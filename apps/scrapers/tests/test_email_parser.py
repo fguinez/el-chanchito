@@ -1,20 +1,23 @@
-"""Tests for the email parser scraper."""
+"""Tests for the agnostic email backend + per-institution pattern matching."""
 
 import pytest
-from scrapers.email_parser import (
+
+from scrapers.backends.email import (
+    _decode_header_value,
+    _match_pattern,
     _parse_amount,
     _parse_merchant,
-    _match_pattern,
-    _decode_header_value,
-    PATTERNS,
 )
+from scrapers.institutions.mach import PATTERN as MACH_PATTERN
+from scrapers.institutions.mercadopago import PATTERN as MP_PATTERN
+from scrapers.institutions.tenpo import PATTERN as TENPO_PATTERN
 
 
 class TestParseAmount:
     """Test Chilean CLP amount parsing."""
 
-    MP = PATTERNS[0].amount_patterns  # MercadoPago patterns
-    MACH = PATTERNS[1].amount_patterns
+    MP = MP_PATTERN.amount_patterns
+    MACH = MACH_PATTERN.amount_patterns
 
     def test_basic_clp(self):
         assert _parse_amount("Pagaste $45.000", self.MP) == 45_000
@@ -46,7 +49,7 @@ class TestParseAmount:
 
 
 class TestParseMerchant:
-    MP = PATTERNS[0].merchant_patterns
+    MP = MP_PATTERN.merchant_patterns
 
     def test_basic_merchant(self):
         result = _parse_merchant("Pagaste en Supermercado Lider. Gracias", self.MP)
@@ -71,48 +74,54 @@ class TestParseMerchant:
 
 
 class TestMatchPattern:
+    """Each institution's PATTERN should match its own senders, not others."""
+
     def test_mercadopago_sender(self):
-        p = _match_pattern("noreply@mercadopago.cl", "Tu pago fue exitoso", PATTERNS)
-        assert p is not None
-        assert p.institution == "mercadopago"
+        assert _match_pattern(
+            "noreply@mercadopago.cl", "Tu pago fue exitoso", MP_PATTERN
+        )
 
     def test_mercadolibre_sender(self):
-        p = _match_pattern("info@mercadolibre.cl", "Compra realizada", PATTERNS)
-        assert p is not None
-        assert p.institution == "mercadopago"
+        assert _match_pattern(
+            "info@mercadolibre.cl", "Compra realizada", MP_PATTERN
+        )
 
     def test_mach_sender(self):
-        p = _match_pattern("notificaciones@somosmach.com", "Compra aprobada", PATTERNS)
-        assert p is not None
-        assert p.institution == "mach"
+        assert _match_pattern(
+            "notificaciones@somosmach.com", "Compra aprobada", MACH_PATTERN
+        )
 
     def test_tenpo_sender(self):
-        p = _match_pattern("info@tenpo.cl", "Transaccion exitosa", PATTERNS)
-        assert p is not None
-        assert p.institution == "tenpo"
+        assert _match_pattern(
+            "info@tenpo.cl", "Transaccion exitosa", TENPO_PATTERN
+        )
 
-    def test_unknown_sender(self):
-        p = _match_pattern("noreply@other.com", "Hello", PATTERNS)
-        assert p is None
+    def test_unknown_sender_rejects(self):
+        assert not _match_pattern("noreply@other.com", "Hello", MP_PATTERN)
+        assert not _match_pattern("noreply@other.com", "Hello", MACH_PATTERN)
+        assert not _match_pattern("noreply@other.com", "Hello", TENPO_PATTERN)
 
     def test_matching_sender_wrong_subject(self):
-        """MercadoPago sender but truly irrelevant subject should not match."""
-        p = _match_pattern("noreply@mercadopago.cl", "Actualiza tu perfil", PATTERNS)
-        assert p is None
+        """MercadoPago sender but irrelevant subject should not match."""
+        assert not _match_pattern(
+            "noreply@mercadopago.cl", "Actualiza tu perfil", MP_PATTERN
+        )
 
     def test_subject_substring_match(self):
         """'MercadoPago' contains 'pago' so it matches the subject filter."""
-        p = _match_pattern("noreply@mercadopago.cl", "Bienvenido a MercadoPago", PATTERNS)
-        assert p is not None
+        assert _match_pattern(
+            "noreply@mercadopago.cl", "Bienvenido a MercadoPago", MP_PATTERN
+        )
 
     def test_case_insensitive_sender(self):
-        p = _match_pattern("NoReply@MercadoPago.CL", "Tu pago ok", PATTERNS)
-        assert p is not None
-        assert p.institution == "mercadopago"
+        assert _match_pattern(
+            "NoReply@MercadoPago.CL", "Tu pago ok", MP_PATTERN
+        )
 
     def test_case_insensitive_subject(self):
-        p = _match_pattern("noreply@mercadopago.cl", "PAGO EXITOSO", PATTERNS)
-        assert p is not None
+        assert _match_pattern(
+            "noreply@mercadopago.cl", "PAGO EXITOSO", MP_PATTERN
+        )
 
 
 class TestDecodeHeader:
@@ -120,7 +129,6 @@ class TestDecodeHeader:
         assert _decode_header_value("Hello World") == "Hello World"
 
     def test_utf8_encoded(self):
-        # RFC 2047 encoded header
         result = _decode_header_value("=?utf-8?q?Pago_exitoso?=")
         assert "Pago exitoso" in result
 

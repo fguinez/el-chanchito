@@ -1,8 +1,8 @@
 """Fintual API client scraper.
 
-Auth: POST /access_tokens with email/password -> returns token
-Goals: GET /goals with X-User-Email + X-User-Token headers
-Each goal has a `nav` field = current net asset value in CLP.
+Auth: POST /access_tokens with email/password -> returns token.
+Goals: GET /goals with X-User-Email + X-User-Token headers.
+Each goal has `nav` = current net asset value in CLP.
 """
 
 import logging
@@ -19,9 +19,8 @@ FINTUAL_API = "https://fintual.cl/api"
 
 
 class FintualScraper(BaseScraper):
-    @property
-    def name(self) -> str:
-        return "fintual_api"
+    method = "http_api"
+    institution = "fintual"
 
     def __init__(self) -> None:
         self.email = os.environ["FINTUAL_EMAIL"]
@@ -29,7 +28,6 @@ class FintualScraper(BaseScraper):
         self._token: str | None = None
 
     async def _authenticate(self, client: httpx.AsyncClient) -> str:
-        """Get an access token from Fintual."""
         if self._token:
             return self._token
 
@@ -49,7 +47,6 @@ class FintualScraper(BaseScraper):
 
     async def scrape_transactions(self) -> list[ScrapedTransaction]:
         # Fintual doesn't expose individual buy/sell transactions via API.
-        # Portfolio value changes are tracked via balance snapshots.
         return []
 
     async def scrape_balances(self) -> list[ScrapedBalance]:
@@ -79,7 +76,6 @@ class FintualScraper(BaseScraper):
                         f"{balance_clp:,}",
                     )
 
-            # Return a single aggregated balance for Fintual
             if total_nav > 0:
                 balances.append(
                     ScrapedBalance(

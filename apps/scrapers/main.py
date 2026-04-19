@@ -14,13 +14,23 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from db.connection import close_pool
-from db.writer import start_scraper_run, finish_scraper_run, upsert_transactions, upsert_balance
+from db.writer import (
+    finish_scraper_run,
+    start_scraper_run,
+    upsert_balance,
+    upsert_transactions,
+)
+from scrapers.backends.email import get_session as get_email_session
 from scrapers.base import BaseScraper
-from scrapers.fintual import FintualScraper
-from scrapers.buda import BudaScraper
-from scrapers.banchile import BanChileScraper
-from scrapers.email_parser import EmailParserScraper
-from scrapers.bci_lider import BciLiderScraper
+from scrapers.institutions import (
+    BanChileScraper,
+    BciLiderScraper,
+    BudaScraper,
+    FintualScraper,
+    MachScraper,
+    MercadoPagoScraper,
+    TenpoScraper,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,7 +41,7 @@ logger = logging.getLogger("scraper-service")
 
 async def run_scraper(scraper: BaseScraper) -> None:
     """Run a single scraper with logging and DB tracking."""
-    run_id = start_scraper_run(scraper.name)
+    run_id = start_scraper_run(scraper.method, scraper.institution)
     logger.info("Starting scraper: %s (run=%s)", scraper.name, run_id)
 
     try:
@@ -72,9 +82,14 @@ def build_scrapers() -> dict[str, BaseScraper]:
         scrapers["banchile"] = BanChileScraper()
         logger.info("BanChile scraper enabled")
 
-    if os.environ.get("EMAIL_IMAP_HOST") and os.environ.get("EMAIL_IMAP_USER") and os.environ.get("EMAIL_IMAP_PASSWORD"):
-        scrapers["email"] = EmailParserScraper()
-        logger.info("Email parser enabled")
+    if all(
+        os.environ.get(k)
+        for k in ("EMAIL_IMAP_HOST", "EMAIL_IMAP_USER", "EMAIL_IMAP_PASSWORD")
+    ):
+        scrapers["mach"] = MachScraper()
+        scrapers["mercadopago"] = MercadoPagoScraper()
+        scrapers["tenpo"] = TenpoScraper()
+        logger.info("Email-based scrapers enabled: mach, mercadopago, tenpo")
 
     return scrapers
 
@@ -90,6 +105,18 @@ async def run_all_once(scrapers: dict[str, BaseScraper]) -> None:
         await run_scraper(scraper)
 
 
+# APScheduler intervals per institution (hours unless noted)
+_EMAIL_INTERVAL_MINUTES = 30
+_SCHEDULES: dict[str, dict] = {
+    "fintual":      {"hours": 6,  "label": "Fintual API (every 6h)"},
+    "buda":         {"hours": 1,  "label": "Buda API (every 1h)"},
+    "banchile":     {"hours": 24, "label": "BanChile (daily)"},
+    "mach":         {"minutes": _EMAIL_INTERVAL_MINUTES, "label": "MACH email (every 30m)"},
+    "mercadopago":  {"minutes": _EMAIL_INTERVAL_MINUTES, "label": "MercadoPago email (every 30m)"},
+    "tenpo":        {"minutes": _EMAIL_INTERVAL_MINUTES, "label": "Tenpo email (every 30m)"},
+}
+
+
 def main_scheduled() -> None:
     """Run scrapers on a schedule using APScheduler."""
     scrapers = build_scrapers()
@@ -100,50 +127,33 @@ def main_scheduled() -> None:
 
     scheduler = AsyncIOScheduler()
 
-    # Schedule each scraper at its own interval
-    if "fintual" in scrapers:
+    for key, scraper in scrapers.items():
+        cfg = _SCHEDULES.get(key)
+        if not cfg:
+            logger.warning("No schedule configured for %s; skipping", key)
+            continue
+        trigger_kwargs = {k: v for k, v in cfg.items() if k != "label"}
         scheduler.add_job(
             run_scraper,
-            IntervalTrigger(hours=6),
-            args=[scrapers["fintual"]],
-            id="fintual",
-            name="Fintual API (every 6h)",
-        )
-
-    if "buda" in scrapers:
-        scheduler.add_job(
-            run_scraper,
-            IntervalTrigger(hours=1),
-            args=[scrapers["buda"]],
-            id="buda",
-            name="Buda API (every 1h)",
-        )
-
-    if "banchile" in scrapers:
-        scheduler.add_job(
-            run_scraper,
-            IntervalTrigger(hours=24),
-            args=[scrapers["banchile"]],
-            id="banchile",
-            name="BanChile (daily)",
-        )
-
-    if "email" in scrapers:
-        scheduler.add_job(
-            run_scraper,
-            IntervalTrigger(minutes=30),
-            args=[scrapers["email"]],
-            id="email",
-            name="Email parser (every 30m)",
+            IntervalTrigger(**trigger_kwargs),
+            args=[scraper],
+            id=key,
+            name=cfg["label"],
         )
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    # Graceful shutdown
     def shutdown(signum, frame):
         logger.info("Shutting down (signal %s)...", signum)
         scheduler.shutdown(wait=False)
+        try:
+            get_email_session().close()
+        except KeyError:
+            # Email session never initialised (no EMAIL_IMAP_* creds).
+            pass
+        except Exception:
+            logger.exception("Error closing IMAP session")
         close_pool()
         loop.stop()
 
@@ -153,7 +163,6 @@ def main_scheduled() -> None:
     scheduler.start()
     logger.info("Scheduler started. Running initial scrape...")
 
-    # Run all scrapers immediately on startup
     loop.run_until_complete(run_all_once(scrapers))
 
     logger.info("Initial scrape complete. Scheduler running...")
@@ -163,6 +172,12 @@ def main_scheduled() -> None:
         pass
     finally:
         scheduler.shutdown(wait=False)
+        try:
+            get_email_session().close()
+        except KeyError:
+            pass
+        except Exception:
+            logger.exception("Error closing IMAP session")
         close_pool()
         logger.info("Scraper service stopped.")
 
@@ -170,8 +185,16 @@ def main_scheduled() -> None:
 def main_once() -> None:
     """Run all scrapers once and exit (for cron-based scheduling)."""
     scrapers = build_scrapers()
-    asyncio.run(run_all_once(scrapers))
-    close_pool()
+    try:
+        asyncio.run(run_all_once(scrapers))
+    finally:
+        try:
+            get_email_session().close()
+        except KeyError:
+            pass
+        except Exception:
+            logger.exception("Error closing IMAP session")
+        close_pool()
 
 
 if __name__ == "__main__":

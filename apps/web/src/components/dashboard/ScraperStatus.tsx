@@ -13,7 +13,8 @@ import { cn } from "@/lib/utils";
 import { AlertTriangle } from "lucide-react";
 
 interface ScraperRun {
-  scraper_name: string;
+  method: string;
+  institution: string;
   started_at: string;
   finished_at: string | null;
   status: string;
@@ -21,13 +22,20 @@ interface ScraperRun {
   error_message: string | null;
 }
 
-const SCRAPER_LABELS: Record<string, string> = {
-  fintual_api: "Fintual",
-  buda_api: "Buda",
-  fintself_banchile: "Banco de Chile",
-  email_parser: "Email (MP/MACH/Tenpo)",
+const INSTITUTION_LABELS: Record<string, string> = {
+  fintual: "Fintual",
+  buda: "Buda",
+  banchile: "Banco de Chile",
+  mach: "MACH",
+  mercadopago: "MercadoPago",
+  tenpo: "Tenpo",
   bci_lider: "BCI Lider",
+  _legacy_composite: "Email (legacy)",
 };
+
+const runKey = (r: ScraperRun) => `${r.method}_${r.institution}`;
+const runLabel = (r: ScraperRun) =>
+  INSTITUTION_LABELS[r.institution] ?? r.institution;
 
 function timeAgo(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();
@@ -66,15 +74,15 @@ export function ScraperStatus() {
           <div className="flex-1 text-sm">
             <p className="font-medium text-red-800 dark:text-red-200">
               {errors.length === 1
-                ? `El scraper ${SCRAPER_LABELS[errors[0].scraper_name] ?? errors[0].scraper_name} tiene un error`
+                ? `El scraper ${runLabel(errors[0])} tiene un error`
                 : `${errors.length} scrapers con errores`}
             </p>
             {errors.map((e) => (
               <p
-                key={e.scraper_name}
+                key={runKey(e)}
                 className="mt-1 text-red-600 dark:text-red-400"
               >
-                {SCRAPER_LABELS[e.scraper_name] ?? e.scraper_name}:{" "}
+                {runLabel(e)}:{" "}
                 {e.error_message
                   ? e.error_message.length > 120
                     ? e.error_message.slice(0, 120) + "..."
@@ -94,60 +102,59 @@ export function ScraperStatus() {
         </CardHeader>
         <CardContent>
           <div className="space-y-2">
-            {runs.map((run) => (
-              <div key={run.scraper_name}>
-                <div
-                  className={cn(
-                    "flex items-center justify-between text-sm",
-                    run.status === "error" && "cursor-pointer"
-                  )}
-                  onClick={() => {
-                    if (run.status === "error") {
-                      setExpandedError(
-                        expandedError === run.scraper_name
-                          ? null
-                          : run.scraper_name
-                      );
-                    }
-                  }}
-                >
-                  <span>
-                    {SCRAPER_LABELS[run.scraper_name] ?? run.scraper_name}
-                  </span>
-                  <div className="flex items-center gap-2">
-                    {run.transactions_imported > 0 && (
-                      <span className="text-xs text-muted-foreground">
-                        +{run.transactions_imported} txn
-                      </span>
+            {runs.map((run) => {
+              const key = runKey(run);
+              return (
+                <div key={key}>
+                  <div
+                    className={cn(
+                      "flex items-center justify-between text-sm",
+                      run.status === "error" && "cursor-pointer"
                     )}
-                    <Badge
-                      variant="outline"
-                      className={cn(
-                        "text-xs",
-                        run.status === "success" &&
-                          "text-green-600 border-green-200",
-                        run.status === "error" &&
-                          "text-red-600 border-red-200",
-                        run.status === "running" &&
-                          "text-blue-600 border-blue-200",
-                        run.status === "partial" &&
-                          "text-yellow-600 border-yellow-200"
+                    onClick={() => {
+                      if (run.status === "error") {
+                        setExpandedError(
+                          expandedError === key ? null : key
+                        );
+                      }
+                    }}
+                  >
+                    <span>{runLabel(run)}</span>
+                    <div className="flex items-center gap-2">
+                      {run.transactions_imported > 0 && (
+                        <span className="text-xs text-muted-foreground">
+                          +{run.transactions_imported} txn
+                        </span>
                       )}
-                    >
-                      {run.status}
-                    </Badge>
-                    <span className="text-muted-foreground">
-                      {timeAgo(run.finished_at ?? run.started_at)}
-                    </span>
+                      <Badge
+                        variant="outline"
+                        className={cn(
+                          "text-xs",
+                          run.status === "success" &&
+                            "text-green-600 border-green-200",
+                          run.status === "error" &&
+                            "text-red-600 border-red-200",
+                          run.status === "running" &&
+                            "text-blue-600 border-blue-200",
+                          run.status === "partial" &&
+                            "text-yellow-600 border-yellow-200"
+                        )}
+                      >
+                        {run.status}
+                      </Badge>
+                      <span className="text-muted-foreground">
+                        {timeAgo(run.finished_at ?? run.started_at)}
+                      </span>
+                    </div>
                   </div>
+                  {expandedError === key && run.error_message && (
+                    <p className="mt-1 rounded bg-muted p-2 text-xs text-muted-foreground">
+                      {run.error_message}
+                    </p>
+                  )}
                 </div>
-                {expandedError === run.scraper_name && run.error_message && (
-                  <p className="mt-1 rounded bg-muted p-2 text-xs text-muted-foreground">
-                    {run.error_message}
-                  </p>
-                )}
-              </div>
-            ))}
+              );
+            })}
           </div>
         </CardContent>
       </Card>

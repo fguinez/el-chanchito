@@ -86,7 +86,7 @@ scrapers-start: ## Start scrapers on schedule (long-running)
 		../../.venv/bin/python main.py
 
 scrapers-test: ## Test scraper imports and basic functionality
-	cd apps/scrapers && ../../.venv/bin/python -c "from scrapers.fintual import FintualScraper; from scrapers.buda import BudaScraper; from scrapers.banchile import BanChileScraper; from scrapers.email_parser import EmailParserScraper; from scrapers.bci_lider import BciLiderScraper; from db.writer import start_scraper_run, finish_scraper_run; print('All scraper imports OK')"
+	cd apps/scrapers && ../../.venv/bin/python -c "from scrapers.institutions import FintualScraper, BudaScraper, BanChileScraper, BciLiderScraper, MachScraper, MercadoPagoScraper, TenpoScraper; from scrapers.backends.email import get_session, fetch_transactions_for_pattern; from scrapers.backends.fintself import run_fintself_scraper; from db.writer import start_scraper_run, finish_scraper_run; print('All scraper imports OK')"
 
 # ─── Docker (full stack) ────────────────────────────────────────────────────
 

@@ -1,13 +1,8 @@
-"""Buda.com REST API client scraper.
+"""Buda.com REST API scraper.
 
 Auth: HMAC-SHA384 signing.
   Signature string: "{METHOD} {path} {base64_body} {nonce}"
   Headers: X-SBTC-APIKEY, X-SBTC-NONCE, X-SBTC-SIGNATURE
-
-Endpoints:
-  GET /api/v2/balances — all currency balances
-  GET /api/v2/currencies/{currency}/deposits — deposit history
-  GET /api/v2/currencies/{currency}/withdrawals — withdrawal history
 """
 
 import base64
@@ -28,19 +23,18 @@ BUDA_BASE = "https://www.buda.com"
 
 
 class BudaScraper(BaseScraper):
-    @property
-    def name(self) -> str:
-        return "buda_api"
+    method = "http_api"
+    institution = "buda"
 
     def __init__(self) -> None:
         self.api_key = os.environ["BUDA_API_KEY"]
         self.api_secret = os.environ["BUDA_API_SECRET"]
 
-    def _sign(self, method: str, path: str, body: str = "") -> dict[str, str]:
+    def _sign(self, request_method: str, path: str, body: str = "") -> dict[str, str]:
         """Generate HMAC-SHA384 auth headers for a request."""
         nonce = str(int(time.time() * 1e6))
         encoded_body = base64.b64encode(body.encode()).decode() if body else ""
-        msg = f"{method} {path} {encoded_body} {nonce}"
+        msg = f"{request_method} {path} {encoded_body} {nonce}"
 
         signature = hmac.new(
             self.api_secret.encode(),
@@ -55,7 +49,7 @@ class BudaScraper(BaseScraper):
         }
 
     async def scrape_transactions(self) -> list[ScrapedTransaction]:
-        """Fetch recent CLP deposits and withdrawals."""
+        """Fetch recent CLP/BTC deposits and withdrawals."""
         transactions: list[ScrapedTransaction] = []
 
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -79,11 +73,9 @@ class BudaScraper(BaseScraper):
                             amount_val = int(float(amount_arr[0]))
                             item_currency = amount_arr[1] if len(amount_arr) > 1 else currency.upper()
 
-                            # Skip zero amounts
                             if amount_val == 0:
                                 continue
 
-                            # Withdrawals are expenses (negative)
                             if tx_type == "withdrawals":
                                 amount_val = -abs(amount_val)
 
@@ -117,9 +109,7 @@ class BudaScraper(BaseScraper):
                             )
 
                     except httpx.HTTPStatusError as e:
-                        logger.warning(
-                            "Buda %s/%s failed: %s", currency, tx_type, e
-                        )
+                        logger.warning("Buda %s/%s failed: %s", currency, tx_type, e)
                     except Exception:
                         logger.exception("Buda %s/%s error", currency, tx_type)
 
@@ -131,9 +121,7 @@ class BudaScraper(BaseScraper):
         headers = self._sign("GET", path)
 
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(
-                f"{BUDA_BASE}{path}.json", headers=headers
-            )
+            resp = await client.get(f"{BUDA_BASE}{path}.json", headers=headers)
             resp.raise_for_status()
 
             balances: list[ScrapedBalance] = []
@@ -143,9 +131,7 @@ class BudaScraper(BaseScraper):
                 amount = int(float(available[0]))
 
                 if amount > 0:
-                    logger.info(
-                        "Buda balance %s: %s", currency_id, f"{amount:,}"
-                    )
+                    logger.info("Buda balance %s: %s", currency_id, f"{amount:,}")
                     balances.append(
                         ScrapedBalance(
                             account_institution="buda",

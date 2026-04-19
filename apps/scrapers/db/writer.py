@@ -10,17 +10,21 @@ from scrapers.base import ScrapedTransaction, ScrapedBalance
 logger = logging.getLogger(__name__)
 
 
-def start_scraper_run(scraper_name: str) -> str:
-    """Record the start of a scraper run. Returns the run ID."""
+def start_scraper_run(method: str, institution: str) -> str:
+    """Record the start of a scraper run. Returns the run ID.
+
+    `method` is the scraping mechanism ('email', 'fintself', 'http_api',
+    'open_banking'); `institution` is the platform being scraped.
+    """
     run_id = str(uuid4())
     pool = get_pool()
     with pool.connection() as conn:
         conn.execute(
             """
-            INSERT INTO scraper_runs (id, scraper_name, started_at, status)
-            VALUES (%s, %s, %s, 'running')
+            INSERT INTO scraper_runs (id, method, institution, started_at, status)
+            VALUES (%s, %s, %s, %s, 'running')
             """,
-            (run_id, scraper_name, datetime.now(timezone.utc)),
+            (run_id, method, institution, datetime.now(timezone.utc)),
         )
     return run_id
 

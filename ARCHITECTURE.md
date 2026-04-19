@@ -49,10 +49,10 @@
 │  ┌──────────────────────────────────────────────────────────┐  │
 │  │                   APScheduler                             │  │
 │  │                                                           │  │
-│  │   ┌─────────┐   ┌──────┐   ┌─────────┐   ┌───────────┐ │  │
-│  │   │ Fintual │   │ Buda │   │BanChile │   │  Email    │ │  │
-│  │   │  (6h)   │   │ (1h) │   │ (24h)   │   │  (30m)   │ │  │
-│  │   └────┬────┘   └──┬───┘   └────┬────┘   └─────┬─────┘ │  │
+│  │   ┌─────────┐ ┌──────┐ ┌────────┐ ┌─────────────────┐ │  │
+│  │   │ Fintual │ │ Buda │ │BanChile│ │ MACH / MP / Tenpo│ │  │
+│  │   │  (6h)   │ │ (1h) │ │ (24h)  │ │ shared IMAP 30m  │ │  │
+│  │   └────┬────┘ └──┬───┘ └────┬───┘ └────────┬─────────┘ │  │
 │  │        │            │            │               │        │  │
 │  │        ▼            ▼            ▼               ▼        │  │
 │  │   ┌──────────────────────────────────────────────────┐   │  │
@@ -197,7 +197,8 @@ income_sources                internal_transfers
                                 to_account_id FK
 scraper_runs                    transfer_date
   id PK                         status (pending|resolved)
-  scraper_name
+  method                         (email|fintself|http_api|open_banking)
+  institution                    (mach|mercadopago|tenpo|banchile|...)
   started_at
   finished_at
   status
@@ -216,25 +217,50 @@ scraper_runs                    transfer_date
 | `V005__scraper_runs.sql` | scraper_runs |
 | `V006__account_balances.sql` | account_balances |
 | `V007__category_rules.sql` | category_rules + seed default categories |
+| `V008__scraper_runs_method_institution.sql` | splits `scraper_runs.scraper_name` into `method` + `institution` |
 
 ## Scraper Architecture
 
-Each scraper implements a common interface:
+Scrapers are split into **agnostic backends** (how we scrape) and
+**institution scrapers** (what we scrape):
+
+```
+apps/scrapers/scrapers/
+  base.py                  # BaseScraper + ScrapedTransaction/Balance
+  backends/
+    email.py               # ImapSession (shared login + NOOP keepalive),
+                           # EmailPattern, fetch_transactions_for_pattern
+    fintself.py            # run_fintself_scraper(bank_key, user, password)
+  institutions/
+    mach.py  mercadopago.py  tenpo.py       -> consume backends/email
+    banchile.py                              -> consumes backends/fintself
+    buda.py  fintual.py  bci_lider.py        -> self-contained (HTTP/stub)
+```
+
+Each institution scraper implements:
 
 ```python
 class BaseScraper(ABC):
-    name: str                                    # unique identifier
+    method: str                                  # "email" | "fintself" | "http_api" | "open_banking"
+    institution: str                             # "mach" | "banchile" | "buda" | ...
     scrape_transactions() -> list[ScrapedTransaction]
     scrape_balances() -> list[ScrapedBalance]
 ```
 
-| Scraper | Source | Auth | Schedule |
-|---|---|---|---|
-| `FintualScraper` | REST API | Email + password -> token | 6h |
-| `BudaScraper` | REST API | HMAC-SHA384 signed requests | 1h |
-| `BanChileScraper` | Browser (fintself/Playwright) | RUT + password | 24h |
-| `EmailParserScraper` | IMAP (Gmail) | Email + app password | 30m |
-| `BciLiderScraper` | Stub (open-banking-chile) | RUT + password | - |
+Both `method` and `institution` are stored per `scraper_runs` row.
+
+| Institution | Method | Source | Auth | Schedule |
+|---|---|---|---|---|
+| `fintual` | `http_api` | REST API | Email + password -> token | 6h |
+| `buda` | `http_api` | REST API | HMAC-SHA384 signed requests | 1h |
+| `banchile` | `fintself` | Browser (fintself/Playwright) | RUT + password | 24h |
+| `mach` | `email` | IMAP (Gmail) | Shared IMAP session | 30m |
+| `mercadopago` | `email` | IMAP (Gmail) | Shared IMAP session | 30m |
+| `tenpo` | `email` | IMAP (Gmail) | Shared IMAP session | 30m |
+| `bci_lider` | `open_banking` | Stub (open-banking-chile) | RUT + password | - |
+
+The three email-based scrapers reuse one `ImapSession`: it runs `NOOP` on
+each acquire and only re-logs-in when the mailbox has been dropped.
 
 ### Deduplication
 

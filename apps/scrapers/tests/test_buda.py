@@ -6,7 +6,7 @@ import pytest
 os.environ.setdefault("BUDA_API_KEY", "test_key")
 os.environ.setdefault("BUDA_API_SECRET", "test_secret")
 
-from scrapers.buda import BudaScraper
+from scrapers.institutions.buda import BudaScraper
 
 
 class TestBudaHmacSigning:

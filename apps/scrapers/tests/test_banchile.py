@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 os.environ.setdefault("BANCHILE_RUT", "test")
 os.environ.setdefault("BANCHILE_PASSWORD", "test")
 
-from scrapers.banchile import BanChileScraper
+from scrapers.institutions.banchile import BanChileScraper
 
 
 def _make_movement(

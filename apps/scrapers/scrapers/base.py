@@ -31,13 +31,27 @@ class ScrapedBalance:
 
 
 class BaseScraper(ABC):
-    """Interface that all scrapers must implement."""
+    """Interface that all scrapers must implement.
+
+    `method` = how we scrape (email, fintself, http_api, open_banking)
+    `institution` = what we scrape (mach, banchile, buda, ...)
+    Both are stored on each `scraper_runs` row.
+    """
 
     @property
     @abstractmethod
-    def name(self) -> str:
-        """Unique name for this scraper (used in scraper_runs table)."""
+    def method(self) -> str:
         ...
+
+    @property
+    @abstractmethod
+    def institution(self) -> str:
+        ...
+
+    @property
+    def name(self) -> str:
+        """Log/display label; DB uses method+institution directly."""
+        return f"{self.method}_{self.institution}"
 
     @abstractmethod
     async def scrape_transactions(self) -> list[ScrapedTransaction]:

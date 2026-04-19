@@ -221,7 +221,8 @@ export const scraperRuns = pgTable(
   "scraper_runs",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    scraperName: text("scraper_name").notNull(),
+    method: text("method").notNull(),
+    institution: text("institution").notNull(),
     startedAt: timestamp("started_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -231,7 +232,11 @@ export const scraperRuns = pgTable(
     errorMessage: text("error_message"),
   },
   (table) => [
-    index("idx_scraper_runs_name_date").on(table.scraperName, table.startedAt),
+    index("idx_scraper_runs_method_institution_date").on(
+      table.method,
+      table.institution,
+      table.startedAt,
+    ),
   ]
 );
 
