@@ -1,0 +1,11 @@
+{
+  "name": "@chanchito/db-schema",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "migrate": "node migrate.mjs"
+  },
+  "dependencies": {
+    "postgres": "^3.4.5"
+  }
+}

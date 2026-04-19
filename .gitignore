@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+.venv/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Build
+.next/
+out/
+dist/
+__pycache__/
+*.pyc
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Database
+pgdata/
+
+# Logs
+*.log
+
+# Test
+coverage/
+.pytest_cache/
+.mypy_cache/
+
+# Local files
+local/
+.agents/*local*
+.claude/
+.gemini/
+.cursor/

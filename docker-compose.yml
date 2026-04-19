@@ -1,0 +1,50 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "${POSTGRES_PORT:-5435}:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-finance}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-finance}
+      POSTGRES_DB: ${POSTGRES_DB:-finance}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-finance}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-finance}:${POSTGRES_PASSWORD:-finance}@postgres:5432/${POSTGRES_DB:-finance}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  scrapers:
+    build:
+      context: .
+      dockerfile: apps/scrapers/Dockerfile
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-finance}:${POSTGRES_PASSWORD:-finance}@postgres:5432/${POSTGRES_DB:-finance}
+      BANCHILE_RUT: ${BANCHILE_RUT:-}
+      BANCHILE_PASSWORD: ${BANCHILE_PASSWORD:-}
+      FINTUAL_EMAIL: ${FINTUAL_EMAIL:-}
+      FINTUAL_TOKEN: ${FINTUAL_TOKEN:-}
+      BUDA_API_KEY: ${BUDA_API_KEY:-}
+      BUDA_API_SECRET: ${BUDA_API_SECRET:-}
+      EMAIL_IMAP_HOST: ${EMAIL_IMAP_HOST:-}
+      EMAIL_IMAP_USER: ${EMAIL_IMAP_USER:-}
+      EMAIL_IMAP_PASSWORD: ${EMAIL_IMAP_PASSWORD:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:

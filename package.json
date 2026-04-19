@@ -1,0 +1,15 @@
+{
+  "name": "el-chanchito",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --filter @chanchito/web dev",
+    "build": "pnpm --filter @chanchito/web build",
+    "db:migrate": "pnpm --filter @chanchito/db-schema migrate",
+    "lint": "pnpm -r lint"
+  },
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=9"
+  },
+  "packageManager": "pnpm@9.15.4+sha256.9bee59c7313a216722c079c1e22160dea7f88df4e0c3450b1d7b01b882336c6a"
+}

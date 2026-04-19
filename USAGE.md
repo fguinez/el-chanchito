@@ -1,0 +1,193 @@
+# El Chanchito - Usage Guide
+
+## Prerequisites
+
+- **Node.js** >= 20 + **pnpm** >= 9
+- **Python** >= 3.11
+- **Docker** + **Docker Compose**
+- **Playwright** browsers (for BanChile scraper): `playwright install chromium`
+
+## Quick Start
+
+```bash
+# 1. Clone and install
+pnpm install
+
+# 2. Set up environment
+cp .env.example .env
+# Edit .env with your credentials (see "Configuration" below)
+
+# 3. Start PostgreSQL
+make db-up
+
+# 4. Run database migrations
+make db-migrate
+
+# 5. Start the dashboard
+make dev
+
+# Open http://localhost:3000
+```
+
+## Configuration
+
+Copy `.env.example` to `.env` and fill in the values:
+
+```bash
+# Required - PostgreSQL (defaults work out of the box)
+POSTGRES_USER=finance
+POSTGRES_PASSWORD=finance
+POSTGRES_DB=finance
+DATABASE_URL=postgres://finance:finance@localhost:5435/finance
+
+# Optional - Scrapers (enable only the ones you need)
+
+# Banco de Chile (via fintself - browser automation)
+BANCHILE_RUT=12345678-9
+BANCHILE_PASSWORD=your_password
+
+# Fintual (official API)
+FINTUAL_EMAIL=your@email.com
+FINTUAL_TOKEN=your_password
+
+# Buda.com (HMAC-authenticated API)
+BUDA_API_KEY=your_api_key
+BUDA_API_SECRET=your_api_secret
+
+# Email parser (for MercadoPago, MACH, Tenpo notifications)
+EMAIL_IMAP_HOST=imap.gmail.com
+EMAIL_IMAP_USER=your@gmail.com
+EMAIL_IMAP_PASSWORD=your_app_password  # Use Gmail App Password, not your regular password
+```
+
+### Gmail App Password
+
+For the email parser, you need a Gmail App Password (not your regular password):
+
+1. Go to https://myaccount.google.com/apppasswords
+2. Generate a new app password for "Mail"
+3. Use that 16-character password as `EMAIL_IMAP_PASSWORD`
+
+## Dashboard Pages
+
+| Page | URL | Description |
+|---|---|---|
+| **Inicio** | `/` | Today's budget status, expected balance, drift, quick actions |
+| **Planificacion** | `/planning` | Day-by-day expected balance table (31 rows, today highlighted) |
+| **Historial** | `/history` | Wealth timeline chart + snapshot table (patrimonio, deuda, ahorro) |
+| **Gastos** | `/expenses` | Transaction list, manual entry form, CSV import |
+| **Gastos Fijos** | `/fixed` | Monthly fixed expenses with shared ratio (69%) |
+| **Transferencias** | `/transfers` | Internal money movements (pending/resolved) |
+| **Configuracion** | `/settings` | Budget parameters, income split calculator, monthly reset |
+
+## Daily Workflow
+
+1. Open the dashboard at `http://localhost:3000`
+2. The **Inicio** page shows your expected balance for today vs your real balance
+3. If the drift is negative, you're over budget; positive means under budget
+4. Add manual expenses in **Gastos** or let scrapers import them automatically
+5. Check **Planificacion** to see how the rest of the month looks
+
+## Monthly Workflow
+
+At the start of each month:
+
+1. Go to **Configuracion**
+2. Update any budget parameters that changed (salary, credit card limit, etc.)
+3. Click **"Crear proximo mes"** to initialize next month's config
+4. Review **Gastos Fijos** for any changes to recurring expenses
+5. Add a new wealth snapshot in **Historial** (patrimonio + deuda)
+
+## Scrapers
+
+Scrapers run independently from the dashboard. They share a PostgreSQL database.
+
+### Running scrapers once
+
+```bash
+make scrapers-once
+```
+
+### Running scrapers on schedule
+
+```bash
+make scrapers-start
+```
+
+Schedule per scraper:
+- **Fintual**: every 6 hours
+- **Buda**: every 1 hour
+- **BanChile**: every 24 hours
+- **Email parser**: every 30 minutes
+
+### Checking scraper status
+
+The home page shows scraper status with:
+- Last sync time per account
+- Green/red badges for success/error
+- Error messages (click to expand)
+
+## CSV Import
+
+1. Go to **Gastos**
+2. Scroll to **Importar CSV**
+3. Select a CSV file from any bank
+4. The importer auto-detects separators (`,` or `;`) and column names
+5. Map columns: Descripcion, Monto, Fecha
+6. Preview the first 5 rows
+7. Click **Importar**
+
+Supported date formats: `DD/MM/YYYY`, `DD-MM-YYYY`, `YYYY-MM-DD`
+
+Amounts: handles `1.234` (Chilean thousands separator) and `-1.234,56`
+
+## Category Auto-Assignment
+
+1. Categories are pre-seeded: Supermercado, Transporte, Restaurantes, etc.
+2. Add keyword rules via the API:
+   ```bash
+   # Example: UBER -> Transporte
+   curl -X POST http://localhost:3000/api/categories \
+     -H "Content-Type: application/json" \
+     -d '{"keyword":"uber","categoryId":"<transport-category-id>"}'
+   ```
+3. Run auto-assignment:
+   ```bash
+   curl -X PUT http://localhost:3000/api/categories
+   ```
+
+## API Reference
+
+All API routes are under `/api/`:
+
+| Method | Endpoint | Description |
+|---|---|---|
+| GET/POST | `/api/budget` | Budget config (current month) |
+| GET | `/api/planning` | Planning table + today status |
+| GET/POST | `/api/transactions` | Transactions (list, create) |
+| POST | `/api/import` | CSV import |
+| GET/POST/PUT/DELETE | `/api/fixed-expenses` | Fixed expenses CRUD |
+| GET/POST/DELETE | `/api/wealth` | Wealth snapshots |
+| GET/POST/DELETE | `/api/income-sources` | Income sources |
+| GET/POST/PUT/DELETE | `/api/transfers` | Internal transfers |
+| GET/POST/PUT | `/api/categories` | Categories + auto-assign rules |
+| GET | `/api/scrapers` | Scraper run status |
+| GET | `/api/balances` | Latest balance per account |
+| POST | `/api/month-reset` | Create next month's config |
+
+## Deployment
+
+### Local (Docker Compose)
+
+```bash
+make up        # Start everything (postgres + web + scrapers)
+make down      # Stop everything
+make logs      # View logs
+```
+
+### Production
+
+The project is deployment-agnostic. Options:
+- **Fly.io**: `fly launch` in each app directory
+- **Railway**: Connect the monorepo, set build commands per service
+- **VPS**: Use `docker-compose.yml` with proper secrets management
