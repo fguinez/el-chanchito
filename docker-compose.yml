@@ -23,6 +23,8 @@ services:
       - "3000:3000"
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-finance}:${POSTGRES_PASSWORD:-finance}@postgres:5432/${POSTGRES_DB:-finance}
+      # Internal-only control endpoint on the scraper service (see below).
+      SCRAPER_CONTROL_URL: ${SCRAPER_CONTROL_URL:-http://scrapers:8080}
     depends_on:
       postgres:
         condition: service_healthy
@@ -46,6 +48,12 @@ services:
       # Cached Fintual web session (see `make fintual-login`); persisted in the
       # scraper_state volume so 2FA isn't re-triggered on every container start.
       FINTUAL_SESSION_FILE: ${FINTUAL_SESSION_FILE:-/data/fintual_session.json}
+      # On-demand refresh: the web app POSTs to this port to trigger a scrape.
+      SCRAPER_CONTROL_PORT: ${SCRAPER_CONTROL_PORT:-8080}
+    # `expose` (not `ports`) keeps the control endpoint on the private compose
+    # network only — it's an unauthenticated trigger, never publish it (see #23).
+    expose:
+      - "8080"
     volumes:
       - scraper_state:/data
     depends_on:

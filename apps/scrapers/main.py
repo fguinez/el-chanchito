@@ -1,10 +1,14 @@
 """Scraper service entry point with APScheduler."""
 
 import asyncio
+import json
 import logging
 import os
 import signal
 import sys
+import threading
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from dotenv import load_dotenv
 
@@ -119,6 +123,82 @@ _SCHEDULES: dict[str, dict] = {
 }
 
 
+def _make_control_handler(scheduler: AsyncIOScheduler, scraper_keys: set[str]):
+    """Build the HTTP handler for the internal scraper control server.
+
+    Triggering a scrape means moving a scheduled job's next run time to now:
+    APScheduler then runs it on the scheduler's own event loop, reusing the
+    job's `coalesce` / `max_instances=1` guards so a manual trigger can't
+    overlap a scheduled or in-flight run. `job.modify()` is thread-safe, so
+    it's fine to call from this handler's thread.
+    """
+
+    def trigger(slug: str) -> bool:
+        job = scheduler.get_job(slug)
+        if job is None:
+            return False
+        job.modify(next_run_time=datetime.now(timezone.utc))
+        logger.info("Manual trigger for %s", slug)
+        return True
+
+    class ControlHandler(BaseHTTPRequestHandler):
+        def _send(self, code: int, payload: dict) -> None:
+            body = json.dumps(payload).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self) -> None:  # noqa: N802
+            if self.path == "/health":
+                self._send(200, {"status": "ok"})
+            else:
+                self._send(404, {"error": "not found"})
+
+        def do_POST(self) -> None:  # noqa: N802
+            if self.path == "/refresh":
+                triggered = sorted(s for s in scraper_keys if trigger(s))
+                self._send(202, {"triggered": triggered})
+            elif self.path.startswith("/refresh/"):
+                slug = self.path[len("/refresh/") :]
+                if trigger(slug):
+                    self._send(202, {"triggered": [slug]})
+                else:
+                    self._send(404, {"error": f"unknown scraper: {slug}"})
+            else:
+                self._send(404, {"error": "not found"})
+
+        def log_message(self, fmt: str, *args) -> None:
+            # Route the default stderr access log through our logger (debug).
+            logger.debug("control: " + fmt, *args)
+
+    return ControlHandler
+
+
+def _start_control_server(
+    scheduler: AsyncIOScheduler, scraper_keys: set[str]
+) -> ThreadingHTTPServer | None:
+    """Start the internal HTTP control server when SCRAPER_CONTROL_PORT is set.
+
+    This is an unauthenticated trigger meant to be reachable only from the
+    dashboard over the private container network (or localhost in host-dev).
+    Never publish the port publicly — see issue #23.
+    """
+    port = os.environ.get("SCRAPER_CONTROL_PORT")
+    if not port:
+        return None
+
+    handler = _make_control_handler(scheduler, scraper_keys)
+    server = ThreadingHTTPServer(("0.0.0.0", int(port)), handler)
+    thread = threading.Thread(
+        target=server.serve_forever, name="scraper-control", daemon=True
+    )
+    thread.start()
+    logger.info("Control server listening on :%s (POST /refresh[/{slug}])", port)
+    return server
+
+
 def main_scheduled() -> None:
     """Run scrapers on a schedule using APScheduler."""
     scrapers = build_scrapers()
@@ -127,7 +207,13 @@ def main_scheduled() -> None:
         logger.error("No scrapers configured. Exiting.")
         sys.exit(1)
 
-    scheduler = AsyncIOScheduler()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    # AsyncIOScheduler.start() (apscheduler 3.11+) binds to the *running* loop
+    # unless one is passed explicitly. We start it below before the loop is
+    # running, so hand it our loop up front.
+    scheduler = AsyncIOScheduler(event_loop=loop)
 
     for key, scraper in scrapers.items():
         cfg = _SCHEDULES.get(key)
@@ -141,10 +227,11 @@ def main_scheduled() -> None:
             args=[scraper],
             id=key,
             name=cfg["label"],
+            # A manual trigger reuses these guards so it can never overlap a
+            # scheduled or in-flight run of the same institution.
+            max_instances=1,
+            coalesce=True,
         )
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     def shutdown(signum, frame):
         logger.info("Shutting down (signal %s)...", signum)
@@ -165,6 +252,8 @@ def main_scheduled() -> None:
     scheduler.start()
     logger.info("Scheduler started. Running initial scrape...")
 
+    control_server = _start_control_server(scheduler, set(scrapers))
+
     loop.run_until_complete(run_all_once(scrapers))
 
     logger.info("Initial scrape complete. Scheduler running...")
@@ -174,6 +263,8 @@ def main_scheduled() -> None:
         pass
     finally:
         scheduler.shutdown(wait=False)
+        if control_server is not None:
+            control_server.shutdown()
         try:
             get_email_session().close()
         except KeyError:

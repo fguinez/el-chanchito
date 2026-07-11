@@ -17,8 +17,9 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { formatCLP, cn } from "@/lib/utils";
-import { Building2, ExternalLink } from "lucide-react";
+import { AlertTriangle, Building2, ExternalLink, RefreshCw } from "lucide-react";
 
 interface Product {
   id: string;
@@ -99,6 +100,47 @@ const LIABILITY_KINDS = new Set([
   "mortgage",
 ]);
 
+/** Slugs with a live scraper the refresh button can trigger. Everything else
+ *  (e.g. `bci_lider`, `manual`) gets a disabled button — see build_scrapers(). */
+const SCRAPER_SLUGS = new Set([
+  "fintual",
+  "buda",
+  "banchile",
+  "mach",
+  "mercadopago",
+  "tenpo",
+]);
+
+// Latest scraper run per institution, from GET /api/scrapers (used for polling).
+interface ScraperRun {
+  institution: string;
+  status: string;
+  started_at: string;
+}
+
+const POLL_INTERVAL_MS = 3000;
+const POLL_TIMEOUT_MS = 60000;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Latest run per institution (slug → status + started_at). `/api/scrapers`
+ *  already returns the latest per (method, institution); collapse methods by
+ *  keeping the most recent started_at so an institution maps to one entry. */
+async function fetchRunMap(): Promise<Map<string, ScraperRun>> {
+  const map = new Map<string, ScraperRun>();
+  try {
+    const res = await fetch("/api/scrapers");
+    const runs: ScraperRun[] = await res.json();
+    for (const r of runs) {
+      const prev = map.get(r.institution);
+      if (!prev || r.started_at > prev.started_at) map.set(r.institution, r);
+    }
+  } catch {
+    /* treat as no data */
+  }
+  return map;
+}
+
 function timeAgo(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();
   const minutes = Math.floor(diff / 60000);
@@ -168,19 +210,104 @@ export default function InstitutionsPage() {
   const [institutions, setInstitutions] = useState<Institution[] | null>(null);
   const [totals, setTotals] = useState<Totals | null>(null);
   const [error, setError] = useState(false);
+  // Institution slugs with a scrape currently in flight (spinning buttons).
+  const [syncing, setSyncing] = useState<Set<string>>(new Set());
+  // Set when the scraper service is unreachable / not configured (proxy 503).
+  const [serviceError, setServiceError] = useState<string | null>(null);
+
+  async function loadInstitutions() {
+    try {
+      const res = await fetch("/api/institutions");
+      if (!res.ok) throw new Error("failed");
+      const data: ApiResponse = await res.json();
+      setInstitutions(data.institutions);
+      setTotals(data.totals);
+    } catch {
+      setError(true);
+    }
+  }
 
   useEffect(() => {
-    fetch("/api/institutions")
-      .then((res) => {
-        if (!res.ok) throw new Error("failed");
-        return res.json();
-      })
-      .then((data: ApiResponse) => {
-        setInstitutions(data.institutions);
-        setTotals(data.totals);
-      })
-      .catch(() => setError(true));
+    loadInstitutions();
   }, []);
+
+  const markDone = (slug: string) =>
+    setSyncing((prev) => {
+      const next = new Set(prev);
+      next.delete(slug);
+      return next;
+    });
+
+  /**
+   * Poll `/api/scrapers` until each triggered institution's run finishes (a
+   * *new* run appears — started_at past its baseline — and leaves `running`),
+   * reloading balances as each one lands. Caps at POLL_TIMEOUT_MS so a slow or
+   * unconfigured scraper can't spin forever.
+   */
+  async function pollUntilDone(pending: Set<string>, baseline: Map<string, ScraperRun>) {
+    const deadline = Date.now() + POLL_TIMEOUT_MS;
+    while (pending.size > 0 && Date.now() < deadline) {
+      await sleep(POLL_INTERVAL_MS);
+      const runs = await fetchRunMap();
+      let anyDone = false;
+      for (const slug of [...pending]) {
+        const run = runs.get(slug);
+        if (!run) continue;
+        const base = baseline.get(slug);
+        const isNewRun = !base || run.started_at > base.started_at;
+        if (isNewRun && run.status !== "running") {
+          pending.delete(slug);
+          markDone(slug);
+          anyDone = true;
+        }
+      }
+      if (anyDone) await loadInstitutions();
+    }
+    // Timed out with runs still pending: stop spinning and show latest data.
+    if (pending.size > 0) {
+      for (const slug of pending) markDone(slug);
+      await loadInstitutions();
+    }
+  }
+
+  /** Trigger a scrape for one institution (by slug) or all when omitted. */
+  async function refresh(slug?: string) {
+    setServiceError(null);
+    // Snapshot current runs first so polling can tell the new run apart.
+    const baseline = await fetchRunMap();
+
+    let triggered: string[];
+    try {
+      const res = await fetch("/api/institutions/refresh", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(slug ? { institution: slug } : {}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setServiceError(
+          data.error ??
+            (res.status === 503
+              ? "Servicio de scrapers no disponible."
+              : "No se pudo iniciar la sincronización.")
+        );
+        return;
+      }
+      triggered =
+        Array.isArray(data.triggered) && data.triggered.length > 0
+          ? data.triggered
+          : slug
+            ? [slug]
+            : [];
+    } catch {
+      setServiceError("Servicio de scrapers no disponible.");
+      return;
+    }
+
+    if (triggered.length === 0) return;
+    setSyncing((prev) => new Set([...prev, ...triggered]));
+    void pollUntilDone(new Set(triggered), baseline);
+  }
 
   if (error) {
     return (
@@ -215,13 +342,35 @@ export default function InstitutionsPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-2xl font-bold">Instituciones</h2>
-        <p className="text-sm text-muted-foreground">
-          Cada banco, fintech y exchange que sigues, con el detalle de sus
-          productos.
-        </p>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h2 className="text-2xl font-bold">Instituciones</h2>
+          <p className="text-sm text-muted-foreground">
+            Cada banco, fintech y exchange que sigues, con el detalle de sus
+            productos.
+          </p>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => refresh()}
+          disabled={syncing.size > 0}
+        >
+          <RefreshCw
+            className={cn("h-4 w-4", syncing.size > 0 && "animate-spin")}
+          />
+          {syncing.size > 0 ? "Sincronizando…" : "Actualizar todo"}
+        </Button>
       </div>
+
+      {serviceError && (
+        <div className="flex items-start gap-3 rounded-md border border-red-200 bg-red-50 p-3 dark:border-red-900 dark:bg-red-950">
+          <AlertTriangle className="mt-0.5 h-4 w-4 text-red-600" />
+          <p className="text-sm text-red-800 dark:text-red-200">
+            {serviceError}
+          </p>
+        </div>
+      )}
 
       {/* Summary */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
@@ -292,16 +441,38 @@ export default function InstitutionsPage() {
                     </CardDescription>
                   </div>
                 </div>
-                {inst.url && (
-                  <a
-                    href={inst.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+                <div className="flex items-center gap-2">
+                  {inst.url && (
+                    <a
+                      href={inst.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+                    >
+                      Sitio <ExternalLink className="h-3.5 w-3.5" />
+                    </a>
+                  )}
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    onClick={() => refresh(inst.slug)}
+                    disabled={
+                      !SCRAPER_SLUGS.has(inst.slug) || syncing.has(inst.slug)
+                    }
+                    title={
+                      SCRAPER_SLUGS.has(inst.slug)
+                        ? "Actualizar"
+                        : "Sin scraper disponible"
+                    }
                   >
-                    Sitio <ExternalLink className="h-3.5 w-3.5" />
-                  </a>
-                )}
+                    <RefreshCw
+                      className={cn(
+                        "h-4 w-4",
+                        syncing.has(inst.slug) && "animate-spin"
+                      )}
+                    />
+                  </Button>
+                </div>
               </div>
             </CardHeader>
             <CardContent>

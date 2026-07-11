@@ -167,6 +167,40 @@ The home page shows scraper status with:
 - Green/red badges for success/error
 - Error messages (click to expand)
 
+### On-demand refresh (from the dashboard)
+
+The **Instituciones** page has an **"Actualizar todo"** button plus a per-institution
+refresh icon. Clicking one triggers an immediate scrape instead of waiting for the
+next scheduled run; the button spins ("Sincronizando…") and the page reloads the
+balances once the run finishes. Institutions without a live scraper
+(`bci_lider`, `manual`) have the button disabled.
+
+This works only while the scraper service is running with its **internal control
+endpoint** enabled. The endpoint is an unauthenticated trigger, so it must stay on
+the private network — never publish its port (see the auth issue, #23). If the
+service isn't reachable the dashboard shows *"Servicio de scrapers no disponible"*
+instead of spinning forever.
+
+- **Scraper service** — set `SCRAPER_CONTROL_PORT` (a small HTTP server binds to it):
+  - `POST /refresh` — trigger every configured scraper
+  - `POST /refresh/{slug}` — trigger one (`404` if the slug isn't configured)
+  - `GET /health` — liveness check
+- **Dashboard** — set `SCRAPER_CONTROL_URL` to reach that server; the web route
+  `POST /api/institutions/refresh` (optional body `{"institution":"<slug>"}`) proxies
+  to it and returns `503` when it's unavailable.
+
+Under Docker Compose this is wired automatically (`scrapers` exposes `8080` on the
+compose network, `web` points at `http://scrapers:8080`). For **host-dev**, run the
+scraper service with the control port set and point the dashboard at it:
+
+```bash
+# terminal 1 — scrapers on a schedule, control endpoint on :8080
+SCRAPER_CONTROL_PORT=8080 make scrapers-start
+
+# terminal 2 — dashboard, reaching the scraper control endpoint
+SCRAPER_CONTROL_URL=http://localhost:8080 make dev
+```
+
 ## CSV Import
 
 1. Go to **Gastos**
@@ -211,6 +245,8 @@ All API routes are under `/api/`:
 | GET/POST/DELETE | `/api/income-sources` | Income sources |
 | GET/POST/PUT/DELETE | `/api/transfers` | Internal transfers |
 | GET/POST/PUT | `/api/categories` | Categories + auto-assign rules |
+| GET | `/api/institutions` | Institutions + nested products + CLP subtotals |
+| POST | `/api/institutions/refresh` | Trigger a scrape (all, or `{institution}`) |
 | GET | `/api/scrapers` | Scraper run status |
 | GET | `/api/balances` | Latest balance per account |
 | POST | `/api/month-reset` | Create next month's config |

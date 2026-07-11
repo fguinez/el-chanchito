@@ -22,7 +22,8 @@
 │  │                   API Routes (/api/*)                    │   │
 │  │  budget | planning | transactions | wealth | scrapers   │   │
 │  │  fixed-expenses | income-sources | transfers | import   │   │
-│  │  categories | balances | month-reset                    │   │
+│  │  categories | balances | month-reset | institutions     │   │
+│  │  institutions/refresh (→ scraper control endpoint)      │   │
 │  └────────────────────────┬────────────────────────────────┘   │
 │                           │                                     │
 │  ┌────────────────────────┴────────────────────────────────┐   │
@@ -311,6 +312,35 @@ Transactions are deduplicated via `UNIQUE(product_id, external_id)`:
 - BanChile: `bch_{md5(date|description|amount|account_id)[:16]}` (fintself's account_id)
 - Email: `email_{institution}_{hash(message_id)}`
 - CSV: `csv_{base64url(date|description|amount)[:24]}`
+
+### On-demand refresh (control endpoint)
+
+Scrapers normally run only on their APScheduler intervals. The scheduled service
+(`SCRAPER_MODE=scheduled`) also starts a tiny stdlib `http.server` **control
+endpoint** when `SCRAPER_CONTROL_PORT` is set, so the dashboard can force an
+immediate scrape:
+
+```
+Browser → web POST /api/institutions/refresh {institution?}
+        → (SCRAPER_CONTROL_URL) scrapers POST /refresh[/{slug}]
+        → scheduler.get_job(slug).modify(next_run_time=now)  ⇒ 202 Accepted
+```
+
+- Endpoints: `POST /refresh` (all), `POST /refresh/{slug}` (one, `404` if not a
+  configured scraper), `GET /health`.
+- Triggering just moves a job's next run time to now, so it reuses each job's
+  `coalesce=True` / `max_instances=1` guards — a manual trigger can't overlap a
+  scheduled or in-flight run of the same institution. The HTTP call returns `202`
+  immediately; the scrape runs asynchronously on the scheduler's event loop.
+- The server runs on a daemon thread and binds `0.0.0.0` inside the container.
+  It's an **unauthenticated** trigger — keep it internal (Compose `expose`s port
+  `8080` on the private network; never publish it — see #23). The web proxy
+  returns `503` when it's unreachable so the UI can explain the outage.
+
+| Var | Service | Meaning |
+|---|---|---|
+| `SCRAPER_CONTROL_PORT` | scrapers | Port the control server binds (unset ⇒ disabled) |
+| `SCRAPER_CONTROL_URL` | web | Base URL the refresh proxy calls (e.g. `http://scrapers:8080`) |
 
 ## Tech Stack
 
