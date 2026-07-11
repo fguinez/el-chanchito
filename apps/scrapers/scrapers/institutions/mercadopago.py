@@ -7,7 +7,7 @@ from scrapers.base import BaseScraper, ScrapedBalance, ScrapedTransaction
 
 PATTERN = EmailPattern(
     institution="mercadopago",
-    account_type="prepaid",
+    product_kind="wallet",
     sender_contains=["mercadopago", "mercadolibre"],
     subject_contains=["pago", "compra", "transferencia", "pagaste"],
     amount_patterns=[

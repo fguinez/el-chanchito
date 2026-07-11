@@ -10,12 +10,13 @@ from typing import Optional
 class ScrapedTransaction:
     """A transaction extracted by a scraper."""
 
-    account_institution: str  # e.g. 'banchile', 'fintual'
-    account_type: str  # e.g. 'checking', 'credit_card'
+    institution: str  # institution slug, e.g. 'banchile', 'fintual'
+    product_kind: str  # e.g. 'checking', 'credit_card', 'wallet', 'crypto'
     description: str
     amount: int  # CLP, negative=expense, positive=income
     transaction_date: date
     external_id: str  # unique identifier for dedup
+    currency: str = "CLP"
     category_hint: Optional[str] = None  # scraper's best guess
     scheduled_month: Optional[date] = None
 
@@ -24,10 +25,11 @@ class ScrapedTransaction:
 class ScrapedBalance:
     """A balance snapshot from a scraper."""
 
-    account_institution: str
-    account_type: str
-    balance: int  # CLP
+    institution: str
+    product_kind: str
+    balance: float  # in units of `currency` (fractional for crypto)
     as_of: date
+    currency: str = "CLP"
 
 
 class BaseScraper(ABC):
@@ -60,5 +62,5 @@ class BaseScraper(ABC):
 
     @abstractmethod
     async def scrape_balances(self) -> list[ScrapedBalance]:
-        """Fetch current account balances."""
+        """Fetch current product balances."""
         ...

@@ -33,18 +33,18 @@ class TestMovementConversion:
         mov = _make_movement()
         txn = self.scraper._movement_to_transaction(mov)
         assert txn.amount == -10000
-        assert txn.account_institution == "banchile"
+        assert txn.institution == "banchile"
         assert txn.description == "TEST"
 
     def test_checking_account_type(self):
         mov = _make_movement(acct_type="corriente")
         txn = self.scraper._movement_to_transaction(mov)
-        assert txn.account_type == "checking"
+        assert txn.product_kind == "checking"
 
     def test_credit_card_type(self):
         mov = _make_movement(acct_type="credito")
         txn = self.scraper._movement_to_transaction(mov)
-        assert txn.account_type == "credit_card"
+        assert txn.product_kind == "credit_card"
 
     def test_datetime_to_date_conversion(self):
         mov = _make_movement(dt=datetime(2026, 4, 10, 15, 30))
@@ -86,4 +86,4 @@ class TestMovementConversion:
         mov = _make_movement()
         mov.account_type = None
         txn = self.scraper._movement_to_transaction(mov)
-        assert txn.account_type == "checking"
+        assert txn.product_kind == "checking"

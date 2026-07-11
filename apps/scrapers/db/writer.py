@@ -2,6 +2,7 @@
 
 import logging
 from datetime import datetime, timezone
+from decimal import Decimal
 from uuid import uuid4
 
 from db.connection import get_pool
@@ -55,30 +56,81 @@ def finish_scraper_run(
         )
 
 
-def _resolve_account_id(conn, institution: str, account_type: str) -> str:
-    """Get or create an account ID for the given institution and type."""
+def _resolve_product_id(
+    conn, institution_slug: str, kind: str, currency: str = "CLP"
+) -> str:
+    """Get or create the product for (institution, kind, currency).
+
+    Walks the chain institution -> account -> product, creating missing links.
+    Single-user deployment: everything attaches to the oldest user.
+    """
     row = conn.execute(
-        "SELECT id FROM accounts WHERE institution = %s AND account_type = %s",
-        (institution, account_type),
+        "SELECT id, name FROM institutions WHERE slug = %s", (institution_slug,)
     ).fetchone()
-
     if row:
-        return row[0]
+        institution_id, institution_name = row
+    else:
+        institution_id = str(uuid4())
+        institution_name = institution_slug
+        conn.execute(
+            """
+            INSERT INTO institutions (id, slug, name, kind)
+            VALUES (%s, %s, %s, 'other')
+            """,
+            (institution_id, institution_slug, institution_slug),
+        )
 
-    account_id = str(uuid4())
+    user_row = conn.execute(
+        "SELECT id FROM users ORDER BY created_at LIMIT 1"
+    ).fetchone()
+    if not user_row:
+        raise RuntimeError("No users found — run the V009 migration first")
+    user_id = user_row[0]
+
+    account_row = conn.execute(
+        """
+        SELECT id FROM accounts
+        WHERE user_id = %s AND institution_id = %s
+        ORDER BY display_order LIMIT 1
+        """,
+        (user_id, institution_id),
+    ).fetchone()
+    if account_row:
+        account_id = account_row[0]
+    else:
+        account_id = str(uuid4())
+        conn.execute(
+            "INSERT INTO accounts (id, user_id, institution_id) VALUES (%s, %s, %s)",
+            (account_id, user_id, institution_id),
+        )
+
+    product_row = conn.execute(
+        """
+        SELECT id FROM products
+        WHERE account_id = %s AND kind = %s AND currency = %s
+        LIMIT 1
+        """,
+        (account_id, kind, currency),
+    ).fetchone()
+    if product_row:
+        return product_row[0]
+
+    product_id = str(uuid4())
     conn.execute(
         """
-        INSERT INTO accounts (id, name, institution, account_type)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO products (id, account_id, name, kind, currency)
+        VALUES (%s, %s, %s, %s, %s)
         """,
         (
+            product_id,
             account_id,
-            f"{institution} - {account_type}",
-            institution,
-            account_type,
+            f"{institution_name} - {kind}"
+            + (f" ({currency})" if currency != "CLP" else ""),
+            kind,
+            currency,
         ),
     )
-    return account_id
+    return product_id
 
 
 def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
@@ -91,26 +143,26 @@ def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
 
     with pool.connection() as conn:
         for txn in transactions:
-            account_id = _resolve_account_id(
-                conn, txn.account_institution, txn.account_type
+            product_id = _resolve_product_id(
+                conn, txn.institution, txn.product_kind, txn.currency
             )
             try:
                 cur = conn.execute(
                     """
                     INSERT INTO transactions
-                        (id, account_id, description, amount, transaction_date,
+                        (id, product_id, description, amount, transaction_date,
                          scheduled_month, source, external_id)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (account_id, external_id) DO NOTHING
+                    ON CONFLICT (product_id, external_id) DO NOTHING
                     """,
                     (
                         str(uuid4()),
-                        account_id,
+                        product_id,
                         txn.description,
                         txn.amount,
                         txn.transaction_date,
                         txn.scheduled_month,
-                        f"scraper_{txn.account_institution}",
+                        f"scraper_{txn.institution}",
                         txn.external_id,
                     ),
                 )
@@ -123,25 +175,51 @@ def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
 
 
 def upsert_balance(balance: ScrapedBalance) -> None:
-    """Store the latest balance for an account (upsert)."""
+    """Record a scraped balance.
+
+    Always refreshes products.current_balance/balance_as_of ("last checked"),
+    but appends a product_balances history row only when the value changed —
+    both in the same transaction so the denormalized column can't drift.
+    """
+    new_value = Decimal(str(balance.balance))
     pool = get_pool()
     with pool.connection() as conn:
-        account_id = _resolve_account_id(
-            conn, balance.account_institution, balance.account_type
+        product_id = _resolve_product_id(
+            conn, balance.institution, balance.product_kind, balance.currency
         )
+
+        row = conn.execute(
+            "SELECT current_balance FROM products WHERE id = %s", (product_id,)
+        ).fetchone()
+        current = row[0] if row else None
+
+        now = datetime.now(timezone.utc)
+        changed = current is None or Decimal(current) != new_value
+        if changed:
+            conn.execute(
+                """
+                INSERT INTO product_balances (id, product_id, balance, as_of, source)
+                VALUES (%s, %s, %s, %s, 'scraper')
+                ON CONFLICT (product_id, as_of) DO NOTHING
+                """,
+                (str(uuid4()), product_id, new_value, now),
+            )
+
         conn.execute(
             """
-            INSERT INTO account_balances (id, account_id, balance, as_of, source)
-            VALUES (%s, %s, %s, now(), 'scraper')
-            ON CONFLICT (account_id) DO UPDATE
-            SET balance = EXCLUDED.balance, as_of = now(), source = 'scraper'
+            UPDATE products
+            SET current_balance = %s, balance_as_of = %s, updated_at = %s
+            WHERE id = %s
             """,
-            (str(uuid4()), account_id, balance.balance),
+            (new_value, now, now, product_id),
         )
+
         logger.info(
-            "Balance update: %s/%s = $%s (as of %s)",
-            balance.account_institution,
-            balance.account_type,
+            "Balance %s: %s/%s = %s %s (as of %s)",
+            "update" if changed else "confirmed",
+            balance.institution,
+            balance.product_kind,
             f"{balance.balance:,}",
+            balance.currency,
             balance.as_of,
         )

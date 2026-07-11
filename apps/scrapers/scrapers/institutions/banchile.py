@@ -24,9 +24,9 @@ class BanChileScraper(BaseScraper):
         amount_clp = int(movement.amount)
         tx_date = movement.date.date() if isinstance(movement.date, datetime) else movement.date
 
-        acct_type = "checking"
+        kind = "checking"
         if movement.account_type and movement.account_type.value == "credito":
-            acct_type = "credit_card"
+            kind = "credit_card"
 
         raw_str = f"{tx_date.isoformat()}|{movement.description}|{amount_clp}|{movement.account_id or ''}"
         external_id = f"bch_{hashlib.md5(raw_str.encode()).hexdigest()[:16]}"
@@ -34,8 +34,8 @@ class BanChileScraper(BaseScraper):
         scheduled = date(tx_date.year, tx_date.month, 1)
 
         return ScrapedTransaction(
-            account_institution="banchile",
-            account_type=acct_type,
+            institution="banchile",
+            product_kind=kind,
             description=movement.description,
             amount=amount_clp,
             transaction_date=tx_date,
@@ -65,8 +65,8 @@ class BanChileScraper(BaseScraper):
             except Exception:
                 logger.exception("Failed to convert movement: %s", getattr(mov, "description", "?"))
 
-        checking = [t for t in transactions if t.account_type == "checking"]
-        credit = [t for t in transactions if t.account_type == "credit_card"]
+        checking = [t for t in transactions if t.product_kind == "checking"]
+        credit = [t for t in transactions if t.product_kind == "credit_card"]
         logger.info(
             "BancoDeChile: %d checking, %d credit card transactions",
             len(checking),

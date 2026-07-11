@@ -79,8 +79,8 @@ class FintualScraper(BaseScraper):
             if total_nav > 0:
                 balances.append(
                     ScrapedBalance(
-                        account_institution="fintual",
-                        account_type="investment",
+                        institution="fintual",
+                        product_kind="investment",
                         balance=total_nav,
                         as_of=date.today(),
                     )

@@ -29,7 +29,7 @@ class EmailPattern:
     """Configuration for parsing a specific institution's emails."""
 
     institution: str
-    account_type: str
+    product_kind: str
     sender_contains: list[str]        # match any of these in From header
     subject_contains: list[str]       # match any of these in Subject (optional filter)
     amount_patterns: list[str]        # regex patterns to extract amount from body
@@ -276,8 +276,8 @@ async def fetch_transactions_for_pattern(
 
                 transactions.append(
                     ScrapedTransaction(
-                        account_institution=pattern.institution,
-                        account_type=pattern.account_type,
+                        institution=pattern.institution,
+                        product_kind=pattern.product_kind,
                         description=description,
                         amount=amount,
                         transaction_date=tx_date,

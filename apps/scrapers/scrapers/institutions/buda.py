@@ -96,8 +96,8 @@ class BudaScraper(BaseScraper):
 
                             transactions.append(
                                 ScrapedTransaction(
-                                    account_institution="buda",
-                                    account_type="crypto",
+                                    institution="buda",
+                                    product_kind="crypto",
                                     description=f"Buda {tx_type[:-1]} {item_currency}",
                                     amount=amount_val,
                                     transaction_date=tx_date,
@@ -128,16 +128,19 @@ class BudaScraper(BaseScraper):
             for bal in resp.json().get("balances", []):
                 currency_id = bal.get("id", "")
                 available = bal.get("available_amount", ["0"])
-                amount = int(float(available[0]))
+                # Keep fractional amounts: 0.5 BTC must not truncate to 0.
+                amount = float(available[0])
 
                 if amount > 0:
                     logger.info("Buda balance %s: %s", currency_id, f"{amount:,}")
                     balances.append(
                         ScrapedBalance(
-                            account_institution="buda",
-                            account_type="crypto",
+                            institution="buda",
+                            product_kind="crypto",
                             balance=amount,
                             as_of=date.today(),
+                            # One product per currency (BTC, CLP, ...)
+                            currency=currency_id.upper() or "CLP",
                         )
                     )
 
