@@ -35,10 +35,11 @@
 │                    PostgreSQL 16 (Alpine)                        │
 │                     port 5435 (host)                             │
 │                                                                 │
-│  accounts | transactions | categories | category_rules          │
+│  users | institutions | accounts | products                     │
+│  product_balances | transactions | categories | category_rules  │
 │  budget_configs | budget_adjustments | wealth_snapshots          │
 │  fixed_expenses | income_sources | internal_transfers           │
-│  account_balances | scraper_runs                                │
+│  scraper_runs                                                   │
 └───────────────────────────▲─────────────────────────────────────┘
                             │
                             │ writes directly (psycopg3)
@@ -57,7 +58,7 @@
 │  │        ▼            ▼            ▼               ▼        │  │
 │  │   ┌──────────────────────────────────────────────────┐   │  │
 │  │   │              DB Writer (upsert)                   │   │  │
-│  │   │   transactions + account_balances + scraper_runs  │   │  │
+│  │   │   transactions + product_balances + scraper_runs  │   │  │
 │  │   └──────────────────────────────────────────────────┘   │  │
 │  └──────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
@@ -142,19 +143,46 @@ drift = 0  =>  exactly on track
 
 ## Database Schema (ER Diagram)
 
+Core hierarchy (since V009): `users -> accounts -> products`. "Account" always
+means the user's enrollment at one institution (what you log into); the
+money-holding elements are **products** (schema.org/FinancialProduct).
+
 ```
-accounts ─────────────┐
+users ────────────────┐
   id PK               │
-  name                 │
-  institution          │      account_balances
-  account_type         │        id PK
-  currency             ├──────< account_id FK (unique)
-  display_order        │        balance
-                       │        as_of
+  name, email          │
                        │
-transactions ──────────┤
+institutions ─────────┤       accounts
+  id PK               ├──────<  id PK
+  slug (unique)        │        user_id FK
+  name                 │        institution_id FK
+  kind (bank|fintech|  │        name ('Personal')
+    exchange|          │        is_active, display_order
+    asset_manager|     │
+    other)             │
+                       │
+products ──────────────┘      product_balances (history)
+  id PK                         id PK
+  account_id FK ──────>       < product_id FK
+  parent_product_id FK (self:   balance NUMERIC(20,8)
+    debit->checking,            as_of (unique w/ product_id)
+    línea->cta.cte.)            source
+  kind (checking|savings|
+    vista|wallet|term_deposit|
+    credit_card|debit_card|
+    prepaid_card|line_of_credit|
+    loan|mortgage|investment|
+    crypto|other)
+  name, currency
+  current_balance NUMERIC     -- denormalized latest
+  balance_as_of               -- last checked (bumps even if unchanged)
+  credit_limit, external_ref
+  details JSONB               -- kind-specific attributes
+  is_active, display_order
+
+transactions ──────────┐
   id PK                │      categories
-  account_id FK ───────┘        id PK
+  product_id FK ───────┘        id PK
   description                   name
   amount (int, CLP)             parent_id FK (self)
   transaction_date              color, icon
@@ -162,7 +190,7 @@ transactions ──────────┤
   scheduled_month             category_rules
   source                        id PK
   external_id (unique w/       keyword
-    account_id)                 category_id FK ──────>
+    product_id)                 category_id FK ──────>
   is_internal_transfer
   is_manually_categorized
 
@@ -179,7 +207,7 @@ budget_configs                budget_adjustments
   day_start
 
 
-wealth_snapshots              fixed_expenses
+wealth_snapshots (legacy)     fixed_expenses
   id PK                         id PK
   snapshot_date (unique)        name
   patrimonio                    amount
@@ -187,14 +215,17 @@ wealth_snapshots              fixed_expenses
   fintual_balance               shared_ratio
   mercadopago_balance           active_from/to
   banchile_savings
+  -- pre-V009 totals + manual entries;
+  -- /api/wealth now derives the series
+  -- from product_balances
 
 
 income_sources                internal_transfers
   id PK                         id PK
   name                          description
   monthly_amount                amount
-                                from_account_id FK
-                                to_account_id FK
+                                from_product_id FK
+                                to_product_id FK
 scraper_runs                    transfer_date
   id PK                         status (pending|resolved)
   method                         (email|fintself|http_api|open_banking)
@@ -218,6 +249,7 @@ scraper_runs                    transfer_date
 | `V006__account_balances.sql` | account_balances |
 | `V007__category_rules.sql` | category_rules + seed default categories |
 | `V008__scraper_runs_method_institution.sql` | splits `scraper_runs.scraper_name` into `method` + `institution` |
+| `V009__users_institutions_products.sql` | users, institutions, accounts (enrollments); old accounts renamed to products (UUIDs preserved); account_balances -> product_balances (history); wealth backfill |
 
 ## Scraper Architecture
 
@@ -249,6 +281,14 @@ class BaseScraper(ABC):
 
 Both `method` and `institution` are stored per `scraper_runs` row.
 
+`ScrapedTransaction`/`ScrapedBalance` carry `institution` (slug),
+`product_kind`, and `currency`. The writer resolves the chain
+institution → account → product (creating missing links; single-user:
+everything attaches to the oldest user), so e.g. each Buda currency
+becomes its own `crypto` product. `upsert_balance` always refreshes
+`products.current_balance`/`balance_as_of` but appends a
+`product_balances` history row only when the value changed.
+
 | Institution | Method | Source | Auth | Schedule |
 |---|---|---|---|---|
 | `fintual` | `http_api` | REST API | Email + password -> token | 6h |
@@ -264,11 +304,11 @@ each acquire and only re-logs-in when the mailbox has been dropped.
 
 ### Deduplication
 
-Transactions are deduplicated via `UNIQUE(account_id, external_id)`:
+Transactions are deduplicated via `UNIQUE(product_id, external_id)`:
 
 - Fintual: no transactions (balance-only)
 - Buda: `buda_{deposit/withdrawal_id}`
-- BanChile: `bch_{md5(date|description|amount|account_id)[:16]}`
+- BanChile: `bch_{md5(date|description|amount|account_id)[:16]}` (fintself's account_id)
 - Email: `email_{institution}_{hash(message_id)}`
 - CSV: `csv_{base64url(date|description|amount)[:24]}`
 
@@ -321,7 +361,7 @@ el-chanchito/
 │
 ├── packages/
 │   └── db-schema/                   # Shared SQL migrations
-│       ├── migrations/              # V001 through V007
+│       ├── migrations/              # V001 through V009
 │       └── migrate.mjs             # Migration runner
 │
 ├── docker-compose.yml
