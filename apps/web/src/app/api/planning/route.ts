@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { budgetConfigs, budgetAdjustments, transactions, accounts, accountBalances } from "@/lib/db/schema";
-import { eq, desc, sql, and, gt, or } from "drizzle-orm";
+import { budgetConfigs, budgetAdjustments, transactions, products, accounts, institutions } from "@/lib/db/schema";
+import { eq, desc, sql, and, gt, inArray, isNotNull } from "drizzle-orm";
 import {
   generatePlanningTable,
   getTodayStatus,
@@ -89,29 +89,21 @@ export async function GET(request: NextRequest) {
 
   // Get real balance from scrapers (sum of BanChile checking + credit card balances)
   const balanceRows = await db
-    .select({
-      balance: accountBalances.balance,
-      institution: accounts.institution,
-      accountType: accounts.accountType,
-    })
-    .from(accountBalances)
-    .innerJoin(accounts, eq(accountBalances.accountId, accounts.id))
+    .select({ balance: products.currentBalance })
+    .from(products)
+    .innerJoin(accounts, eq(products.accountId, accounts.id))
+    .innerJoin(institutions, eq(accounts.institutionId, institutions.id))
     .where(
-      or(
-        and(
-          eq(accounts.institution, "banchile"),
-          eq(accounts.accountType, "credit_card")
-        ),
-        and(
-          eq(accounts.institution, "banchile"),
-          eq(accounts.accountType, "checking")
-        )
+      and(
+        eq(institutions.slug, "banchile"),
+        inArray(products.kind, ["checking", "credit_card"]),
+        isNotNull(products.currentBalance)
       )
     );
 
   let realBalance: number | null = null;
   if (balanceRows.length > 0) {
-    realBalance = balanceRows.reduce((sum, r) => sum + r.balance, 0);
+    realBalance = balanceRows.reduce((sum, r) => sum + Number(r.balance), 0);
   }
 
   const todayStatus = getTodayStatus(

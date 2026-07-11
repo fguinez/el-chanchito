@@ -26,8 +26,8 @@ interface InternalTransfer {
   id: string;
   description: string;
   amount: number;
-  fromAccountId: string | null;
-  toAccountId: string | null;
+  fromProductId: string | null;
+  toProductId: string | null;
   transferDate: string;
   status: string;
   notes: string | null;

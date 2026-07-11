@@ -1,23 +1,28 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { accounts, accountBalances } from "@/lib/db/schema";
-import { eq } from "drizzle-orm";
+import { products, accounts, institutions } from "@/lib/db/schema";
+import { eq, isNotNull } from "drizzle-orm";
 
-/** GET /api/balances — get latest balance per account */
+/** GET /api/balances — current balance per product (denormalized on products) */
 export async function GET() {
   const rows = await db
     .select({
-      accountId: accounts.id,
-      name: accounts.name,
-      institution: accounts.institution,
-      accountType: accounts.accountType,
-      balance: accountBalances.balance,
-      asOf: accountBalances.asOf,
-      source: accountBalances.source,
+      productId: products.id,
+      name: products.name,
+      institution: institutions.slug,
+      institutionName: institutions.name,
+      kind: products.kind,
+      currency: products.currency,
+      balance: products.currentBalance,
+      asOf: products.balanceAsOf,
     })
-    .from(accounts)
-    .innerJoin(accountBalances, eq(accounts.id, accountBalances.accountId))
-    .orderBy(accounts.displayOrder);
+    .from(products)
+    .innerJoin(accounts, eq(products.accountId, accounts.id))
+    .innerJoin(institutions, eq(accounts.institutionId, institutions.id))
+    .where(isNotNull(products.currentBalance))
+    .orderBy(products.displayOrder);
 
-  return NextResponse.json(rows);
+  return NextResponse.json(
+    rows.map((r) => ({ ...r, balance: Number(r.balance) }))
+  );
 }

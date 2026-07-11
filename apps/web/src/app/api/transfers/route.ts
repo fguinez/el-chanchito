@@ -16,7 +16,9 @@ export async function GET() {
 /** POST /api/transfers — create an internal transfer */
 export async function POST(request: NextRequest) {
   const body = await request.json();
-  const { description, amount, fromAccountId, toAccountId, transferDate, notes } = body;
+  const { description, amount, transferDate, notes } = body;
+  const fromProductId = body.fromProductId ?? body.fromAccountId ?? null;
+  const toProductId = body.toProductId ?? body.toAccountId ?? null;
 
   if (!description || amount === undefined || !transferDate) {
     return NextResponse.json(
@@ -30,8 +32,8 @@ export async function POST(request: NextRequest) {
     .values({
       description,
       amount: Math.round(amount),
-      fromAccountId: fromAccountId ?? null,
-      toAccountId: toAccountId ?? null,
+      fromProductId,
+      toProductId,
       transferDate,
       notes: notes ?? null,
     })

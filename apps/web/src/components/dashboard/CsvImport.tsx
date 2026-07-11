@@ -126,7 +126,7 @@ export function CsvImport({ onImported }: { onImported: () => void }) {
         body: JSON.stringify({
           rows,
           institution,
-          accountType: "checking",
+          kind: "checking",
         }),
       });
 

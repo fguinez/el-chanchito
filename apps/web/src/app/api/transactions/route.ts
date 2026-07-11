@@ -1,21 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { transactions, accounts } from "@/lib/db/schema";
+import { transactions } from "@/lib/db/schema";
+import { resolveProductId } from "@/lib/db/resolve";
 import { eq, desc, and } from "drizzle-orm";
 
 /** GET /api/transactions — list transactions with optional filters */
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
   const month = searchParams.get("month");
-  const accountId = searchParams.get("accountId");
+  const productId =
+    searchParams.get("productId") ?? searchParams.get("accountId");
   const limit = parseInt(searchParams.get("limit") ?? "50");
 
   const conditions = [];
   if (month) {
     conditions.push(eq(transactions.scheduledMonth, month));
   }
-  if (accountId) {
-    conditions.push(eq(transactions.accountId, accountId));
+  if (productId) {
+    conditions.push(eq(transactions.productId, productId));
   }
 
   const rows = await db
@@ -26,7 +28,7 @@ export async function GET(request: NextRequest) {
       transactionDate: transactions.transactionDate,
       scheduledMonth: transactions.scheduledMonth,
       source: transactions.source,
-      accountId: transactions.accountId,
+      productId: transactions.productId,
       categoryId: transactions.categoryId,
       isInternalTransfer: transactions.isInternalTransfer,
       notes: transactions.notes,
@@ -44,7 +46,8 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   const body = await request.json();
 
-  const { description, amount, transactionDate, scheduledMonth, accountId, notes } = body;
+  const { description, amount, transactionDate, scheduledMonth, notes } = body;
+  const productId = body.productId ?? body.accountId;
 
   if (!description || amount === undefined || !transactionDate) {
     return NextResponse.json(
@@ -53,34 +56,9 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // If no account specified, resolve or create a "manual" account
-  let resolvedAccountId = accountId;
-  if (!resolvedAccountId) {
-    const [manualAccount] = await db
-      .select()
-      .from(accounts)
-      .where(
-        and(
-          eq(accounts.institution, "manual"),
-          eq(accounts.accountType, "checking")
-        )
-      )
-      .limit(1);
-
-    if (manualAccount) {
-      resolvedAccountId = manualAccount.id;
-    } else {
-      const [created] = await db
-        .insert(accounts)
-        .values({
-          name: "Entrada manual",
-          institution: "manual",
-          accountType: "checking",
-        })
-        .returning();
-      resolvedAccountId = created.id;
-    }
-  }
+  // If no product specified, resolve or create the manual-entry product
+  const resolvedProductId =
+    productId ?? (await resolveProductId("manual", "checking"));
 
   // Derive scheduledMonth from transactionDate if not provided
   const txDate = new Date(transactionDate);
@@ -91,7 +69,7 @@ export async function POST(request: NextRequest) {
   const [created] = await db
     .insert(transactions)
     .values({
-      accountId: resolvedAccountId,
+      productId: resolvedProductId,
       description,
       amount: Math.round(amount),
       transactionDate,

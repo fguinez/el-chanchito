@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { transactions, accounts } from "@/lib/db/schema";
-import { eq, and } from "drizzle-orm";
+import { transactions, type ProductKind } from "@/lib/db/schema";
+import { resolveProductId } from "@/lib/db/resolve";
 
 interface CsvRow {
   description: string;
@@ -12,11 +12,13 @@ interface CsvRow {
 /** POST /api/import — import transactions from parsed CSV data */
 export async function POST(request: NextRequest) {
   const body = await request.json();
-  const { rows, institution, accountType } = body as {
+  const { rows, institution } = body as {
     rows: CsvRow[];
     institution: string;
-    accountType: string;
+    kind?: ProductKind;
+    accountType?: string; // legacy alias for kind
   };
+  const kind = (body.kind ?? body.accountType ?? "checking") as ProductKind;
 
   if (!rows || !Array.isArray(rows) || rows.length === 0) {
     return NextResponse.json(
@@ -25,28 +27,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // Resolve or create account
-  let [account] = await db
-    .select()
-    .from(accounts)
-    .where(
-      and(
-        eq(accounts.institution, institution || "csv_import"),
-        eq(accounts.accountType, accountType || "checking")
-      )
-    )
-    .limit(1);
-
-  if (!account) {
-    [account] = await db
-      .insert(accounts)
-      .values({
-        name: `${institution || "CSV"} - ${accountType || "checking"}`,
-        institution: institution || "csv_import",
-        accountType: accountType || "checking",
-      })
-      .returning();
-  }
+  const productId = await resolveProductId(institution || "csv_import", kind);
 
   let imported = 0;
   let skipped = 0;
@@ -74,7 +55,7 @@ export async function POST(request: NextRequest) {
       await db
         .insert(transactions)
         .values({
-          accountId: account.id,
+          productId,
           description: row.description,
           amount: Math.round(row.amount),
           transactionDate: dateStr,
