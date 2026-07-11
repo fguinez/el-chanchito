@@ -49,7 +49,7 @@ DATABASE_URL=postgres://finance:finance@localhost:5435/finance
 
 # Scraper identifiers (enable only the ones you need)
 BANCHILE_RUT=12345678-9          # Banco de Chile (via fintself)
-FINTUAL_EMAIL=your@email.com     # Fintual (official API)
+FINTUAL_EMAIL=your@email.com     # Fintual (web session; run `make fintual-login` once)
 EMAIL_IMAP_HOST=imap.gmail.com   # Email parser (MercadoPago, MACH, Tenpo)
 EMAIL_IMAP_USER=your@gmail.com
 ```
@@ -68,7 +68,7 @@ Secrets and their meaning:
 | Keychain item | Value |
 |---|---|
 | `chanchito.BANCHILE_PASSWORD` | Banco de Chile web password |
-| `chanchito.FINTUAL_PASSWORD` | Fintual account password (exchanged for a short-lived API token on each run) |
+| `chanchito.FINTUAL_PASSWORD` | Fintual account password (used by `make fintual-login` to open a web session) |
 | `chanchito.BUDA_API_KEY` | Buda.com API key |
 | `chanchito.BUDA_API_SECRET` | Buda.com API secret |
 | `chanchito.EMAIL_IMAP_PASSWORD` | Gmail App Password (see below) |
@@ -118,6 +118,29 @@ At the start of each month:
 ## Scrapers
 
 Scrapers run independently from the dashboard. They share a PostgreSQL database.
+
+### Fintual sign-in
+
+Fintual retired its token-only API — reading your goals now requires a real web
+session with e-mail 2FA. Sign in once and the session is cached to disk
+(`apps/scrapers/.fintual_session.json`, gitignored):
+
+```bash
+make fintual-login   # signs in, prompts for the 6-digit code Fintual e-mails you
+```
+
+Scheduled scrapes reuse the cached session automatically. When it eventually
+expires, the Fintual scraper reports `Fintual session expired. Run
+`make fintual-login`…` — just run the login again. (Override the cache location
+with `FINTUAL_SESSION_FILE` if needed.)
+
+Running scrapers in Docker? The session is cached in the `scraper_state` volume
+(`FINTUAL_SESSION_FILE=/data/fintual_session.json`). Sign in *inside* the
+container so it writes to that volume:
+
+```bash
+docker compose run --rm scrapers python -m scrapers.institutions.fintual
+```
 
 ### Running scrapers once
 

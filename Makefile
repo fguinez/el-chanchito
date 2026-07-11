@@ -1,5 +1,5 @@
 .PHONY: help install dev build db-up db-down db-migrate db-reset db-shell \
-       scrapers-once scrapers-start up down logs clean typecheck lint test
+       scrapers-once scrapers-start scrapers-test fintual-login up down logs clean typecheck lint test
 
 # ─── Help ────────────────────────────────────────────────────────────────────
 
@@ -110,6 +110,10 @@ scrapers-start: ## Start scrapers on schedule (long-running)
 		DATABASE_URL=$${DATABASE_URL:-postgres://finance:finance@localhost:5435/finance} \
 		SCRAPER_MODE=scheduled \
 		../../.venv/bin/python main.py
+
+fintual-login: ## Sign in to Fintual (prompts for the e-mailed 2FA code) and cache the session
+	@. ./scripts/load-secrets.sh && cd apps/scrapers && \
+		../../.venv/bin/python -m scrapers.institutions.fintual
 
 scrapers-test: ## Test scraper imports and basic functionality
 	cd apps/scrapers && ../../.venv/bin/python -c "from scrapers.institutions import FintualScraper, BudaScraper, BanChileScraper, BciLiderScraper, MachScraper, MercadoPagoScraper, TenpoScraper; from scrapers.backends.email import get_session, fetch_transactions_for_pattern; from scrapers.backends.fintself import run_fintself_scraper; from db.writer import start_scraper_run, finish_scraper_run; print('All scraper imports OK')"

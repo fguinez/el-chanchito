@@ -34,6 +34,7 @@ coverage/
 
 # Local files
 local/
+.fintual_session.json
 .agents/*local*
 .claude/
 .gemini/

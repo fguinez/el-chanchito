@@ -291,7 +291,7 @@ becomes its own `crypto` product. `upsert_balance` always refreshes
 
 | Institution | Method | Source | Auth | Schedule |
 |---|---|---|---|---|
-| `fintual` | `http_api` | REST API | Email + password -> token | 6h |
+| `fintual` | `http_api` | REST API (`/api/goals`) | Web session + e-mail 2FA (cached; `make fintual-login`) | 6h |
 | `buda` | `http_api` | REST API | HMAC-SHA384 signed requests | 1h |
 | `banchile` | `fintself` | Browser (fintself/Playwright) | RUT + password | 24h |
 | `mach` | `email` | IMAP (Gmail) | Shared IMAP session | 30m |

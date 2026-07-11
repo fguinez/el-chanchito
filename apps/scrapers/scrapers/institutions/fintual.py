@@ -1,13 +1,27 @@
-"""Fintual API client scraper.
+"""Fintual scraper (web-session auth).
 
-Auth: POST /access_tokens with email/password -> returns token.
-Goals: GET /goals with X-User-Email + X-User-Token headers.
-Each goal has `nav` = current net asset value in CLP.
+Fintual retired the old API-token flow: `POST /api/access_tokens` still issues a
+token, but `/api/goals` now sits behind the website's session auth, so the token
+alone gets a 401. The working flow mirrors a browser sign-in:
+
+    GET  /f/sign-in/                     -> establish session
+    POST /auth/sessions/initiate_login   -> {email, password}; 201 => e-mail 2FA
+    POST /auth/sessions/finalize_login_web -> {email, password, code}; sets cookies
+    GET  /api/goals                      -> old JSON:API shape, `nav` per goal
+
+Because the 2FA code is e-mailed to the account address (not a mailbox we can
+read), sign-in is a manual step: run `make fintual-login`, type the code, and the
+session cookies are cached to disk. Scheduled scrapes reuse the cached session and
+fail with a clear message when it expires so the login can be repeated.
 """
 
+import asyncio
+import json
 import logging
 import os
 from datetime import date
+from pathlib import Path
+from typing import Callable
 
 import httpx
 
@@ -15,7 +29,28 @@ from scrapers.base import BaseScraper, ScrapedBalance, ScrapedTransaction
 
 logger = logging.getLogger(__name__)
 
-FINTUAL_API = "https://fintual.cl/api"
+FINTUAL_ORIGIN = "https://fintual.cl"
+SIGN_IN_URL = f"{FINTUAL_ORIGIN}/f/sign-in/"
+INITIATE_LOGIN_URL = f"{FINTUAL_ORIGIN}/auth/sessions/initiate_login"
+FINALIZE_LOGIN_URL = f"{FINTUAL_ORIGIN}/auth/sessions/finalize_login_web"
+GOALS_URL = f"{FINTUAL_ORIGIN}/api/goals"
+
+# A desktop Chrome UA; Fintual's session endpoints behave differently without one.
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
+# Cookie that proves an authenticated session; its presence gates a cache hit.
+_SESSION_COOKIE = "monolith_token"
+
+# apps/scrapers/, resolved from this file so cwd doesn't matter.
+_APP_DIR = Path(__file__).resolve().parents[2]
+_DEFAULT_SESSION_FILE = _APP_DIR / ".fintual_session.json"
+
+
+class FintualSessionError(RuntimeError):
+    """Raised when there is no usable cached session and 2FA login is required."""
 
 
 class FintualScraper(BaseScraper):
@@ -24,48 +59,94 @@ class FintualScraper(BaseScraper):
 
     def __init__(self) -> None:
         self.email = os.environ["FINTUAL_EMAIL"]
-        # FINTUAL_TOKEN is the legacy name for the same value: the account
-        # password, exchanged for a short-lived access token on each run.
+        # FINTUAL_TOKEN is the legacy name for the same value: the account password.
         self.password = os.environ.get("FINTUAL_PASSWORD") or os.environ["FINTUAL_TOKEN"]
-        self._token: str | None = None
-
-    async def _authenticate(self, client: httpx.AsyncClient, force: bool = False) -> str:
-        if self._token and not force:
-            return self._token
-
-        resp = await client.post(
-            f"{FINTUAL_API}/access_tokens",
-            json={"user": {"email": self.email, "password": self.password}},
+        self.session_file = Path(
+            os.environ.get("FINTUAL_SESSION_FILE", str(_DEFAULT_SESSION_FILE))
         )
-        resp.raise_for_status()
-        self._token = resp.json()["data"]["attributes"]["token"]
-        return self._token
 
-    def _auth_headers(self) -> dict[str, str]:
-        return {
-            "X-User-Email": self.email,
-            "X-User-Token": self._token or "",
-        }
+    # -- session persistence ------------------------------------------------
+
+    def _base_headers(self) -> dict[str, str]:
+        return {"User-Agent": BROWSER_USER_AGENT, "Origin": FINTUAL_ORIGIN}
+
+    def _save_session(self, client: httpx.AsyncClient) -> None:
+        cookies = {c.name: c.value for c in client.cookies.jar if c.value}
+        self.session_file.write_text(json.dumps(cookies))
+        # Session tokens are secrets — keep the cache private.
+        os.chmod(self.session_file, 0o600)
+        logger.info("Saved Fintual session to %s", self.session_file)
+
+    def _load_session(self, client: httpx.AsyncClient) -> bool:
+        """Restore cached cookies onto `client`; return True if a session exists."""
+        if not self.session_file.exists():
+            return False
+        try:
+            cookies = json.loads(self.session_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            return False
+        for name, value in cookies.items():
+            client.cookies.set(name, value, domain="fintual.cl")
+        return _SESSION_COOKIE in cookies
+
+    # -- login (manual, interactive) ---------------------------------------
+
+    async def login(self, code_provider: Callable[[], str]) -> None:
+        """Sign in and cache the session.
+
+        `code_provider` is called (only when 2FA is required) to obtain the
+        6-digit code Fintual e-mails to the account address.
+        """
+        async with httpx.AsyncClient(
+            timeout=30.0, follow_redirects=True, headers=self._base_headers()
+        ) as client:
+            await client.get(
+                SIGN_IN_URL,
+                headers={"Accept": "text/html,application/xhtml+xml,*/*;q=0.8"},
+            )
+
+            resp = await client.post(
+                INITIATE_LOGIN_URL,
+                headers={"Accept": "application/json", "Referer": SIGN_IN_URL},
+                json={"email": self.email, "password": self.password},
+            )
+
+            if resp.status_code == 201:
+                logger.info("Fintual login initiated; e-mail 2FA required.")
+                code = code_provider().strip()
+                resp = await client.post(
+                    FINALIZE_LOGIN_URL,
+                    headers={"Accept": "application/json", "Referer": SIGN_IN_URL},
+                    json={"email": self.email, "password": self.password, "code": code},
+                )
+                resp.raise_for_status()
+                logger.info("Fintual 2FA accepted; session established.")
+            elif resp.status_code == 200:
+                logger.info("Fintual login succeeded without 2FA.")
+            else:
+                resp.raise_for_status()
+
+            self._save_session(client)
+
+    # -- scraping -----------------------------------------------------------
 
     async def scrape_transactions(self) -> list[ScrapedTransaction]:
         # Fintual doesn't expose individual buy/sell transactions via API.
         return []
 
     async def scrape_balances(self) -> list[ScrapedBalance]:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            await self._authenticate(client)
+        async with httpx.AsyncClient(
+            timeout=30.0, follow_redirects=True, headers=self._base_headers()
+        ) as client:
+            if not self._load_session(client):
+                raise FintualSessionError(
+                    "No cached Fintual session. Run `make fintual-login` to sign in."
+                )
 
-            resp = await client.get(
-                f"{FINTUAL_API}/goals",
-                headers=self._auth_headers(),
-            )
+            resp = await client.get(GOALS_URL, headers={"Accept": "application/json"})
             if resp.status_code == 401:
-                # The cached access token expired (scheduled mode keeps this
-                # instance alive across runs) — renew it once and retry.
-                await self._authenticate(client, force=True)
-                resp = await client.get(
-                    f"{FINTUAL_API}/goals",
-                    headers=self._auth_headers(),
+                raise FintualSessionError(
+                    "Fintual session expired. Run `make fintual-login` to sign in again."
                 )
             resp.raise_for_status()
 
@@ -97,3 +178,23 @@ class FintualScraper(BaseScraper):
                 )
 
             return balances
+
+
+def _login_cli() -> None:
+    """Manual sign-in: `python -m scrapers.institutions.fintual` (or `make fintual-login`)."""
+    from dotenv import load_dotenv
+
+    load_dotenv()  # walks up to the repo-root .env for FINTUAL_EMAIL
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
+
+    scraper = FintualScraper()
+
+    def prompt_code() -> str:
+        return input("Enter the 6-digit code Fintual e-mailed you: ")
+
+    asyncio.run(scraper.login(prompt_code))
+    print(f"\n✅ Signed in. Session cached at {scraper.session_file}")
+
+
+if __name__ == "__main__":
+    _login_cli()

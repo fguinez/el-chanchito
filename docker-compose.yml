@@ -43,9 +43,15 @@ services:
       EMAIL_IMAP_HOST: ${EMAIL_IMAP_HOST:-}
       EMAIL_IMAP_USER: ${EMAIL_IMAP_USER:-}
       EMAIL_IMAP_PASSWORD: ${EMAIL_IMAP_PASSWORD:-}
+      # Cached Fintual web session (see `make fintual-login`); persisted in the
+      # scraper_state volume so 2FA isn't re-triggered on every container start.
+      FINTUAL_SESSION_FILE: ${FINTUAL_SESSION_FILE:-/data/fintual_session.json}
+    volumes:
+      - scraper_state:/data
     depends_on:
       postgres:
         condition: service_healthy
 
 volumes:
   pgdata:
+  scraper_state:
