@@ -40,6 +40,7 @@ interface WealthSnapshot {
   mercadopagoBalance: number | null;
   banchileSavings: number | null;
   notes: string | null;
+  source: "manual" | "computed";
   ahorro: number;
   periodSavings: number | null;
   monthsBetween: number | null;
@@ -410,12 +411,14 @@ export default function HistoryPage() {
                           : "-"}
                       </TableCell>
                       <TableCell>
-                        <button
-                          onClick={() => handleDelete(s.id)}
-                          className="text-muted-foreground hover:text-destructive"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </button>
+                        {s.source === "manual" && (
+                          <button
+                            onClick={() => handleDelete(s.id)}
+                            className="text-muted-foreground hover:text-destructive"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        )}
                       </TableCell>
                     </TableRow>
                   ))}
