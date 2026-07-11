@@ -1,5 +1,6 @@
 """Tests for the BanChile scraper movement conversion."""
 
+import asyncio
 import os
 import pytest
 from datetime import datetime, date
@@ -9,6 +10,8 @@ from unittest.mock import MagicMock
 os.environ.setdefault("BANCHILE_RUT", "test")
 os.environ.setdefault("BANCHILE_PASSWORD", "test")
 
+from scrapers.base import ScrapedBalance
+from scrapers.institutions import banchile as banchile_mod
 from scrapers.institutions.banchile import BanChileScraper
 
 
@@ -87,3 +90,36 @@ class TestMovementConversion:
         mov.account_type = None
         txn = self.scraper._movement_to_transaction(mov)
         assert txn.product_kind == "checking"
+
+
+class TestScrapeBalances:
+    """scrape_balances() delegates to the banchile_web backend and shields the
+    run from a flaky second login."""
+
+    def setup_method(self):
+        self.scraper = BanChileScraper()
+
+    def test_returns_backend_balances(self, monkeypatch):
+        expected = [
+            ScrapedBalance(
+                institution="banchile",
+                product_kind="checking",
+                balance=1234567,
+                as_of=date.today(),
+            )
+        ]
+
+        async def fake_fetch(rut, password):
+            assert (rut, password) == (self.scraper.rut, self.scraper.password)
+            return expected
+
+        monkeypatch.setattr(banchile_mod, "fetch_balances", fake_fetch)
+        assert asyncio.run(self.scraper.scrape_balances()) == expected
+
+    def test_backend_failure_is_swallowed(self, monkeypatch):
+        async def boom(rut, password):
+            raise RuntimeError("login failed")
+
+        monkeypatch.setattr(banchile_mod, "fetch_balances", boom)
+        # A heavy, flaky second login must not fail the whole run.
+        assert asyncio.run(self.scraper.scrape_balances()) == []

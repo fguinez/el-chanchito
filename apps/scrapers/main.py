@@ -44,30 +44,52 @@ logger = logging.getLogger("scraper-service")
 
 
 async def run_scraper(scraper: BaseScraper) -> None:
-    """Run a single scraper with logging and DB tracking."""
+    """Run a single scraper with logging and DB tracking.
+
+    Transactions and balances are scraped as independent legs: a failure in one
+    must not stop the other. BanChile in particular scrapes transactions via the
+    (flaky) fintself browser login and balances via its own login, so a fintself
+    timeout must still leave the balance refreshable — and vice versa.
+    """
     run_id = start_scraper_run(scraper.method, scraper.institution)
     logger.info("Starting scraper: %s (run=%s)", scraper.name, run_id)
 
+    errors: list[str] = []
+    n_tx = 0
+    inserted = 0
+    n_bal = 0
+
     try:
         transactions = await scraper.scrape_transactions()
+        n_tx = len(transactions)
         inserted = upsert_transactions(transactions)
+    except Exception as e:
+        logger.exception("Scraper %s: transactions failed", scraper.name)
+        errors.append(f"transactions: {e}")
 
+    try:
         balances = await scraper.scrape_balances()
+        n_bal = len(balances)
         for balance in balances:
             upsert_balance(balance)
-
-        logger.info(
-            "Scraper %s: %d transactions (%d new), %d balances",
-            scraper.name,
-            len(transactions),
-            inserted,
-            len(balances),
-        )
-        finish_scraper_run(run_id, "success", transactions_imported=inserted)
-
     except Exception as e:
-        logger.exception("Scraper %s failed", scraper.name)
-        finish_scraper_run(run_id, "error", error_message=str(e))
+        logger.exception("Scraper %s: balances failed", scraper.name)
+        errors.append(f"balances: {e}")
+
+    logger.info(
+        "Scraper %s: %d transactions (%d new), %d balances",
+        scraper.name,
+        n_tx,
+        inserted,
+        n_bal,
+    )
+    if errors:
+        finish_scraper_run(
+            run_id, "error", transactions_imported=inserted,
+            error_message="; ".join(errors),
+        )
+    else:
+        finish_scraper_run(run_id, "success", transactions_imported=inserted)
 
 
 def build_scrapers() -> dict[str, BaseScraper]:

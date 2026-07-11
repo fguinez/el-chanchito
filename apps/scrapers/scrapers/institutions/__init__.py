@@ -2,8 +2,9 @@
 
 Each module exposes one `BaseScraper` subclass bound to a single institution.
 Email-based scrapers consume `scrapers.backends.email`; the BanChile scraper
-consumes `scrapers.backends.fintself`. Buda, Fintual and BCI Lider are
-self-contained (no shared backend yet).
+consumes `scrapers.backends.fintself` for transactions and
+`scrapers.backends.banchile_web` (its own Playwright login) for balances.
+Buda, Fintual and BCI Lider are self-contained (no shared backend yet).
 """
 
 from scrapers.institutions.banchile import BanChileScraper

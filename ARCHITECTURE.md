@@ -264,11 +264,24 @@ apps/scrapers/scrapers/
     email.py               # ImapSession (shared login + NOOP keepalive),
                            # EmailPattern, fetch_transactions_for_pattern
     fintself.py            # run_fintself_scraper(bank_key, user, password)
+    banchile_web.py        # own BdC Playwright login -> fetch_balances()
   institutions/
     mach.py  mercadopago.py  tenpo.py       -> consume backends/email
-    banchile.py                              -> consumes backends/fintself
+    banchile.py                              -> fintself (tx) + banchile_web (balances)
     buda.py  fintual.py  bci_lider.py        -> self-contained (HTTP/stub)
 ```
+
+BanChile is a hybrid: transactions come from `fintself`, but `fintself` never
+exposes a balance, so `scrape_balances()` runs a **second, self-contained
+Playwright login** (`backends/banchile_web.py`) and reads the checking "Saldo
+Disponible" off the dashboard. It replicates fintself's `channel="chromium"`
+new-headless workaround (BdC serves a degraded page to the default headless
+shell) and polls for the balance widget (it loads via a later XHR). Because
+transactions and balances are independent legs in `run_scraper`, a fintself
+timeout never blocks the balance (and a balance-scrape failure is swallowed,
+returning `[]`). Credit cards are deferred — the app stores a card's
+`current_balance` as *available cupo* and `ScrapedBalance` has no `credit_limit`
+field (see issue #27).
 
 Each institution scraper implements:
 
