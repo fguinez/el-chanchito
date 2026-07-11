@@ -337,11 +337,12 @@ el-chanchito/
 │   │   │   │   │   ├── page.tsx      # Home
 │   │   │   │   │   ├── planning/     # Planificacion
 │   │   │   │   │   ├── history/      # Historial
+│   │   │   │   │   ├── institutions/ # Instituciones + productos
 │   │   │   │   │   ├── expenses/     # Gastos + CSV import
 │   │   │   │   │   ├── fixed/        # Gastos fijos
 │   │   │   │   │   ├── transfers/    # Movimientos internos
 │   │   │   │   │   └── settings/     # Config + split calculator
-│   │   │   │   └── api/              # 12 API route groups
+│   │   │   │   └── api/              # 13 API route groups
 │   │   │   ├── components/
 │   │   │   │   ├── dashboard/        # ScraperStatus, CsvImport
 │   │   │   │   ├── layout/           # Sidebar
