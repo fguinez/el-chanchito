@@ -6,12 +6,12 @@ import {
   productBalances,
   accounts,
   institutions,
-  ASSET_KINDS,
-  LIABILITY_KINDS,
   type ProductKind,
 } from "@/lib/db/schema";
 import { eq, asc } from "drizzle-orm";
 import { calcWealthMetrics } from "@/lib/budget-engine";
+import { getClpRates } from "@/lib/rates";
+import { assetClp, debtClp } from "@/lib/networth";
 
 interface WealthPoint {
   id: string;
@@ -26,31 +26,21 @@ interface WealthPoint {
 }
 
 /**
- * How a product contributes to deuda. Liability balances store the amount
- * owed — except credit cards, whose scraped balance is the *available* cupo
- * (the planning drift formula depends on that), so owed = limit − available.
- */
-function deudaContribution(
-  kind: ProductKind,
-  balance: number,
-  creditLimit: number | null
-): number {
-  if (kind === "credit_card") {
-    return creditLimit != null ? Math.max(creditLimit - balance, 0) : 0;
-  }
-  if (LIABILITY_KINDS.includes(kind)) return Math.abs(balance);
-  return 0;
-}
-
-/**
  * GET /api/wealth — wealth series with derived metrics.
  *
  * Pre-migration dates come from legacy `wealth_snapshots` totals (which may
  * include components that never became products). Later dates are computed
  * from `product_balances`, carrying each product's latest balance forward
- * per date: patrimonio = Σ asset balances, deuda per deudaContribution.
+ * per date: patrimonio = Σ asset value, deuda = Σ owed, both in CLP.
+ *
+ * Foreign/crypto balances are converted to CLP with current Buda tickers (see
+ * lib/networth). Note: only *current* rates are available, so historical
+ * points are valued at today's prices — acceptable while the computed series is
+ * short; storing per-date rates would be the fix once history accumulates.
  */
 export async function GET() {
+  const rates = await getClpRates();
+
   const legacy = await db
     .select()
     .from(wealthSnapshots)
@@ -63,6 +53,7 @@ export async function GET() {
       asOf: productBalances.asOf,
       kind: products.kind,
       creditLimit: products.creditLimit,
+      currency: products.currency,
       slug: institutions.slug,
     })
     .from(productBalances)
@@ -87,7 +78,13 @@ export async function GET() {
 
   const latestByProduct = new Map<
     string,
-    { balance: number; kind: ProductKind; creditLimit: number | null; slug: string }
+    {
+      balance: number;
+      kind: ProductKind;
+      creditLimit: number | null;
+      currency: string;
+      slug: string;
+    }
   >();
   const computed: WealthPoint[] = [];
 
@@ -99,6 +96,7 @@ export async function GET() {
         balance: Number(row.balance),
         kind: row.kind,
         creditLimit: row.creditLimit,
+        currency: row.currency,
         slug: row.slug,
       });
     }
@@ -112,8 +110,9 @@ export async function GET() {
     let banchileSavings: number | null = null;
 
     for (const p of latestByProduct.values()) {
-      if (ASSET_KINDS.includes(p.kind)) patrimonio += p.balance;
-      deuda += deudaContribution(p.kind, p.balance, p.creditLimit);
+      patrimonio += assetClp(p.kind, p.balance, p.currency, rates) ?? 0;
+      deuda += debtClp(p.kind, p.balance, p.creditLimit, p.currency, rates) ?? 0;
+      // These component columns are CLP-denominated products (informational).
       if (p.slug === "fintual" && p.kind === "investment")
         fintualBalance = p.balance;
       if (p.slug === "mercadopago" && p.kind === "wallet")
