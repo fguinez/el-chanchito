@@ -24,9 +24,10 @@ class BanChileScraper(BaseScraper):
         amount_clp = int(movement.amount)
         tx_date = movement.date.date() if isinstance(movement.date, datetime) else movement.date
 
-        kind = "checking"
-        if movement.account_type and movement.account_type.value == "credito":
-            kind = "credit_card"
+        # account_type is a plain Literal str in fintself >= 1.5 (it was an
+        # enum before); getattr keeps both shapes working.
+        account_type = getattr(movement.account_type, "value", movement.account_type)
+        kind = "credit_card" if account_type == "credito" else "checking"
 
         raw_str = f"{tx_date.isoformat()}|{movement.description}|{amount_clp}|{movement.account_id or ''}"
         external_id = f"bch_{hashlib.md5(raw_str.encode()).hexdigest()[:16]}"
