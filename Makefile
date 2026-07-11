@@ -19,6 +19,32 @@ env: ## Create .env from .env.example
 	@test -f .env || (cp .env.example .env && echo "Created .env — edit it with your credentials")
 	@test -f .env && echo ".env already exists"
 
+# ─── Secrets (macOS Keychain) ────────────────────────────────────────────────
+# Secrets live in the login Keychain as generic passwords named "chanchito.<VAR>".
+# Non-secret config (RUT, emails, hosts) stays in .env.
+
+SECRET_KEYS := BANCHILE_PASSWORD FINTUAL_PASSWORD BUDA_API_KEY BUDA_API_SECRET EMAIL_IMAP_PASSWORD
+
+secrets-init: ## Store scraper secrets in macOS Keychain (interactive, skips existing)
+	@for k in $(SECRET_KEYS); do \
+		if security find-generic-password -a "$$USER" -s "chanchito.$$k" >/dev/null 2>&1; then \
+			echo "= $$k already stored (overwrite with: make secret-set KEY=$$k)"; \
+		else \
+			echo "-> Enter value for $$k"; \
+			security add-generic-password -a "$$USER" -s "chanchito.$$k" -w && echo "+ $$k stored"; \
+		fi; \
+	done
+
+secret-set: ## Store or overwrite one secret (usage: make secret-set KEY=FINTUAL_PASSWORD)
+	@test -n "$(KEY)" || { echo "Usage: make secret-set KEY=<VAR_NAME>"; exit 1; }
+	@security add-generic-password -U -a "$$USER" -s "chanchito.$(KEY)" -w && echo "+ chanchito.$(KEY) stored"
+
+secrets-status: ## Show which secrets are present in Keychain
+	@for k in $(SECRET_KEYS); do \
+		security find-generic-password -a "$$USER" -s "chanchito.$$k" >/dev/null 2>&1 \
+			&& echo "+ $$k" || echo "x $$k (missing)"; \
+	done
+
 # ─── Database ────────────────────────────────────────────────────────────────
 
 db-up: ## Start PostgreSQL container
@@ -74,13 +100,13 @@ test-py: ## Run Python tests only
 # ─── Scrapers ────────────────────────────────────────────────────────────────
 
 scrapers-once: ## Run all scrapers once and exit
-	cd apps/scrapers && \
+	@. ./scripts/load-secrets.sh && cd apps/scrapers && \
 		DATABASE_URL=$${DATABASE_URL:-postgres://finance:finance@localhost:5435/finance} \
 		SCRAPER_MODE=once \
 		../../.venv/bin/python main.py
 
 scrapers-start: ## Start scrapers on schedule (long-running)
-	cd apps/scrapers && \
+	@. ./scripts/load-secrets.sh && cd apps/scrapers && \
 		DATABASE_URL=$${DATABASE_URL:-postgres://finance:finance@localhost:5435/finance} \
 		SCRAPER_MODE=scheduled \
 		../../.venv/bin/python main.py
@@ -91,7 +117,7 @@ scrapers-test: ## Test scraper imports and basic functionality
 # ─── Docker (full stack) ────────────────────────────────────────────────────
 
 up: ## Start all services (postgres + web + scrapers)
-	docker compose up -d
+	@. ./scripts/load-secrets.sh && docker compose up -d
 
 down: ## Stop all services
 	docker compose down

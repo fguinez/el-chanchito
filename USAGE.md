@@ -31,7 +31,14 @@ make dev
 
 ## Configuration
 
-Copy `.env.example` to `.env` and fill in the values:
+Configuration is split in two:
+
+- **`.env`** — non-secret config: Postgres settings and scraper identifiers.
+- **macOS Keychain** — secrets (passwords, tokens, API keys). Loaded automatically
+  by `make scrapers-once`, `make scrapers-start`, and `make up` via
+  `scripts/load-secrets.sh`.
+
+Copy `.env.example` to `.env` and fill in the identifiers:
 
 ```bash
 # Required - PostgreSQL (defaults work out of the box)
@@ -40,25 +47,35 @@ POSTGRES_PASSWORD=finance
 POSTGRES_DB=finance
 DATABASE_URL=postgres://finance:finance@localhost:5435/finance
 
-# Optional - Scrapers (enable only the ones you need)
-
-# Banco de Chile (via fintself - browser automation)
-BANCHILE_RUT=12345678-9
-BANCHILE_PASSWORD=your_password
-
-# Fintual (official API)
-FINTUAL_EMAIL=your@email.com
-FINTUAL_TOKEN=your_password
-
-# Buda.com (HMAC-authenticated API)
-BUDA_API_KEY=your_api_key
-BUDA_API_SECRET=your_api_secret
-
-# Email parser (for MercadoPago, MACH, Tenpo notifications)
-EMAIL_IMAP_HOST=imap.gmail.com
+# Scraper identifiers (enable only the ones you need)
+BANCHILE_RUT=12345678-9          # Banco de Chile (via fintself)
+FINTUAL_EMAIL=your@email.com     # Fintual (official API)
+EMAIL_IMAP_HOST=imap.gmail.com   # Email parser (MercadoPago, MACH, Tenpo)
 EMAIL_IMAP_USER=your@gmail.com
-EMAIL_IMAP_PASSWORD=your_app_password  # Use Gmail App Password, not your regular password
 ```
+
+Then store the secrets in the Keychain (prompts interactively, values never
+touch disk or shell history):
+
+```bash
+make secrets-init      # prompts for each missing secret
+make secrets-status    # shows which secrets are stored
+make secret-set KEY=FINTUAL_PASSWORD   # overwrite a single secret
+```
+
+Secrets and their meaning:
+
+| Keychain item | Value |
+|---|---|
+| `chanchito.BANCHILE_PASSWORD` | Banco de Chile web password |
+| `chanchito.FINTUAL_PASSWORD` | Fintual account password (exchanged for a short-lived API token on each run) |
+| `chanchito.BUDA_API_KEY` | Buda.com API key |
+| `chanchito.BUDA_API_SECRET` | Buda.com API secret |
+| `chanchito.EMAIL_IMAP_PASSWORD` | Gmail App Password (see below) |
+
+A scraper is enabled only when all of its credentials are present.
+On non-macOS hosts (e.g. Docker-only deploys), export the secret env vars
+directly instead of using the Keychain.
 
 ### Gmail App Password
 
