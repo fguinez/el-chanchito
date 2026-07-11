@@ -10,6 +10,8 @@ import asyncio
 import email
 import email.message
 import email.utils
+import hashlib
+import html
 import imaplib
 import logging
 import os
@@ -49,27 +51,46 @@ def _decode_header_value(raw: str) -> str:
     return " ".join(decoded)
 
 
+def _strip_html(html_text: str) -> str:
+    """Convert an HTML body to plain-ish text.
+
+    Drops <style>/<script> blocks first: their contents survive naive tag
+    stripping and pollute merchant/amount regexes with CSS and URLs.
+    """
+    text = re.sub(r"(?is)<(style|script)[^>]*>.*?</\1>", " ", html_text)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    text = html.unescape(text)
+    return re.sub(r"[ \t\r\f\v]+", " ", text)
+
+
 def _get_body(msg: email.message.Message) -> str:
-    """Extract the plain text body from an email message."""
-    if msg.is_multipart():
-        for part in msg.walk():
-            ctype = part.get_content_type()
-            if ctype == "text/plain":
-                payload = part.get_payload(decode=True)
-                if payload:
-                    charset = part.get_content_charset() or "utf-8"
-                    return payload.decode(charset, errors="replace")
-            elif ctype == "text/html":
-                payload = part.get_payload(decode=True)
-                if payload:
-                    charset = part.get_content_charset() or "utf-8"
-                    html = payload.decode(charset, errors="replace")
-                    return re.sub(r"<[^>]+>", " ", html)
-    else:
-        payload = msg.get_payload(decode=True)
-        if payload:
-            charset = msg.get_content_charset() or "utf-8"
-            return payload.decode(charset, errors="replace")
+    """Extract the plain text body from an email message.
+
+    Prefers a text/plain part regardless of MIME ordering; falls back to
+    stripped text/html.
+    """
+    plain_body: str | None = None
+    html_body: str | None = None
+
+    parts = msg.walk() if msg.is_multipart() else [msg]
+    for part in parts:
+        ctype = part.get_content_type()
+        if ctype not in ("text/plain", "text/html"):
+            continue
+        payload = part.get_payload(decode=True)
+        if not payload:
+            continue
+        charset = part.get_content_charset() or "utf-8"
+        decoded = payload.decode(charset, errors="replace")
+        if ctype == "text/plain" and plain_body is None:
+            plain_body = decoded
+        elif ctype == "text/html" and html_body is None:
+            html_body = decoded
+
+    if plain_body:
+        return plain_body
+    if html_body:
+        return _strip_html(html_body)
     return ""
 
 
@@ -238,7 +259,21 @@ async def fetch_transactions_for_pattern(
                 if status != "OK":
                     continue
 
-                raw_email = msg_data[0][1]
+                # Fetch responses may interleave bare flag lines (bytes) with
+                # the (envelope, payload) tuple; indexing [0][1] blindly can
+                # hit an int inside a bytes object.
+                raw_email = next(
+                    (
+                        part[1]
+                        for part in msg_data
+                        if isinstance(part, tuple)
+                        and len(part) > 1
+                        and isinstance(part[1], (bytes, bytearray))
+                    ),
+                    None,
+                )
+                if raw_email is None:
+                    continue
                 msg = email.message_from_bytes(raw_email)
 
                 from_addr = _decode_header_value(msg.get("From", ""))
@@ -269,10 +304,12 @@ async def fetch_transactions_for_pattern(
                 except Exception:
                     pass
 
+                # hashlib, not hash(): Python's hash() is salted per process,
+                # which would mint a new external_id (and a duplicate row)
+                # for the same email on every run.
                 message_id = msg.get("Message-ID", "")
-                external_id = (
-                    f"email_{pattern.institution}_{hash(message_id) & 0xFFFFFFFF:08x}"
-                )
+                digest = hashlib.sha1(message_id.encode()).hexdigest()[:8]
+                external_id = f"email_{pattern.institution}_{digest}"
 
                 transactions.append(
                     ScrapedTransaction(
