@@ -24,11 +24,13 @@ class FintualScraper(BaseScraper):
 
     def __init__(self) -> None:
         self.email = os.environ["FINTUAL_EMAIL"]
-        self.password = os.environ["FINTUAL_TOKEN"]
+        # FINTUAL_TOKEN is the legacy name for the same value: the account
+        # password, exchanged for a short-lived access token on each run.
+        self.password = os.environ.get("FINTUAL_PASSWORD") or os.environ["FINTUAL_TOKEN"]
         self._token: str | None = None
 
-    async def _authenticate(self, client: httpx.AsyncClient) -> str:
-        if self._token:
+    async def _authenticate(self, client: httpx.AsyncClient, force: bool = False) -> str:
+        if self._token and not force:
             return self._token
 
         resp = await client.post(
@@ -57,6 +59,14 @@ class FintualScraper(BaseScraper):
                 f"{FINTUAL_API}/goals",
                 headers=self._auth_headers(),
             )
+            if resp.status_code == 401:
+                # The cached access token expired (scheduled mode keeps this
+                # instance alive across runs) — renew it once and retry.
+                await self._authenticate(client, force=True)
+                resp = await client.get(
+                    f"{FINTUAL_API}/goals",
+                    headers=self._auth_headers(),
+                )
             resp.raise_for_status()
 
             balances: list[ScrapedBalance] = []

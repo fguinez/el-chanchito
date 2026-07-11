@@ -70,7 +70,9 @@ def build_scrapers() -> dict[str, BaseScraper]:
     """Instantiate only scrapers whose credentials are configured."""
     scrapers: dict[str, BaseScraper] = {}
 
-    if os.environ.get("FINTUAL_EMAIL") and os.environ.get("FINTUAL_TOKEN"):
+    if os.environ.get("FINTUAL_EMAIL") and (
+        os.environ.get("FINTUAL_PASSWORD") or os.environ.get("FINTUAL_TOKEN")
+    ):
         scrapers["fintual"] = FintualScraper()
         logger.info("Fintual scraper enabled")
 
