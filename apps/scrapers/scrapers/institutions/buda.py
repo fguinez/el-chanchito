@@ -31,10 +31,18 @@ class BudaScraper(BaseScraper):
         self.api_secret = os.environ["BUDA_API_SECRET"]
 
     def _sign(self, request_method: str, path: str, body: str = "") -> dict[str, str]:
-        """Generate HMAC-SHA384 auth headers for a request."""
+        """Generate HMAC-SHA384 auth headers for a request.
+
+        `path` must be the exact path sent to Buda, including the `.json`
+        suffix and any query string — otherwise the signature is rejected.
+        The body component is omitted entirely for body-less requests.
+        """
         nonce = str(int(time.time() * 1e6))
-        encoded_body = base64.b64encode(body.encode()).decode() if body else ""
-        msg = f"{request_method} {path} {encoded_body} {nonce}"
+        components = [request_method, path]
+        if body:
+            components.append(base64.b64encode(body.encode()).decode())
+        components.append(nonce)
+        msg = " ".join(components)
 
         signature = hmac.new(
             self.api_secret.encode(),
@@ -55,14 +63,13 @@ class BudaScraper(BaseScraper):
         async with httpx.AsyncClient(timeout=30.0) as client:
             for currency in ["clp", "btc"]:
                 for tx_type in ["deposits", "withdrawals"]:
-                    path = f"/api/v2/currencies/{currency}/{tx_type}"
+                    path = f"/api/v2/currencies/{currency}/{tx_type}.json?per=50"
                     headers = self._sign("GET", path)
 
                     try:
                         resp = await client.get(
-                            f"{BUDA_BASE}{path}.json",
+                            f"{BUDA_BASE}{path}",
                             headers=headers,
-                            params={"per": 50},
                         )
                         resp.raise_for_status()
                         data = resp.json()
@@ -117,11 +124,11 @@ class BudaScraper(BaseScraper):
 
     async def scrape_balances(self) -> list[ScrapedBalance]:
         """Fetch all currency balances."""
-        path = "/api/v2/balances"
+        path = "/api/v2/balances.json"
         headers = self._sign("GET", path)
 
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(f"{BUDA_BASE}{path}.json", headers=headers)
+            resp = await client.get(f"{BUDA_BASE}{path}", headers=headers)
             resp.raise_for_status()
 
             balances: list[ScrapedBalance] = []
