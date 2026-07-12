@@ -94,8 +94,12 @@ _LOGIN_SUCCESS_JS = (
 _POPUP_CLOSE_SELECTORS = [
     "button.close",
     "[aria-label='Close']",
+    "[aria-label='Cerrar']",
+    "[aria-label='cerrar']",
     ".modal-close",
+    ".close-modal",
     "button[data-dismiss='modal']",
+    ".modal button:has-text('×')",
 ]
 
 
@@ -166,18 +170,26 @@ _SALDO_PATTERNS = [
 ]
 
 # --- Credit-card detail page ("Saldos y movimientos no facturados") -----------
-# The "Mis Productos" dashboard only shows a card's *available* cupo; the total
-# límite lives on the per-card detail route (#/tarjeta-credito/consultar/...).
-# That page lists a CLP "Cupo Nacional" and a USD "Cupo Internacional", each with
-# its Disponible and Utilizado/Usado. We read available (-> current_balance) and
-# cupo (-> the credit_limit that makes net-worth debt = limit − available). The
-# two currencies are read from separate slices of the page (split on "Cupo
-# Internacional") so a "Disponible" is never paired with the other cupo.
-_CARD_INTERNACIONAL_RE = re.compile(r"cupo\s+internacional", re.I)
-_CLP_CUPO_RE = re.compile(r"cupo\s+nacional.*?\$\s?" + _AMT, re.I | re.S)
-_CLP_DISPONIBLE_RE = re.compile(r"disponible.*?\$\s?" + _AMT, re.I | re.S)
-_USD_CUPO_RE = re.compile(r"cupo\s+internacional.*?USD\s?" + _AMT, re.I | re.S)
-_USD_DISPONIBLE_RE = re.compile(r"disponible.*?USD\s?" + _AMT, re.I | re.S)
+# The "Mis Productos" dashboard only shows an unreliable placeholder for the
+# card, so the real figures come from the per-card route (reached via the
+# "Saldos y Mov. Tarjetas Crédito" shortcut → #/tarjeta-credito/consultar/saldos;
+# label/route confirmed by live QA). That page has a CLP "Nacional" and a USD
+# "Internacional" section, each with "Utilizado", "Disponible" and "Cupo total":
+#     Nacional, al 12/07/2026
+#     Utilizado      $ 400.000
+#     Disponible     $ 3.600.000
+#     Cupo total     $ 4.000.000
+# We read "Disponible" (-> current_balance) and "Cupo total" (-> the credit_limit
+# that makes net-worth debt = límite − disponible). NB the bank also prints
+# "Utilizado" directly, which is slightly below límite − disponible because of
+# pending holds; net worth uses límite − disponible by design (issue #30). The
+# two currencies are read from separate slices of the page (split on the
+# "Internacional" header) so a figure is never paired with the other cupo.
+_CARD_INTERNACIONAL_RE = re.compile(r"internacional", re.I)
+_CLP_CUPO_RE = re.compile(r"cupo\s+total\s*\$\s?" + _AMT, re.I)
+_CLP_DISPONIBLE_RE = re.compile(r"disponible\s*\$\s?" + _AMT, re.I)
+_USD_CUPO_RE = re.compile(r"cupo\s+total\s*USD\s?" + _AMT, re.I)
+_USD_DISPONIBLE_RE = re.compile(r"disponible\s*USD\s?" + _AMT, re.I)
 
 # USD cuenta corriente on the dashboard: same block as the CLP one but the
 # figure is "Disponible USD …". Coupled to "USD" so it never grabs a CLP "$".
@@ -273,10 +285,10 @@ def _balance_from_text(text: Optional[str]) -> Optional[int]:
 def card_saldos_from_text(text: Optional[str]) -> dict[str, dict[str, float]]:
     """Read a card's available cupo + total límite per currency off the detail page.
 
-    Returns e.g. ``{"CLP": {"available": 3550000.0, "limit": 4000000.0},
-    "USD": {"available": 2345.67, "limit": 2400.0}}`` — a currency appears only
-    when its *available* (Disponible) figure parses; ``limit`` is attached when
-    its cupo does too. Returns ``{}`` when nothing parses.
+    Returns e.g. ``{"CLP": {"available": 3600000.0, "limit": 4000000.0},
+    "USD": {"available": 1950.0, "limit": 2000.0}}`` — a currency appears only
+    when its "Disponible" figure parses; ``limit`` (the "Cupo total") is attached
+    when it parses too. Returns ``{}`` when nothing parses.
     """
     if not text:
         return {}
@@ -384,6 +396,13 @@ def dashboard_balances_from_text(text: Optional[str]) -> list[ScrapedBalance]:
 
     balances: list[ScrapedBalance] = []
     for kind, _pattern in _PRODUCT_ROWS:  # stable, source-ordered
+        # The dashboard's card "Disponible" is a static placeholder ($999.999 /
+        # USD 1.234,00 — live QA confirmed it never matches the real available
+        # cupo on the card detail page). Sourcing the card only from its detail
+        # page (`card_balances_from_text`) avoids writing that placeholder — or,
+        # worse, feeding it into the planning cupo drift.
+        if kind == "credit_card":
+            continue
         if kind in by_kind:
             amount = by_kind[kind]
             logger.info("BanChile %s balance: $%s CLP", kind, f"{amount:,}")
@@ -608,33 +627,69 @@ def _wait_for_balances(page, timeout_ms: int) -> list[ScrapedBalance]:
 # The card's total cupo and the línea live on their own SPA (hash) routes, off
 # the "Mis Productos" dashboard. Each read below is *best-effort and non-fatal*:
 # any failure returns [] and leaves the dashboard balances untouched, so a drift
-# in this markup can't cost us the checking/depósito/fondos figures. The card's
-# saldos route carries a per-card token we don't know up front, so it's reached
-# by clicking the card; the línea's route is static, so we drive the SPA to it.
+# in this markup can't cost us the checking/depósito/fondos figures.
+#
+# Hard-won from live QA: the dashboard is littered with *marketing* "Tarjeta de
+# Crédito" links pointing at the public site (sitiospublicos.bancochile.cl), so a
+# broad `tarjeta-credito` selector clicks one of those and navigates the tab off
+# the authenticated portal — losing the card AND the línea (its hash then lands
+# on the wrong origin). The card's own "Ver saldos" button only toggles a dashboard
+# placeholder open; the figures we need are behind the "Saldos y Mov. Tarjetas
+# Crédito" shortcut, which routes in-app to #/tarjeta-credito/consultar/saldos.
+# So we use that shortcut, fence every read with `_ensure_on_portal`, and treat a
+# click that escapes the portal as a miss and recover from it.
+_PORTAL_HOST = "portalpersonas.bancochile.cl"
+_PORTAL_HOME = (
+    "https://portalpersonas.bancochile.cl/mibancochile-web/front/persona/index.html#/home"
+)
 _LINEA_ROUTE = "#/movimientos/linea/saldos-movimientos/"
 _CARD_LINK_SELECTORS = [
+    'button:has-text("SALDOS Y MOV.TARJETAS")',
+    'a:has-text("SALDOS Y MOV.TARJETAS")',
     'a[href*="tarjeta-credito/consultar/saldos"]',
-    'a[href*="tarjeta-credito"]',
-    'a:has-text("Tarjeta de Crédito")',
-    'a:has-text("Tarjetas de Crédito")',
 ]
-_LINEA_LINK_SELECTORS = [
-    'a[href*="linea/saldos-movimientos"]',
-    'a[href*="movimientos/linea"]',
-    'a:has-text("Línea de Crédito")',
-]
-_CARD_READY_RE = re.compile(r"cupo\s+(?:nacional|internacional)", re.I)
+# The card detail page prints "Cupo total" for each of the Nacional/Internacional
+# sections — a reliable "the figures have rendered" signal.
+_CARD_READY_RE = re.compile(r"cupo\s+total", re.I)
 _LINEA_READY_RE = re.compile(r"monto\s+autorizado", re.I)
+
+
+def _on_portal(page) -> bool:
+    """True while the tab is still on the authenticated portal origin."""
+    try:
+        return _PORTAL_HOST in (page.url or "")
+    except Exception:
+        return False
+
+
+def _ensure_on_portal(page) -> bool:
+    """Guarantee the tab is back on the portal home, reloading it if it escaped.
+
+    Cookies live on the browser context, so re-navigating restores the
+    authenticated dashboard. Returns True once the portal is loaded.
+    """
+    if _on_portal(page):
+        return True
+    logger.warning("BanChile: off portal (%s); returning to portal home", page.url)
+    try:
+        page.goto(_PORTAL_HOME, timeout=LOGIN_TIMEOUT, wait_until="domcontentloaded")
+        return _on_portal(page)
+    except Exception:
+        logger.exception("BanChile: could not return to portal home")
+        return False
 
 
 def _wait_for_text(page, ready_re: "re.Pattern[str]", timeout_ms: int) -> Optional[str]:
     """Poll the page's visible text until `ready_re` matches; return it or None.
 
     SPA route changes swap content in via XHR, so the target figures aren't there
-    the instant the route changes — poll like `_wait_for_balances` does.
+    the instant the route changes — poll like `_wait_for_balances` does. Bails
+    early if the tab wanders off the portal (a stray navigation).
     """
     deadline = time.monotonic() + timeout_ms / 1000
     while time.monotonic() < deadline:
+        if not _on_portal(page):
+            return None
         try:
             text = page.evaluate(_INNER_TEXT_JS)
         except Exception:
@@ -646,10 +701,20 @@ def _wait_for_text(page, ready_re: "re.Pattern[str]", timeout_ms: int) -> Option
 
 
 def _read_card_detail(page) -> list[ScrapedBalance]:
-    """Click through to the card detail page and read its cupos (best-effort)."""
+    """Click through to the card detail page and read its cupos (best-effort).
+
+    Fenced so a stray click can't strand us off-portal: if the click escapes the
+    authenticated origin we recover to the portal home and skip the card.
+    """
     try:
+        if not _ensure_on_portal(page):
+            return []
         if not _click_first(page, _CARD_LINK_SELECTORS, timeout=6000):
-            logger.info("BanChile: card detail link not found; skipping cupo/límite")
+            logger.info("BanChile: card saldos link not found; skipping cupo/límite")
+            return []
+        if not _on_portal(page):
+            logger.warning("BanChile: card link left the portal; recovering, skipping card")
+            _ensure_on_portal(page)
             return []
         text = _wait_for_text(page, _CARD_READY_RE, BALANCE_WAIT_TIMEOUT)
         if text is None:
@@ -662,17 +727,16 @@ def _read_card_detail(page) -> list[ScrapedBalance]:
 
 
 def _read_linea_detail(page) -> list[ScrapedBalance]:
-    """Open the línea detail route and read its authorized cupo (best-effort)."""
+    """Open the línea detail route and read its authorized cupo (best-effort).
+
+    The route is static, so we drive the SPA straight to it via a hash change (a
+    reload/`page.goto` to a same-document fragment wouldn't re-route Angular). We
+    first make sure we're on the portal so the hash lands on the right origin.
+    """
     try:
-        # Static route: drive the SPA straight to it (a hash change re-routes an
-        # already-loaded Angular app; `page.goto` to a same-document fragment
-        # wouldn't). Fall back to a menu link if the hash change is swallowed.
-        try:
-            page.evaluate("route => { window.location.hash = route; }", _LINEA_ROUTE)
-        except Exception:
-            if not _click_first(page, _LINEA_LINK_SELECTORS, timeout=6000):
-                logger.info("BanChile: línea detail link not found; skipping")
-                return []
+        if not _ensure_on_portal(page):
+            return []
+        page.evaluate("route => { window.location.hash = route; }", _LINEA_ROUTE)
         text = _wait_for_text(page, _LINEA_READY_RE, BALANCE_WAIT_TIMEOUT)
         if text is None:
             logger.info("BanChile: línea detail page did not render; skipping")

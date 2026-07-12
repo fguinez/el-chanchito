@@ -55,10 +55,10 @@ class TestParseClp:
 
 class TestParseAmount:
     def test_keeps_usd_decimals(self):
-        assert parse_amount("USD 2.345,67") == 2345.67
+        assert parse_amount("USD 1.950,91") == 1950.91
 
     def test_usd_whole(self):
-        assert parse_amount("USD 14.700,00") == 2400.0
+        assert parse_amount("USD 2.000,00") == 2000.0
 
     def test_clp_dollar_sign(self):
         assert parse_amount("$ 4.000.000") == 4000000.0
@@ -68,51 +68,64 @@ class TestParseAmount:
         assert parse_amount("USD") is None
 
 
-# Real credit-card detail page figures ("Saldos y movimientos no facturados"),
-# reconstructed as rendered page text. Account/card identifiers are omitted; the
-# CLP + USD cupo/disponible/utilizado figures are the ones the card actually
-# shows. cupo = disponible + utilizado (national); the USD side likewise.
-CARD_DETAIL = """Saldos y movimientos no facturados
+# Credit-card detail page ("Saldos y movimientos no facturados"): the real page
+# STRUCTURE and labels confirmed by live QA — a CLP "Nacional" and a USD
+# "Internacional" section, each with Utilizado / Disponible / Cupo total — but
+# every identifier and figure is fabricated. CLP available/límite = 3.600.000 /
+# 4.000.000; USD = 1.950,00 / 2.000,00.
+CARD_DETAIL = """Titular Visa Signature ****0000 - Estado: Activa
 
-Cupo Nacional
-$ 4.000.000
-Disponible
-$ 11.770.069
+Saldos y movimientos no facturados
+Movimientos facturados
+
+Nacional, al 01/01/2026
+
 Utilizado
-$ 1.280.651
-
-Cupo Internacional
-USD 14.700,00
+$ 400.000
 Disponible
-USD 2.345,67
-Usado
-USD 183,84
+$ 3.600.000
+Cupo total
+$ 4.000.000
+Cupo disponible avance
+$ 3.600.000
+
+Internacional, al 01/01/2026
+
+Utilizado
+USD 50,00
+Disponible
+USD 1.950,00
+Cupo total
+USD 2.000,00
+Cupo disponible avance
+USD 1.950,00
 """
 
 
 class TestCardSaldosFromText:
     def test_reads_both_currencies(self):
         assert card_saldos_from_text(CARD_DETAIL) == {
-            "CLP": {"available": 3550000.0, "limit": 4000000.0},
-            "USD": {"available": 2345.67, "limit": 2400.0},
+            "CLP": {"available": 3600000.0, "limit": 4000000.0},
+            "USD": {"available": 1950.0, "limit": 2000.0},
         }
 
     def test_disponible_paired_with_own_currency_cupo(self):
-        # The CLP "Disponible" must never pick up the USD cupo (or vice versa):
-        # debt = limit − available would be nonsense across currencies.
+        # The CLP "Disponible" must never pick up the USD "Cupo total" (or vice
+        # versa): debt = límite − available would be nonsense across currencies.
+        # (The "Cupo disponible avance" line must not be read as the límite.)
         result = card_saldos_from_text(CARD_DETAIL)
-        assert result["CLP"]["available"] < result["CLP"]["limit"]
-        assert result["USD"]["available"] < result["USD"]["limit"]
+        assert result["CLP"] == {"available": 3600000.0, "limit": 4000000.0}
+        assert result["USD"] == {"available": 1950.0, "limit": 2000.0}
 
     def test_clp_only_page(self):
-        text = "Cupo Nacional\n$ 5.000.000\nDisponible\n$ 4.000.000\n"
+        text = "Nacional\nDisponible\n$ 4.000.000\nCupo total\n$ 5.000.000\n"
         assert card_saldos_from_text(text) == {
             "CLP": {"available": 4000000.0, "limit": 5000000.0}
         }
 
     def test_unparseable_section_is_omitted(self):
         # No CLP "$" figure to read -> the currency is dropped, not guessed.
-        assert card_saldos_from_text("Cupo Nacional\nDisponible\nsin dato") == {}
+        assert card_saldos_from_text("Nacional\nDisponible\nsin dato") == {}
 
     def test_empty_and_none(self):
         assert card_saldos_from_text("") == {}
@@ -286,18 +299,25 @@ class TestBalancesFromPage:
         assert balances_from_page(page) == []
 
     def test_emits_every_kind_found_in_source_order(self):
-        # The four CLP kinds in source order, then the USD cuenta corriente
-        # (USD 0,00 in the fixture) appended after the CLP block.
+        # CLP checking / depósito / fondos in source order, then the USD cuenta
+        # corriente (USD 0,00). The dashboard credit_card figure is a placeholder
+        # ($999.999) and is deliberately NOT emitted — the card is sourced from
+        # its detail page instead (see test below).
         balances = balances_from_page(_fake_page(FULL_DASHBOARD))
         assert [(b.product_kind, b.currency, b.balance) for b in balances] == [
             ("checking", "CLP", 2500000),
-            ("credit_card", "CLP", 999999),
             ("term_deposit", "CLP", 2400000),
             ("investment", "CLP", 500000),
             ("checking", "USD", 0.0),
         ]
         assert all(b.institution == "banchile" for b in balances)
         assert all(b.as_of == date.today() for b in balances)
+
+    def test_dashboard_never_emits_the_card_placeholder(self):
+        # Live QA showed the dashboard card "Disponible" is a static placeholder
+        # that never matches the real available cupo, so it must not be written.
+        kinds = {b.product_kind for b in balances_from_page(_fake_page(FULL_DASHBOARD))}
+        assert "credit_card" not in kinds
 
     def test_stray_tarjeta_mention_yields_only_checking(self):
         # A "Tarjeta" that isn't the "Tarjeta de Crédito" product header must
@@ -340,8 +360,8 @@ class TestCardBalancesFromText:
         assert [
             (b.product_kind, b.currency, b.balance, b.credit_limit) for b in balances
         ] == [
-            ("credit_card", "CLP", 3550000.0, 4000000.0),
-            ("credit_card", "USD", 2345.67, 2400.0),
+            ("credit_card", "CLP", 3600000.0, 4000000.0),
+            ("credit_card", "USD", 1950.0, 2000.0),
         ]
         assert all(b.institution == "banchile" for b in balances)
 
