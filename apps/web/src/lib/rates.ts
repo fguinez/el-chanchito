@@ -20,7 +20,44 @@ const BUDA_MARKETS: Record<string, string> = {
 
 export type ClpRates = Record<string, number>;
 
+// Fiat FX (USD, EUR, …) comes from a free, no-auth multi-currency endpoint, so
+// the set of convertible currencies grows automatically as new fiat products
+// appear — unlike the crypto tickers above, which are one Buda market per coin.
+// The response gives units-per-USD for ~160 currencies; we pivot each to
+// CLP-per-unit via CLP-per-USD so `toClp` works uniformly. It's updated daily
+// upstream, which is plenty for holdings valuation.
+const FIAT_RATES_URL = "https://open.er-api.com/v6/latest/USD";
+
 let cache: { at: number; rates: ClpRates } | null = null;
+
+/**
+ * CLP per 1 unit of each fiat currency the FX endpoint knows, derived from its
+ * units-per-USD table (CLP per X = CLP-per-USD ÷ X-per-USD). Returns `{}` on any
+ * failure so those currencies stay *absent* (unconvertible) rather than wrong.
+ */
+async function fetchFiatClpRates(): Promise<ClpRates> {
+  try {
+    const res = await fetch(FIAT_RATES_URL, {
+      // Public endpoint, no auth. Don't let Next cache it across requests.
+      cache: "no-store",
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!res.ok) return {};
+    const data = await res.json();
+    const rates = data?.rates;
+    const clpPerUsd = Number(rates?.CLP);
+    if (data?.result !== "success" || !rates || !(clpPerUsd > 0)) return {};
+
+    const out: ClpRates = {};
+    for (const [code, perUsd] of Object.entries(rates)) {
+      const n = Number(perUsd);
+      if (Number.isFinite(n) && n > 0) out[code.toUpperCase()] = clpPerUsd / n;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
 
 async function fetchMarketPrice(market: string): Promise<number | null> {
   try {
@@ -47,13 +84,19 @@ async function fetchMarketPrice(market: string): Promise<number | null> {
 export async function getClpRates(): Promise<ClpRates> {
   if (cache && Date.now() - cache.at < CACHE_TTL_MS) return cache.rates;
 
-  const entries = await Promise.all(
-    Object.entries(BUDA_MARKETS).map(
-      async ([code, market]) => [code, await fetchMarketPrice(market)] as const
-    )
-  );
+  const [entries, fiat] = await Promise.all([
+    Promise.all(
+      Object.entries(BUDA_MARKETS).map(
+        async ([code, market]) => [code, await fetchMarketPrice(market)] as const
+      )
+    ),
+    fetchFiatClpRates(),
+  ]);
 
-  const rates: ClpRates = { CLP: 1 };
+  // Fiat first, then Buda crypto on top: the crypto balances come from Buda, so
+  // its tickers stay authoritative for those coins (their keys don't overlap the
+  // fiat ones anyway). `fetchFiatClpRates` already returns CLP: 1.
+  const rates: ClpRates = { CLP: 1, ...fiat };
   for (const [code, price] of entries) if (price != null) rates[code] = price;
 
   // Cache a fresh result whenever we got real rates (more than just CLP), or on
