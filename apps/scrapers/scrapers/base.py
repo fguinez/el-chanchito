@@ -30,6 +30,10 @@ class ScrapedBalance:
     balance: float  # in units of `currency` (fractional for crypto)
     as_of: date
     currency: str = "CLP"
+    # Total revolving credit for cards / lines of credit, in `currency`. When set,
+    # `balance` holds the *available* cupo and net worth derives debt as
+    # `credit_limit − balance` (see lib/networth.ts). None leaves the limit as-is.
+    credit_limit: Optional[float] = None
 
 
 class BaseScraper(ABC):

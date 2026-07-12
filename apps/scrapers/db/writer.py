@@ -205,21 +205,36 @@ def upsert_balance(balance: ScrapedBalance) -> None:
                 (str(uuid4()), product_id, new_value, now),
             )
 
-        conn.execute(
-            """
-            UPDATE products
-            SET current_balance = %s, balance_as_of = %s, updated_at = %s
-            WHERE id = %s
-            """,
-            (new_value, now, now, product_id),
-        )
+        # `credit_limit` (card / línea total cupo) rides on the same row when the
+        # scraper captured it; None leaves any existing limit untouched so a
+        # dashboard-only scrape can't wipe a limit read from the card detail page.
+        if balance.credit_limit is not None:
+            conn.execute(
+                """
+                UPDATE products
+                SET current_balance = %s, credit_limit = %s,
+                    balance_as_of = %s, updated_at = %s
+                WHERE id = %s
+                """,
+                (new_value, int(round(balance.credit_limit)), now, now, product_id),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE products
+                SET current_balance = %s, balance_as_of = %s, updated_at = %s
+                WHERE id = %s
+                """,
+                (new_value, now, now, product_id),
+            )
 
         logger.info(
-            "Balance %s: %s/%s = %s %s (as of %s)",
+            "Balance %s: %s/%s = %s %s (as of %s)%s",
             "update" if changed else "confirmed",
             balance.institution,
             balance.product_kind,
             f"{balance.balance:,}",
             balance.currency,
             balance.as_of,
+            f", limit {balance.credit_limit:,}" if balance.credit_limit is not None else "",
         )
