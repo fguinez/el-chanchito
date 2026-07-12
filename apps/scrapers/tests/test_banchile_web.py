@@ -45,9 +45,10 @@ class TestParseClp:
         assert parse_clp("sin dato") is None
 
 
-# Trimmed from a real post-login "Mis Productos" dashboard dump (issue #27 QA):
-# a CLP checking account, a credit line, a USD checking account, and a credit
-# card — only the first ($2.500.000) is the CLP checking balance.
+# Synthetic "Mis Productos" dashboard dump — the *structure* mirrors a real
+# post-login page, but every account number and figure is fabricated. It holds a
+# CLP checking account, a credit line, a USD checking account and a credit card;
+# only the first ($2.500.000) is the CLP checking balance.
 REAL_DASHBOARD = """SALDOS Y MOV. CUENTAS
 Cuentas
 Cuenta Corriente
@@ -66,7 +67,7 @@ PAGAR
 
 Disponible
 
-$ 100.000
+$ 300.000
 
 Cuenta Corriente
 
@@ -89,7 +90,7 @@ USD 1.234,00
 class TestBalanceFromText:
     def test_real_dashboard_picks_clp_checking_only(self):
         # The headline case: only the CLP "Cuenta Corriente" disponible counts.
-        # Not the credit line ($100.000), the USD account (USD 0,00), or the
+        # Not the credit line ($300.000), the USD account (USD 0,00), or the
         # credit-card cupo ($999.999).
         assert _balance_from_text(REAL_DASHBOARD) == 2500000
 
@@ -106,7 +107,7 @@ class TestBalanceFromText:
 
     def test_ignores_credit_line_and_card(self):
         text = (
-            "Línea de Crédito\n00-000\nPAGAR\nDisponible\n$ 100.000\n"
+            "Línea de Crédito\n00-000\nPAGAR\nDisponible\n$ 300.000\n"
             "Tarjeta de Crédito\n1234\nDisponible\n$ 999.999"
         )
         assert _balance_from_text(text) is None
@@ -135,21 +136,21 @@ class TestBalanceFromText:
 
 
 # Synthetic depósito-a-plazo / fondos-mutuos blocks: no live fixture exists for
-# these, so they mirror the uniform "<header> … $amount" dashboard layout. The
-# three deposits sum to the real account's total (2.000.000).
+# these, so they mirror the uniform "<header> … $amount" dashboard layout. All
+# figures are fabricated; the three deposits sum to 2.400.000.
 DEPOSITS_BLOCK = (
-    "Depósito a Plazo\n001-234\n$ 1.000.000\n"
-    "Depósito a Plazo\n001-235\n$ 1.244.456\n"
-    "Depósito a Plazo\n001-236\n$ 1.000.000\n"
+    "Depósito a Plazo\n001-234\n$ 700.000\n"
+    "Depósito a Plazo\n001-235\n$ 800.000\n"
+    "Depósito a Plazo\n001-236\n$ 900.000\n"
 )
-FUNDS_BLOCK = "Fondos Mutuos\nFM Estrategia Activa\n$ 1.000.000\n"
+FUNDS_BLOCK = "Fondos Mutuos\nFM Estrategia Activa\n$ 500.000\n"
 FULL_DASHBOARD = REAL_DASHBOARD + DEPOSITS_BLOCK + FUNDS_BLOCK
 
 
 class TestBalancesByKind:
     def test_real_dashboard_checking_and_card(self):
         # The CLP cuenta corriente disponible and the card's CLP cupo — never
-        # the línea de crédito ($100.000), the USD cuenta corriente, or the
+        # the línea de crédito ($300.000), the USD cuenta corriente, or the
         # card's USD cupo.
         assert balances_by_kind(REAL_DASHBOARD) == {
             "checking": 2500000,
@@ -158,21 +159,21 @@ class TestBalancesByKind:
 
     def test_linea_de_credito_is_not_captured(self):
         # Available credit must not leak into any product (net-worth would count
-        # it as debt). 100.000 appears nowhere in the result.
-        assert 100000 not in balances_by_kind(REAL_DASHBOARD).values()
+        # it as debt). 300.000 appears nowhere in the result.
+        assert 300000 not in balances_by_kind(REAL_DASHBOARD).values()
 
     def test_term_deposits_are_summed(self):
-        assert balances_by_kind(DEPOSITS_BLOCK) == {"term_deposit": 2000000}
+        assert balances_by_kind(DEPOSITS_BLOCK) == {"term_deposit": 2400000}
 
     def test_fondos_mutuos_investment(self):
-        assert balances_by_kind(FUNDS_BLOCK) == {"investment": 1000000}
+        assert balances_by_kind(FUNDS_BLOCK) == {"investment": 500000}
 
     def test_full_dashboard_all_four_kinds(self):
         assert balances_by_kind(FULL_DASHBOARD) == {
             "checking": 2500000,
             "credit_card": 999999,
-            "term_deposit": 2000000,
-            "investment": 1000000,
+            "term_deposit": 2400000,
+            "investment": 500000,
         }
 
     def test_tarjeta_without_de_credito_header_is_ignored(self):
@@ -215,8 +216,8 @@ class TestBalancesFromPage:
         assert [(b.product_kind, b.balance) for b in balances] == [
             ("checking", 2500000),
             ("credit_card", 999999),
-            ("term_deposit", 2000000),
-            ("investment", 1000000),
+            ("term_deposit", 2400000),
+            ("investment", 500000),
         ]
         assert all(b.institution == "banchile" for b in balances)
         assert all(b.currency == "CLP" for b in balances)
