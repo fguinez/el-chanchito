@@ -9,11 +9,11 @@ help: ## Show this help
 
 # ─── Setup ───────────────────────────────────────────────────────────────────
 
-install: ## Install all dependencies (Node + Python)
+install: ## Install all dependencies (Node + Python + Playwright browser)
 	pnpm install
 	python3 -m venv .venv
 	.venv/bin/pip install -r apps/scrapers/requirements.txt
-	.venv/bin/pip install fintself
+	.venv/bin/playwright install chromium
 
 env: ## Create .env from .env.example
 	@test -f .env || (cp .env.example .env && echo "Created .env — edit it with your credentials")

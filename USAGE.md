@@ -5,13 +5,15 @@
 - **Node.js** >= 20 + **pnpm** >= 9
 - **Python** >= 3.11
 - **Docker** + **Docker Compose**
-- **Playwright** browsers (for BanChile scraper): `playwright install chromium`
+
+`make install` installs everything, including the Playwright Chromium browser
+the BanChile scraper needs (in Docker this happens in the scrapers image).
 
 ## Quick Start
 
 ```bash
-# 1. Clone and install
-pnpm install
+# 1. Clone and install (Node deps, Python venv, Playwright Chromium)
+make install
 
 # 2. Set up environment
 cp .env.example .env

@@ -3,8 +3,10 @@
 Banco de Chile exposes no public/open-banking API for individuals, and the
 `fintself` library we use for *transactions* only returns `MovementModel`s —
 never an account balance (fintself#… — see issue #27). So to give `banchile`
-a real, refreshable Saldo we log in ourselves with Playwright and read the
-figure off the "Saldos y Movimientos" view.
+real, refreshable balances we log in ourselves with Playwright and read the
+figures off the post-login "Mis Productos" dashboard — checking, credit-card
+cupo, depósitos a plazo and fondos mutuos (see the scope note on
+`balances_by_kind` for what's covered and what's deliberately skipped).
 
 This module deliberately does **not** import `fintself`; it only borrows its
 login flow / page routes as a reference. The one gotcha worth repeating: Banco
@@ -102,30 +104,61 @@ class BanChileWebError(RuntimeError):
 
 # --- Pure helpers (unit-tested; no browser) -----------------------------------
 
-# Extraction is anchored on the literal "$" so an account number, a date, or a
-# USD figure ("USD 0,00") near a label can never be mistaken for the balance —
+# Every figure is anchored on the literal CLP "$" so an account number, a date,
+# or a USD amount ("USD 0,00") near a label can't be mistaken for a balance —
 # recording nothing ("sin dato") beats recording a wrong figure into net worth.
 #
-# Primary source: the post-login "Mis Productos" dashboard, where each account
-# is rendered as
+# The post-login "Mis Productos" dashboard renders each holding as a uniform
+# block — a product-type header, an id, optional label(s), then the amount:
 #     Cuenta Corriente
 #     00-000-00000-01
 #     Disponible
 #     $ 2.500.000
-# We take *only* "Cuenta Corriente" blocks — never "Línea de Crédito" or a
-# "Tarjeta de Crédito" cupo — and only the CLP "$" figure, coupling "Disponible"
-# tightly to "$" so a USD cuenta corriente ("Disponible\nUSD 0,00") is skipped.
-# Multiple CLP checking accounts are summed (one `banchile/checking` product).
-_CHECKING_ROW = re.compile(
-    r"cuenta\s+corriente.{0,60}?disponible\s*\$\s?([\d.]{1,15}(?:,\d{1,2})?)",
-    re.I | re.S,
-)
-# Fallback for the dedicated "Saldos y Movimientos" view, which labels the
-# figure "Saldo Disponible" (spendable) / "Saldo Contable" (accounting).
+# We map each product family to a `product_kind` and sum every CLP "$" figure
+# under that family's header into one product (several cuentas corrientes -> one
+# `banchile/checking`; three depósitos a plazo -> one `term_deposit`; ...).
+#
+# Scope (see `scrape_balances` in institutions/banchile.py and issue #8):
+#   • checking (CLP)     — asset; also feeds the planning "real balance" drift.
+#   • credit_card (CLP)  — stores the *available cupo* (the planning drift relies
+#                          on that; net-worth debt = credit_limit − available,
+#                          but the limit isn't on the dashboard, so debt stays 0
+#                          until it's captured — tracked separately).
+#   • term_deposit (CLP) — depósito a plazo, asset.
+#   • investment (CLP)   — fondos mutuos, asset.
+# The depósito/fondos row patterns are inferred from the uniform layout (no live
+# fixture yet) and validated against synthetic fixtures, so a layout mismatch
+# yields *nothing* rather than a wrong number.
+#
+# Deliberately skipped today (would inject a wrong figure; tracked in a
+# follow-up issue):
+#   • USD cuenta corriente / USD card cupo — the planning sum is currency-naive
+#     (`api/planning` sums `current_balance` with no FX), so a USD product under
+#     the checking/credit_card kinds would be added as if it were CLP.
+#   • línea de crédito — the dashboard shows *available* credit, but net-worth
+#     treats a `line_of_credit` balance as the amount *owed*, so storing
+#     available would count borrowing capacity as debt.
+
+# A Chilean-formatted amount: 1.234.567 with optional ,dd decimals.
+_AMT = r"([\d.]{1,15}(?:,\d{1,2})?)"
+
+# family -> compiled "header … [label] $amount" row. Order is stable (drives the
+# emitted/logged order). "Disponible" is coupled tightly to "$" for the account
+# families so a USD figure ("Disponible\nUSD 0,00") is skipped; depósito/fondos
+# have no reliable label, so they anchor on the header + the nearest CLP "$".
+_PRODUCT_ROWS: list[tuple[str, "re.Pattern[str]"]] = [
+    ("checking", re.compile(r"cuenta\s+corriente.{0,60}?disponible\s*\$\s?" + _AMT, re.I | re.S)),
+    ("credit_card", re.compile(r"tarjetas?\s+de\s+cr[eé]dito.{0,120}?disponible\s*\$\s?" + _AMT, re.I | re.S)),
+    ("term_deposit", re.compile(r"dep[oó]sitos?\s+a\s+plazo.{0,80}?\$\s?" + _AMT, re.I | re.S)),
+    ("investment", re.compile(r"fondos?\s+mutuos?.{0,80}?\$\s?" + _AMT, re.I | re.S)),
+]
+
+# Fallback for the dedicated "Saldos y Movimientos" checking view, which labels
+# the figure "Saldo Disponible" (spendable) / "Saldo Contable" (accounting).
 # Tried in order so the spendable figure wins when both are present.
 _SALDO_PATTERNS = [
-    re.compile(r"saldo\s+disponible.{0,40}?\$\s?([\d.]{1,15}(?:,\d{1,2})?)", re.I | re.S),
-    re.compile(r"saldo\s+contable.{0,40}?\$\s?([\d.]{1,15}(?:,\d{1,2})?)", re.I | re.S),
+    re.compile(r"saldo\s+disponible.{0,40}?\$\s?" + _AMT, re.I | re.S),
+    re.compile(r"saldo\s+contable.{0,40}?\$\s?" + _AMT, re.I | re.S),
 ]
 
 
@@ -152,33 +185,50 @@ def parse_clp(raw: Optional[str]) -> Optional[int]:
         return None
 
 
-def _balance_from_text(text: Optional[str]) -> Optional[int]:
-    """Extract the CLP checking available balance from a page's visible text.
-
-    Prefers the dashboard product summary (summing every CLP "Cuenta Corriente"
-    disponible); falls back to a single "Saldo Disponible/Contable" figure.
-    Returns None when neither is present.
-    """
-    if not text:
-        return None
-
+def _sum_clp_rows(text: str, pattern: "re.Pattern[str]") -> Optional[int]:
+    """Sum every CLP "$" figure `pattern` captures; None when none parse."""
     total = 0
     found = False
-    for raw in _CHECKING_ROW.findall(text):
+    for raw in pattern.findall(text):
         value = parse_clp(raw)
         if value is not None:
             total += value
             found = True
-    if found:
-        return total
+    return total if found else None
 
-    for pattern in _SALDO_PATTERNS:
-        match = pattern.search(text)
-        if match:
-            value = parse_clp(match.group(1))
-            if value is not None:
-                return value
-    return None
+
+def balances_by_kind(text: Optional[str]) -> dict[str, int]:
+    """Map each BdC `product_kind` present in `text` to its CLP total.
+
+    Returns ``{}`` when nothing parses. Checking falls back to the dedicated
+    "Saldo Disponible/Contable" view when the dashboard block is absent.
+    """
+    if not text:
+        return {}
+
+    result: dict[str, int] = {}
+    for kind, pattern in _PRODUCT_ROWS:
+        total = _sum_clp_rows(text, pattern)
+        if total is not None:
+            result[kind] = total
+
+    if "checking" not in result:
+        for pattern in _SALDO_PATTERNS:
+            match = pattern.search(text)
+            if match:
+                value = parse_clp(match.group(1))
+                if value is not None:
+                    result["checking"] = value
+                    break
+    return result
+
+
+def _balance_from_text(text: Optional[str]) -> Optional[int]:
+    """The CLP checking balance only (kept for callers/tests that want a scalar).
+
+    See `balances_by_kind` for the full per-kind map.
+    """
+    return balances_by_kind(text).get("checking")
 
 
 # Guarded: right after the post-login redirect `document.body` can still be
@@ -190,7 +240,8 @@ def _read_checking(page) -> Optional[int]:
     """Read the page's visible text and extract the CLP checking balance.
 
     Quiet (no logging) so it's safe to call in a polling loop; returns None
-    when the balance isn't present/rendered yet.
+    when the balance isn't present/rendered yet — checking is the "dashboard has
+    loaded" signal `_wait_for_balances` polls on.
     """
     try:
         text = page.evaluate(_INNER_TEXT_JS)
@@ -200,30 +251,39 @@ def _read_checking(page) -> Optional[int]:
 
 
 def balances_from_page(page) -> list[ScrapedBalance]:
-    """Read the checking balance off an already-authenticated BdC page.
+    """Read every scrapable BdC balance off an already-authenticated page.
 
     This is the seam the tests mock: it only reads `page`'s visible text (via
-    ``page.evaluate``) and shapes the result, so it can be exercised with a
-    fake page and no real bank. Returns an empty list when no balance is found.
-
-    Credit cards are intentionally **not** read here (deferred — see
-    `scrape_balances` in institutions/banchile.py for the rationale).
+    ``page.evaluate``) and shapes the result, so it can be exercised with a fake
+    page and no real bank. Returns an empty list when nothing is found. Every
+    balance is CLP (USD products are skipped — see the module scope note).
     """
-    checking = _read_checking(page)
-    if checking is None:
-        logger.warning("BanChile: no checking balance found on page")
+    try:
+        text = page.evaluate(_INNER_TEXT_JS)
+    except Exception:
+        logger.exception("BanChile: could not read page text")
         return []
 
-    logger.info("BanChile checking balance: $%s CLP", f"{checking:,}")
-    return [
-        ScrapedBalance(
-            institution="banchile",
-            product_kind="checking",
-            balance=checking,
-            as_of=date.today(),
-            currency="CLP",
-        )
-    ]
+    by_kind = balances_by_kind(text)
+    if not by_kind:
+        logger.warning("BanChile: no balances found on page")
+        return []
+
+    balances: list[ScrapedBalance] = []
+    for kind, _pattern in _PRODUCT_ROWS:  # stable, source-ordered
+        if kind in by_kind:
+            amount = by_kind[kind]
+            logger.info("BanChile %s balance: $%s CLP", kind, f"{amount:,}")
+            balances.append(
+                ScrapedBalance(
+                    institution="banchile",
+                    product_kind=kind,
+                    balance=amount,
+                    as_of=date.today(),
+                    currency="CLP",
+                )
+            )
+    return balances
 
 
 # --- Browser plumbing ---------------------------------------------------------

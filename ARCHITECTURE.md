@@ -273,15 +273,30 @@ apps/scrapers/scrapers/
 
 BanChile is a hybrid: transactions come from `fintself`, but `fintself` never
 exposes a balance, so `scrape_balances()` runs a **second, self-contained
-Playwright login** (`backends/banchile_web.py`) and reads the checking "Saldo
-Disponible" off the dashboard. It replicates fintself's `channel="chromium"`
-new-headless workaround (BdC serves a degraded page to the default headless
-shell) and polls for the balance widget (it loads via a later XHR). Because
-transactions and balances are independent legs in `run_scraper`, a fintself
-timeout never blocks the balance (and a balance-scrape failure is swallowed,
-returning `[]`). Credit cards are deferred — the app stores a card's
-`current_balance` as *available cupo* and `ScrapedBalance` has no `credit_limit`
-field (see issue #27).
+Playwright login** (`backends/banchile_web.py`) and reads the "Mis Productos"
+dashboard. It replicates fintself's `channel="chromium"` new-headless workaround
+(BdC serves a degraded page to the default headless shell) and polls for the
+balance widget (it loads via a later XHR). Because transactions and balances are
+independent legs in `run_scraper`, a fintself timeout never blocks the balance
+(and a balance-scrape failure is swallowed, returning `[]`).
+
+`balances_by_kind` maps the dashboard to CLP products: `checking` (cuenta
+corriente disponible), `credit_card` (available cupo), `term_deposit` (depósito
+a plazo) and `investment` (fondos mutuos). Two things are **deliberately
+skipped** to avoid feeding a wrong figure into net worth: USD products (the
+`api/planning` real-balance sum is currency-naive), and the línea de crédito
+(the dashboard shows *available* credit, but a `line_of_credit` balance is read
+as the amount *owed*). Every figure is anchored on the literal CLP `$`, so a
+missing/changed layout records nothing rather than a wrong number.
+
+**Balance sign conventions** (`web/src/lib/networth.ts`, `ASSET_KINDS` /
+`LIABILITY_KINDS` in `db/schema.ts`): assets store their positive value in
+`products.current_balance`; liabilities store the amount *owed*, **except**
+`credit_card`, which stores the *available cupo* (debt = `credit_limit −
+available`; the planning drift relies on the cupo). `debit_card` counts nowhere
+— its money lives in the parent `checking`. Everything is converted to CLP
+before summing patrimonio/deuda. BdC cards currently store cupo with no
+`credit_limit`, so their debt reads as 0 until the limit is scraped.
 
 Each institution scraper implements:
 
@@ -363,7 +378,7 @@ Browser → web POST /api/institutions/refresh {institution?}
 | UI | Tailwind CSS 4 + shadcn/ui (New York) + Recharts |
 | ORM | Drizzle ORM |
 | Database | PostgreSQL 16 (Alpine) |
-| Scrapers | Python 3.12 + httpx + fintself + APScheduler |
+| Scrapers | Python 3.12 + httpx + fintself + Playwright + APScheduler |
 | DB Driver (Python) | psycopg3 + psycopg-pool |
 | Containerization | Docker + Docker Compose |
 | Package Manager | pnpm (workspaces) |

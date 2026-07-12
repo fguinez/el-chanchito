@@ -54,8 +54,11 @@ class BanChileScraper(BaseScraper):
                 password=self.password,
             )
         except ImportError:
-            logger.error("fintself not installed. Run: pip install fintself")
-            return []
+            # A missing runtime dep is a broken deployment, not a clean run:
+            # raise so the run is recorded as `error` (and shows on the
+            # dashboard) instead of silently succeeding with 0 transactions.
+            logger.exception("fintself not installed. Run: pip install -r requirements.txt")
+            raise
         except Exception:
             logger.exception("BancoDeChile scrape failed")
             raise
@@ -77,22 +80,22 @@ class BanChileScraper(BaseScraper):
         return transactions
 
     async def scrape_balances(self) -> list[ScrapedBalance]:
-        """Scrape the checking balance via our own BdC web session.
+        """Scrape BdC balances via our own web session (see `banchile_web.py`).
 
         `fintself` (used for transactions) never exposes a balance, so this
-        runs a *second*, self-contained Playwright login — see
-        `backends/banchile_web.py`. It's a heavy login; a failure here is
-        logged and swallowed (returns []) rather than raised, so a flaky
-        balance scrape can't fail the whole run or lose the transactions that
-        were already imported. APScheduler's `max_instances=1`/`coalesce`
-        already stop back-to-back manual refreshes (#26) from overlapping; a
-        cookie-session cache would be the next step if BdC rate-limits us.
+        runs a *second*, self-contained Playwright login. It reads every CLP
+        product it can trust off the "Mis Productos" dashboard — checking,
+        credit-card available cupo, depósitos a plazo (`term_deposit`) and
+        fondos mutuos (`investment`); `balances_by_kind` documents what's
+        covered and what's deliberately skipped (USD products, línea de
+        crédito) to avoid feeding a wrong figure into net worth.
 
-        Credit cards are deferred: `ScrapedBalance` has no `credit_limit`
-        field, and the app stores a card's `current_balance` as the *available
-        cupo* (net-worth debt = limit − available; see web/src/lib/networth.ts).
-        Doing cards right needs a schema change plus USD-line handling — out of
-        scope for this checking-only first cut (issue #27).
+        It's a heavy login; a failure here is logged and swallowed (returns [])
+        rather than raised, so a flaky balance scrape can't fail the whole run
+        or lose the transactions that were already imported. APScheduler's
+        `max_instances=1`/`coalesce` already stop back-to-back manual refreshes
+        (#26) from overlapping; a cookie-session cache would be the next step if
+        BdC rate-limits us (#28).
         """
         try:
             return await fetch_balances(self.rut, self.password)
