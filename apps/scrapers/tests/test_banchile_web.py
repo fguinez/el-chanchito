@@ -16,6 +16,7 @@ from scrapers.backends.banchile_web import (
     balances_from_page,
     card_balances_from_text,
     card_saldos_from_text,
+    inversiones_balances_from_text,
     linea_balances_from_text,
     linea_saldo_from_text,
     parse_amount,
@@ -222,16 +223,21 @@ class TestBalanceFromText:
         assert _balance_from_text(None) is None
 
 
-# Synthetic depósito-a-plazo / fondos-mutuos blocks: no live fixture exists for
-# these, so they mirror the uniform "<header> … $amount" dashboard layout. All
-# figures are fabricated; the three deposits sum to 2.400.000.
-DEPOSITS_BLOCK = (
-    "Depósito a Plazo\n001-234\n$ 700.000\n"
-    "Depósito a Plazo\n001-235\n$ 800.000\n"
-    "Depósito a Plazo\n001-236\n$ 900.000\n"
-)
-FUNDS_BLOCK = "Fondos Mutuos\nFM Estrategia Activa\n$ 500.000\n"
-FULL_DASHBOARD = REAL_DASHBOARD + DEPOSITS_BLOCK + FUNDS_BLOCK
+# Synthetic "Resumen de Inversión" page. The STRUCTURE mirrors the real page —
+# SALDO TOTAL broken into "En activos financieros" (fondos mutuos) and "En
+# depósitos y ahorros" (depósitos a plazo) — with figures from a live read:
+# fondos = 1.000.000, depósitos = 2.000.000 (SALDO TOTAL 3.000.000).
+INVERSION_RESUMEN = """Resumen de Inversión
+
+SALDO TOTAL
+$ 3.000.000
+
+En activos financieros
+$ 1.000.000
+
+En depósitos y ahorros
+$ 2.000.000
+"""
 
 
 class TestBalancesByKind:
@@ -249,19 +255,16 @@ class TestBalancesByKind:
         # it as debt). 300.000 appears nowhere in the result.
         assert 300000 not in balances_by_kind(REAL_DASHBOARD).values()
 
-    def test_term_deposits_are_summed(self):
-        assert balances_by_kind(DEPOSITS_BLOCK) == {"term_deposit": 2400000}
-
-    def test_fondos_mutuos_investment(self):
-        assert balances_by_kind(FUNDS_BLOCK) == {"investment": 500000}
-
-    def test_full_dashboard_all_four_kinds(self):
-        assert balances_by_kind(FULL_DASHBOARD) == {
-            "checking": 2500000,
-            "credit_card": 999999,
-            "term_deposit": 2400000,
-            "investment": 500000,
-        }
+    def test_dashboard_never_reports_investments(self):
+        # Depósitos a plazo / fondos mutuos aren't on the "Mis Productos"
+        # dashboard — they're read from the inversiones resumen page — so no
+        # matter what investment-looking text the dashboard carries, this never
+        # reports those kinds.
+        text = REAL_DASHBOARD + "Depósito a Plazo\n001\n$ 900.000\nFondos Mutuos\nX\n$ 500.000\n"
+        result = balances_by_kind(text)
+        assert result == {"checking": 2500000, "credit_card": 999999}
+        assert "term_deposit" not in result
+        assert "investment" not in result
 
     def test_tarjeta_without_de_credito_header_is_ignored(self):
         # A stray "Tarjeta" mention (not the "Tarjeta de Crédito" product header)
@@ -298,16 +301,14 @@ class TestBalancesFromPage:
         page.evaluate.side_effect = RuntimeError("page closed")
         assert balances_from_page(page) == []
 
-    def test_emits_every_kind_found_in_source_order(self):
-        # CLP checking / depósito / fondos in source order, then the USD cuenta
-        # corriente (USD 0,00). The dashboard credit_card figure is a placeholder
-        # ($999.999) and is deliberately NOT emitted — the card is sourced from
-        # its detail page instead (see test below).
-        balances = balances_from_page(_fake_page(FULL_DASHBOARD))
+    def test_emits_clp_then_usd_checking(self):
+        # The dashboard only carries checking: the CLP cuenta corriente, then the
+        # USD one (USD 0,00). The credit_card figure is a placeholder ($999.999)
+        # and is deliberately NOT emitted — the card is sourced from its detail
+        # page. Depósitos/fondos aren't on the dashboard at all (inversiones page).
+        balances = balances_from_page(_fake_page(REAL_DASHBOARD))
         assert [(b.product_kind, b.currency, b.balance) for b in balances] == [
             ("checking", "CLP", 2500000),
-            ("term_deposit", "CLP", 2400000),
-            ("investment", "CLP", 500000),
             ("checking", "USD", 0.0),
         ]
         assert all(b.institution == "banchile" for b in balances)
@@ -316,7 +317,7 @@ class TestBalancesFromPage:
     def test_dashboard_never_emits_the_card_placeholder(self):
         # Live QA showed the dashboard card "Disponible" is a static placeholder
         # that never matches the real available cupo, so it must not be written.
-        kinds = {b.product_kind for b in balances_from_page(_fake_page(FULL_DASHBOARD))}
+        kinds = {b.product_kind for b in balances_from_page(_fake_page(REAL_DASHBOARD))}
         assert "credit_card" not in kinds
 
     def test_stray_tarjeta_mention_yields_only_checking(self):
@@ -402,6 +403,48 @@ class TestLineaBalances:
         # Without the authorized cupo, storing "available" would be counted as
         # debt — so nothing is emitted (issue #30).
         assert linea_balances_from_text("Saldo disponible\n$ 80.000") == []
+
+
+class TestInversionesBalances:
+    def test_reads_term_deposit_and_investment(self):
+        # The resumen breakdown: "En depósitos y ahorros" -> term_deposit,
+        # "En activos financieros" -> investment. Both assets (credit_limit None).
+        balances = inversiones_balances_from_text(INVERSION_RESUMEN)
+        assert [
+            (b.product_kind, b.currency, b.balance, b.credit_limit) for b in balances
+        ] == [
+            ("term_deposit", "CLP", 2000000, None),
+            ("investment", "CLP", 1000000, None),
+        ]
+        assert all(b.institution == "banchile" for b in balances)
+        assert all(b.as_of == date.today() for b in balances)
+
+    def test_saldo_total_headline_is_never_grabbed(self):
+        # Each label anchors on its own nearest "$"; the SALDO TOTAL headline
+        # ($ 3.000.000) must not be read as either kind.
+        amounts = {b.balance for b in inversiones_balances_from_text(INVERSION_RESUMEN)}
+        assert 3000000 not in amounts
+
+    def test_only_deposits_present(self):
+        balances = inversiones_balances_from_text("En depósitos y ahorros\n$ 2.000.000\n")
+        assert [(b.product_kind, b.balance) for b in balances] == [
+            ("term_deposit", 2000000)
+        ]
+
+    def test_only_funds_present(self):
+        balances = inversiones_balances_from_text("En activos financieros\n$ 1.000.000\n")
+        assert [(b.product_kind, b.balance) for b in balances] == [
+            ("investment", 1000000)
+        ]
+
+    def test_dashboard_text_yields_nothing(self):
+        # The dashboard carries no "activos financieros"/"depósitos y ahorros"
+        # labels, so this reader finds nothing there.
+        assert inversiones_balances_from_text(REAL_DASHBOARD) == []
+
+    def test_empty_and_none(self):
+        assert inversiones_balances_from_text("") == []
+        assert inversiones_balances_from_text(None) == []
 
 
 class TestMergeBalances:

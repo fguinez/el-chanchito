@@ -4,10 +4,10 @@ Banco de Chile exposes no public/open-banking API for individuals, and the
 `fintself` library we use for *transactions* only returns `MovementModel`s —
 never an account balance (fintself#… — see issue #27). So to give `banchile`
 real, refreshable balances we log in ourselves with Playwright and read the
-figures off the post-login "Mis Productos" dashboard — CLP/USD checking,
-credit-card cupo, depósitos a plazo and fondos mutuos — plus the card total
-cupo/límite and the línea de crédito from their own detail pages (see the scope
-note before `_PRODUCT_ROWS` for what's covered and how).
+figures off the post-login "Mis Productos" dashboard — CLP/USD checking and the
+credit-card cupo — plus the card total cupo/límite, the línea de crédito, and the
+depósitos a plazo / fondos mutuos, each from their own detail pages (see the
+scope note before `_PRODUCT_ROWS` for what's covered and how).
 
 This module deliberately does **not** import `fintself`; it only borrows its
 login flow / page routes as a reference. The one gotcha worth repeating: Banco
@@ -131,11 +131,6 @@ class BanChileWebError(RuntimeError):
 #                          on that); the total límite comes from the card detail
 #                          page (below), which supersedes this entry so net-worth
 #                          debt = credit_limit − available.
-#   • term_deposit (CLP) — depósito a plazo, asset.
-#   • investment (CLP)   — fondos mutuos, asset.
-# The depósito/fondos row patterns are inferred from the uniform layout (no live
-# fixture yet) and validated against synthetic fixtures, so a layout mismatch
-# yields *nothing* rather than a wrong number.
 #
 # Read off their own detail pages (best-effort, non-fatal — see the navigation
 # section), once #30 made net worth currency- and cupo-aware:
@@ -144,6 +139,11 @@ class BanChileWebError(RuntimeError):
 #   • line_of_credit (CLP)    — available + authorized cupo (`linea_saldo...`),
 #     stored like a card so debt = autorizado − disponible = utilizado. Emitted
 #     only with the cupo, else the available would be miscounted as debt.
+#   • term_deposit (CLP) — depósitos a plazo, asset. Read off the "Resumen de
+#     Inversión" page's "En depósitos y ahorros" total (`inversiones_...`); they
+#     aren't on the "Mis Productos" dashboard at all.
+#   • investment (CLP)   — fondos mutuos, asset. The same page's "En activos
+#     financieros" total.
 # USD balances convert to CLP via lib/rates' multi-currency FX (api/planning,
 # api/wealth, api/institutions).
 
@@ -152,13 +152,12 @@ _AMT = r"([\d.]{1,15}(?:,\d{1,2})?)"
 
 # family -> compiled "header … [label] $amount" row. Order is stable (drives the
 # emitted/logged order). "Disponible" is coupled tightly to "$" for the account
-# families so a USD figure ("Disponible\nUSD 0,00") is skipped; depósito/fondos
-# have no reliable label, so they anchor on the header + the nearest CLP "$".
+# families so a USD figure ("Disponible\nUSD 0,00") is skipped. Depósitos a plazo
+# and fondos mutuos aren't on this dashboard — they're read from the inversiones
+# resumen page instead (see `_INVERSION_ROWS` / `inversiones_balances_from_text`).
 _PRODUCT_ROWS: list[tuple[str, "re.Pattern[str]"]] = [
     ("checking", re.compile(r"cuenta\s+corriente.{0,60}?disponible\s*\$\s?" + _AMT, re.I | re.S)),
     ("credit_card", re.compile(r"tarjetas?\s+de\s+cr[eé]dito.{0,120}?disponible\s*\$\s?" + _AMT, re.I | re.S)),
-    ("term_deposit", re.compile(r"dep[oó]sitos?\s+a\s+plazo.{0,80}?\$\s?" + _AMT, re.I | re.S)),
-    ("investment", re.compile(r"fondos?\s+mutuos?.{0,80}?\$\s?" + _AMT, re.I | re.S)),
 ]
 
 # Fallback for the dedicated "Saldos y Movimientos" checking view, which labels
@@ -204,6 +203,22 @@ _USD_CHECKING_RE = re.compile(
 # the cupo is present, or the available would be miscounted as debt (issue #30).
 _LINEA_AUTORIZADO_RE = re.compile(r"monto\s+autorizado.*?\$\s?" + _AMT, re.I | re.S)
 _LINEA_DISPONIBLE_RE = re.compile(r"saldo\s+disponible.*?\$\s?" + _AMT, re.I | re.S)
+
+# --- Inversiones resumen page ("Resumen de Inversión") ------------------------
+# Depósitos a plazo and fondos mutuos aren't on the "Mis Productos" dashboard;
+# they live on the inversiones SPA route, whose resumen breaks SALDO TOTAL into
+# "En activos financieros" (fondos mutuos -> investment) and "En depósitos y
+# ahorros" (depósitos a plazo -> term_deposit):
+#     SALDO TOTAL              $ 3.000.000
+#     En activos financieros   $ 1.000.000
+#     En depósitos y ahorros   $ 2.000.000
+# We read those two summary totals — one asset balance per kind — which is far
+# more robust than clicking into and summing each individual holding. Each label
+# anchors on the nearest CLP "$" (non-greedy), so "SALDO TOTAL" is never grabbed.
+_INVERSION_ROWS: list[tuple[str, "re.Pattern[str]"]] = [
+    ("term_deposit", re.compile(r"dep[oó]sitos\s+y\s+ahorros?.{0,40}?\$\s?" + _AMT, re.I | re.S)),
+    ("investment", re.compile(r"activos\s+financieros.{0,40}?\$\s?" + _AMT, re.I | re.S)),
+]
 
 
 def parse_amount(raw: Optional[str]) -> Optional[float]:
@@ -383,10 +398,10 @@ def _read_checking(page) -> Optional[int]:
 def dashboard_balances_from_text(text: Optional[str]) -> list[ScrapedBalance]:
     """Shape the "Mis Productos" dashboard text into ScrapedBalances.
 
-    Emits the CLP checking / credit-card cupo / depósito / fondos figures (in
-    stable source order) plus the USD cuenta corriente when present. The card's
-    *total* cupo/límite and the línea live on their own detail pages, read
-    separately (see `card_balances_from_text` / `linea_balances_from_text`).
+    Emits the CLP checking figure plus the USD cuenta corriente when present. The
+    card's *total* cupo/límite, the línea, and the depósitos/fondos live on their
+    own detail pages, read separately (see `card_balances_from_text` /
+    `linea_balances_from_text` / `inversiones_balances_from_text`).
     """
     by_kind = balances_by_kind(text)
     usd_checking = _usd_checking_from_text(text)
@@ -499,6 +514,37 @@ def linea_balances_from_text(text: Optional[str]) -> list[ScrapedBalance]:
             credit_limit=entry["limit"],
         )
     ]
+
+
+def inversiones_balances_from_text(text: Optional[str]) -> list[ScrapedBalance]:
+    """Term-deposit + fondos-mutuos ScrapedBalances from the inversiones resumen.
+
+    Reads the "Resumen de Inversión" page's SALDO TOTAL breakdown — "En depósitos
+    y ahorros" -> `term_deposit`, "En activos financieros" -> `investment` — one
+    CLP asset balance per kind whose figure parses (`credit_limit` stays None: an
+    asset carries no debt). Returns [] when neither total is found.
+    """
+    if not text:
+        return []
+    balances: list[ScrapedBalance] = []
+    for kind, pattern in _INVERSION_ROWS:  # stable, source-ordered
+        match = pattern.search(text)
+        if match is None:
+            continue
+        amount = parse_clp(match.group(1))
+        if amount is None:
+            continue
+        logger.info("BanChile %s balance: $%s CLP", kind, f"{amount:,}")
+        balances.append(
+            ScrapedBalance(
+                institution="banchile",
+                product_kind=kind,
+                balance=amount,
+                as_of=date.today(),
+                currency="CLP",
+            )
+        )
+    return balances
 
 
 def _merge_balances(
@@ -652,6 +698,10 @@ _CARD_LINK_SELECTORS = [
 # sections — a reliable "the figures have rendered" signal.
 _CARD_READY_RE = re.compile(r"cupo\s+total", re.I)
 _LINEA_READY_RE = re.compile(r"monto\s+autorizado", re.I)
+# The inversiones resumen is a static hash route, driven like the línea. It has
+# rendered once either breakdown line of SALDO TOTAL is on the page.
+_INVERSION_ROUTE = "#/inversion/mis-inversiones/consultar/resumen-de-inversion"
+_INVERSION_READY_RE = re.compile(r"activos\s+financieros|dep[oó]sitos\s+y\s+ahorros?", re.I)
 
 
 def _on_portal(page) -> bool:
@@ -747,6 +797,28 @@ def _read_linea_detail(page) -> list[ScrapedBalance]:
         return []
 
 
+def _read_inversiones_detail(page) -> list[ScrapedBalance]:
+    """Open the inversiones resumen route and read the depósito/fondos totals.
+
+    Depósitos a plazo and fondos mutuos aren't on the "Mis Productos" dashboard;
+    they live on their own "Resumen de Inversión" SPA route, driven straight to
+    via a hash change (like the línea). Best-effort and non-fatal: any failure
+    returns [] and leaves the dashboard/card/línea balances untouched.
+    """
+    try:
+        if not _ensure_on_portal(page):
+            return []
+        page.evaluate("route => { window.location.hash = route; }", _INVERSION_ROUTE)
+        text = _wait_for_text(page, _INVERSION_READY_RE, BALANCE_WAIT_TIMEOUT)
+        if text is None:
+            logger.info("BanChile: inversiones page did not render; skipping depósitos/fondos")
+            return []
+        return inversiones_balances_from_text(text)
+    except Exception:
+        logger.exception("BanChile: inversiones detail read failed")
+        return []
+
+
 def _scrape_sync(rut: str, password: str, headless: bool) -> list[ScrapedBalance]:
     """Synchronous Playwright flow (runs in a worker thread, no event loop)."""
     from playwright.sync_api import sync_playwright  # lazy: keeps tests browser-free
@@ -770,11 +842,13 @@ def _scrape_sync(rut: str, password: str, headless: bool) -> list[ScrapedBalance
             _dismiss_popup(page)
             # Balances render on the post-login dashboard via a later XHR.
             balances = _wait_for_balances(page, BALANCE_WAIT_TIMEOUT)
-            # Enrich with the per-product detail pages (card cupo/límite, línea).
-            # Each is non-fatal; a detail reading supersedes the dashboard's entry
-            # for the same product so a card picks up its credit_limit.
+            # Enrich with the per-product detail pages (card cupo/límite, línea,
+            # depósitos/fondos). Each is non-fatal; a detail reading supersedes the
+            # dashboard's entry for the same product so a card picks up its
+            # credit_limit and the inversiones page supplies term_deposit/investment.
             balances = _merge_balances(balances, _read_card_detail(page))
             balances = _merge_balances(balances, _read_linea_detail(page))
+            balances = _merge_balances(balances, _read_inversiones_detail(page))
             return balances
         finally:
             browser.close()
@@ -785,10 +859,10 @@ async def fetch_balances(
 ) -> list[ScrapedBalance]:
     """Log into Banco de Chile and return its scraped balances.
 
-    Covers the dashboard products (CLP/USD checking, card cupo, depósitos,
-    fondos) plus the card total cupo/límite and the línea read from their detail
-    pages. Runs the synchronous Playwright flow in a thread executor so it
-    doesn't block the scheduler's event loop, mirroring backends/fintself.py.
+    Covers the dashboard checking (CLP/USD) plus the card total cupo/límite, the
+    línea, and the depósitos a plazo / fondos mutuos read from their own detail
+    pages. Runs the synchronous Playwright flow in a thread executor so it doesn't
+    block the scheduler's event loop, mirroring backends/fintself.py.
     """
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _scrape_sync, rut, password, headless)
