@@ -83,12 +83,12 @@ class BanChileScraper(BaseScraper):
         """Scrape BdC balances via our own web session (see `banchile_web.py`).
 
         `fintself` (used for transactions) never exposes a balance, so this
-        runs a *second*, self-contained Playwright login. It reads every CLP
-        product it can trust off the "Mis Productos" dashboard — checking,
+        runs a *second*, self-contained Playwright login. It reads every product
+        it can trust off the "Mis Productos" dashboard — CLP/USD checking,
         credit-card available cupo, depósitos a plazo (`term_deposit`) and
-        fondos mutuos (`investment`); `balances_by_kind` documents what's
-        covered and what's deliberately skipped (USD products, línea de
-        crédito) to avoid feeding a wrong figure into net worth.
+        fondos mutuos (`investment`) — plus the card total cupo/límite and the
+        línea de crédito from their own detail pages (see `banchile_web.py`).
+        USD figures convert to CLP via lib/rates' multi-currency FX.
 
         It's a heavy login; a failure here is logged and swallowed (returns [])
         rather than raised, so a flaky balance scrape can't fail the whole run

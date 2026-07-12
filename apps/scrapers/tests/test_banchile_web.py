@@ -10,10 +10,18 @@ from unittest.mock import MagicMock
 
 from scrapers.backends.banchile_web import (
     _balance_from_text,
+    _merge_balances,
+    _usd_checking_from_text,
     balances_by_kind,
     balances_from_page,
+    card_balances_from_text,
+    card_saldos_from_text,
+    linea_balances_from_text,
+    linea_saldo_from_text,
+    parse_amount,
     parse_clp,
 )
+from scrapers.base import ScrapedBalance
 
 
 class TestParseClp:
@@ -43,6 +51,72 @@ class TestParseClp:
 
     def test_no_digits(self):
         assert parse_clp("sin dato") is None
+
+
+class TestParseAmount:
+    def test_keeps_usd_decimals(self):
+        assert parse_amount("USD 2.345,67") == 2345.67
+
+    def test_usd_whole(self):
+        assert parse_amount("USD 14.700,00") == 2400.0
+
+    def test_clp_dollar_sign(self):
+        assert parse_amount("$ 4.000.000") == 4000000.0
+
+    def test_none_and_no_digits(self):
+        assert parse_amount(None) is None
+        assert parse_amount("USD") is None
+
+
+# Real credit-card detail page figures ("Saldos y movimientos no facturados"),
+# reconstructed as rendered page text. Account/card identifiers are omitted; the
+# CLP + USD cupo/disponible/utilizado figures are the ones the card actually
+# shows. cupo = disponible + utilizado (national); the USD side likewise.
+CARD_DETAIL = """Saldos y movimientos no facturados
+
+Cupo Nacional
+$ 4.000.000
+Disponible
+$ 11.770.069
+Utilizado
+$ 1.280.651
+
+Cupo Internacional
+USD 14.700,00
+Disponible
+USD 2.345,67
+Usado
+USD 183,84
+"""
+
+
+class TestCardSaldosFromText:
+    def test_reads_both_currencies(self):
+        assert card_saldos_from_text(CARD_DETAIL) == {
+            "CLP": {"available": 3550000.0, "limit": 4000000.0},
+            "USD": {"available": 2345.67, "limit": 2400.0},
+        }
+
+    def test_disponible_paired_with_own_currency_cupo(self):
+        # The CLP "Disponible" must never pick up the USD cupo (or vice versa):
+        # debt = limit − available would be nonsense across currencies.
+        result = card_saldos_from_text(CARD_DETAIL)
+        assert result["CLP"]["available"] < result["CLP"]["limit"]
+        assert result["USD"]["available"] < result["USD"]["limit"]
+
+    def test_clp_only_page(self):
+        text = "Cupo Nacional\n$ 5.000.000\nDisponible\n$ 4.000.000\n"
+        assert card_saldos_from_text(text) == {
+            "CLP": {"available": 4000000.0, "limit": 5000000.0}
+        }
+
+    def test_unparseable_section_is_omitted(self):
+        # No CLP "$" figure to read -> the currency is dropped, not guessed.
+        assert card_saldos_from_text("Cupo Nacional\nDisponible\nsin dato") == {}
+
+    def test_empty_and_none(self):
+        assert card_saldos_from_text("") == {}
+        assert card_saldos_from_text(None) == {}
 
 
 # Synthetic "Mis Productos" dashboard dump — the *structure* mirrors a real
@@ -212,15 +286,17 @@ class TestBalancesFromPage:
         assert balances_from_page(page) == []
 
     def test_emits_every_kind_found_in_source_order(self):
+        # The four CLP kinds in source order, then the USD cuenta corriente
+        # (USD 0,00 in the fixture) appended after the CLP block.
         balances = balances_from_page(_fake_page(FULL_DASHBOARD))
-        assert [(b.product_kind, b.balance) for b in balances] == [
-            ("checking", 2500000),
-            ("credit_card", 999999),
-            ("term_deposit", 2400000),
-            ("investment", 500000),
+        assert [(b.product_kind, b.currency, b.balance) for b in balances] == [
+            ("checking", "CLP", 2500000),
+            ("credit_card", "CLP", 999999),
+            ("term_deposit", "CLP", 2400000),
+            ("investment", "CLP", 500000),
+            ("checking", "USD", 0.0),
         ]
         assert all(b.institution == "banchile" for b in balances)
-        assert all(b.currency == "CLP" for b in balances)
         assert all(b.as_of == date.today() for b in balances)
 
     def test_stray_tarjeta_mention_yields_only_checking(self):
@@ -229,3 +305,120 @@ class TestBalancesFromPage:
         text = "Saldo Disponible $1.000.000\nCupo Disponible Tarjeta $500.000"
         balances = balances_from_page(_fake_page(text))
         assert [b.product_kind for b in balances] == ["checking"]
+
+
+class TestUsdChecking:
+    def test_usd_cuenta_corriente_emitted_from_dashboard(self):
+        text = "Cuenta Corriente\n00-000\nDisponible\nUSD 1.234,56\n"
+        balances = balances_from_page(_fake_page(text))
+        assert [(b.product_kind, b.currency, b.balance) for b in balances] == [
+            ("checking", "USD", 1234.56)
+        ]
+
+    def test_zero_usd_checking_still_emitted(self):
+        # A real (empty) USD account shows USD 0,00 — recording it is correct.
+        assert _usd_checking_from_text(REAL_DASHBOARD) == 0.0
+
+    def test_clp_and_usd_checking_coexist(self):
+        text = (
+            "Cuenta Corriente\n11-111\nDisponible\n$ 2.000.000\n"
+            "Cuenta Corriente\n22-222\nDisponible\nUSD 500,00\n"
+        )
+        balances = balances_from_page(_fake_page(text))
+        assert [(b.product_kind, b.currency, b.balance) for b in balances] == [
+            ("checking", "CLP", 2000000),
+            ("checking", "USD", 500.0),
+        ]
+
+    def test_no_usd_checking(self):
+        assert _usd_checking_from_text("Saldo Disponible $1.000.000") is None
+
+
+class TestCardBalancesFromText:
+    def test_emits_clp_and_usd_with_limits(self):
+        balances = card_balances_from_text(CARD_DETAIL)
+        assert [
+            (b.product_kind, b.currency, b.balance, b.credit_limit) for b in balances
+        ] == [
+            ("credit_card", "CLP", 3550000.0, 4000000.0),
+            ("credit_card", "USD", 2345.67, 2400.0),
+        ]
+        assert all(b.institution == "banchile" for b in balances)
+
+    def test_empty_page_no_balances(self):
+        assert card_balances_from_text("nada") == []
+
+
+class TestLineaSaldo:
+    def test_reads_available_and_authorized(self):
+        text = (
+            "Monto autorizado\n$ 100.000\n"
+            "Saldo disponible\n$ 100.000\n"
+            "Monto utilizado\n$ 0\n"
+        )
+        assert linea_saldo_from_text(text) == {"available": 100000.0, "limit": 100000.0}
+
+    def test_used_line_debt_is_limit_minus_available(self):
+        text = "Monto autorizado\n$ 500.000\nSaldo disponible\n$ 200.000\n"
+        entry = linea_saldo_from_text(text)
+        assert entry == {"available": 200000.0, "limit": 500000.0}
+        # net worth computes debt = limit − available = 300.000 (the utilizado).
+        assert entry["limit"] - entry["available"] == 300000.0
+
+    def test_none_when_no_disponible(self):
+        assert linea_saldo_from_text("Monto autorizado\n$ 100.000") is None
+        assert linea_saldo_from_text("") is None
+
+
+class TestLineaBalances:
+    def test_emits_line_of_credit_with_limit(self):
+        text = "Monto autorizado\n$ 100.000\nSaldo disponible\n$ 80.000\n"
+        balances = linea_balances_from_text(text)
+        assert [
+            (b.product_kind, b.currency, b.balance, b.credit_limit) for b in balances
+        ] == [("line_of_credit", "CLP", 80000.0, 100000.0)]
+
+    def test_no_cupo_means_no_emission(self):
+        # Without the authorized cupo, storing "available" would be counted as
+        # debt — so nothing is emitted (issue #30).
+        assert linea_balances_from_text("Saldo disponible\n$ 80.000") == []
+
+
+class TestMergeBalances:
+    def _bal(self, kind, currency, balance, limit=None):
+        return ScrapedBalance(
+            institution="banchile",
+            product_kind=kind,
+            balance=balance,
+            as_of=date.today(),
+            currency=currency,
+            credit_limit=limit,
+        )
+
+    def test_detail_supersedes_dashboard_for_same_product(self):
+        base = [self._bal("credit_card", "CLP", 999999)]
+        extra = [self._bal("credit_card", "CLP", 3550000.0, 4000000.0)]
+        merged = _merge_balances(base, extra)
+        assert len(merged) == 1
+        assert merged[0].balance == 3550000.0
+        assert merged[0].credit_limit == 4000000.0
+
+    def test_keeps_distinct_products_and_appends(self):
+        base = [
+            self._bal("checking", "CLP", 2500000),
+            self._bal("credit_card", "CLP", 999999),
+        ]
+        extra = [
+            self._bal("credit_card", "CLP", 3550000.0, 4000000.0),
+            self._bal("credit_card", "USD", 2345.67, 2400.0),
+        ]
+        merged = _merge_balances(base, extra)
+        assert [(b.product_kind, b.currency) for b in merged] == [
+            ("checking", "CLP"),
+            ("credit_card", "CLP"),
+            ("credit_card", "USD"),
+        ]
+
+    def test_empty_extra_returns_base(self):
+        base = [self._bal("checking", "CLP", 100)]
+        assert _merge_balances(base, []) is base

@@ -4,9 +4,10 @@ Banco de Chile exposes no public/open-banking API for individuals, and the
 `fintself` library we use for *transactions* only returns `MovementModel`s —
 never an account balance (fintself#… — see issue #27). So to give `banchile`
 real, refreshable balances we log in ourselves with Playwright and read the
-figures off the post-login "Mis Productos" dashboard — checking, credit-card
-cupo, depósitos a plazo and fondos mutuos (see the scope note on
-`balances_by_kind` for what's covered and what's deliberately skipped).
+figures off the post-login "Mis Productos" dashboard — CLP/USD checking,
+credit-card cupo, depósitos a plazo and fondos mutuos — plus the card total
+cupo/límite and the línea de crédito from their own detail pages (see the scope
+note before `_PRODUCT_ROWS` for what's covered and how).
 
 This module deliberately does **not** import `fintself`; it only borrows its
 login flow / page routes as a reference. The one gotcha worth repeating: Banco
@@ -118,26 +119,29 @@ class BanChileWebError(RuntimeError):
 # under that family's header into one product (several cuentas corrientes -> one
 # `banchile/checking`; three depósitos a plazo -> one `term_deposit`; ...).
 #
-# Scope (see `scrape_balances` in institutions/banchile.py and issue #8):
-#   • checking (CLP)     — asset; also feeds the planning "real balance" drift.
+# Scope (see `scrape_balances` in institutions/banchile.py; issues #8, #30):
+# Read straight off the dashboard, all CLP unless noted:
+#   • checking (CLP + USD) — asset; CLP also feeds the planning "real balance"
+#                            drift. USD is summed separately (`_usd_checking...`).
 #   • credit_card (CLP)  — stores the *available cupo* (the planning drift relies
-#                          on that; net-worth debt = credit_limit − available,
-#                          but the limit isn't on the dashboard, so debt stays 0
-#                          until it's captured — tracked separately).
+#                          on that); the total límite comes from the card detail
+#                          page (below), which supersedes this entry so net-worth
+#                          debt = credit_limit − available.
 #   • term_deposit (CLP) — depósito a plazo, asset.
 #   • investment (CLP)   — fondos mutuos, asset.
 # The depósito/fondos row patterns are inferred from the uniform layout (no live
 # fixture yet) and validated against synthetic fixtures, so a layout mismatch
 # yields *nothing* rather than a wrong number.
 #
-# Deliberately skipped today (would inject a wrong figure; tracked in a
-# follow-up issue):
-#   • USD cuenta corriente / USD card cupo — the planning sum is currency-naive
-#     (`api/planning` sums `current_balance` with no FX), so a USD product under
-#     the checking/credit_card kinds would be added as if it were CLP.
-#   • línea de crédito — the dashboard shows *available* credit, but net-worth
-#     treats a `line_of_credit` balance as the amount *owed*, so storing
-#     available would count borrowing capacity as debt.
+# Read off their own detail pages (best-effort, non-fatal — see the navigation
+# section), once #30 made net worth currency- and cupo-aware:
+#   • credit_card (CLP + USD) — available cupo + total cupo/límite, per currency
+#     (`card_saldos_from_text`), so a card contributes real debt.
+#   • line_of_credit (CLP)    — available + authorized cupo (`linea_saldo...`),
+#     stored like a card so debt = autorizado − disponible = utilizado. Emitted
+#     only with the cupo, else the available would be miscounted as debt.
+# USD balances convert to CLP via lib/rates' multi-currency FX (api/planning,
+# api/wealth, api/institutions).
 
 # A Chilean-formatted amount: 1.234.567 with optional ,dd decimals.
 _AMT = r"([\d.]{1,15}(?:,\d{1,2})?)"
@@ -161,17 +165,46 @@ _SALDO_PATTERNS = [
     re.compile(r"saldo\s+contable.{0,40}?\$\s?" + _AMT, re.I | re.S),
 ]
 
+# --- Credit-card detail page ("Saldos y movimientos no facturados") -----------
+# The "Mis Productos" dashboard only shows a card's *available* cupo; the total
+# límite lives on the per-card detail route (#/tarjeta-credito/consultar/...).
+# That page lists a CLP "Cupo Nacional" and a USD "Cupo Internacional", each with
+# its Disponible and Utilizado/Usado. We read available (-> current_balance) and
+# cupo (-> the credit_limit that makes net-worth debt = limit − available). The
+# two currencies are read from separate slices of the page (split on "Cupo
+# Internacional") so a "Disponible" is never paired with the other cupo.
+_CARD_INTERNACIONAL_RE = re.compile(r"cupo\s+internacional", re.I)
+_CLP_CUPO_RE = re.compile(r"cupo\s+nacional.*?\$\s?" + _AMT, re.I | re.S)
+_CLP_DISPONIBLE_RE = re.compile(r"disponible.*?\$\s?" + _AMT, re.I | re.S)
+_USD_CUPO_RE = re.compile(r"cupo\s+internacional.*?USD\s?" + _AMT, re.I | re.S)
+_USD_DISPONIBLE_RE = re.compile(r"disponible.*?USD\s?" + _AMT, re.I | re.S)
 
-def parse_clp(raw: Optional[str]) -> Optional[int]:
-    """Parse a Chilean-formatted CLP amount into whole pesos.
+# USD cuenta corriente on the dashboard: same block as the CLP one but the
+# figure is "Disponible USD …". Coupled to "USD" so it never grabs a CLP "$".
+_USD_CHECKING_RE = re.compile(
+    r"cuenta\s+corriente.{0,60}?disponible\s*USD\s?" + _AMT, re.I | re.S
+)
 
-    Handles ``$1.234.567``, ``1.234.567``, ``$ 1.234.567`` and the rare
-    ``1.234.567,00`` (comma = decimals, rounded). Returns None when there's no
-    digit to parse.
+# --- Línea de crédito detail page ("Saldos y movimientos de la línea") ---------
+# Labels "Monto autorizado" (total cupo -> credit_limit), "Saldo disponible"
+# (available -> current_balance) and "Monto utilizado" (owed). Stored like a
+# card so net-worth debt = autorizado − disponible = utilizado; only emitted when
+# the cupo is present, or the available would be miscounted as debt (issue #30).
+_LINEA_AUTORIZADO_RE = re.compile(r"monto\s+autorizado.*?\$\s?" + _AMT, re.I | re.S)
+_LINEA_DISPONIBLE_RE = re.compile(r"saldo\s+disponible.*?\$\s?" + _AMT, re.I | re.S)
+
+
+def parse_amount(raw: Optional[str]) -> Optional[float]:
+    """Parse a Chilean-formatted CLP/USD amount into a float (keeps decimals).
+
+    Handles ``$1.234.567``, ``USD 2.345,67``, ``$ 1.234.567`` and
+    ``1.234.567,00`` (comma = decimal separator). Returns None when there's no
+    digit to parse. Used where cents matter (USD cupo); `parse_clp` rounds it to
+    whole pesos for CLP.
     """
     if not raw:
         return None
-    cleaned = re.sub(r"(?i)CLP|\$|\s", "", raw.strip())
+    cleaned = re.sub(r"(?i)CLP|USD|\$|\s", "", raw.strip())
     if "," in cleaned:  # comma is the decimal separator
         cleaned = cleaned.replace(".", "").replace(",", ".")
     else:  # dots are thousands separators
@@ -179,10 +212,16 @@ def parse_clp(raw: Optional[str]) -> Optional[int]:
     if not re.search(r"\d", cleaned):
         return None
     try:
-        return int(round(float(cleaned)))  # float() carries a leading "-"
+        return float(cleaned)  # float() carries a leading "-"
     except ValueError:
-        logger.warning("Could not parse CLP amount: %r", raw)
+        logger.warning("Could not parse amount: %r", raw)
         return None
+
+
+def parse_clp(raw: Optional[str]) -> Optional[int]:
+    """Parse a Chilean-formatted CLP amount into whole pesos (rounds decimals)."""
+    value = parse_amount(raw)
+    return int(round(value)) if value is not None else None
 
 
 def _sum_clp_rows(text: str, pattern: "re.Pattern[str]") -> Optional[int]:
@@ -231,6 +270,85 @@ def _balance_from_text(text: Optional[str]) -> Optional[int]:
     return balances_by_kind(text).get("checking")
 
 
+def card_saldos_from_text(text: Optional[str]) -> dict[str, dict[str, float]]:
+    """Read a card's available cupo + total límite per currency off the detail page.
+
+    Returns e.g. ``{"CLP": {"available": 3550000.0, "limit": 4000000.0},
+    "USD": {"available": 2345.67, "limit": 2400.0}}`` — a currency appears only
+    when its *available* (Disponible) figure parses; ``limit`` is attached when
+    its cupo does too. Returns ``{}`` when nothing parses.
+    """
+    if not text:
+        return {}
+
+    intl = _CARD_INTERNACIONAL_RE.search(text)
+    clp_section = text[: intl.start()] if intl else text
+    usd_section = text[intl.start() :] if intl else ""
+
+    result: dict[str, dict[str, float]] = {}
+    for currency, section, cupo_re, disponible_re in (
+        ("CLP", clp_section, _CLP_CUPO_RE, _CLP_DISPONIBLE_RE),
+        ("USD", usd_section, _USD_CUPO_RE, _USD_DISPONIBLE_RE),
+    ):
+        if not section:
+            continue
+        disponible = disponible_re.search(section)
+        if disponible is None:
+            continue
+        available = parse_amount(disponible.group(1))
+        if available is None:
+            continue
+        entry: dict[str, float] = {"available": available}
+        cupo = cupo_re.search(section)
+        if cupo is not None:
+            limit = parse_amount(cupo.group(1))
+            if limit is not None:
+                entry["limit"] = limit
+        result[currency] = entry
+    return result
+
+
+def _usd_checking_from_text(text: Optional[str]) -> Optional[float]:
+    """Sum every USD "Cuenta Corriente … Disponible USD …" on the dashboard.
+
+    Returns None when there's no USD cuenta corriente (the common case). Kept
+    fractional — a USD balance carries cents.
+    """
+    if not text:
+        return None
+    total = 0.0
+    found = False
+    for raw in _USD_CHECKING_RE.findall(text):
+        value = parse_amount(raw)
+        if value is not None:
+            total += value
+            found = True
+    return total if found else None
+
+
+def linea_saldo_from_text(text: Optional[str]) -> Optional[dict[str, float]]:
+    """Read a línea de crédito's available + authorized cupo off its detail page.
+
+    Returns ``{"available": 100000.0, "limit": 100000.0}`` (``limit`` only when
+    "Monto autorizado" parses), or None when the "Saldo disponible" isn't found.
+    """
+    if not text:
+        return None
+    disponible = _LINEA_DISPONIBLE_RE.search(text)
+    if disponible is None:
+        return None
+    available = parse_amount(disponible.group(1))
+    if available is None:
+        return None
+    entry: dict[str, float] = {"available": available}
+    autorizado = _LINEA_AUTORIZADO_RE.search(text)
+    if autorizado is not None:
+        limit = parse_amount(autorizado.group(1))
+        if limit is not None:
+            entry["limit"] = limit
+    return entry
+
+
 # Guarded: right after the post-login redirect `document.body` can still be
 # null, and the balances load via a later XHR — so this must not throw.
 _INNER_TEXT_JS = "() => (document.body && document.body.innerText) || ''"
@@ -250,22 +368,17 @@ def _read_checking(page) -> Optional[int]:
     return _balance_from_text(text)
 
 
-def balances_from_page(page) -> list[ScrapedBalance]:
-    """Read every scrapable BdC balance off an already-authenticated page.
+def dashboard_balances_from_text(text: Optional[str]) -> list[ScrapedBalance]:
+    """Shape the "Mis Productos" dashboard text into ScrapedBalances.
 
-    This is the seam the tests mock: it only reads `page`'s visible text (via
-    ``page.evaluate``) and shapes the result, so it can be exercised with a fake
-    page and no real bank. Returns an empty list when nothing is found. Every
-    balance is CLP (USD products are skipped — see the module scope note).
+    Emits the CLP checking / credit-card cupo / depósito / fondos figures (in
+    stable source order) plus the USD cuenta corriente when present. The card's
+    *total* cupo/límite and the línea live on their own detail pages, read
+    separately (see `card_balances_from_text` / `linea_balances_from_text`).
     """
-    try:
-        text = page.evaluate(_INNER_TEXT_JS)
-    except Exception:
-        logger.exception("BanChile: could not read page text")
-        return []
-
     by_kind = balances_by_kind(text)
-    if not by_kind:
+    usd_checking = _usd_checking_from_text(text)
+    if not by_kind and usd_checking is None:
         logger.warning("BanChile: no balances found on page")
         return []
 
@@ -283,7 +396,107 @@ def balances_from_page(page) -> list[ScrapedBalance]:
                     currency="CLP",
                 )
             )
+    if usd_checking is not None:
+        logger.info("BanChile checking balance: USD %s", f"{usd_checking:,.2f}")
+        balances.append(
+            ScrapedBalance(
+                institution="banchile",
+                product_kind="checking",
+                balance=usd_checking,
+                as_of=date.today(),
+                currency="USD",
+            )
+        )
     return balances
+
+
+def balances_from_page(page) -> list[ScrapedBalance]:
+    """Read the dashboard balances off an already-authenticated page.
+
+    This is the seam the tests mock: it only reads `page`'s visible text (via
+    ``page.evaluate``) and delegates the shaping to `dashboard_balances_from_text`,
+    so it can be exercised with a fake page and no real bank. Returns [] on error
+    or when nothing is found.
+    """
+    try:
+        text = page.evaluate(_INNER_TEXT_JS)
+    except Exception:
+        logger.exception("BanChile: could not read page text")
+        return []
+    return dashboard_balances_from_text(text)
+
+
+def card_balances_from_text(text: Optional[str]) -> list[ScrapedBalance]:
+    """Card ScrapedBalances (CLP + USD) from the card detail page text.
+
+    Available cupo -> `balance`, total cupo -> `credit_limit` (so net-worth debt
+    = límite − available). Currencies without a límite still emit (debt 0, like a
+    dashboard-only scrape). Returns [] when nothing parses.
+    """
+    balances: list[ScrapedBalance] = []
+    for currency, data in card_saldos_from_text(text).items():
+        limit = data.get("limit")
+        logger.info(
+            "BanChile credit_card balance: %s %s (limit %s)",
+            currency,
+            f"{data['available']:,.2f}",
+            f"{limit:,.2f}" if limit is not None else "—",
+        )
+        balances.append(
+            ScrapedBalance(
+                institution="banchile",
+                product_kind="credit_card",
+                balance=data["available"],
+                as_of=date.today(),
+                currency=currency,
+                credit_limit=limit,
+            )
+        )
+    return balances
+
+
+def linea_balances_from_text(text: Optional[str]) -> list[ScrapedBalance]:
+    """Línea de crédito ScrapedBalance from its detail page text.
+
+    Only emitted when the authorized cupo is present: without it, net worth would
+    treat the *available* balance as the amount owed (issue #30). Returns [] when
+    the cupo or the available figure is missing.
+    """
+    entry = linea_saldo_from_text(text)
+    if entry is None or "limit" not in entry:
+        return []
+    logger.info(
+        "BanChile line_of_credit balance: $%s CLP (limit $%s)",
+        f"{entry['available']:,.0f}",
+        f"{entry['limit']:,.0f}",
+    )
+    return [
+        ScrapedBalance(
+            institution="banchile",
+            product_kind="line_of_credit",
+            balance=entry["available"],
+            as_of=date.today(),
+            currency="CLP",
+            credit_limit=entry["limit"],
+        )
+    ]
+
+
+def _merge_balances(
+    base: list[ScrapedBalance], extra: list[ScrapedBalance]
+) -> list[ScrapedBalance]:
+    """Overlay `extra` onto `base`, keyed by (product_kind, currency).
+
+    A detail-page reading (card cupo, línea) supersedes the dashboard's entry for
+    the same product, so a card gets its `credit_limit` and we never write the
+    same product twice. Order is preserved: surviving base entries, then `extra`.
+    """
+    if not extra:
+        return base
+    replaced = {(b.product_kind, b.currency) for b in extra}
+    merged = [b for b in base if (b.product_kind, b.currency) not in replaced]
+    merged.extend(extra)
+    return merged
 
 
 # --- Browser plumbing ---------------------------------------------------------
@@ -391,6 +604,85 @@ def _wait_for_balances(page, timeout_ms: int) -> list[ScrapedBalance]:
     return balances_from_page(page)  # one canonical build + log
 
 
+# --- Detail-page navigation ---------------------------------------------------
+# The card's total cupo and the línea live on their own SPA (hash) routes, off
+# the "Mis Productos" dashboard. Each read below is *best-effort and non-fatal*:
+# any failure returns [] and leaves the dashboard balances untouched, so a drift
+# in this markup can't cost us the checking/depósito/fondos figures. The card's
+# saldos route carries a per-card token we don't know up front, so it's reached
+# by clicking the card; the línea's route is static, so we drive the SPA to it.
+_LINEA_ROUTE = "#/movimientos/linea/saldos-movimientos/"
+_CARD_LINK_SELECTORS = [
+    'a[href*="tarjeta-credito/consultar/saldos"]',
+    'a[href*="tarjeta-credito"]',
+    'a:has-text("Tarjeta de Crédito")',
+    'a:has-text("Tarjetas de Crédito")',
+]
+_LINEA_LINK_SELECTORS = [
+    'a[href*="linea/saldos-movimientos"]',
+    'a[href*="movimientos/linea"]',
+    'a:has-text("Línea de Crédito")',
+]
+_CARD_READY_RE = re.compile(r"cupo\s+(?:nacional|internacional)", re.I)
+_LINEA_READY_RE = re.compile(r"monto\s+autorizado", re.I)
+
+
+def _wait_for_text(page, ready_re: "re.Pattern[str]", timeout_ms: int) -> Optional[str]:
+    """Poll the page's visible text until `ready_re` matches; return it or None.
+
+    SPA route changes swap content in via XHR, so the target figures aren't there
+    the instant the route changes — poll like `_wait_for_balances` does.
+    """
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        try:
+            text = page.evaluate(_INNER_TEXT_JS)
+        except Exception:
+            text = ""
+        if text and ready_re.search(text):
+            return text
+        page.wait_for_timeout(1000)
+    return None
+
+
+def _read_card_detail(page) -> list[ScrapedBalance]:
+    """Click through to the card detail page and read its cupos (best-effort)."""
+    try:
+        if not _click_first(page, _CARD_LINK_SELECTORS, timeout=6000):
+            logger.info("BanChile: card detail link not found; skipping cupo/límite")
+            return []
+        text = _wait_for_text(page, _CARD_READY_RE, BALANCE_WAIT_TIMEOUT)
+        if text is None:
+            logger.info("BanChile: card detail page did not render; skipping cupo")
+            return []
+        return card_balances_from_text(text)
+    except Exception:
+        logger.exception("BanChile: card detail read failed")
+        return []
+
+
+def _read_linea_detail(page) -> list[ScrapedBalance]:
+    """Open the línea detail route and read its authorized cupo (best-effort)."""
+    try:
+        # Static route: drive the SPA straight to it (a hash change re-routes an
+        # already-loaded Angular app; `page.goto` to a same-document fragment
+        # wouldn't). Fall back to a menu link if the hash change is swallowed.
+        try:
+            page.evaluate("route => { window.location.hash = route; }", _LINEA_ROUTE)
+        except Exception:
+            if not _click_first(page, _LINEA_LINK_SELECTORS, timeout=6000):
+                logger.info("BanChile: línea detail link not found; skipping")
+                return []
+        text = _wait_for_text(page, _LINEA_READY_RE, BALANCE_WAIT_TIMEOUT)
+        if text is None:
+            logger.info("BanChile: línea detail page did not render; skipping")
+            return []
+        return linea_balances_from_text(text)
+    except Exception:
+        logger.exception("BanChile: línea detail read failed")
+        return []
+
+
 def _scrape_sync(rut: str, password: str, headless: bool) -> list[ScrapedBalance]:
     """Synchronous Playwright flow (runs in a worker thread, no event loop)."""
     from playwright.sync_api import sync_playwright  # lazy: keeps tests browser-free
@@ -413,7 +705,13 @@ def _scrape_sync(rut: str, password: str, headless: bool) -> list[ScrapedBalance
             _login(page, rut, password)
             _dismiss_popup(page)
             # Balances render on the post-login dashboard via a later XHR.
-            return _wait_for_balances(page, BALANCE_WAIT_TIMEOUT)
+            balances = _wait_for_balances(page, BALANCE_WAIT_TIMEOUT)
+            # Enrich with the per-product detail pages (card cupo/límite, línea).
+            # Each is non-fatal; a detail reading supersedes the dashboard's entry
+            # for the same product so a card picks up its credit_limit.
+            balances = _merge_balances(balances, _read_card_detail(page))
+            balances = _merge_balances(balances, _read_linea_detail(page))
+            return balances
         finally:
             browser.close()
 
@@ -421,10 +719,12 @@ def _scrape_sync(rut: str, password: str, headless: bool) -> list[ScrapedBalance
 async def fetch_balances(
     rut: str, password: str, *, headless: bool = True
 ) -> list[ScrapedBalance]:
-    """Log into Banco de Chile and return its scraped balances (checking only).
+    """Log into Banco de Chile and return its scraped balances.
 
-    Runs the synchronous Playwright flow in a thread executor so it doesn't
-    block the scheduler's event loop, mirroring backends/fintself.py.
+    Covers the dashboard products (CLP/USD checking, card cupo, depósitos,
+    fondos) plus the card total cupo/límite and the línea read from their detail
+    pages. Runs the synchronous Playwright flow in a thread executor so it
+    doesn't block the scheduler's event loop, mirroring backends/fintself.py.
     """
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _scrape_sync, rut, password, headless)
