@@ -9,6 +9,7 @@ import {
   calcCupoTcMes,
   type BudgetConfig,
 } from "@/lib/budget-engine";
+import { getClpRates, toClp } from "@/lib/rates";
 
 /** GET /api/planning — get the planning table + today status for current month */
 export async function GET(request: NextRequest) {
@@ -87,9 +88,11 @@ export async function GET(request: NextRequest) {
     todayDay
   );
 
-  // Get real balance from scrapers (sum of BanChile checking + credit card balances)
+  // Get real balance from scrapers (sum of BanChile checking + credit card
+  // balances). BdC holds USD products too, so each balance is converted to CLP
+  // from its own currency before summing — the planning drift is a CLP figure.
   const balanceRows = await db
-    .select({ balance: products.currentBalance })
+    .select({ balance: products.currentBalance, currency: products.currency })
     .from(products)
     .innerJoin(accounts, eq(products.accountId, accounts.id))
     .innerJoin(institutions, eq(accounts.institutionId, institutions.id))
@@ -103,7 +106,20 @@ export async function GET(request: NextRequest) {
 
   let realBalance: number | null = null;
   if (balanceRows.length > 0) {
-    realBalance = balanceRows.reduce((sum, r) => sum + Number(r.balance), 0);
+    const rates = await getClpRates();
+    // Sum only the convertible balances; a balance with no known rate is left
+    // out rather than added raw (an omission beats a wrong figure). realBalance
+    // stays null if nothing converts — CLP always does, so this is a safety net.
+    let sum = 0;
+    let converted = false;
+    for (const r of balanceRows) {
+      const clp = toClp(r.currency, Number(r.balance), rates);
+      if (clp != null) {
+        sum += clp;
+        converted = true;
+      }
+    }
+    if (converted) realBalance = sum;
   }
 
   const todayStatus = getTodayStatus(
