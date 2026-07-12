@@ -6,17 +6,20 @@ import { ASSET_KINDS, LIABILITY_KINDS, type ProductKind } from "./db/schema";
 import { toClp, type ClpRates } from "./rates";
 
 /**
- * Amount owed on a product, in its own currency. Credit cards store the
- * *available* cupo (the planning drift formula relies on that), so the debt is
- * `limit − available`; other liabilities store the owed amount directly.
- * Non-liabilities owe nothing.
+ * Amount owed on a product, in its own currency. Revolving credit (cards, and
+ * líneas de crédito scraped with their cupo) stores the *available* amount — the
+ * planning drift formula relies on that — so the debt is `limit − available`.
+ * Other liabilities (loans, mortgages, or a manually-entered línea with no cupo)
+ * store the owed amount directly. Non-liabilities owe nothing.
  */
 export function owedInCurrency(
   kind: ProductKind,
   balance: number,
   creditLimit: number | null
 ): number {
-  if (kind === "credit_card") {
+  // A línea with a known cupo behaves like a card (available + limit); without
+  // one it falls through to the owed-directly branch below (manual entry).
+  if (kind === "credit_card" || (kind === "line_of_credit" && creditLimit != null)) {
     return creditLimit != null ? Math.max(creditLimit - balance, 0) : 0;
   }
   if (LIABILITY_KINDS.includes(kind)) return Math.abs(balance);
