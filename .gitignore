@@ -36,6 +36,7 @@ coverage/
 # Local files
 local/
 .fintual_session.json
+.bci_lider_chrome_profile/
 .agents/*local*
 .claude/
 .gemini/

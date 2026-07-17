@@ -1,5 +1,5 @@
 .PHONY: help install dev build db-up db-down db-migrate db-reset db-shell \
-       scrapers-once scrapers-start scrapers-test fintual-login up down logs clean typecheck lint test \
+       scrapers-once scrapers-start scrapers-test fintual-login bci-lider-login up down logs clean typecheck lint test \
        product-model-generate
 
 # ─── Help ────────────────────────────────────────────────────────────────────
@@ -27,7 +27,7 @@ env: ## Create .env from .env.example
 # Secrets live in the login Keychain as generic passwords named "chanchito.<VAR>".
 # Non-secret config (RUT, emails, hosts) stays in .env.
 
-SECRET_KEYS := BANCHILE_PASSWORD FINTUAL_PASSWORD BUDA_API_KEY BUDA_API_SECRET EMAIL_IMAP_PASSWORD
+SECRET_KEYS := BANCHILE_PASSWORD LIDER_BCI_PASSWORD FINTUAL_PASSWORD BUDA_API_KEY BUDA_API_SECRET EMAIL_IMAP_PASSWORD
 
 secrets-init: ## Store scraper secrets in macOS Keychain (interactive, skips existing)
 	@for k in $(SECRET_KEYS); do \
@@ -124,6 +124,10 @@ scrapers-start: ## Start scrapers on schedule (long-running)
 fintual-login: ## Sign in to Fintual (prompts for the e-mailed 2FA code) and cache the session
 	@. ./scripts/load-secrets.sh && cd apps/scrapers && \
 		../../.venv/bin/python -m scrapers.institutions.fintual
+
+bci-lider-login: ## Sign in to Tarjeta Lider Bci: launches a real Chrome, autofills the login (tick the Cloudflare check if shown), leaves it running for CDP scraping
+	@. ./scripts/load-secrets.sh && cd apps/scrapers && \
+		../../.venv/bin/python -m scrapers.institutions.bci_lider
 
 scrapers-test: ## Test scraper imports and basic functionality
 	cd apps/scrapers && ../../.venv/bin/python -c "from scrapers.institutions import FintualScraper, BudaScraper, BanChileScraper, BciLiderScraper, MachScraper, MercadoPagoScraper, TenpoScraper; from scrapers.backends.email import get_session, fetch_transactions_for_pattern; from scrapers.backends.fintself import run_fintself_scraper; from db.writer import start_scraper_run, finish_scraper_run; print('All scraper imports OK')"

@@ -35,8 +35,8 @@ class ProductScrapeResult:
 class BaseScraper(ABC):
     """Interface that all scrapers must implement.
 
-    `method` = how we scrape (email, fintself, http_api, open_banking)
-    `institution` = what we scrape (mach, banchile, buda, ...)
+    `method` = how we scrape (email, fintself, web, http_api, open_banking)
+    `institution` = what we scrape (mach, banchile, bci_lider, buda, ...)
     Both are stored on each `scraper_runs` row.
     """
 
