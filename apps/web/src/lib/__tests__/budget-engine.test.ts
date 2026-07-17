@@ -14,7 +14,7 @@ import {
   type BudgetConfig,
 } from "../budget-engine";
 
-// Default config matching the Excel "Presupuesto mensual.xlsx"
+// Synthetic default config shared by the planning tests
 const EXCEL_CONFIG: BudgetConfig = {
   variableBudget: 600_000,
   fixedBudget: 1_000_000,
@@ -41,13 +41,13 @@ describe("getDaysInMonth", () => {
 });
 
 describe("calcPresupDiario", () => {
-  it("matches Excel: 600000 / 31 = 19355", () => {
-    // Excel formula: =presup_mensual_var/31
+  it("divides the variable budget across 31 days", () => {
+    // presup_diario = presup_mensual_var / days in month
     expect(calcPresupDiario(600_000, 31)).toBe(19355);
   });
 
   it("adjusts for shorter months", () => {
-    expect(calcPresupDiario(600_000, 30)).toBe(30000);
+    expect(calcPresupDiario(600_000, 30)).toBe(20000);
     expect(calcPresupDiario(600_000, 28)).toBe(21429);
   });
 
@@ -57,13 +57,13 @@ describe("calcPresupDiario", () => {
 });
 
 describe("calcGastoEstimadoMes", () => {
-  it("matches Excel: 600000 + 1000000 = 1600000", () => {
+  it("sums the variable and fixed budgets", () => {
     expect(calcGastoEstimadoMes(600_000, 1_000_000)).toBe(1_600_000);
   });
 });
 
 describe("calcCupoTcMes", () => {
-  it("matches Excel: 2000000 - 0 = 2000000", () => {
+  it("returns the full limit when there are no future debts", () => {
     expect(calcCupoTcMes(2_000_000, 0)).toBe(2_000_000);
   });
 
@@ -73,7 +73,7 @@ describe("calcCupoTcMes", () => {
 });
 
 describe("calcLiquidoMes", () => {
-  it("matches Excel: 2000000 + 0 - 0 = 2000000", () => {
+  it("equals the limit when balance and debts are zero", () => {
     expect(calcLiquidoMes(2_000_000, 0, 0)).toBe(2_000_000);
   });
 
@@ -83,8 +83,8 @@ describe("calcLiquidoMes", () => {
 });
 
 describe("calcAhorroPorMes", () => {
-  it("matches Excel: 1500000 - 1600000 = 1000000", () => {
-    expect(calcAhorroPorMes(1_500_000, 1_600_000)).toBe(1_000_000);
+  it("subtracts estimated spending from the salary", () => {
+    expect(calcAhorroPorMes(1_500_000, 1_100_000)).toBe(400_000);
   });
 
   it("can be negative if spending exceeds salary", () => {
@@ -98,18 +98,18 @@ describe("generatePlanningTable", () => {
     expect(plans).toHaveLength(30);
   });
 
-  it("matches Excel day 1 balance", () => {
-    // Excel: cupo_tc_mes - presup_diario * 1 = 2000000 - 30000*1 = 1980000
+  it("computes the day 1 balance", () => {
+    // cupo_tc_mes - presup_diario * 1 = 2000000 - 20000*1 = 1980000
     const plans = generatePlanningTable(EXCEL_CONFIG, 30, [], 0, 1);
-    const presupDiario = calcPresupDiario(600_000, 30); // 30000
+    const presupDiario = calcPresupDiario(600_000, 30); // 20000
     expect(plans[0].expectedTcBalance).toBe(2_000_000 - presupDiario * 1);
     expect(plans[0].expectedCcBalance).toBe(0);
     expect(plans[0].expectedTotal).toBe(2_000_000 - presupDiario);
   });
 
-  it("matches Excel day 12 for April (30 days)", () => {
+  it("computes day 12 for a 30-day month", () => {
     const plans = generatePlanningTable(EXCEL_CONFIG, 30, [], 0, 12);
-    const presupDiario = calcPresupDiario(600_000, 30); // 30000
+    const presupDiario = calcPresupDiario(600_000, 30); // 20000
     const day12 = plans[11]; // index 11 = day 12
     expect(day12.day).toBe(12);
     expect(day12.expectedTcBalance).toBe(2_000_000 - presupDiario * 12);
@@ -189,7 +189,7 @@ describe("getTodayStatus", () => {
     const status = getTodayStatus(
       EXCEL_CONFIG, 30, [], 0, 12, null, 300_000
     );
-    expect(status.budgetRemainingMonth).toBe(600_000); // 600000 - 300000
+    expect(status.budgetRemainingMonth).toBe(300_000); // 600000 - 300000
     expect(status.daysRemaining).toBe(18); // 30 - 12
   });
 });
@@ -205,11 +205,11 @@ describe("calcWealthMetrics", () => {
     expect(metrics.monthlyRate).toBeNull();
   });
 
-  it("matches Excel historial row Mar 2026", () => {
-    // Excel: ahorro=19200000, period_savings=1000000, months=2, rate=500000
+  it("computes savings across a two-month gap", () => {
+    // ahorro=19200000, period_savings=1000000, months=2, rate=500000
     const metrics = calcWealthMetrics(
       { patrimonio: 20_000_000, deuda: 800_000, date: new Date(2026, 2, 1) },
-      { patrimonio: 19_000_000, deuda: 700_000, date: new Date(2026, 0, 1) }
+      { patrimonio: 19_000_000, deuda: 800_000, date: new Date(2026, 0, 1) }
     );
     expect(metrics.ahorro).toBe(19_200_000);
     expect(metrics.periodSavings).toBe(1_000_000);
@@ -221,11 +221,11 @@ describe("calcWealthMetrics", () => {
     // Use explicit dates to avoid UTC timezone issues
     const metrics = calcWealthMetrics(
       { patrimonio: 10_000_000, deuda: 0, date: new Date(2026, 2, 15) }, // March 15
-      { patrimonio: 2_000_000, deuda: 0, date: new Date(2026, 2, 1) }   // March 1
+      { patrimonio: 9_800_000, deuda: 0, date: new Date(2026, 2, 1) }   // March 1
     );
     expect(metrics.monthsBetween).toBe(0);
     expect(metrics.monthlyRate).toBeNull();
-    expect(metrics.periodSavings).toBe(500_000);
+    expect(metrics.periodSavings).toBe(200_000);
   });
 
   it("handles negative savings (wealth decrease)", () => {
@@ -233,11 +233,11 @@ describe("calcWealthMetrics", () => {
       { patrimonio: 2_400_000, deuda: 300_000, date: new Date(2023, 8, 1) },
       { patrimonio: 2_500_000, deuda: 250_000, date: new Date(2023, 5, 1) }
     );
-    // Excel: ahorro went from 2250000 to 2100000, period_savings=-150000
+    // ahorro went from 2250000 to 2100000, period_savings=-150000
     expect(metrics.ahorro).toBe(2_100_000);
     expect(metrics.periodSavings).toBe(-150_000);
     expect(metrics.monthsBetween).toBe(3);
-    expect(metrics.monthlyRate).toBe(-50000); // -150000/3 rounded
+    expect(metrics.monthlyRate).toBe(-50_000); // -150000/3
   });
 });
 
@@ -247,12 +247,12 @@ describe("calcPersonalAmount", () => {
   });
 
   it("applies 69% ratio for shared expenses", () => {
-    // Excel: Arriendo 500000 * 0.69 = 345000
+    // Arriendo 500000 * 0.69 = 345000
     expect(calcPersonalAmount(500_000, true, 0.69)).toBe(345_000);
   });
 
   it("applies ratio for utilities", () => {
-    // Excel: Agua 20000 * 0.69 = 13800
+    // Agua 20000 * 0.69 = 13800
     expect(calcPersonalAmount(20_000, true, 0.69)).toBe(13_800);
     // Gas: 50000 * 0.69 = 34500
     expect(calcPersonalAmount(50_000, true, 0.69)).toBe(34_500);
@@ -262,8 +262,8 @@ describe("calcPersonalAmount", () => {
 });
 
 describe("calcIncomeSplit", () => {
-  it("matches Excel porcentaje pagos", () => {
-    // Excel: Sueldo1=1500000 (70.34%), Sueldo2=1000000 (29.66%)
+  it("splits a shared payment by income ratio", () => {
+    // Sueldo 1=1500000 (60%), Sueldo 2=1000000 (40%)
     const result = calcIncomeSplit(
       [
         { name: "Sueldo 1", amount: 1_500_000 },
@@ -274,12 +274,12 @@ describe("calcIncomeSplit", () => {
 
     expect(result).toHaveLength(2);
 
-    // Sueldo 1: 70.34% of 800000 = 480000
-    expect(result[0].ratio).toBeCloseTo(0.7034, 3);
+    // Sueldo 1: 60% of 800000 = 480000
+    expect(result[0].ratio).toBeCloseTo(0.6, 3);
     expect(result[0].share).toBe(480_000);
 
-    // Sueldo 2: 29.66% of 800000 = 320000
-    expect(result[1].ratio).toBeCloseTo(0.2966, 3);
+    // Sueldo 2: 40% of 800000 = 320000
+    expect(result[1].ratio).toBeCloseTo(0.4, 3);
     expect(result[1].share).toBe(320_000);
   });
 

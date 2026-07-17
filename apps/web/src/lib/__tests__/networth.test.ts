@@ -99,7 +99,7 @@ describe("assetClp / debtClp with currency conversion", () => {
   });
 
   it("a USD credit card's debt converts to CLP", () => {
-    // limit − available = 2400 − 2345.67 = 261.09 USD -> * 900 CLP.
+    // limit − available = 2.400 − 2.345,67 = 54,33 USD -> * 900 CLP.
     expect(
       debtClp(
         "credit_card",
@@ -108,7 +108,7 @@ describe("assetClp / debtClp with currency conversion", () => {
         "USD",
         rates
       )
-    ).toBeCloseTo(261.09 * 900, 2);
+    ).toBeCloseTo(54.33 * 900, 2);
   });
 
   it("a credit card is never an asset", () => {

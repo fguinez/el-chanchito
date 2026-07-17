@@ -246,9 +246,9 @@ class TestBalanceFromText:
         assert _balance_from_text(None) is None
 
 
-# Synthetic "Resumen de Inversión" page. The STRUCTURE mirrors the real page —
+# Synthetic "Resumen de Inversión" page. The STRUCTURE mirrors the real page:
 # SALDO TOTAL broken into "En activos financieros" (fondos mutuos) and "En
-# depósitos y ahorros" (depósitos a plazo) — with figures from a live read:
+# depósitos y ahorros" (depósitos a plazo). Every figure is fabricated:
 # fondos = 1.000.000, depósitos = 2.000.000 (SALDO TOTAL 3.000.000).
 INVERSION_RESUMEN = """Resumen de Inversión
 
@@ -551,10 +551,10 @@ class TestMergeBalances:
 
     def test_detail_supersedes_dashboard_for_same_product(self):
         base = [self._card("CLP", 999999)]
-        extra = [self._card("CLP", 3550000.0, 4000000.0)]
+        extra = [self._card("CLP", 3600000.0, 4000000.0)]
         merged = _merge_balances(base, extra)
         assert len(merged) == 1
-        assert merged[0].metrics.available == 3550000.0
+        assert merged[0].metrics.available == 3600000.0
         assert merged[0].metrics.limit == 4000000.0
 
     def test_keeps_distinct_products_and_appends(self):
@@ -563,8 +563,8 @@ class TestMergeBalances:
             self._card("CLP", 999999),
         ]
         extra = [
-            self._card("CLP", 3550000.0, 4000000.0),
-            self._card("USD", 2345.67, 2400.0),
+            self._card("CLP", 3600000.0, 4000000.0),
+            self._card("USD", 1950.0, 2000.0),
         ]
         merged = _merge_balances(base, extra)
         assert [(b.kind, b.currency) for b in merged] == [
