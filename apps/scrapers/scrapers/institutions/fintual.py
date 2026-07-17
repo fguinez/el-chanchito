@@ -155,10 +155,19 @@ class FintualScraper(BaseScraper):
             # external_ref, so each goal keeps its own balance history.
             products: list[ScrapedProduct] = []
             total_nav = 0
+            skipped = 0
 
             for goal in resp.json().get("data", []):
+                goal_id = goal.get("id")
+                if goal_id is None:
+                    # Without an id there is no stable external_ref; skip the
+                    # entry rather than abort the run.
+                    skipped += 1
+                    continue
+
                 attrs = goal.get("attributes", {})
-                nav = int(round(float(attrs.get("nav", 0))))
+                # A brand-new goal can report `"nav": null`; value it at 0.
+                nav = int(round(float(attrs.get("nav") or 0)))
                 total_nav += nav
 
                 # deposited/profit ride along when the payload reports them.
@@ -170,7 +179,7 @@ class FintualScraper(BaseScraper):
                         institution="fintual",
                         kind="investment",
                         currency="CLP",
-                        external_ref=str(goal["id"]),
+                        external_ref=str(goal_id),
                         name=attrs.get("name", "Unknown"),
                         metrics=InvestmentMetrics(
                             nav=nav,
@@ -181,6 +190,9 @@ class FintualScraper(BaseScraper):
                         ),
                     )
                 )
+
+            if skipped:
+                logger.warning("Fintual: skipped %d goal(s) without an id", skipped)
 
             logger.info(
                 "Fintual: %d goals, total nav $%s CLP",

@@ -123,8 +123,9 @@ export async function GET() {
       patrimonio += assetClp(p.kind, p.balance, p.currency, rates) ?? 0;
       deuda += debtClp(p.kind, p.balance, p.metrics, p.currency, rates) ?? 0;
       // These component columns are CLP-denominated products (informational).
+      // Fintual emits one product per goal, so its column sums across them.
       if (p.slug === "fintual" && p.kind === "investment")
-        fintualBalance = p.balance;
+        fintualBalance = (fintualBalance ?? 0) + p.balance;
       if (p.slug === "mercadopago" && p.kind === "wallet")
         mercadopagoBalance = p.balance;
       if (p.slug === "banchile" && p.kind === "savings")

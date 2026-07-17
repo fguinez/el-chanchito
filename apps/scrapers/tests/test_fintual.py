@@ -102,6 +102,31 @@ class TestScrapeProducts:
         assert product.metrics.deposited is None
         assert product.metrics.profit is None
 
+    def test_null_nav_emits_zero(self, monkeypatch):
+        """An explicit `"nav": null` emits the goal valued at 0, not an error."""
+        goals = [_goal("901", name="Fresh Goal", nav=None)]
+
+        products = self._scrape(monkeypatch, goals)
+
+        assert len(products) == 1
+        product = products[0]
+        assert product.external_ref == "901"
+        assert product.metrics.nav == 0
+
+    def test_goal_without_id_is_skipped(self, monkeypatch):
+        """Entries with a missing or null id are skipped; other goals still emit."""
+        goals = [
+            {"type": "goal", "attributes": {"name": "No Id", "nav": 5000.0}},
+            _goal(None, name="Null Id", nav=7000.0),
+            _goal("34567", name="Risky Norris", nav=12345678.33),
+        ]
+
+        products = self._scrape(monkeypatch, goals)
+
+        assert len(products) == 1
+        assert products[0].external_ref == "34567"
+        assert products[0].metrics.nav == 12345678
+
     def test_empty_goals_list(self, monkeypatch):
         """No goals means no products, not an error."""
         assert self._scrape(monkeypatch, []) == []
