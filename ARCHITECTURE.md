@@ -295,18 +295,25 @@ XHR). Because transactions and products are independent legs in `run_scraper`,
 a fintself timeout never blocks the products leg (and a product-scrape crash
 is swallowed into a run warning, never raised).
 
-Four surfaces feed BanChile's typed products: the dashboard (CLP + USD
+Five surfaces feed BanChile's typed products: the dashboard (CLP + USD
 `checking` — the card row there is a static placeholder, so it's skipped), the
 card detail page (CLP "Nacional" + USD "Internacional" `credit_card` metrics:
 `available`/`limit`/`owed` from Disponible / Cupo total / Utilizado, plus the
 masked `last4` attribute), the línea detail page (`line_of_credit` metrics from
-Monto autorizado / Saldo disponible / Monto utilizado), and the inversiones
-resumen (`term_deposit` + `investment` totals). Every figure is anchored on a
-literal `$`/`USD` label, so a missing/changed layout records nothing rather
-than a wrong number. The portal intermittently serves slow pages, so each
-surface is read with bounded retries (three attempts with escalating render
-budgets, pausing and recovering to the portal home in between); a surface that
-still yields nothing becomes a run warning instead of a silent gap.
+Monto autorizado / Saldo disponible / Monto utilizado), the depósitos a plazo
+listing (one `term_deposit` per deposit, identity and figures read from each
+card's "VER DETALLE" aside), and the fondos mutuos listing (one `investment`
+per fund from the cards, with the "Acerca del fondo" aside enriching the
+variation percentages best-effort). Every figure is anchored on a literal
+`$`/`USD` label, so a missing/changed layout records nothing rather than a
+wrong number. The portal intermittently serves slow pages, so each surface is
+read with bounded retries (three attempts with escalating render budgets,
+pausing and recovering to the portal home in between); a surface that still
+yields nothing becomes a run warning instead of a silent gap. If per-holding
+parsing stays unusable on the final attempt, the depósitos/fondos surfaces
+fall back to a single summed roll-up per kind (the listing header total),
+shaped like the products issue #36 retired; the DB writer keeps the roll-up
+and per-holding representations mutually exclusive so neither double-counts.
 
 **Balance conventions & net worth** are registry-driven: each kind's `role`
 (asset/liability/none) and `balance_convention` (value/available/owed/units)
