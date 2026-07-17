@@ -1,5 +1,6 @@
 .PHONY: help install dev build db-up db-down db-migrate db-reset db-shell \
-       scrapers-once scrapers-start scrapers-test fintual-login up down logs clean typecheck lint test
+       scrapers-once scrapers-start scrapers-test fintual-login up down logs clean typecheck lint test \
+       product-model-generate
 
 # ─── Help ────────────────────────────────────────────────────────────────────
 
@@ -12,7 +13,10 @@ help: ## Show this help
 install: ## Install all dependencies (Node + Python + Playwright browser)
 	pnpm install
 	python3 -m venv .venv
-	.venv/bin/pip install -r apps/scrapers/requirements.txt
+	# pip resolves the `-e ../../packages/product-model` line relative to its
+	# working directory, so install from apps/scrapers (the Dockerfile does the
+	# same via WORKDIR).
+	cd apps/scrapers && ../../.venv/bin/pip install -r requirements.txt
 	.venv/bin/playwright install chromium
 
 env: ## Create .env from .env.example
@@ -96,6 +100,12 @@ test-ts: ## Run TypeScript tests only
 
 test-py: ## Run Python tests only
 	cd apps/scrapers && ../../.venv/bin/python -m pytest tests/ -v
+	cd packages/product-model && ../../.venv/bin/python -m pytest tests/ -v
+
+# ─── Product model ───────────────────────────────────────────────────────────
+
+product-model-generate: ## Regenerate product-model artifacts (TS + JSON Schema + PRODUCTS.md)
+	.venv/bin/python packages/product-model/scripts/generate.py
 
 # ─── Scrapers ────────────────────────────────────────────────────────────────
 

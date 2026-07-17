@@ -13,6 +13,7 @@ out/
 dist/
 __pycache__/
 *.pyc
+*.egg-info/
 
 # IDE
 .idea/

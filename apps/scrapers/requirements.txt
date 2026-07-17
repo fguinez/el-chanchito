@@ -9,3 +9,9 @@ httpx>=0.27,<1
 # "chromium" full-binary channel banchile_web relies on needs Playwright >= 1.49.
 fintself>=1.5,<2
 playwright>=1.49,<2
+pydantic>=2.7,<3
+# Shared per-kind product payloads + ingest envelopes. Editable so scraper
+# imports track the workspace package. pip resolves this path relative to its
+# working directory, so run the install from apps/scrapers (make install and
+# the Dockerfile both do).
+-e ../../packages/product-model

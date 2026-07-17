@@ -1,0 +1,6 @@
+{
+  "name": "@chanchito/product-model",
+  "private": true,
+  "main": "./generated/index.ts",
+  "types": "./generated/index.ts"
+}

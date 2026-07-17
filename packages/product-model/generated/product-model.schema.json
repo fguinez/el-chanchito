@@ -1,0 +1,1587 @@
+{
+  "$defs": {
+    "CheckingAttributes": {
+      "additionalProperties": false,
+      "description": "Identity fields for a checking account (cuenta corriente).",
+      "properties": {
+        "account_number": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Account number as shown by the institution.",
+          "title": "Account Number"
+        },
+        "kind": {
+          "const": "checking",
+          "default": "checking",
+          "description": "Payload discriminator; always \"checking\".",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "title": "CheckingAttributes",
+      "type": "object"
+    },
+    "CheckingMetrics": {
+      "additionalProperties": false,
+      "description": "Observation for a checking account; headline is `balance`.",
+      "properties": {
+        "accounting_balance": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Accounting balance in account currency (Saldo contable).",
+          "title": "Accounting Balance"
+        },
+        "balance": {
+          "description": "Available balance in account currency (Saldo disponible).",
+          "title": "Balance",
+          "type": "number"
+        },
+        "kind": {
+          "const": "checking",
+          "default": "checking",
+          "description": "Payload discriminator; always \"checking\".",
+          "title": "Kind",
+          "type": "string"
+        },
+        "reported_as_of": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Date the institution printed next to the balance.",
+          "title": "Reported As Of"
+        }
+      },
+      "required": [
+        "balance"
+      ],
+      "title": "CheckingMetrics",
+      "type": "object"
+    },
+    "CreditCardAttributes": {
+      "additionalProperties": false,
+      "description": "Identity/config fields for a credit card.",
+      "properties": {
+        "brand": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Card network or product brand (e.g. 'Visa Signature').",
+          "title": "Brand"
+        },
+        "due_day": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Day of month the payment is due (vencimiento).",
+          "title": "Due Day"
+        },
+        "kind": {
+          "const": "credit_card",
+          "default": "credit_card",
+          "description": "Payload discriminator; always \"credit_card\".",
+          "title": "Kind",
+          "type": "string"
+        },
+        "last4": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Last four digits of the card number (from the masked '****0000').",
+          "title": "Last4"
+        },
+        "statement_day": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Day of month the statement closes (facturación).",
+          "title": "Statement Day"
+        }
+      },
+      "title": "CreditCardAttributes",
+      "type": "object"
+    },
+    "CreditCardMetrics": {
+      "additionalProperties": false,
+      "description": "Observation for a credit card; headline is `available`.",
+      "properties": {
+        "available": {
+          "description": "Available credit in product currency (Disponible).",
+          "title": "Available",
+          "type": "number"
+        },
+        "kind": {
+          "const": "credit_card",
+          "default": "credit_card",
+          "description": "Payload discriminator; always \"credit_card\".",
+          "title": "Kind",
+          "type": "string"
+        },
+        "limit": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Total credit limit in product currency (Cupo total).",
+          "title": "Limit"
+        },
+        "owed": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Amount drawn as reported by the bank (Utilizado / Monto utilizado).",
+          "title": "Owed"
+        },
+        "reported_as_of": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Date the institution printed next to the card figures.",
+          "title": "Reported As Of"
+        }
+      },
+      "required": [
+        "available"
+      ],
+      "title": "CreditCardMetrics",
+      "type": "object"
+    },
+    "CryptoAttributes": {
+      "additionalProperties": false,
+      "description": "Identity fields for a crypto holding.",
+      "properties": {
+        "kind": {
+          "const": "crypto",
+          "default": "crypto",
+          "description": "Payload discriminator; always \"crypto\".",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "title": "CryptoAttributes",
+      "type": "object"
+    },
+    "CryptoMetrics": {
+      "additionalProperties": false,
+      "description": "Observation for a crypto holding; headline is `units`.",
+      "properties": {
+        "frozen": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Units locked in open orders.",
+          "title": "Frozen"
+        },
+        "kind": {
+          "const": "crypto",
+          "default": "crypto",
+          "description": "Payload discriminator; always \"crypto\".",
+          "title": "Kind",
+          "type": "string"
+        },
+        "pending": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Units pending confirmation.",
+          "title": "Pending"
+        },
+        "units": {
+          "description": "Coin units held (fractional).",
+          "title": "Units",
+          "type": "number"
+        }
+      },
+      "required": [
+        "units"
+      ],
+      "title": "CryptoMetrics",
+      "type": "object"
+    },
+    "DebitCardAttributes": {
+      "additionalProperties": false,
+      "description": "Identity fields for a debit card; money lives in the parent checking.",
+      "properties": {
+        "brand": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Card network or product brand (e.g. 'Visa Signature').",
+          "title": "Brand"
+        },
+        "kind": {
+          "const": "debit_card",
+          "default": "debit_card",
+          "description": "Payload discriminator; always \"debit_card\".",
+          "title": "Kind",
+          "type": "string"
+        },
+        "last4": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Last four digits of the card number (from the masked '****0000').",
+          "title": "Last4"
+        }
+      },
+      "title": "DebitCardAttributes",
+      "type": "object"
+    },
+    "DebitCardMetrics": {
+      "additionalProperties": false,
+      "description": "Observation for a debit card; empty — money lives in the parent checking.",
+      "properties": {
+        "kind": {
+          "const": "debit_card",
+          "default": "debit_card",
+          "description": "Payload discriminator; always \"debit_card\".",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "title": "DebitCardMetrics",
+      "type": "object"
+    },
+    "InvestmentAttributes": {
+      "additionalProperties": false,
+      "description": "Identity fields for an investment position (fund, goal, portfolio).",
+      "properties": {
+        "fund_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Fund name for single-fund products (e.g. a fondo mutuo).",
+          "title": "Fund Name"
+        },
+        "kind": {
+          "const": "investment",
+          "default": "investment",
+          "description": "Payload discriminator; always \"investment\".",
+          "title": "Kind",
+          "type": "string"
+        },
+        "portfolio": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Portfolio the money is invested in (e.g. 'Risky Norris').",
+          "title": "Portfolio"
+        },
+        "risk_profile": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Risk profile label (e.g. 'Arriesgado').",
+          "title": "Risk Profile"
+        }
+      },
+      "title": "InvestmentAttributes",
+      "type": "object"
+    },
+    "InvestmentMetrics": {
+      "additionalProperties": false,
+      "description": "Observation for an investment position; headline is `nav`.",
+      "properties": {
+        "deposited": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Total amount deposited to date.",
+          "title": "Deposited"
+        },
+        "kind": {
+          "const": "investment",
+          "default": "investment",
+          "description": "Payload discriminator; always \"investment\".",
+          "title": "Kind",
+          "type": "string"
+        },
+        "nav": {
+          "description": "Current market value of the position (net asset value).",
+          "title": "Nav",
+          "type": "number"
+        },
+        "profit": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Cumulative profit as reported (nav minus deposited).",
+          "title": "Profit"
+        },
+        "var_30d_pct": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "30-day variation as a percent number (Var. 30 días).",
+          "title": "Var 30D Pct"
+        },
+        "var_daily_pct": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Daily variation as a percent number (Var. diaria).",
+          "title": "Var Daily Pct"
+        },
+        "var_ytd_pct": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Year-to-date variation as a percent number (Var. año).",
+          "title": "Var Ytd Pct"
+        }
+      },
+      "required": [
+        "nav"
+      ],
+      "title": "InvestmentMetrics",
+      "type": "object"
+    },
+    "LineOfCreditAttributes": {
+      "additionalProperties": false,
+      "description": "Config fields for a line of credit (línea de crédito).",
+      "properties": {
+        "interest_rate_pct": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Annual interest rate as a percent number.",
+          "title": "Interest Rate Pct"
+        },
+        "kind": {
+          "const": "line_of_credit",
+          "default": "line_of_credit",
+          "description": "Payload discriminator; always \"line_of_credit\".",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "title": "LineOfCreditAttributes",
+      "type": "object"
+    },
+    "LineOfCreditMetrics": {
+      "additionalProperties": false,
+      "description": "Observation for a line of credit; headline is `available`.",
+      "properties": {
+        "available": {
+          "description": "Available credit in product currency (Disponible).",
+          "title": "Available",
+          "type": "number"
+        },
+        "kind": {
+          "const": "line_of_credit",
+          "default": "line_of_credit",
+          "description": "Payload discriminator; always \"line_of_credit\".",
+          "title": "Kind",
+          "type": "string"
+        },
+        "limit": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Total credit limit in product currency (Cupo total).",
+          "title": "Limit"
+        },
+        "owed": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Amount drawn as reported by the bank (Utilizado / Monto utilizado).",
+          "title": "Owed"
+        }
+      },
+      "required": [
+        "available"
+      ],
+      "title": "LineOfCreditMetrics",
+      "type": "object"
+    },
+    "LoanAttributes": {
+      "additionalProperties": false,
+      "description": "Config fields for a consumer loan (préstamo).",
+      "properties": {
+        "due_day": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Day of month each installment is due.",
+          "title": "Due Day"
+        },
+        "installments_total": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Total number of installments (cuotas).",
+          "title": "Installments Total"
+        },
+        "interest_rate_pct": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Annual interest rate as a percent number (e.g. 18.9).",
+          "title": "Interest Rate Pct"
+        },
+        "kind": {
+          "const": "loan",
+          "default": "loan",
+          "description": "Payload discriminator; always \"loan\".",
+          "title": "Kind",
+          "type": "string"
+        },
+        "opened_date": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Date the loan was granted.",
+          "title": "Opened Date"
+        },
+        "original_principal": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Original loan principal in CLP.",
+          "title": "Original Principal"
+        }
+      },
+      "title": "LoanAttributes",
+      "type": "object"
+    },
+    "LoanMetrics": {
+      "additionalProperties": false,
+      "description": "Observation for a consumer loan; headline is `owed`.",
+      "properties": {
+        "installments_paid": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Number of installments already paid.",
+          "title": "Installments Paid"
+        },
+        "kind": {
+          "const": "loan",
+          "default": "loan",
+          "description": "Payload discriminator; always \"loan\".",
+          "title": "Kind",
+          "type": "string"
+        },
+        "next_payment_amount": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Amount of the next installment in CLP.",
+          "title": "Next Payment Amount"
+        },
+        "next_payment_date": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Due date of the next installment.",
+          "title": "Next Payment Date"
+        },
+        "owed": {
+          "description": "Outstanding amount owed in CLP.",
+          "title": "Owed",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "owed"
+      ],
+      "title": "LoanMetrics",
+      "type": "object"
+    },
+    "MortgageAttributes": {
+      "additionalProperties": false,
+      "description": "Config fields for a mortgage (crédito hipotecario).",
+      "properties": {
+        "due_day": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Day of month each installment is due.",
+          "title": "Due Day"
+        },
+        "installments_total": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Total number of installments (cuotas).",
+          "title": "Installments Total"
+        },
+        "interest_rate_pct": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Annual interest rate as a percent number (e.g. 18.9).",
+          "title": "Interest Rate Pct"
+        },
+        "kind": {
+          "const": "mortgage",
+          "default": "mortgage",
+          "description": "Payload discriminator; always \"mortgage\".",
+          "title": "Kind",
+          "type": "string"
+        },
+        "opened_date": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Date the loan was granted.",
+          "title": "Opened Date"
+        },
+        "original_principal": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Original loan principal in CLP.",
+          "title": "Original Principal"
+        }
+      },
+      "title": "MortgageAttributes",
+      "type": "object"
+    },
+    "MortgageMetrics": {
+      "additionalProperties": false,
+      "description": "Observation for a mortgage; headline is `owed`.",
+      "properties": {
+        "installments_paid": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Number of installments already paid.",
+          "title": "Installments Paid"
+        },
+        "kind": {
+          "const": "mortgage",
+          "default": "mortgage",
+          "description": "Payload discriminator; always \"mortgage\".",
+          "title": "Kind",
+          "type": "string"
+        },
+        "next_payment_amount": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Amount of the next installment in CLP.",
+          "title": "Next Payment Amount"
+        },
+        "next_payment_date": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Due date of the next installment.",
+          "title": "Next Payment Date"
+        },
+        "owed": {
+          "description": "Outstanding amount owed in CLP.",
+          "title": "Owed",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "owed"
+      ],
+      "title": "MortgageMetrics",
+      "type": "object"
+    },
+    "OtherAttributes": {
+      "additionalProperties": false,
+      "description": "Identity fields for products that fit no other kind.",
+      "properties": {
+        "kind": {
+          "const": "other",
+          "default": "other",
+          "description": "Payload discriminator; always \"other\".",
+          "title": "Kind",
+          "type": "string"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Free-form note describing the product.",
+          "title": "Note"
+        }
+      },
+      "title": "OtherAttributes",
+      "type": "object"
+    },
+    "OtherMetrics": {
+      "additionalProperties": false,
+      "description": "Observation for an uncategorized product; headline is `balance` if known.",
+      "properties": {
+        "balance": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Balance in CLP when known.",
+          "title": "Balance"
+        },
+        "kind": {
+          "const": "other",
+          "default": "other",
+          "description": "Payload discriminator; always \"other\".",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "title": "OtherMetrics",
+      "type": "object"
+    },
+    "PrepaidCardAttributes": {
+      "additionalProperties": false,
+      "description": "Identity fields for a prepaid card.",
+      "properties": {
+        "brand": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Card network or product brand (e.g. 'Visa Signature').",
+          "title": "Brand"
+        },
+        "kind": {
+          "const": "prepaid_card",
+          "default": "prepaid_card",
+          "description": "Payload discriminator; always \"prepaid_card\".",
+          "title": "Kind",
+          "type": "string"
+        },
+        "last4": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Last four digits of the card number (from the masked '****0000').",
+          "title": "Last4"
+        }
+      },
+      "title": "PrepaidCardAttributes",
+      "type": "object"
+    },
+    "PrepaidCardMetrics": {
+      "additionalProperties": false,
+      "description": "Observation for a prepaid card; headline is `balance`.",
+      "properties": {
+        "balance": {
+          "description": "Prepaid balance in CLP.",
+          "title": "Balance",
+          "type": "integer"
+        },
+        "kind": {
+          "const": "prepaid_card",
+          "default": "prepaid_card",
+          "description": "Payload discriminator; always \"prepaid_card\".",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "balance"
+      ],
+      "title": "PrepaidCardMetrics",
+      "type": "object"
+    },
+    "SavingsAttributes": {
+      "additionalProperties": false,
+      "description": "Identity fields for a savings account (cuenta de ahorro).",
+      "properties": {
+        "account_number": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Account number as shown by the institution.",
+          "title": "Account Number"
+        },
+        "kind": {
+          "const": "savings",
+          "default": "savings",
+          "description": "Payload discriminator; always \"savings\".",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "title": "SavingsAttributes",
+      "type": "object"
+    },
+    "SavingsMetrics": {
+      "additionalProperties": false,
+      "description": "Observation for a savings account; headline is `balance`.",
+      "properties": {
+        "accounting_balance": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Accounting balance in account currency (Saldo contable).",
+          "title": "Accounting Balance"
+        },
+        "balance": {
+          "description": "Available balance in account currency (Saldo disponible).",
+          "title": "Balance",
+          "type": "number"
+        },
+        "kind": {
+          "const": "savings",
+          "default": "savings",
+          "description": "Payload discriminator; always \"savings\".",
+          "title": "Kind",
+          "type": "string"
+        },
+        "reported_as_of": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Date the institution printed next to the balance.",
+          "title": "Reported As Of"
+        }
+      },
+      "required": [
+        "balance"
+      ],
+      "title": "SavingsMetrics",
+      "type": "object"
+    },
+    "ScrapedProduct": {
+      "additionalProperties": false,
+      "description": "One scraped observation of a product.",
+      "properties": {
+        "attributes": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "checking": "#/$defs/CheckingAttributes",
+                  "credit_card": "#/$defs/CreditCardAttributes",
+                  "crypto": "#/$defs/CryptoAttributes",
+                  "debit_card": "#/$defs/DebitCardAttributes",
+                  "investment": "#/$defs/InvestmentAttributes",
+                  "line_of_credit": "#/$defs/LineOfCreditAttributes",
+                  "loan": "#/$defs/LoanAttributes",
+                  "mortgage": "#/$defs/MortgageAttributes",
+                  "other": "#/$defs/OtherAttributes",
+                  "prepaid_card": "#/$defs/PrepaidCardAttributes",
+                  "savings": "#/$defs/SavingsAttributes",
+                  "term_deposit": "#/$defs/TermDepositAttributes",
+                  "vista": "#/$defs/VistaAttributes",
+                  "wallet": "#/$defs/WalletAttributes"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/CheckingAttributes"
+                },
+                {
+                  "$ref": "#/$defs/SavingsAttributes"
+                },
+                {
+                  "$ref": "#/$defs/VistaAttributes"
+                },
+                {
+                  "$ref": "#/$defs/WalletAttributes"
+                },
+                {
+                  "$ref": "#/$defs/TermDepositAttributes"
+                },
+                {
+                  "$ref": "#/$defs/CreditCardAttributes"
+                },
+                {
+                  "$ref": "#/$defs/DebitCardAttributes"
+                },
+                {
+                  "$ref": "#/$defs/PrepaidCardAttributes"
+                },
+                {
+                  "$ref": "#/$defs/LineOfCreditAttributes"
+                },
+                {
+                  "$ref": "#/$defs/LoanAttributes"
+                },
+                {
+                  "$ref": "#/$defs/MortgageAttributes"
+                },
+                {
+                  "$ref": "#/$defs/InvestmentAttributes"
+                },
+                {
+                  "$ref": "#/$defs/CryptoAttributes"
+                },
+                {
+                  "$ref": "#/$defs/OtherAttributes"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Slow-changing identity/config payload; shallow-merged on write.",
+          "title": "Attributes"
+        },
+        "currency": {
+          "default": "CLP",
+          "description": "ISO currency code of the product (e.g. 'CLP', 'USD').",
+          "title": "Currency",
+          "type": "string"
+        },
+        "external_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Stable per-institution identifier (e.g. a Fintual goal id); None for singleton products.",
+          "title": "External Ref"
+        },
+        "institution": {
+          "description": "Institution slug, e.g. 'banchile', 'fintual'.",
+          "title": "Institution",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Product kind; selects the attributes/metrics payload family.",
+          "enum": [
+            "checking",
+            "savings",
+            "vista",
+            "wallet",
+            "term_deposit",
+            "credit_card",
+            "debit_card",
+            "prepaid_card",
+            "line_of_credit",
+            "loan",
+            "mortgage",
+            "investment",
+            "crypto",
+            "other"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "metrics": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "checking": "#/$defs/CheckingMetrics",
+                  "credit_card": "#/$defs/CreditCardMetrics",
+                  "crypto": "#/$defs/CryptoMetrics",
+                  "debit_card": "#/$defs/DebitCardMetrics",
+                  "investment": "#/$defs/InvestmentMetrics",
+                  "line_of_credit": "#/$defs/LineOfCreditMetrics",
+                  "loan": "#/$defs/LoanMetrics",
+                  "mortgage": "#/$defs/MortgageMetrics",
+                  "other": "#/$defs/OtherMetrics",
+                  "prepaid_card": "#/$defs/PrepaidCardMetrics",
+                  "savings": "#/$defs/SavingsMetrics",
+                  "term_deposit": "#/$defs/TermDepositMetrics",
+                  "vista": "#/$defs/VistaMetrics",
+                  "wallet": "#/$defs/WalletMetrics"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/CheckingMetrics"
+                },
+                {
+                  "$ref": "#/$defs/SavingsMetrics"
+                },
+                {
+                  "$ref": "#/$defs/VistaMetrics"
+                },
+                {
+                  "$ref": "#/$defs/WalletMetrics"
+                },
+                {
+                  "$ref": "#/$defs/TermDepositMetrics"
+                },
+                {
+                  "$ref": "#/$defs/CreditCardMetrics"
+                },
+                {
+                  "$ref": "#/$defs/DebitCardMetrics"
+                },
+                {
+                  "$ref": "#/$defs/PrepaidCardMetrics"
+                },
+                {
+                  "$ref": "#/$defs/LineOfCreditMetrics"
+                },
+                {
+                  "$ref": "#/$defs/LoanMetrics"
+                },
+                {
+                  "$ref": "#/$defs/MortgageMetrics"
+                },
+                {
+                  "$ref": "#/$defs/InvestmentMetrics"
+                },
+                {
+                  "$ref": "#/$defs/CryptoMetrics"
+                },
+                {
+                  "$ref": "#/$defs/OtherMetrics"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-scrape observation payload; snapshotted by the writer.",
+          "title": "Metrics"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Display name used only when creating the product; never overwrites user renames.",
+          "title": "Name"
+        }
+      },
+      "required": [
+        "institution",
+        "kind"
+      ],
+      "title": "ScrapedProduct",
+      "type": "object"
+    },
+    "ScrapedTransaction": {
+      "additionalProperties": false,
+      "description": "A transaction extracted by a scraper.",
+      "properties": {
+        "amount": {
+          "description": "Amount in CLP; negative=expense, positive=income.",
+          "title": "Amount",
+          "type": "integer"
+        },
+        "category_hint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Scraper's best-guess category.",
+          "title": "Category Hint"
+        },
+        "currency": {
+          "default": "CLP",
+          "description": "ISO currency code (default 'CLP').",
+          "title": "Currency",
+          "type": "string"
+        },
+        "description": {
+          "description": "Human-readable transaction description.",
+          "title": "Description",
+          "type": "string"
+        },
+        "external_id": {
+          "description": "Unique identifier for dedup.",
+          "title": "External Id",
+          "type": "string"
+        },
+        "institution": {
+          "description": "Institution slug, e.g. 'banchile', 'fintual'.",
+          "title": "Institution",
+          "type": "string"
+        },
+        "product_kind": {
+          "description": "Kind of the product the transaction belongs to, e.g. 'checking'.",
+          "title": "Product Kind",
+          "type": "string"
+        },
+        "scheduled_month": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "First-of-month date the charge lands, for deferred/installment purchases.",
+          "title": "Scheduled Month"
+        },
+        "transaction_date": {
+          "description": "Date the transaction occurred.",
+          "format": "date",
+          "title": "Transaction Date",
+          "type": "string"
+        }
+      },
+      "required": [
+        "institution",
+        "product_kind",
+        "description",
+        "amount",
+        "transaction_date",
+        "external_id"
+      ],
+      "title": "ScrapedTransaction",
+      "type": "object"
+    },
+    "TermDepositAttributes": {
+      "additionalProperties": false,
+      "description": "Config fields for a term deposit (depósito a plazo).",
+      "properties": {
+        "deposit_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Deposit modality (e.g. 'Renovable', 'Plazo fijo').",
+          "title": "Deposit Type"
+        },
+        "interest_rate_pct": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Agreed period rate as a percent number (Tasa período).",
+          "title": "Interest Rate Pct"
+        },
+        "issue_date": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Date the deposit was taken out (Fecha inicio).",
+          "title": "Issue Date"
+        },
+        "kind": {
+          "const": "term_deposit",
+          "default": "term_deposit",
+          "description": "Payload discriminator; always \"term_deposit\".",
+          "title": "Kind",
+          "type": "string"
+        },
+        "maturity_date": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Date the deposit matures (Fecha vencimiento).",
+          "title": "Maturity Date"
+        },
+        "maturity_value": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Amount payable at maturity in CLP (Monto al vencimiento).",
+          "title": "Maturity Value"
+        },
+        "principal": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Invested principal in CLP (Monto invertido).",
+          "title": "Principal"
+        },
+        "term_days": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Term length in days.",
+          "title": "Term Days"
+        }
+      },
+      "title": "TermDepositAttributes",
+      "type": "object"
+    },
+    "TermDepositMetrics": {
+      "additionalProperties": false,
+      "description": "Observation for a term deposit; headline is `balance`.",
+      "properties": {
+        "balance": {
+          "description": "Current value of the deposit in CLP.",
+          "title": "Balance",
+          "type": "integer"
+        },
+        "kind": {
+          "const": "term_deposit",
+          "default": "term_deposit",
+          "description": "Payload discriminator; always \"term_deposit\".",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "balance"
+      ],
+      "title": "TermDepositMetrics",
+      "type": "object"
+    },
+    "VistaAttributes": {
+      "additionalProperties": false,
+      "description": "Identity fields for a vista account (cuenta vista).",
+      "properties": {
+        "account_number": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Account number as shown by the institution.",
+          "title": "Account Number"
+        },
+        "kind": {
+          "const": "vista",
+          "default": "vista",
+          "description": "Payload discriminator; always \"vista\".",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "title": "VistaAttributes",
+      "type": "object"
+    },
+    "VistaMetrics": {
+      "additionalProperties": false,
+      "description": "Observation for a vista account; headline is `balance`.",
+      "properties": {
+        "accounting_balance": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Accounting balance in account currency (Saldo contable).",
+          "title": "Accounting Balance"
+        },
+        "balance": {
+          "description": "Available balance in account currency (Saldo disponible).",
+          "title": "Balance",
+          "type": "number"
+        },
+        "kind": {
+          "const": "vista",
+          "default": "vista",
+          "description": "Payload discriminator; always \"vista\".",
+          "title": "Kind",
+          "type": "string"
+        },
+        "reported_as_of": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Date the institution printed next to the balance.",
+          "title": "Reported As Of"
+        }
+      },
+      "required": [
+        "balance"
+      ],
+      "title": "VistaMetrics",
+      "type": "object"
+    },
+    "WalletAttributes": {
+      "additionalProperties": false,
+      "description": "Identity fields for an app wallet (MACH, Tenpo, Mercado Pago).",
+      "properties": {
+        "kind": {
+          "const": "wallet",
+          "default": "wallet",
+          "description": "Payload discriminator; always \"wallet\".",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "title": "WalletAttributes",
+      "type": "object"
+    },
+    "WalletMetrics": {
+      "additionalProperties": false,
+      "description": "Observation for an app wallet; headline is `balance`.",
+      "properties": {
+        "balance": {
+          "description": "Wallet balance in CLP.",
+          "title": "Balance",
+          "type": "integer"
+        },
+        "kind": {
+          "const": "wallet",
+          "default": "wallet",
+          "description": "Payload discriminator; always \"wallet\".",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "balance"
+      ],
+      "title": "WalletMetrics",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Ingest contract for scraped products and transactions; ScrapedProduct and ScrapedTransaction are the envelope models.",
+  "title": "chanchito product model"
+}
