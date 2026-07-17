@@ -942,7 +942,13 @@ def build_depositos_products(
         and len(asides) == len(cards)
         and all_complete
     )
-    if strict or (final and complete and all_complete):
+    # The final attempt relaxes the header's Cantidad cross-check, but per-holding
+    # products still have to cover EVERY card: a subset would drop deposits whose
+    # aside never rendered, and (once the writer retires the roll-up) silently
+    # undercount net worth. Partial coverage falls through to the roll-up, which
+    # preserves the exact total.
+    covers_all = bool(cards) and len(complete) == len(cards) and all_complete
+    if strict or (final and covers_all):
         products = [_deposito_product(aside) for aside in complete]
         for product in products:
             logger.info(

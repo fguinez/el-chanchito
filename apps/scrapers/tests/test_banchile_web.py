@@ -1170,14 +1170,28 @@ class TestBuildDepositosProducts:
         asides[1]["monto_inicial"] = None
         assert build_depositos_products(DEPOSITOS_LISTADO, asides, 0) == []
 
-    def test_final_attempt_emits_partial_complete_holdings(self):
-        # Final attempt relaxes the count checks: two complete asides (of three
-        # cards) still become two products.
+    def test_final_attempt_partial_coverage_falls_back_to_rollup(self):
+        # Two complete asides for three cards is partial coverage: emitting the
+        # subset would drop deposit #3 and (once the writer retires the roll-up)
+        # undercount net worth, so the final attempt falls back to the roll-up
+        # that preserves the exact total.
         products = build_depositos_products(DEPOSITOS_LISTADO, _deposito_asides()[:2], 2)
+        assert [(p.kind, p.external_ref, p.name, p.metrics.balance) for p in products] == [
+            ("term_deposit", None, None, 4499999)
+        ]
+
+    def test_final_attempt_full_coverage_without_cantidad_emits_per_holding(self):
+        # The relaxation the final attempt DOES allow: Cantidad didn't parse,
+        # but every card got a complete unique aside, so per-holding still wins.
+        listado = DEPOSITOS_LISTADO.replace("Cantidad\n\n3", "Cantidad\n\n-")
+        products = build_depositos_products(listado, _deposito_asides(), 2)
         assert [p.external_ref for p in products] == [
             "00000000000000001",
             "00000000000000002",
+            "00000000000000003",
         ]
+        # A missing Cantidad still forces a retry on a non-final attempt.
+        assert build_depositos_products(listado, _deposito_asides(), 0) == []
 
     def test_final_attempt_incomplete_aside_falls_back_to_rollup(self):
         # An aside without its Monto Inicial is money we can't attribute: the
@@ -1724,8 +1738,9 @@ class TestSurfaceRetries:
         assert page.goto.call_count == 2
         assert [c.args[0] for c in page.wait_for_timeout.call_args_list] == [2000, 4000]
 
-    def test_broken_aside_click_degrades_to_partial_holdings(self, monkeypatch):
-        """A VER DETALLE whose click opens nothing costs only that holding."""
+    def test_broken_aside_click_falls_back_to_rollup(self, monkeypatch):
+        """A VER DETALLE whose click opens nothing: rather than drop that deposit
+        and undercount, the surface falls back to the summed roll-up."""
         page = _fake_portal_page()
         # Button 1 exists (wait_for passes) but its click opens no aside.
         page.detail_buttons["depósitos"][1].click.side_effect = None
@@ -1737,9 +1752,8 @@ class TestSurfaceRetries:
 
         assert result.failed_surfaces == ()
         deposits = [b for b in result.products if b.kind == "term_deposit"]
-        # Final attempt emits the two complete holdings (see the builder's
-        # degradation ladder); the broken one is dropped, never guessed.
-        assert [b.external_ref for b in deposits] == [
-            "00000000000000001",
-            "00000000000000003",
+        # Partial coverage (deposit #2's aside never opens) can't be attributed,
+        # so the final attempt emits the roll-up total, not a lossy subset.
+        assert [(b.external_ref, b.metrics.balance) for b in deposits] == [
+            (None, 4499999)
         ]
