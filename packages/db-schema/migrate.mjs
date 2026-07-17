@@ -1,6 +1,7 @@
 import postgres from "postgres";
 import { readdir, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const sql = postgres(
   process.env.DATABASE_URL || "postgres://finance:finance@localhost:5432/finance"
@@ -16,7 +17,9 @@ async function migrate() {
     )
   `;
 
-  const migrationsDir = join(import.meta.dirname, "migrations");
+  // import.meta.dirname needs Node >=20.11; derive it from the module URL so the
+  // runner also works on Node 18 (the version on many machines' bare PATH).
+  const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "migrations");
   const files = (await readdir(migrationsDir))
     .filter((f) => f.endsWith(".sql"))
     .sort();
