@@ -1,4 +1,4 @@
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, isNull } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   users,
@@ -9,14 +9,20 @@ import {
 } from "./schema";
 
 /**
- * Resolve (or create) the product for an institution slug + kind + currency,
- * walking the chain institution -> account -> product. Single-user deployment:
- * everything attaches to the oldest user.
+ * Resolve (or create) the product for an institution slug + kind + currency
+ * (+ optional external_ref), walking the chain institution -> account ->
+ * product. Single-user deployment: everything attaches to the oldest user.
+ *
+ * Note: the products identity is the `uq_products_identity` expression index
+ * (COALESCE(external_ref, '')), which Drizzle can't target in an onConflict —
+ * so this keeps the select-then-insert flow. The scraper writer is the only
+ * concurrent products writer in practice, and it does upsert atomically.
  */
 export async function resolveProductId(
   institutionSlug: string,
   kind: ProductKind,
-  currency = "CLP"
+  currency = "CLP",
+  externalRef: string | null = null
 ): Promise<string> {
   let [institution] = await db
     .select()
@@ -64,7 +70,10 @@ export async function resolveProductId(
       and(
         eq(products.accountId, account.id),
         eq(products.kind, kind),
-        eq(products.currency, currency)
+        eq(products.currency, currency),
+        externalRef == null
+          ? isNull(products.externalRef)
+          : eq(products.externalRef, externalRef)
       )
     )
     .limit(1);
@@ -75,6 +84,7 @@ export async function resolveProductId(
         accountId: account.id,
         kind,
         currency,
+        externalRef,
         name: `${institution.name} - ${kind}`,
       })
       .returning();

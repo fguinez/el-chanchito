@@ -10,6 +10,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@chanchito/product-model':
+        specifier: workspace:*
+        version: link:../../packages/product-model
       class-variance-authority:
         specifier: ^0.7.1
         version: 0.7.1
@@ -80,6 +83,8 @@ importers:
       postgres:
         specifier: ^3.4.5
         version: 3.4.9
+
+  packages/product-model: {}
 
 packages:
 

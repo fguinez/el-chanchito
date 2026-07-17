@@ -19,13 +19,14 @@ import asyncio
 import json
 import logging
 import os
-from datetime import date
 from pathlib import Path
 from typing import Callable
 
 import httpx
 
-from scrapers.base import BaseScraper, ScrapedBalance, ScrapedTransaction
+from product_model import InvestmentMetrics
+
+from scrapers.base import BaseScraper, ScrapedProduct, ScrapedTransaction
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +135,7 @@ class FintualScraper(BaseScraper):
         # Fintual doesn't expose individual buy/sell transactions via API.
         return []
 
-    async def scrape_balances(self) -> list[ScrapedBalance]:
+    async def scrape_products(self) -> list[ScrapedProduct]:
         async with httpx.AsyncClient(
             timeout=30.0, follow_redirects=True, headers=self._base_headers()
         ) as client:
@@ -150,7 +151,9 @@ class FintualScraper(BaseScraper):
                 )
             resp.raise_for_status()
 
-            balances: list[ScrapedBalance] = []
+            # One summed product for now; per-goal products (external_ref =
+            # goal id, nav/deposited/profit metrics) are the planned next step.
+            products: list[ScrapedProduct] = []
             total_nav = 0
 
             for goal in resp.json().get("data", []):
@@ -168,16 +171,15 @@ class FintualScraper(BaseScraper):
                     )
 
             if total_nav > 0:
-                balances.append(
-                    ScrapedBalance(
+                products.append(
+                    ScrapedProduct(
                         institution="fintual",
-                        product_kind="investment",
-                        balance=total_nav,
-                        as_of=date.today(),
+                        kind="investment",
+                        metrics=InvestmentMetrics(nav=total_nav),
                     )
                 )
 
-            return balances
+            return products
 
 
 def _login_cli() -> None:

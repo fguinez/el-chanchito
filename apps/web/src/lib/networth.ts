@@ -2,27 +2,47 @@
 // product contributes to patrimonio and deuda — and, crucially, convert to CLP
 // before summing (mixing native crypto units into a CLP total was a real bug).
 
-import { ASSET_KINDS, LIABILITY_KINDS, type ProductKind } from "./db/schema";
+import {
+  KIND_INFO,
+  type ProductKind,
+  type ProductMetrics,
+} from "./db/schema";
 import { toClp, type ClpRates } from "./rates";
 
 /**
- * Amount owed on a product, in its own currency. Revolving credit (cards, and
- * líneas de crédito scraped with their cupo) stores the *available* amount — the
- * planning drift formula relies on that — so the debt is `limit − available`.
- * Other liabilities (loans, mortgages, or a manually-entered línea with no cupo)
- * store the owed amount directly. Non-liabilities owe nothing.
+ * Amount owed on a product, in its own currency, derived from its kind's role
+ * in the registry plus its latest (or per-snapshot) metrics:
+ *   1. not a liability -> 0
+ *   2. reported owed (the bank's Utilizado) when present
+ *   3. else limit − available when the same observation carries both
+ *   4. else abs(balance) only when the kind's convention stores the owed amount
+ *   5. else 0 — a card with no metrics contributes no debt (never guess)
+ *
+ * Metrics come from JSONB, so every field is runtime-checked with typeof
+ * (the `in` guards double as type narrowing over the discriminated union).
  */
 export function owedInCurrency(
   kind: ProductKind,
   balance: number,
-  creditLimit: number | null
+  metrics: ProductMetrics | null
 ): number {
-  // A línea with a known cupo behaves like a card (available + limit); without
-  // one it falls through to the owed-directly branch below (manual entry).
-  if (kind === "credit_card" || (kind === "line_of_credit" && creditLimit != null)) {
-    return creditLimit != null ? Math.max(creditLimit - balance, 0) : 0;
+  if (KIND_INFO[kind].role !== "liability") return 0;
+
+  if (metrics && "owed" in metrics && typeof metrics.owed === "number") {
+    return Math.max(metrics.owed, 0);
   }
-  if (LIABILITY_KINDS.includes(kind)) return Math.abs(balance);
+
+  if (
+    metrics &&
+    "limit" in metrics &&
+    typeof metrics.limit === "number" &&
+    "available" in metrics &&
+    typeof metrics.available === "number"
+  ) {
+    return Math.max(metrics.limit - metrics.available, 0);
+  }
+
+  if (KIND_INFO[kind].balanceConvention === "owed") return Math.abs(balance);
   return 0;
 }
 
@@ -34,7 +54,7 @@ export function assetClp(
   currency: string,
   rates: ClpRates
 ): number | null {
-  if (!ASSET_KINDS.includes(kind)) return 0;
+  if (KIND_INFO[kind].role !== "asset") return 0;
   return toClp(currency, balance, rates);
 }
 
@@ -44,11 +64,11 @@ export function assetClp(
 export function debtClp(
   kind: ProductKind,
   balance: number,
-  creditLimit: number | null,
+  metrics: ProductMetrics | null,
   currency: string,
   rates: ClpRates
 ): number | null {
-  const owed = owedInCurrency(kind, balance, creditLimit);
+  const owed = owedInCurrency(kind, balance, metrics);
   if (owed === 0) return 0;
   return toClp(currency, owed, rates);
 }

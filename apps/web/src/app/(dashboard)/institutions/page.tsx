@@ -32,9 +32,9 @@ interface Product {
   currentBalance: number | null;
   currentBalanceClp: number | null;
   balanceAsOf: string | null;
-  creditLimit: number | null;
   externalRef: string | null;
-  details: Record<string, unknown>;
+  attributes: Record<string, unknown>;
+  metrics: Record<string, unknown> | null;
   isActive: boolean;
 }
 
@@ -187,10 +187,16 @@ function displayProductName(product: Product, institutionName: string): string {
   return cleaned;
 }
 
-/** Human-readable detail chips pulled from the product's details JSONB + account. */
+/** The product's credit limit (cupo) as observed in its latest metrics. */
+function productLimit(product: Product): number | null {
+  const limit = product.metrics?.limit;
+  return typeof limit === "number" ? limit : null;
+}
+
+/** Human-readable detail chips pulled from the product's attributes + account. */
 function productDetailChips(product: Product): string[] {
   const chips: string[] = [];
-  const d = product.details ?? {};
+  const d = product.attributes ?? {};
 
   if (product.accountName && product.accountName !== "Personal") {
     chips.push(product.accountName);
@@ -493,6 +499,7 @@ export default function InstitutionsPage() {
                       product.currency,
                       product.currentBalance
                     );
+                    const cupo = productLimit(product);
                     const isLiability = LIABILITY_KINDS.has(product.kind);
                     return (
                       <TableRow
@@ -536,9 +543,7 @@ export default function InstitutionsPage() {
                             )}
                         </TableCell>
                         <TableCell className="text-right tabular-nums text-muted-foreground">
-                          {product.creditLimit != null
-                            ? formatCLP(product.creditLimit)
-                            : "—"}
+                          {cupo != null ? formatCLP(cupo) : "—"}
                         </TableCell>
                         <TableCell className="text-right text-sm text-muted-foreground">
                           {product.balanceAsOf

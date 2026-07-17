@@ -3,10 +3,11 @@ import { db } from "@/lib/db";
 import {
   wealthSnapshots,
   products,
-  productBalances,
+  productSnapshots,
   accounts,
   institutions,
   type ProductKind,
+  type ProductMetrics,
 } from "@/lib/db/schema";
 import { eq, asc } from "drizzle-orm";
 import { calcWealthMetrics } from "@/lib/budget-engine";
@@ -25,13 +26,22 @@ interface WealthPoint {
   source: "manual" | "computed";
 }
 
+/** A snapshot's typed metrics, or null for rows that predate them (`{}`). */
+function snapshotMetrics(
+  metrics: ProductMetrics | Record<string, never>
+): ProductMetrics | null {
+  return "kind" in metrics ? (metrics as ProductMetrics) : null;
+}
+
 /**
  * GET /api/wealth — wealth series with derived metrics.
  *
  * Pre-migration dates come from legacy `wealth_snapshots` totals (which may
  * include components that never became products). Later dates are computed
- * from `product_balances`, carrying each product's latest balance forward
- * per date: patrimonio = Σ asset value, deuda = Σ owed, both in CLP.
+ * from `product_snapshots`, carrying each product's latest observation forward
+ * per date: patrimonio = Σ asset value, deuda = Σ owed, both in CLP. Debt
+ * derives from each snapshot's *own* metrics (the limit/owed as observed on
+ * that date), not from today's product row.
  *
  * Foreign/crypto balances are converted to CLP with current Buda tickers (see
  * lib/networth). Note: only *current* rates are available, so historical
@@ -48,19 +58,19 @@ export async function GET() {
 
   const balanceRows = await db
     .select({
-      productId: productBalances.productId,
-      balance: productBalances.balance,
-      asOf: productBalances.asOf,
+      productId: productSnapshots.productId,
+      balance: productSnapshots.balance,
+      metrics: productSnapshots.metrics,
+      asOf: productSnapshots.asOf,
       kind: products.kind,
-      creditLimit: products.creditLimit,
       currency: products.currency,
       slug: institutions.slug,
     })
-    .from(productBalances)
-    .innerJoin(products, eq(productBalances.productId, products.id))
+    .from(productSnapshots)
+    .innerJoin(products, eq(productSnapshots.productId, products.id))
     .innerJoin(accounts, eq(products.accountId, accounts.id))
     .innerJoin(institutions, eq(accounts.institutionId, institutions.id))
-    .orderBy(asc(productBalances.asOf));
+    .orderBy(asc(productSnapshots.asOf));
 
   // Legacy totals are authoritative up to their last date; the backfilled
   // history rows on those dates only cover 3 components and would undercount.
@@ -80,8 +90,8 @@ export async function GET() {
     string,
     {
       balance: number;
+      metrics: ProductMetrics | null;
       kind: ProductKind;
-      creditLimit: number | null;
       currency: string;
       slug: string;
     }
@@ -94,8 +104,8 @@ export async function GET() {
     for (const row of rows) {
       latestByProduct.set(row.productId, {
         balance: Number(row.balance),
+        metrics: snapshotMetrics(row.metrics),
         kind: row.kind,
-        creditLimit: row.creditLimit,
         currency: row.currency,
         slug: row.slug,
       });
@@ -111,7 +121,7 @@ export async function GET() {
 
     for (const p of latestByProduct.values()) {
       patrimonio += assetClp(p.kind, p.balance, p.currency, rates) ?? 0;
-      deuda += debtClp(p.kind, p.balance, p.creditLimit, p.currency, rates) ?? 0;
+      deuda += debtClp(p.kind, p.balance, p.metrics, p.currency, rates) ?? 0;
       // These component columns are CLP-denominated products (informational).
       if (p.slug === "fintual" && p.kind === "investment")
         fintualBalance = p.balance;

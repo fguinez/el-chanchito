@@ -1,39 +1,16 @@
-"""Abstract base class for all scrapers."""
+"""Abstract base class for all scrapers.
+
+The scraped-data contract (the `ScrapedProduct` / `ScrapedTransaction`
+envelopes) lives in the shared `product_model` package — the same pydantic
+models that will validate the future REST ingest API — and is re-exported
+here so scrapers keep a single import point.
+"""
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from datetime import date
-from typing import Optional
 
+from product_model import ScrapedProduct, ScrapedTransaction
 
-@dataclass
-class ScrapedTransaction:
-    """A transaction extracted by a scraper."""
-
-    institution: str  # institution slug, e.g. 'banchile', 'fintual'
-    product_kind: str  # e.g. 'checking', 'credit_card', 'wallet', 'crypto'
-    description: str
-    amount: int  # CLP, negative=expense, positive=income
-    transaction_date: date
-    external_id: str  # unique identifier for dedup
-    currency: str = "CLP"
-    category_hint: Optional[str] = None  # scraper's best guess
-    scheduled_month: Optional[date] = None
-
-
-@dataclass
-class ScrapedBalance:
-    """A balance snapshot from a scraper."""
-
-    institution: str
-    product_kind: str
-    balance: float  # in units of `currency` (fractional for crypto)
-    as_of: date
-    currency: str = "CLP"
-    # Total revolving credit for cards / lines of credit, in `currency`. When set,
-    # `balance` holds the *available* cupo and net worth derives debt as
-    # `credit_limit − balance` (see lib/networth.ts). None leaves the limit as-is.
-    credit_limit: Optional[float] = None
+__all__ = ["BaseScraper", "ScrapedProduct", "ScrapedTransaction"]
 
 
 class BaseScraper(ABC):
@@ -65,6 +42,6 @@ class BaseScraper(ABC):
         ...
 
     @abstractmethod
-    async def scrape_balances(self) -> list[ScrapedBalance]:
-        """Fetch current product balances."""
+    async def scrape_products(self) -> list[ScrapedProduct]:
+        """Fetch current products as typed observations (attributes/metrics)."""
         ...

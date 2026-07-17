@@ -1,12 +1,15 @@
 """Write scraped data to the database."""
 
+import json
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 
+from psycopg.types.json import Jsonb
+
 from db.connection import get_pool
-from scrapers.base import ScrapedTransaction, ScrapedBalance
+from scrapers.base import ScrapedProduct, ScrapedTransaction
 
 logger = logging.getLogger(__name__)
 
@@ -56,13 +59,50 @@ def finish_scraper_run(
         )
 
 
-def _resolve_product_id(
-    conn, institution_slug: str, kind: str, currency: str = "CLP"
+# --- Pure helpers (no DB) ------------------------------------------------------
+
+# Distinct from any canonical JSON string, so None (no metrics recorded yet /
+# none scraped) never compares equal to a real payload — not even to `{}`.
+_NO_METRICS = "\x00none"
+
+
+def _canonical_metrics(metrics: dict | None) -> str:
+    """Canonical form of a metrics payload for change detection.
+
+    Key order must not matter (Postgres jsonb reorders keys), so the dict is
+    serialized sorted and compact. None maps to a sentinel distinct from `{}`.
+    """
+    if metrics is None:
+        return _NO_METRICS
+    return json.dumps(metrics, sort_keys=True, separators=(",", ":"))
+
+
+def _headline_decimal(headline: float | int | None) -> Decimal | None:
+    """Convert a metrics headline to a Decimal for the NUMERIC balance column.
+
+    Via str() so a float like 0.1 keeps its printed value instead of its
+    binary expansion. None (kinds with no headline) passes through.
+    """
+    if headline is None:
+        return None
+    return Decimal(str(headline))
+
+
+def _resolve_product(
+    conn,
+    institution_slug: str,
+    kind: str,
+    currency: str = "CLP",
+    external_ref: str | None = None,
+    name: str | None = None,
 ) -> str:
-    """Get or create the product for (institution, kind, currency).
+    """Get or create the product for (institution, kind, currency, external_ref).
 
     Walks the chain institution -> account -> product, creating missing links.
-    Single-user deployment: everything attaches to the oldest user.
+    Single-user deployment: everything attaches to the oldest user. The product
+    step upserts on the identity index so concurrent writers can't race a
+    SELECT-then-INSERT; `name` is only used for the INSERT values (create-only),
+    so a user rename is never overwritten.
     """
     row = conn.execute(
         "SELECT id, name FROM institutions WHERE slug = %s", (institution_slug,)
@@ -104,33 +144,27 @@ def _resolve_product_id(
             (account_id, user_id, institution_id),
         )
 
+    default_name = f"{institution_name} - {kind}" + (
+        f" ({currency})" if currency != "CLP" else ""
+    )
     product_row = conn.execute(
         """
-        SELECT id FROM products
-        WHERE account_id = %s AND kind = %s AND currency = %s
-        LIMIT 1
-        """,
-        (account_id, kind, currency),
-    ).fetchone()
-    if product_row:
-        return product_row[0]
-
-    product_id = str(uuid4())
-    conn.execute(
-        """
-        INSERT INTO products (id, account_id, name, kind, currency)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO products (id, account_id, name, kind, currency, external_ref)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (account_id, kind, currency, COALESCE(external_ref, ''))
+        DO UPDATE SET updated_at = now()
+        RETURNING id
         """,
         (
-            product_id,
+            str(uuid4()),
             account_id,
-            f"{institution_name} - {kind}"
-            + (f" ({currency})" if currency != "CLP" else ""),
+            name or default_name,
             kind,
             currency,
+            external_ref,
         ),
-    )
-    return product_id
+    ).fetchone()
+    return product_row[0]
 
 
 def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
@@ -143,7 +177,7 @@ def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
 
     with pool.connection() as conn:
         for txn in transactions:
-            product_id = _resolve_product_id(
+            product_id = _resolve_product(
                 conn, txn.institution, txn.product_kind, txn.currency
             )
             try:
@@ -174,67 +208,84 @@ def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
     return inserted
 
 
-def upsert_balance(balance: ScrapedBalance) -> None:
-    """Record a scraped balance.
+def upsert_product(sp: ScrapedProduct) -> None:
+    """Record one scraped product observation.
 
-    Always refreshes products.current_balance/balance_as_of ("last checked"),
-    but appends a product_balances history row only when the value changed —
-    both in the same transaction so the denormalized column can't drift.
+    Attributes shallow-merge into products.attributes (a dashboard-only scrape
+    can't wipe a last4 read earlier from a detail page). Metrics always refresh
+    products.current_balance/metrics/balance_as_of ("last checked"), but append
+    a product_snapshots history row only when the payload changed — both in the
+    same transaction so the denormalized columns can't drift.
     """
-    new_value = Decimal(str(balance.balance))
     pool = get_pool()
     with pool.connection() as conn:
-        product_id = _resolve_product_id(
-            conn, balance.institution, balance.product_kind, balance.currency
+        product_id = _resolve_product(
+            conn,
+            sp.institution,
+            sp.kind,
+            sp.currency,
+            external_ref=sp.external_ref,
+            name=sp.name,
         )
 
+        if sp.attributes is not None:
+            attrs = sp.attributes.model_dump(mode="json", exclude_none=True)
+            conn.execute(
+                "UPDATE products SET attributes = attributes || %s WHERE id = %s",
+                (Jsonb(attrs), product_id),
+            )
+
+        if sp.metrics is None:
+            logger.info(
+                "Product confirmed (no metrics): %s/%s %s",
+                sp.institution,
+                sp.kind,
+                sp.currency,
+            )
+            return
+
+        metrics_dict = sp.metrics.model_dump(mode="json", exclude_none=True)
+        headline = _headline_decimal(sp.metrics.headline())
+
         row = conn.execute(
-            "SELECT current_balance FROM products WHERE id = %s", (product_id,)
+            "SELECT metrics FROM products WHERE id = %s", (product_id,)
         ).fetchone()
-        current = row[0] if row else None
+        current_metrics = row[0] if row else None
 
         now = datetime.now(timezone.utc)
-        changed = current is None or Decimal(current) != new_value
-        if changed:
+        changed = _canonical_metrics(metrics_dict) != _canonical_metrics(
+            current_metrics
+        )
+        # `balance` is NOT NULL: a kind whose headline is None (e.g. debit_card)
+        # gets no history row, only the latest-metrics refresh below.
+        if changed and headline is not None:
             conn.execute(
                 """
-                INSERT INTO product_balances (id, product_id, balance, as_of, source)
-                VALUES (%s, %s, %s, %s, 'scraper')
+                INSERT INTO product_snapshots
+                    (id, product_id, balance, metrics, as_of, source)
+                VALUES (%s, %s, %s, %s, %s, 'scraper')
                 ON CONFLICT (product_id, as_of) DO NOTHING
                 """,
-                (str(uuid4()), product_id, new_value, now),
+                (str(uuid4()), product_id, headline, Jsonb(metrics_dict), now),
             )
 
-        # `credit_limit` (card / línea total cupo) rides on the same row when the
-        # scraper captured it; None leaves any existing limit untouched so a
-        # dashboard-only scrape can't wipe a limit read from the card detail page.
-        if balance.credit_limit is not None:
-            conn.execute(
-                """
-                UPDATE products
-                SET current_balance = %s, credit_limit = %s,
-                    balance_as_of = %s, updated_at = %s
-                WHERE id = %s
-                """,
-                (new_value, int(round(balance.credit_limit)), now, now, product_id),
-            )
-        else:
-            conn.execute(
-                """
-                UPDATE products
-                SET current_balance = %s, balance_as_of = %s, updated_at = %s
-                WHERE id = %s
-                """,
-                (new_value, now, now, product_id),
-            )
+        # balance_as_of moves even when nothing changed — it means "last time a
+        # scraper confirmed this observation".
+        conn.execute(
+            """
+            UPDATE products
+            SET current_balance = %s, metrics = %s, balance_as_of = %s,
+                updated_at = %s
+            WHERE id = %s
+            """,
+            (headline, Jsonb(metrics_dict), now, now, product_id),
+        )
 
         logger.info(
-            "Balance %s: %s/%s = %s %s (as of %s)%s",
+            "Product %s: %s/%s %s = %s",
             "update" if changed else "confirmed",
-            balance.institution,
-            balance.product_kind,
-            f"{balance.balance:,}",
-            balance.currency,
-            balance.as_of,
-            f", limit {balance.credit_limit:,}" if balance.credit_limit is not None else "",
+            sp.institution,
+            sp.kind,
+            sp.currency,
+            metrics_dict,
         )

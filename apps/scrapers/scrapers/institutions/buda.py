@@ -15,7 +15,9 @@ from datetime import date, datetime
 
 import httpx
 
-from scrapers.base import BaseScraper, ScrapedBalance, ScrapedTransaction
+from product_model import CryptoMetrics
+
+from scrapers.base import BaseScraper, ScrapedProduct, ScrapedTransaction
 
 logger = logging.getLogger(__name__)
 
@@ -122,8 +124,8 @@ class BudaScraper(BaseScraper):
 
         return transactions
 
-    async def scrape_balances(self) -> list[ScrapedBalance]:
-        """Fetch all currency balances."""
+    async def scrape_products(self) -> list[ScrapedProduct]:
+        """Fetch all currency balances as crypto products."""
         path = "/api/v2/balances.json"
         headers = self._sign("GET", path)
 
@@ -131,7 +133,7 @@ class BudaScraper(BaseScraper):
             resp = await client.get(f"{BUDA_BASE}{path}", headers=headers)
             resp.raise_for_status()
 
-            balances: list[ScrapedBalance] = []
+            products: list[ScrapedProduct] = []
             for bal in resp.json().get("balances", []):
                 currency_id = bal.get("id", "")
                 available = bal.get("available_amount", ["0"])
@@ -140,15 +142,14 @@ class BudaScraper(BaseScraper):
 
                 if amount > 0:
                     logger.info("Buda balance %s: %s", currency_id, f"{amount:,}")
-                    balances.append(
-                        ScrapedBalance(
+                    products.append(
+                        ScrapedProduct(
                             institution="buda",
-                            product_kind="crypto",
-                            balance=amount,
-                            as_of=date.today(),
+                            kind="crypto",
                             # One product per currency (BTC, CLP, ...)
                             currency=currency_id.upper() or "CLP",
+                            metrics=CryptoMetrics(units=amount),
                         )
                     )
 
-            return balances
+            return products

@@ -21,7 +21,7 @@ from db.connection import close_pool
 from db.writer import (
     finish_scraper_run,
     start_scraper_run,
-    upsert_balance,
+    upsert_product,
     upsert_transactions,
 )
 from scrapers.backends.email import get_session as get_email_session
@@ -46,10 +46,10 @@ logger = logging.getLogger("scraper-service")
 async def run_scraper(scraper: BaseScraper) -> None:
     """Run a single scraper with logging and DB tracking.
 
-    Transactions and balances are scraped as independent legs: a failure in one
+    Transactions and products are scraped as independent legs: a failure in one
     must not stop the other. BanChile in particular scrapes transactions via the
-    (flaky) fintself browser login and balances via its own login, so a fintself
-    timeout must still leave the balance refreshable — and vice versa.
+    (flaky) fintself browser login and products via its own login, so a fintself
+    timeout must still leave the balances refreshable — and vice versa.
     """
     run_id = start_scraper_run(scraper.method, scraper.institution)
     logger.info("Starting scraper: %s (run=%s)", scraper.name, run_id)
@@ -57,7 +57,7 @@ async def run_scraper(scraper: BaseScraper) -> None:
     errors: list[str] = []
     n_tx = 0
     inserted = 0
-    n_bal = 0
+    n_prod = 0
 
     try:
         transactions = await scraper.scrape_transactions()
@@ -68,20 +68,20 @@ async def run_scraper(scraper: BaseScraper) -> None:
         errors.append(f"transactions: {e}")
 
     try:
-        balances = await scraper.scrape_balances()
-        n_bal = len(balances)
-        for balance in balances:
-            upsert_balance(balance)
+        products = await scraper.scrape_products()
+        n_prod = len(products)
+        for sp in products:
+            upsert_product(sp)
     except Exception as e:
-        logger.exception("Scraper %s: balances failed", scraper.name)
-        errors.append(f"balances: {e}")
+        logger.exception("Scraper %s: products failed", scraper.name)
+        errors.append(f"products: {e}")
 
     logger.info(
-        "Scraper %s: %d transactions (%d new), %d balances",
+        "Scraper %s: %d transactions (%d new), %d products",
         scraper.name,
         n_tx,
         inserted,
-        n_bal,
+        n_prod,
     )
     if errors:
         finish_scraper_run(

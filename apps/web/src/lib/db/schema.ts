@@ -3,7 +3,6 @@ import {
   uuid,
   text,
   integer,
-  bigint,
   boolean,
   date,
   timestamp,
@@ -13,6 +12,25 @@ import {
   index,
 } from "drizzle-orm/pg-core";
 import { relations } from "drizzle-orm";
+import type {
+  ProductAttributes,
+  ProductKind,
+  ProductMetrics,
+} from "@chanchito/product-model";
+
+// Kind vocabulary, roles, and labels are generated from the shared registry
+// (packages/product-model); re-exported here so callers keep one import path.
+export {
+  PRODUCT_KINDS,
+  ASSET_KINDS,
+  LIABILITY_KINDS,
+  KIND_INFO,
+} from "@chanchito/product-model";
+export type {
+  ProductAttributes,
+  ProductKind,
+  ProductMetrics,
+} from "@chanchito/product-model";
 
 // ---------------------------------------------------------------------------
 // Core hierarchy: users -> accounts (enrollment at an institution) -> products
@@ -79,62 +97,11 @@ export const accounts = pgTable(
   ]
 );
 
-export const PRODUCT_KINDS = [
-  "checking",
-  "savings",
-  "vista",
-  "wallet",
-  "term_deposit",
-  "credit_card",
-  "debit_card",
-  "prepaid_card",
-  "line_of_credit",
-  "loan",
-  "mortgage",
-  "investment",
-  "crypto",
-  "other",
-] as const;
-
-export type ProductKind = (typeof PRODUCT_KINDS)[number];
-
-// How each kind counts toward net worth: patrimonio = Σ assets − Σ liabilities.
-// debit_card is absent on purpose: its money lives in the parent checking.
-export const ASSET_KINDS: ProductKind[] = [
-  "checking",
-  "savings",
-  "vista",
-  "wallet",
-  "term_deposit",
-  "prepaid_card",
-  "investment",
-  "crypto",
-];
-
-export const LIABILITY_KINDS: ProductKind[] = [
-  "credit_card",
-  "line_of_credit",
-  "loan",
-  "mortgage",
-];
-
-// Kind-specific attributes; promoted to a real column only when queried.
-export type ProductDetails = {
-  brand?: string;
-  last4?: string;
-  statementDay?: number;
-  dueDay?: number;
-  interestRate?: number;
-  portfolio?: string;
-  riskProfile?: string;
-  installments?: number;
-  deposited?: number;
-  profit?: number;
-  role?: "asset" | "liability"; // only meaningful for kind = "other"
-};
-
 // Products: the money-holding elements (schema.org/FinancialProduct).
 // Renamed from the old `accounts` table — rows kept their UUIDs.
+// Per-kind payloads (typed by the shared registry):
+//   attributes -> slow-changing identity/config, shallow-merged on write
+//   metrics    -> latest per-scrape observation; history in product_snapshots
 export const products = pgTable(
   "products",
   {
@@ -149,10 +116,14 @@ export const products = pgTable(
     name: text("name").notNull(),
     currency: text("currency").notNull().default("CLP"),
     externalRef: text("external_ref"),
-    creditLimit: bigint("credit_limit", { mode: "number" }),
-    details: jsonb("details").$type<ProductDetails>().notNull().default({}),
-    // Denormalized latest balance; history lives in product_balances.
-    // balance_as_of also moves when an unchanged balance is re-confirmed.
+    attributes: jsonb("attributes")
+      .$type<ProductAttributes | Record<string, never>>()
+      .notNull()
+      .default({}),
+    metrics: jsonb("metrics").$type<ProductMetrics | null>(),
+    // Denormalized latest headline (metrics.headline()); history lives in
+    // product_snapshots. balance_as_of also moves when an unchanged balance
+    // is re-confirmed.
     currentBalance: numeric("current_balance", { precision: 20, scale: 8 }),
     balanceAsOf: timestamp("balance_as_of", { withTimezone: true }),
     isActive: boolean("is_active").notNull().default(true),
@@ -167,24 +138,30 @@ export const products = pgTable(
   (table) => [index("idx_products_account").on(table.accountId)]
 );
 
-// Product balance history: one row per value change (not one per scrape)
-export const productBalances = pgTable(
-  "product_balances",
+// Product observation history: one row per metrics change (not one per scrape).
+// `balance` is the headline; `metrics` the full typed payload at `as_of`
+// (empty `{}` for rows that predate typed observations).
+export const productSnapshots = pgTable(
+  "product_snapshots",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     productId: uuid("product_id")
       .notNull()
       .references(() => products.id),
     balance: numeric("balance", { precision: 20, scale: 8 }).notNull(),
+    metrics: jsonb("metrics")
+      .$type<ProductMetrics | Record<string, never>>()
+      .notNull()
+      .default({}),
     asOf: timestamp("as_of", { withTimezone: true }).notNull().defaultNow(),
     source: text("source").notNull().default("scraper"),
   },
   (table) => [
-    uniqueIndex("uq_product_balances_product_as_of").on(
+    uniqueIndex("product_snapshots_product_id_as_of_key").on(
       table.productId,
       table.asOf
     ),
-    index("idx_product_balances_product").on(table.productId),
+    index("idx_product_snapshots_product").on(table.productId),
   ]
 );
 
@@ -445,14 +422,14 @@ export const productsRelations = relations(products, ({ one, many }) => ({
     references: [products.id],
   }),
   transactions: many(transactions),
-  balances: many(productBalances),
+  snapshots: many(productSnapshots),
 }));
 
-export const productBalancesRelations = relations(
-  productBalances,
+export const productSnapshotsRelations = relations(
+  productSnapshots,
   ({ one }) => ({
     product: one(products, {
-      fields: [productBalances.productId],
+      fields: [productSnapshots.productId],
       references: [products.id],
     }),
   })

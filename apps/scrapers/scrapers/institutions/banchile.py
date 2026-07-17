@@ -7,7 +7,7 @@ from datetime import date, datetime
 
 from scrapers.backends.banchile_web import fetch_balances
 from scrapers.backends.fintself import run_fintself_scraper
-from scrapers.base import BaseScraper, ScrapedBalance, ScrapedTransaction
+from scrapers.base import BaseScraper, ScrapedProduct, ScrapedTransaction
 
 logger = logging.getLogger(__name__)
 
@@ -79,8 +79,8 @@ class BanChileScraper(BaseScraper):
         )
         return transactions
 
-    async def scrape_balances(self) -> list[ScrapedBalance]:
-        """Scrape BdC balances via our own web session (see `banchile_web.py`).
+    async def scrape_products(self) -> list[ScrapedProduct]:
+        """Scrape BdC products via our own web session (see `banchile_web.py`).
 
         `fintself` (used for transactions) never exposes a balance, so this
         runs a *second*, self-contained Playwright login. It reads CLP/USD

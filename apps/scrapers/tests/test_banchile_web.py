@@ -5,8 +5,9 @@ are exercised directly, and `balances_from_page` is driven with a fake page
 whose `evaluate` returns canned page text.
 """
 
-from datetime import date
 from unittest.mock import MagicMock
+
+from product_model import CheckingMetrics, CreditCardMetrics
 
 from scrapers.backends.banchile_web import (
     _balance_from_text,
@@ -22,7 +23,7 @@ from scrapers.backends.banchile_web import (
     parse_amount,
     parse_clp,
 )
-from scrapers.base import ScrapedBalance
+from scrapers.base import ScrapedProduct
 
 
 class TestParseClp:
@@ -283,15 +284,14 @@ def _fake_page(text):
 
 
 class TestBalancesFromPage:
-    def test_returns_checking_scraped_balance(self):
+    def test_returns_checking_scraped_product(self):
         balances = balances_from_page(_fake_page("Saldo Disponible $3.210.000"))
         assert len(balances) == 1
         bal = balances[0]
         assert bal.institution == "banchile"
-        assert bal.product_kind == "checking"
+        assert bal.kind == "checking"
         assert bal.currency == "CLP"
-        assert bal.balance == 3210000
-        assert bal.as_of == date.today()
+        assert bal.metrics == CheckingMetrics(balance=3210000)
 
     def test_no_balance_returns_empty(self):
         assert balances_from_page(_fake_page("nada por aquí")) == []
@@ -307,17 +307,16 @@ class TestBalancesFromPage:
         # and is deliberately NOT emitted — the card is sourced from its detail
         # page. Depósitos/fondos aren't on the dashboard at all (inversiones page).
         balances = balances_from_page(_fake_page(REAL_DASHBOARD))
-        assert [(b.product_kind, b.currency, b.balance) for b in balances] == [
+        assert [(b.kind, b.currency, b.metrics.balance) for b in balances] == [
             ("checking", "CLP", 2500000),
             ("checking", "USD", 0.0),
         ]
         assert all(b.institution == "banchile" for b in balances)
-        assert all(b.as_of == date.today() for b in balances)
 
     def test_dashboard_never_emits_the_card_placeholder(self):
         # Live QA showed the dashboard card "Disponible" is a static placeholder
         # that never matches the real available cupo, so it must not be written.
-        kinds = {b.product_kind for b in balances_from_page(_fake_page(REAL_DASHBOARD))}
+        kinds = {b.kind for b in balances_from_page(_fake_page(REAL_DASHBOARD))}
         assert "credit_card" not in kinds
 
     def test_stray_tarjeta_mention_yields_only_checking(self):
@@ -325,14 +324,14 @@ class TestBalancesFromPage:
         # not become a credit_card balance.
         text = "Saldo Disponible $1.000.000\nCupo Disponible Tarjeta $500.000"
         balances = balances_from_page(_fake_page(text))
-        assert [b.product_kind for b in balances] == ["checking"]
+        assert [b.kind for b in balances] == ["checking"]
 
 
 class TestUsdChecking:
     def test_usd_cuenta_corriente_emitted_from_dashboard(self):
         text = "Cuenta Corriente\n00-000\nDisponible\nUSD 1.234,56\n"
         balances = balances_from_page(_fake_page(text))
-        assert [(b.product_kind, b.currency, b.balance) for b in balances] == [
+        assert [(b.kind, b.currency, b.metrics.balance) for b in balances] == [
             ("checking", "USD", 1234.56)
         ]
 
@@ -346,7 +345,7 @@ class TestUsdChecking:
             "Cuenta Corriente\n22-222\nDisponible\nUSD 500,00\n"
         )
         balances = balances_from_page(_fake_page(text))
-        assert [(b.product_kind, b.currency, b.balance) for b in balances] == [
+        assert [(b.kind, b.currency, b.metrics.balance) for b in balances] == [
             ("checking", "CLP", 2000000),
             ("checking", "USD", 500.0),
         ]
@@ -359,7 +358,8 @@ class TestCardBalancesFromText:
     def test_emits_clp_and_usd_with_limits(self):
         balances = card_balances_from_text(CARD_DETAIL)
         assert [
-            (b.product_kind, b.currency, b.balance, b.credit_limit) for b in balances
+            (b.kind, b.currency, b.metrics.available, b.metrics.limit)
+            for b in balances
         ] == [
             ("credit_card", "CLP", 3600000.0, 4000000.0),
             ("credit_card", "USD", 1950.0, 2000.0),
@@ -396,7 +396,8 @@ class TestLineaBalances:
         text = "Monto autorizado\n$ 100.000\nSaldo disponible\n$ 80.000\n"
         balances = linea_balances_from_text(text)
         assert [
-            (b.product_kind, b.currency, b.balance, b.credit_limit) for b in balances
+            (b.kind, b.currency, b.metrics.available, b.metrics.limit)
+            for b in balances
         ] == [("line_of_credit", "CLP", 80000.0, 100000.0)]
 
     def test_no_cupo_means_no_emission(self):
@@ -407,33 +408,35 @@ class TestLineaBalances:
 
 class TestInversionesBalances:
     def test_reads_term_deposit_and_investment(self):
-        # The resumen breakdown: "En depósitos y ahorros" -> term_deposit,
-        # "En activos financieros" -> investment. Both assets (credit_limit None).
+        # The resumen breakdown: "En depósitos y ahorros" -> term_deposit
+        # (balance metric), "En activos financieros" -> investment (nav metric).
         balances = inversiones_balances_from_text(INVERSION_RESUMEN)
         assert [
-            (b.product_kind, b.currency, b.balance, b.credit_limit) for b in balances
+            (b.kind, b.currency, b.metrics.headline()) for b in balances
         ] == [
-            ("term_deposit", "CLP", 2000000, None),
-            ("investment", "CLP", 1000000, None),
+            ("term_deposit", "CLP", 2000000),
+            ("investment", "CLP", 1000000),
         ]
         assert all(b.institution == "banchile" for b in balances)
-        assert all(b.as_of == date.today() for b in balances)
 
     def test_saldo_total_headline_is_never_grabbed(self):
         # Each label anchors on its own nearest "$"; the SALDO TOTAL headline
         # ($ 3.000.000) must not be read as either kind.
-        amounts = {b.balance for b in inversiones_balances_from_text(INVERSION_RESUMEN)}
+        amounts = {
+            b.metrics.headline()
+            for b in inversiones_balances_from_text(INVERSION_RESUMEN)
+        }
         assert 3000000 not in amounts
 
     def test_only_deposits_present(self):
         balances = inversiones_balances_from_text("En depósitos y ahorros\n$ 2.000.000\n")
-        assert [(b.product_kind, b.balance) for b in balances] == [
+        assert [(b.kind, b.metrics.balance) for b in balances] == [
             ("term_deposit", 2000000)
         ]
 
     def test_only_funds_present(self):
         balances = inversiones_balances_from_text("En activos financieros\n$ 1.000.000\n")
-        assert [(b.product_kind, b.balance) for b in balances] == [
+        assert [(b.kind, b.metrics.nav) for b in balances] == [
             ("investment", 1000000)
         ]
 
@@ -448,40 +451,46 @@ class TestInversionesBalances:
 
 
 class TestMergeBalances:
-    def _bal(self, kind, currency, balance, limit=None):
-        return ScrapedBalance(
+    def _checking(self, currency, balance):
+        return ScrapedProduct(
             institution="banchile",
-            product_kind=kind,
-            balance=balance,
-            as_of=date.today(),
+            kind="checking",
             currency=currency,
-            credit_limit=limit,
+            metrics=CheckingMetrics(balance=balance),
+        )
+
+    def _card(self, currency, available, limit=None):
+        return ScrapedProduct(
+            institution="banchile",
+            kind="credit_card",
+            currency=currency,
+            metrics=CreditCardMetrics(available=available, limit=limit),
         )
 
     def test_detail_supersedes_dashboard_for_same_product(self):
-        base = [self._bal("credit_card", "CLP", 999999)]
-        extra = [self._bal("credit_card", "CLP", 3550000.0, 4000000.0)]
+        base = [self._card("CLP", 999999)]
+        extra = [self._card("CLP", 3550000.0, 4000000.0)]
         merged = _merge_balances(base, extra)
         assert len(merged) == 1
-        assert merged[0].balance == 3550000.0
-        assert merged[0].credit_limit == 4000000.0
+        assert merged[0].metrics.available == 3550000.0
+        assert merged[0].metrics.limit == 4000000.0
 
     def test_keeps_distinct_products_and_appends(self):
         base = [
-            self._bal("checking", "CLP", 2500000),
-            self._bal("credit_card", "CLP", 999999),
+            self._checking("CLP", 2500000),
+            self._card("CLP", 999999),
         ]
         extra = [
-            self._bal("credit_card", "CLP", 3550000.0, 4000000.0),
-            self._bal("credit_card", "USD", 2345.67, 2400.0),
+            self._card("CLP", 3550000.0, 4000000.0),
+            self._card("USD", 2345.67, 2400.0),
         ]
         merged = _merge_balances(base, extra)
-        assert [(b.product_kind, b.currency) for b in merged] == [
+        assert [(b.kind, b.currency) for b in merged] == [
             ("checking", "CLP"),
             ("credit_card", "CLP"),
             ("credit_card", "USD"),
         ]
 
     def test_empty_extra_returns_base(self):
-        base = [self._bal("checking", "CLP", 100)]
+        base = [self._checking("CLP", 100)]
         assert _merge_balances(base, []) is base

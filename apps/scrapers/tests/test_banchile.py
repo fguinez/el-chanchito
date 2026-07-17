@@ -10,7 +10,9 @@ from unittest.mock import MagicMock
 os.environ.setdefault("BANCHILE_RUT", "test")
 os.environ.setdefault("BANCHILE_PASSWORD", "test")
 
-from scrapers.base import ScrapedBalance
+from product_model import CheckingMetrics
+
+from scrapers.base import ScrapedProduct
 from scrapers.institutions import banchile as banchile_mod
 from scrapers.institutions.banchile import BanChileScraper
 
@@ -25,6 +27,8 @@ def _make_movement(
     mock.amount = Decimal(str(amount))
     mock.account_type = MagicMock(value=acct_type)
     mock.account_id = acct_id
+    # A plain string, as in fintself — the pydantic envelope validates it.
+    mock.transaction_type = "compra"
     return mock
 
 
@@ -92,20 +96,19 @@ class TestMovementConversion:
         assert txn.product_kind == "checking"
 
 
-class TestScrapeBalances:
-    """scrape_balances() delegates to the banchile_web backend and shields the
+class TestScrapeProducts:
+    """scrape_products() delegates to the banchile_web backend and shields the
     run from a flaky second login."""
 
     def setup_method(self):
         self.scraper = BanChileScraper()
 
-    def test_returns_backend_balances(self, monkeypatch):
+    def test_returns_backend_products(self, monkeypatch):
         expected = [
-            ScrapedBalance(
+            ScrapedProduct(
                 institution="banchile",
-                product_kind="checking",
-                balance=1234567,
-                as_of=date.today(),
+                kind="checking",
+                metrics=CheckingMetrics(balance=1234567),
             )
         ]
 
@@ -114,7 +117,7 @@ class TestScrapeBalances:
             return expected
 
         monkeypatch.setattr(banchile_mod, "fetch_balances", fake_fetch)
-        assert asyncio.run(self.scraper.scrape_balances()) == expected
+        assert asyncio.run(self.scraper.scrape_products()) == expected
 
     def test_backend_failure_is_swallowed(self, monkeypatch):
         async def boom(rut, password):
@@ -122,4 +125,4 @@ class TestScrapeBalances:
 
         monkeypatch.setattr(banchile_mod, "fetch_balances", boom)
         # A heavy, flaky second login must not fail the whole run.
-        assert asyncio.run(self.scraper.scrape_balances()) == []
+        assert asyncio.run(self.scraper.scrape_products()) == []

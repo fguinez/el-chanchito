@@ -6,7 +6,8 @@ import {
   products,
   ASSET_KINDS,
   type ProductKind,
-  type ProductDetails,
+  type ProductAttributes,
+  type ProductMetrics,
 } from "@/lib/db/schema";
 import { asc, eq } from "drizzle-orm";
 import { getClpRates, toClp } from "@/lib/rates";
@@ -23,9 +24,9 @@ interface ApiProduct {
   currentBalance: number | null;
   currentBalanceClp: number | null;
   balanceAsOf: string | null;
-  creditLimit: number | null;
   externalRef: string | null;
-  details: ProductDetails;
+  attributes: ProductAttributes | Record<string, never>;
+  metrics: ProductMetrics | null;
   isActive: boolean;
 }
 
@@ -85,9 +86,9 @@ export async function GET() {
         currency: products.currency,
         currentBalance: products.currentBalance,
         balanceAsOf: products.balanceAsOf,
-        creditLimit: products.creditLimit,
         externalRef: products.externalRef,
-        details: products.details,
+        attributes: products.attributes,
+        metrics: products.metrics,
         isActive: products.isActive,
       })
       .from(institutions)
@@ -141,9 +142,9 @@ export async function GET() {
       currentBalanceClp:
         balance != null ? toClp(row.currency, balance, rates) : null,
       balanceAsOf: row.balanceAsOf ? row.balanceAsOf.toISOString() : null,
-      creditLimit: row.creditLimit,
       externalRef: row.externalRef,
-      details: row.details,
+      attributes: row.attributes,
+      metrics: row.metrics,
       isActive: row.isActive,
     });
   }
@@ -175,7 +176,7 @@ export async function GET() {
       const d = debtClp(
         p.kind,
         p.currentBalance,
-        p.creditLimit,
+        p.metrics,
         p.currency,
         rates
       );

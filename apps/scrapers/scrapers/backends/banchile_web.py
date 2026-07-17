@@ -29,10 +29,17 @@ import asyncio
 import logging
 import re
 import time
-from datetime import date
 from typing import Optional
 
-from scrapers.base import ScrapedBalance
+from product_model import (
+    CheckingMetrics,
+    CreditCardMetrics,
+    InvestmentMetrics,
+    LineOfCreditMetrics,
+    TermDepositMetrics,
+)
+
+from scrapers.base import ScrapedProduct
 
 logger = logging.getLogger(__name__)
 
@@ -123,14 +130,14 @@ class BanChileWebError(RuntimeError):
 # under that family's header into one product (several cuentas corrientes -> one
 # `banchile/checking`; three depósitos a plazo -> one `term_deposit`; ...).
 #
-# Scope (see `scrape_balances` in institutions/banchile.py; issues #8, #30):
+# Scope (see `scrape_products` in institutions/banchile.py; issues #8, #30):
 # Read straight off the dashboard, all CLP unless noted:
 #   • checking (CLP + USD) — asset; CLP also feeds the planning "real balance"
 #                            drift. USD is summed separately (`_usd_checking...`).
 #   • credit_card (CLP)  — stores the *available cupo* (the planning drift relies
 #                          on that); the total límite comes from the card detail
 #                          page (below), which supersedes this entry so net-worth
-#                          debt = credit_limit − available.
+#                          debt = límite − available.
 #
 # Read off their own detail pages (best-effort, non-fatal — see the navigation
 # section), once #30 made net worth currency- and cupo-aware:
@@ -178,9 +185,9 @@ _SALDO_PATTERNS = [
 #     Utilizado      $ 400.000
 #     Disponible     $ 3.600.000
 #     Cupo total     $ 4.000.000
-# We read "Disponible" (-> current_balance) and "Cupo total" (-> the credit_limit
-# that makes net-worth debt = límite − disponible). NB the bank also prints
-# "Utilizado" directly, which is slightly below límite − disponible because of
+# We read "Disponible" (-> metrics.available) and "Cupo total" (-> the
+# metrics.limit that makes net-worth debt = límite − disponible). NB the bank
+# also prints "Utilizado" directly, slightly below límite − disponible because of
 # pending holds; net worth uses límite − disponible by design (issue #30). The
 # two currencies are read from separate slices of the page (split on the
 # "Internacional" header) so a figure is never paired with the other cupo.
@@ -197,10 +204,10 @@ _USD_CHECKING_RE = re.compile(
 )
 
 # --- Línea de crédito detail page ("Saldos y movimientos de la línea") ---------
-# Labels "Monto autorizado" (total cupo -> credit_limit), "Saldo disponible"
-# (available -> current_balance) and "Monto utilizado" (owed). Stored like a
-# card so net-worth debt = autorizado − disponible = utilizado; only emitted when
-# the cupo is present, or the available would be miscounted as debt (issue #30).
+# Labels "Monto autorizado" (total cupo -> metrics.limit), "Saldo disponible"
+# (-> metrics.available) and "Monto utilizado" (owed). Stored like a card so
+# net-worth debt = autorizado − disponible = utilizado; only emitted when the
+# cupo is present, or the available would be miscounted as debt (issue #30).
 _LINEA_AUTORIZADO_RE = re.compile(r"monto\s+autorizado.*?\$\s?" + _AMT, re.I | re.S)
 _LINEA_DISPONIBLE_RE = re.compile(r"saldo\s+disponible.*?\$\s?" + _AMT, re.I | re.S)
 
@@ -395,8 +402,8 @@ def _read_checking(page) -> Optional[int]:
     return _balance_from_text(text)
 
 
-def dashboard_balances_from_text(text: Optional[str]) -> list[ScrapedBalance]:
-    """Shape the "Mis Productos" dashboard text into ScrapedBalances.
+def dashboard_balances_from_text(text: Optional[str]) -> list[ScrapedProduct]:
+    """Shape the "Mis Productos" dashboard text into ScrapedProducts.
 
     Emits the CLP checking figure plus the USD cuenta corriente when present. The
     card's *total* cupo/límite, the línea, and the depósitos/fondos live on their
@@ -409,7 +416,7 @@ def dashboard_balances_from_text(text: Optional[str]) -> list[ScrapedBalance]:
         logger.warning("BanChile: no balances found on page")
         return []
 
-    balances: list[ScrapedBalance] = []
+    balances: list[ScrapedProduct] = []
     for kind, _pattern in _PRODUCT_ROWS:  # stable, source-ordered
         # The dashboard's card "Disponible" is a static placeholder ($999.999 /
         # USD 1.234,00 — live QA confirmed it never matches the real available
@@ -422,29 +429,27 @@ def dashboard_balances_from_text(text: Optional[str]) -> list[ScrapedBalance]:
             amount = by_kind[kind]
             logger.info("BanChile %s balance: $%s CLP", kind, f"{amount:,}")
             balances.append(
-                ScrapedBalance(
+                ScrapedProduct(
                     institution="banchile",
-                    product_kind=kind,
-                    balance=amount,
-                    as_of=date.today(),
+                    kind=kind,
                     currency="CLP",
+                    metrics=CheckingMetrics(balance=amount),
                 )
             )
     if usd_checking is not None:
         logger.info("BanChile checking balance: USD %s", f"{usd_checking:,.2f}")
         balances.append(
-            ScrapedBalance(
+            ScrapedProduct(
                 institution="banchile",
-                product_kind="checking",
-                balance=usd_checking,
-                as_of=date.today(),
+                kind="checking",
                 currency="USD",
+                metrics=CheckingMetrics(balance=usd_checking),
             )
         )
     return balances
 
 
-def balances_from_page(page) -> list[ScrapedBalance]:
+def balances_from_page(page) -> list[ScrapedProduct]:
     """Read the dashboard balances off an already-authenticated page.
 
     This is the seam the tests mock: it only reads `page`'s visible text (via
@@ -460,14 +465,14 @@ def balances_from_page(page) -> list[ScrapedBalance]:
     return dashboard_balances_from_text(text)
 
 
-def card_balances_from_text(text: Optional[str]) -> list[ScrapedBalance]:
-    """Card ScrapedBalances (CLP + USD) from the card detail page text.
+def card_balances_from_text(text: Optional[str]) -> list[ScrapedProduct]:
+    """Card ScrapedProducts (CLP + USD) from the card detail page text.
 
-    Available cupo -> `balance`, total cupo -> `credit_limit` (so net-worth debt
-    = límite − available). Currencies without a límite still emit (debt 0, like a
-    dashboard-only scrape). Returns [] when nothing parses.
+    Available cupo -> `metrics.available`, total cupo -> `metrics.limit` (so
+    net-worth debt = límite − available). Currencies without a límite still emit
+    (debt 0, like a dashboard-only scrape). Returns [] when nothing parses.
     """
-    balances: list[ScrapedBalance] = []
+    balances: list[ScrapedProduct] = []
     for currency, data in card_saldos_from_text(text).items():
         limit = data.get("limit")
         logger.info(
@@ -477,20 +482,18 @@ def card_balances_from_text(text: Optional[str]) -> list[ScrapedBalance]:
             f"{limit:,.2f}" if limit is not None else "—",
         )
         balances.append(
-            ScrapedBalance(
+            ScrapedProduct(
                 institution="banchile",
-                product_kind="credit_card",
-                balance=data["available"],
-                as_of=date.today(),
+                kind="credit_card",
                 currency=currency,
-                credit_limit=limit,
+                metrics=CreditCardMetrics(available=data["available"], limit=limit),
             )
         )
     return balances
 
 
-def linea_balances_from_text(text: Optional[str]) -> list[ScrapedBalance]:
-    """Línea de crédito ScrapedBalance from its detail page text.
+def linea_balances_from_text(text: Optional[str]) -> list[ScrapedProduct]:
+    """Línea de crédito ScrapedProduct from its detail page text.
 
     Only emitted when the authorized cupo is present: without it, net worth would
     treat the *available* balance as the amount owed (issue #30). Returns [] when
@@ -505,28 +508,28 @@ def linea_balances_from_text(text: Optional[str]) -> list[ScrapedBalance]:
         f"{entry['limit']:,.0f}",
     )
     return [
-        ScrapedBalance(
+        ScrapedProduct(
             institution="banchile",
-            product_kind="line_of_credit",
-            balance=entry["available"],
-            as_of=date.today(),
+            kind="line_of_credit",
             currency="CLP",
-            credit_limit=entry["limit"],
+            metrics=LineOfCreditMetrics(
+                available=entry["available"], limit=entry["limit"]
+            ),
         )
     ]
 
 
-def inversiones_balances_from_text(text: Optional[str]) -> list[ScrapedBalance]:
-    """Term-deposit + fondos-mutuos ScrapedBalances from the inversiones resumen.
+def inversiones_balances_from_text(text: Optional[str]) -> list[ScrapedProduct]:
+    """Term-deposit + fondos-mutuos ScrapedProducts from the inversiones resumen.
 
     Reads the "Resumen de Inversión" page's SALDO TOTAL breakdown — "En depósitos
     y ahorros" -> `term_deposit`, "En activos financieros" -> `investment` — one
-    CLP asset balance per kind whose figure parses (`credit_limit` stays None: an
-    asset carries no debt). Returns [] when neither total is found.
+    CLP asset balance per kind whose figure parses (both are assets: their
+    metrics carry no debt). Returns [] when neither total is found.
     """
     if not text:
         return []
-    balances: list[ScrapedBalance] = []
+    balances: list[ScrapedProduct] = []
     for kind, pattern in _INVERSION_ROWS:  # stable, source-ordered
         match = pattern.search(text)
         if match is None:
@@ -535,31 +538,35 @@ def inversiones_balances_from_text(text: Optional[str]) -> list[ScrapedBalance]:
         if amount is None:
             continue
         logger.info("BanChile %s balance: $%s CLP", kind, f"{amount:,}")
+        metrics = (
+            TermDepositMetrics(balance=amount)
+            if kind == "term_deposit"
+            else InvestmentMetrics(nav=amount)
+        )
         balances.append(
-            ScrapedBalance(
+            ScrapedProduct(
                 institution="banchile",
-                product_kind=kind,
-                balance=amount,
-                as_of=date.today(),
+                kind=kind,
                 currency="CLP",
+                metrics=metrics,
             )
         )
     return balances
 
 
 def _merge_balances(
-    base: list[ScrapedBalance], extra: list[ScrapedBalance]
-) -> list[ScrapedBalance]:
-    """Overlay `extra` onto `base`, keyed by (product_kind, currency).
+    base: list[ScrapedProduct], extra: list[ScrapedProduct]
+) -> list[ScrapedProduct]:
+    """Overlay `extra` onto `base`, keyed by (kind, currency).
 
     A detail-page reading (card cupo, línea) supersedes the dashboard's entry for
-    the same product, so a card gets its `credit_limit` and we never write the
-    same product twice. Order is preserved: surviving base entries, then `extra`.
+    the same product, so a card gets its `limit` and we never write the same
+    product twice. Order is preserved: surviving base entries, then `extra`.
     """
     if not extra:
         return base
-    replaced = {(b.product_kind, b.currency) for b in extra}
-    merged = [b for b in base if (b.product_kind, b.currency) not in replaced]
+    replaced = {(b.kind, b.currency) for b in extra}
+    merged = [b for b in base if (b.kind, b.currency) not in replaced]
     merged.extend(extra)
     return merged
 
@@ -654,7 +661,7 @@ def _dismiss_popup(page) -> None:
         pass
 
 
-def _wait_for_balances(page, timeout_ms: int) -> list[ScrapedBalance]:
+def _wait_for_balances(page, timeout_ms: int) -> list[ScrapedProduct]:
     """Poll the dashboard until its async balance widget renders.
 
     A single read right after the post-login redirect misses the balances (the
@@ -750,7 +757,7 @@ def _wait_for_text(page, ready_re: "re.Pattern[str]", timeout_ms: int) -> Option
     return None
 
 
-def _read_card_detail(page) -> list[ScrapedBalance]:
+def _read_card_detail(page) -> list[ScrapedProduct]:
     """Click through to the card detail page and read its cupos (best-effort).
 
     Fenced so a stray click can't strand us off-portal: if the click escapes the
@@ -776,7 +783,7 @@ def _read_card_detail(page) -> list[ScrapedBalance]:
         return []
 
 
-def _read_linea_detail(page) -> list[ScrapedBalance]:
+def _read_linea_detail(page) -> list[ScrapedProduct]:
     """Open the línea detail route and read its authorized cupo (best-effort).
 
     The route is static, so we drive the SPA straight to it via a hash change (a
@@ -797,7 +804,7 @@ def _read_linea_detail(page) -> list[ScrapedBalance]:
         return []
 
 
-def _read_inversiones_detail(page) -> list[ScrapedBalance]:
+def _read_inversiones_detail(page) -> list[ScrapedProduct]:
     """Open the inversiones resumen route and read the depósito/fondos totals.
 
     Depósitos a plazo and fondos mutuos aren't on the "Mis Productos" dashboard;
@@ -819,7 +826,7 @@ def _read_inversiones_detail(page) -> list[ScrapedBalance]:
         return []
 
 
-def _scrape_sync(rut: str, password: str, headless: bool) -> list[ScrapedBalance]:
+def _scrape_sync(rut: str, password: str, headless: bool) -> list[ScrapedProduct]:
     """Synchronous Playwright flow (runs in a worker thread, no event loop)."""
     from playwright.sync_api import sync_playwright  # lazy: keeps tests browser-free
 
@@ -845,7 +852,7 @@ def _scrape_sync(rut: str, password: str, headless: bool) -> list[ScrapedBalance
             # Enrich with the per-product detail pages (card cupo/límite, línea,
             # depósitos/fondos). Each is non-fatal; a detail reading supersedes the
             # dashboard's entry for the same product so a card picks up its
-            # credit_limit and the inversiones page supplies term_deposit/investment.
+            # límite and the inversiones page supplies term_deposit/investment.
             balances = _merge_balances(balances, _read_card_detail(page))
             balances = _merge_balances(balances, _read_linea_detail(page))
             balances = _merge_balances(balances, _read_inversiones_detail(page))
@@ -856,7 +863,7 @@ def _scrape_sync(rut: str, password: str, headless: bool) -> list[ScrapedBalance
 
 async def fetch_balances(
     rut: str, password: str, *, headless: bool = True
-) -> list[ScrapedBalance]:
+) -> list[ScrapedProduct]:
     """Log into Banco de Chile and return its scraped balances.
 
     Covers the dashboard checking (CLP/USD) plus the card total cupo/límite, the
