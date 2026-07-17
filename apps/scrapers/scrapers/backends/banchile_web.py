@@ -5,9 +5,10 @@ Banco de Chile exposes no public/open-banking API for individuals, and the
 never an account balance (fintself#… — see issue #27). So to give `banchile`
 real, refreshable balances we log in ourselves with Playwright and read the
 figures off the post-login "Mis Productos" dashboard — CLP/USD checking and the
-credit-card cupo — plus the card total cupo/límite, the línea de crédito, and the
-depósitos a plazo / fondos mutuos, each from their own detail pages (see the
-scope note before `_PRODUCT_ROWS` for what's covered and how).
+credit-card cupo — plus the card total cupo/límite/utilizado (and masked last4),
+the línea de crédito, and the depósitos a plazo / fondos mutuos, each from their
+own detail pages (see the scope note before `_PRODUCT_ROWS` for what's covered
+and how).
 
 This module deliberately does **not** import `fintself`; it only borrows its
 login flow / page routes as a reference. The one gotcha worth repeating: Banco
@@ -33,6 +34,7 @@ from typing import Optional
 
 from product_model import (
     CheckingMetrics,
+    CreditCardAttributes,
     CreditCardMetrics,
     InvestmentMetrics,
     LineOfCreditMetrics,
@@ -141,10 +143,12 @@ class BanChileWebError(RuntimeError):
 #
 # Read off their own detail pages (best-effort, non-fatal — see the navigation
 # section), once #30 made net worth currency- and cupo-aware:
-#   • credit_card (CLP + USD) — available cupo + total cupo/límite, per currency
-#     (`card_saldos_from_text`), so a card contributes real debt.
-#   • line_of_credit (CLP)    — available + authorized cupo (`linea_saldo...`),
-#     stored like a card so debt = autorizado − disponible = utilizado. Emitted
+#   • credit_card (CLP + USD) — available cupo + total cupo/límite + the
+#     bank-reported "Utilizado" per currency (`card_saldos_from_text`), plus the
+#     masked card number's last4, so a card contributes real debt.
+#   • line_of_credit (CLP)    — available + authorized cupo + "Monto utilizado"
+#     (`linea_saldo...`), stored like a card so net-worth debt prefers the
+#     reported utilizado and falls back to autorizado − disponible. Emitted
 #     only with the cupo, else the available would be miscounted as debt.
 #   • term_deposit (CLP) — depósitos a plazo, asset. Read off the "Resumen de
 #     Inversión" page's "En depósitos y ahorros" total (`inversiones_...`); they
@@ -185,17 +189,23 @@ _SALDO_PATTERNS = [
 #     Utilizado      $ 400.000
 #     Disponible     $ 3.600.000
 #     Cupo total     $ 4.000.000
-# We read "Disponible" (-> metrics.available) and "Cupo total" (-> the
-# metrics.limit that makes net-worth debt = límite − disponible). NB the bank
-# also prints "Utilizado" directly, slightly below límite − disponible because of
-# pending holds; net worth uses límite − disponible by design (issue #30). The
-# two currencies are read from separate slices of the page (split on the
+# We read "Disponible" (-> metrics.available), "Cupo total" (-> metrics.limit)
+# and "Utilizado" (-> metrics.owed). The reported Utilizado is the bank's own
+# debt figure and net worth prefers it; it sits slightly below límite −
+# disponible because pending holds consume cupo without being owed yet, and
+# límite − disponible stays the fallback when it doesn't parse (issues #30/#34).
+# The two currencies are read from separate slices of the page (split on the
 # "Internacional" header) so a figure is never paired with the other cupo.
 _CARD_INTERNACIONAL_RE = re.compile(r"internacional", re.I)
 _CLP_CUPO_RE = re.compile(r"cupo\s+total\s*\$\s?" + _AMT, re.I)
 _CLP_DISPONIBLE_RE = re.compile(r"disponible\s*\$\s?" + _AMT, re.I)
+_CLP_UTILIZADO_RE = re.compile(r"utilizado\s*\$\s?" + _AMT, re.I)
 _USD_CUPO_RE = re.compile(r"cupo\s+total\s*USD\s?" + _AMT, re.I)
 _USD_DISPONIBLE_RE = re.compile(r"disponible\s*USD\s?" + _AMT, re.I)
+_USD_UTILIZADO_RE = re.compile(r"utilizado\s*USD\s?" + _AMT, re.I)
+# The card header prints the masked card number ("Titular Visa Signature
+# ****0000"); its tail becomes attributes.last4 — one value for the whole card.
+_MASKED_NUMBER_RE = re.compile(r"\*{4}(\d{4})")
 
 # USD cuenta corriente on the dashboard: same block as the CLP one but the
 # figure is "Disponible USD …". Coupled to "USD" so it never grabs a CLP "$".
@@ -205,11 +215,13 @@ _USD_CHECKING_RE = re.compile(
 
 # --- Línea de crédito detail page ("Saldos y movimientos de la línea") ---------
 # Labels "Monto autorizado" (total cupo -> metrics.limit), "Saldo disponible"
-# (-> metrics.available) and "Monto utilizado" (owed). Stored like a card so
-# net-worth debt = autorizado − disponible = utilizado; only emitted when the
-# cupo is present, or the available would be miscounted as debt (issue #30).
+# (-> metrics.available) and "Monto utilizado" (-> metrics.owed, the bank's own
+# debt figure, preferred by net worth with autorizado − disponible as the
+# fallback). Stored like a card; only emitted when the cupo is present, or the
+# available would be miscounted as debt (issue #30).
 _LINEA_AUTORIZADO_RE = re.compile(r"monto\s+autorizado.*?\$\s?" + _AMT, re.I | re.S)
 _LINEA_DISPONIBLE_RE = re.compile(r"saldo\s+disponible.*?\$\s?" + _AMT, re.I | re.S)
+_LINEA_UTILIZADO_RE = re.compile(r"monto\s+utilizado.*?\$\s?" + _AMT, re.I | re.S)
 
 # --- Inversiones resumen page ("Resumen de Inversión") ------------------------
 # Depósitos a plazo and fondos mutuos aren't on the "Mis Productos" dashboard;
@@ -305,12 +317,14 @@ def _balance_from_text(text: Optional[str]) -> Optional[int]:
 
 
 def card_saldos_from_text(text: Optional[str]) -> dict[str, dict[str, float]]:
-    """Read a card's available cupo + total límite per currency off the detail page.
+    """Read a card's cupos per currency off the detail page.
 
-    Returns e.g. ``{"CLP": {"available": 3600000.0, "limit": 4000000.0},
-    "USD": {"available": 1950.0, "limit": 2000.0}}`` — a currency appears only
-    when its "Disponible" figure parses; ``limit`` (the "Cupo total") is attached
-    when it parses too. Returns ``{}`` when nothing parses.
+    Returns e.g. ``{"CLP": {"available": 3600000.0, "limit": 4000000.0,
+    "owed": 400000.0}, "USD": {"available": 1950.0, "limit": 2000.0,
+    "owed": 50.0}}`` — a currency appears only when its "Disponible" figure
+    parses; ``limit`` (the "Cupo total") and ``owed`` (the bank-reported
+    "Utilizado") are attached when they parse too. Returns ``{}`` when nothing
+    parses.
     """
     if not text:
         return {}
@@ -320,9 +334,9 @@ def card_saldos_from_text(text: Optional[str]) -> dict[str, dict[str, float]]:
     usd_section = text[intl.start() :] if intl else ""
 
     result: dict[str, dict[str, float]] = {}
-    for currency, section, cupo_re, disponible_re in (
-        ("CLP", clp_section, _CLP_CUPO_RE, _CLP_DISPONIBLE_RE),
-        ("USD", usd_section, _USD_CUPO_RE, _USD_DISPONIBLE_RE),
+    for currency, section, cupo_re, disponible_re, utilizado_re in (
+        ("CLP", clp_section, _CLP_CUPO_RE, _CLP_DISPONIBLE_RE, _CLP_UTILIZADO_RE),
+        ("USD", usd_section, _USD_CUPO_RE, _USD_DISPONIBLE_RE, _USD_UTILIZADO_RE),
     ):
         if not section:
             continue
@@ -338,8 +352,26 @@ def card_saldos_from_text(text: Optional[str]) -> dict[str, dict[str, float]]:
             limit = parse_amount(cupo.group(1))
             if limit is not None:
                 entry["limit"] = limit
+        utilizado = utilizado_re.search(section)
+        if utilizado is not None:
+            owed = parse_amount(utilizado.group(1))
+            if owed is not None:
+                entry["owed"] = owed
         result[currency] = entry
     return result
+
+
+def card_last4_from_text(text: Optional[str]) -> Optional[str]:
+    """The card's last four digits from the masked number ("****0000"), if shown.
+
+    One shared value for the whole card — the CLP "Nacional" and USD
+    "Internacional" slices belong to the same plastic. Returns None when no
+    masked number is on the page (recording nothing beats guessing).
+    """
+    if not text:
+        return None
+    match = _MASKED_NUMBER_RE.search(text)
+    return match.group(1) if match else None
 
 
 def _usd_checking_from_text(text: Optional[str]) -> Optional[float]:
@@ -361,10 +393,11 @@ def _usd_checking_from_text(text: Optional[str]) -> Optional[float]:
 
 
 def linea_saldo_from_text(text: Optional[str]) -> Optional[dict[str, float]]:
-    """Read a línea de crédito's available + authorized cupo off its detail page.
+    """Read a línea de crédito's cupos off its detail page.
 
-    Returns ``{"available": 100000.0, "limit": 100000.0}`` (``limit`` only when
-    "Monto autorizado" parses), or None when the "Saldo disponible" isn't found.
+    Returns ``{"available": 80000.0, "limit": 100000.0, "owed": 20000.0}``
+    (``limit``/``owed`` only when "Monto autorizado" / "Monto utilizado" parse),
+    or None when the "Saldo disponible" isn't found.
     """
     if not text:
         return None
@@ -380,6 +413,11 @@ def linea_saldo_from_text(text: Optional[str]) -> Optional[dict[str, float]]:
         limit = parse_amount(autorizado.group(1))
         if limit is not None:
             entry["limit"] = limit
+    utilizado = _LINEA_UTILIZADO_RE.search(text)
+    if utilizado is not None:
+        owed = parse_amount(utilizado.group(1))
+        if owed is not None:
+            entry["owed"] = owed
     return entry
 
 
@@ -468,25 +506,36 @@ def balances_from_page(page) -> list[ScrapedProduct]:
 def card_balances_from_text(text: Optional[str]) -> list[ScrapedProduct]:
     """Card ScrapedProducts (CLP + USD) from the card detail page text.
 
-    Available cupo -> `metrics.available`, total cupo -> `metrics.limit` (so
-    net-worth debt = límite − available). Currencies without a límite still emit
-    (debt 0, like a dashboard-only scrape). Returns [] when nothing parses.
+    Available cupo -> `metrics.available`, total cupo -> `metrics.limit`, and
+    the bank-reported "Utilizado" -> `metrics.owed` (net worth prefers it,
+    falling back to límite − available). The masked number's last4 rides along
+    as `attributes.last4`, one shared value for both currencies. Every field
+    beyond `available` is optional — a currency missing its límite/utilizado
+    still emits (debt 0, like a dashboard-only scrape). Returns [] when nothing
+    parses.
     """
+    last4 = card_last4_from_text(text)
+    attributes = CreditCardAttributes(last4=last4) if last4 is not None else None
     balances: list[ScrapedProduct] = []
     for currency, data in card_saldos_from_text(text).items():
         limit = data.get("limit")
+        owed = data.get("owed")
         logger.info(
-            "BanChile credit_card balance: %s %s (limit %s)",
+            "BanChile credit_card balance: %s %s (limit %s, owed %s)",
             currency,
             f"{data['available']:,.2f}",
             f"{limit:,.2f}" if limit is not None else "—",
+            f"{owed:,.2f}" if owed is not None else "—",
         )
         balances.append(
             ScrapedProduct(
                 institution="banchile",
                 kind="credit_card",
                 currency=currency,
-                metrics=CreditCardMetrics(available=data["available"], limit=limit),
+                attributes=attributes,
+                metrics=CreditCardMetrics(
+                    available=data["available"], limit=limit, owed=owed
+                ),
             )
         )
     return balances
@@ -495,17 +544,21 @@ def card_balances_from_text(text: Optional[str]) -> list[ScrapedProduct]:
 def linea_balances_from_text(text: Optional[str]) -> list[ScrapedProduct]:
     """Línea de crédito ScrapedProduct from its detail page text.
 
-    Only emitted when the authorized cupo is present: without it, net worth would
-    treat the *available* balance as the amount owed (issue #30). Returns [] when
-    the cupo or the available figure is missing.
+    The reported "Monto utilizado" rides along as `metrics.owed` when it parses
+    (optional — net worth falls back to límite − available without it). Only
+    emitted when the authorized cupo is present: without it, net worth would
+    treat the *available* balance as the amount owed (issue #30). Returns []
+    when the cupo or the available figure is missing.
     """
     entry = linea_saldo_from_text(text)
     if entry is None or "limit" not in entry:
         return []
+    owed = entry.get("owed")
     logger.info(
-        "BanChile line_of_credit balance: $%s CLP (limit $%s)",
+        "BanChile line_of_credit balance: $%s CLP (limit $%s, owed %s)",
         f"{entry['available']:,.0f}",
         f"{entry['limit']:,.0f}",
+        f"${owed:,.0f}" if owed is not None else "—",
     )
     return [
         ScrapedProduct(
@@ -513,7 +566,7 @@ def linea_balances_from_text(text: Optional[str]) -> list[ScrapedProduct]:
             kind="line_of_credit",
             currency="CLP",
             metrics=LineOfCreditMetrics(
-                available=entry["available"], limit=entry["limit"]
+                available=entry["available"], limit=entry["limit"], owed=owed
             ),
         )
     ]

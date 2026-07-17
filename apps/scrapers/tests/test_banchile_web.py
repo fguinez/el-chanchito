@@ -16,6 +16,7 @@ from scrapers.backends.banchile_web import (
     balances_by_kind,
     balances_from_page,
     card_balances_from_text,
+    card_last4_from_text,
     card_saldos_from_text,
     inversiones_balances_from_text,
     linea_balances_from_text,
@@ -73,8 +74,9 @@ class TestParseAmount:
 # Credit-card detail page ("Saldos y movimientos no facturados"): the real page
 # STRUCTURE and labels confirmed by live QA — a CLP "Nacional" and a USD
 # "Internacional" section, each with Utilizado / Disponible / Cupo total — but
-# every identifier and figure is fabricated. CLP available/límite = 3.600.000 /
-# 4.000.000; USD = 1.950,00 / 2.000,00.
+# every identifier and figure is fabricated. CLP utilizado/available/límite =
+# 400.000 / 3.600.000 / 4.000.000; USD = 50,00 / 1.950,00 / 2.000,00; the
+# masked card number's tail ("****0000") is the last4.
 CARD_DETAIL = """Titular Visa Signature ****0000 - Estado: Activa
 
 Saldos y movimientos no facturados
@@ -107,17 +109,21 @@ USD 1.950,00
 class TestCardSaldosFromText:
     def test_reads_both_currencies(self):
         assert card_saldos_from_text(CARD_DETAIL) == {
-            "CLP": {"available": 3600000.0, "limit": 4000000.0},
-            "USD": {"available": 1950.0, "limit": 2000.0},
+            "CLP": {"available": 3600000.0, "limit": 4000000.0, "owed": 400000.0},
+            "USD": {"available": 1950.0, "limit": 2000.0, "owed": 50.0},
         }
 
     def test_disponible_paired_with_own_currency_cupo(self):
-        # The CLP "Disponible" must never pick up the USD "Cupo total" (or vice
-        # versa): debt = límite − available would be nonsense across currencies.
-        # (The "Cupo disponible avance" line must not be read as the límite.)
+        # The CLP figures must never pick up the USD "Cupo total"/"Utilizado"
+        # (or vice versa): debt would be nonsense across currencies. (The "Cupo
+        # disponible avance" line must not be read as the límite.)
         result = card_saldos_from_text(CARD_DETAIL)
-        assert result["CLP"] == {"available": 3600000.0, "limit": 4000000.0}
-        assert result["USD"] == {"available": 1950.0, "limit": 2000.0}
+        assert result["CLP"] == {
+            "available": 3600000.0,
+            "limit": 4000000.0,
+            "owed": 400000.0,
+        }
+        assert result["USD"] == {"available": 1950.0, "limit": 2000.0, "owed": 50.0}
 
     def test_clp_only_page(self):
         text = "Nacional\nDisponible\n$ 4.000.000\nCupo total\n$ 5.000.000\n"
@@ -132,6 +138,21 @@ class TestCardSaldosFromText:
     def test_empty_and_none(self):
         assert card_saldos_from_text("") == {}
         assert card_saldos_from_text(None) == {}
+
+
+class TestCardLast4:
+    def test_reads_masked_tail(self):
+        assert card_last4_from_text(CARD_DETAIL) == "0000"
+
+    def test_dashboard_bullet_mask_is_ignored(self):
+        # The dashboard masks with bullets ("•••• 1234"); only the detail page's
+        # "****0000" form is trusted for the last4.
+        assert card_last4_from_text("•••• 1234") is None
+
+    def test_none_when_absent(self):
+        assert card_last4_from_text("Nacional\nDisponible\n$ 1.000") is None
+        assert card_last4_from_text("") is None
+        assert card_last4_from_text(None) is None
 
 
 # Synthetic "Mis Productos" dashboard dump — the *structure* mirrors a real
@@ -355,35 +376,75 @@ class TestUsdChecking:
 
 
 class TestCardBalancesFromText:
-    def test_emits_clp_and_usd_with_limits(self):
+    def test_emits_clp_and_usd_with_limits_and_owed(self):
         balances = card_balances_from_text(CARD_DETAIL)
         assert [
-            (b.kind, b.currency, b.metrics.available, b.metrics.limit)
+            (b.kind, b.currency, b.metrics.available, b.metrics.limit, b.metrics.owed)
             for b in balances
         ] == [
-            ("credit_card", "CLP", 3600000.0, 4000000.0),
-            ("credit_card", "USD", 1950.0, 2000.0),
+            ("credit_card", "CLP", 3600000.0, 4000000.0, 400000.0),
+            ("credit_card", "USD", 1950.0, 2000.0, 50.0),
         ]
         assert all(b.institution == "banchile" for b in balances)
+        # One shared plastic: both currency slices carry the same masked tail.
+        assert [b.attributes.last4 for b in balances] == ["0000", "0000"]
+
+    def test_missing_utilizado_degrades_gracefully(self):
+        # A relabeled/absent "Utilizado" must not cost the available/límite:
+        # owed just stays None (net worth falls back to límite − available).
+        balances = card_balances_from_text(CARD_DETAIL.replace("Utilizado", "Ocupado"))
+        assert [
+            (b.currency, b.metrics.available, b.metrics.limit, b.metrics.owed)
+            for b in balances
+        ] == [
+            ("CLP", 3600000.0, 4000000.0, None),
+            ("USD", 1950.0, 2000.0, None),
+        ]
+
+    def test_no_masked_number_no_attributes(self):
+        # Without the "****0000" header the card still emits — attributes are
+        # simply not attached (never a guessed/empty last4).
+        text = "Nacional\nDisponible\n$ 4.000.000\nCupo total\n$ 5.000.000\n"
+        balances = card_balances_from_text(text)
+        assert [(b.currency, b.attributes) for b in balances] == [("CLP", None)]
 
     def test_empty_page_no_balances(self):
         assert card_balances_from_text("nada") == []
 
 
 class TestLineaSaldo:
-    def test_reads_available_and_authorized(self):
+    def test_reads_available_authorized_and_utilizado(self):
         text = (
             "Monto autorizado\n$ 100.000\n"
             "Saldo disponible\n$ 100.000\n"
             "Monto utilizado\n$ 0\n"
         )
-        assert linea_saldo_from_text(text) == {"available": 100000.0, "limit": 100000.0}
+        # An untouched line reports "Monto utilizado $ 0" — owed 0 is a real
+        # figure worth recording, not a missing one.
+        assert linea_saldo_from_text(text) == {
+            "available": 100000.0,
+            "limit": 100000.0,
+            "owed": 0.0,
+        }
 
-    def test_used_line_debt_is_limit_minus_available(self):
+    def test_used_line_reads_monto_utilizado(self):
+        text = (
+            "Monto autorizado\n$ 500.000\n"
+            "Saldo disponible\n$ 200.000\n"
+            "Monto utilizado\n$ 300.000\n"
+        )
+        assert linea_saldo_from_text(text) == {
+            "available": 200000.0,
+            "limit": 500000.0,
+            "owed": 300000.0,
+        }
+
+    def test_missing_utilizado_still_yields_available_and_limit(self):
+        # A relabeled/absent "Monto utilizado" degrades gracefully: no "owed"
+        # key, and net worth falls back to limit − available = 300.000.
         text = "Monto autorizado\n$ 500.000\nSaldo disponible\n$ 200.000\n"
         entry = linea_saldo_from_text(text)
         assert entry == {"available": 200000.0, "limit": 500000.0}
-        # net worth computes debt = limit − available = 300.000 (the utilizado).
         assert entry["limit"] - entry["available"] == 300000.0
 
     def test_none_when_no_disponible(self):
@@ -392,18 +453,38 @@ class TestLineaSaldo:
 
 
 class TestLineaBalances:
-    def test_emits_line_of_credit_with_limit(self):
+    def test_monto_utilizado_becomes_owed(self):
+        text = (
+            "Monto autorizado\n$ 100.000\n"
+            "Saldo disponible\n$ 80.000\n"
+            "Monto utilizado\n$ 20.000\n"
+        )
+        balances = linea_balances_from_text(text)
+        assert [
+            (b.kind, b.currency, b.metrics.available, b.metrics.limit, b.metrics.owed)
+            for b in balances
+        ] == [("line_of_credit", "CLP", 80000.0, 100000.0, 20000.0)]
+
+    def test_emits_without_utilizado_owed_none(self):
+        # "Monto utilizado" missing -> the línea still emits with its available
+        # and límite; owed stays None (net worth falls back to límite − available).
         text = "Monto autorizado\n$ 100.000\nSaldo disponible\n$ 80.000\n"
         balances = linea_balances_from_text(text)
         assert [
-            (b.kind, b.currency, b.metrics.available, b.metrics.limit)
+            (b.kind, b.currency, b.metrics.available, b.metrics.limit, b.metrics.owed)
             for b in balances
-        ] == [("line_of_credit", "CLP", 80000.0, 100000.0)]
+        ] == [("line_of_credit", "CLP", 80000.0, 100000.0, None)]
 
     def test_no_cupo_means_no_emission(self):
         # Without the authorized cupo, storing "available" would be counted as
-        # debt — so nothing is emitted (issue #30).
+        # debt — so nothing is emitted (issue #30), even with a utilizado.
         assert linea_balances_from_text("Saldo disponible\n$ 80.000") == []
+        assert (
+            linea_balances_from_text(
+                "Saldo disponible\n$ 80.000\nMonto utilizado\n$ 20.000\n"
+            )
+            == []
+        )
 
 
 class TestInversionesBalances:
