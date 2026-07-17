@@ -298,7 +298,7 @@ export const budgetAdjustments = pgTable(
 // ---------------------------------------------------------------------------
 
 // Wealth snapshots: legacy totals for pre-migration dates + manual entries.
-// The wealth series is now derived from product_balances (see /api/wealth).
+// The wealth series is now derived from product_snapshots (see /api/wealth).
 export const wealthSnapshots = pgTable("wealth_snapshots", {
   id: uuid("id").primaryKey().defaultRandom(),
   snapshotDate: date("snapshot_date").notNull().unique(),

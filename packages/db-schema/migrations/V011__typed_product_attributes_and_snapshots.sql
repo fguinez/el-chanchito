@@ -18,8 +18,11 @@ ALTER TABLE products
   ADD COLUMN metrics JSONB;
 
 -- Seed revolving metrics from the old columns (current_balance held the
--- available cupo, credit_limit the total) so net-worth debt doesn't blink to
--- zero until the next scrape re-observes the card / línea.
+-- available cupo, credit_limit the total). This keeps the *current* net worth
+-- (/api/institutions, which reads products.metrics) from losing card / línea
+-- debt before the first re-scrape; the wealth *history* series is a different
+-- story — pre-V011 snapshot rows intentionally carry empty metrics (see the
+-- INSERT below) and the series self-heals as re-scraped observations accumulate.
 UPDATE products
 SET metrics = jsonb_strip_nulls(
   jsonb_build_object(

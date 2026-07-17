@@ -37,7 +37,7 @@
 │                     port 5435 (host)                             │
 │                                                                 │
 │  users | institutions | accounts | products                     │
-│  product_balances | transactions | categories | category_rules  │
+│  product_snapshots | transactions | categories | category_rules │
 │  budget_configs | budget_adjustments | wealth_snapshots          │
 │  fixed_expenses | income_sources | internal_transfers           │
 │  scraper_runs                                                   │
@@ -59,7 +59,7 @@
 │  │        ▼            ▼            ▼               ▼        │  │
 │  │   ┌──────────────────────────────────────────────────┐   │  │
 │  │   │              DB Writer (upsert)                   │   │  │
-│  │   │   transactions + product_balances + scraper_runs  │   │  │
+│  │   │   transactions + product_snapshots + scraper_runs │   │  │
 │  │   └──────────────────────────────────────────────────┘   │  │
 │  └──────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
@@ -83,14 +83,16 @@
              ▼             ▼           ▼
         ┌────────────────────────────────────┐
         │         ScrapedTransaction         │
-        │         ScrapedBalance             │
+        │         ScrapedProduct             │
+        │   (pydantic envelopes from         │
+        │    packages/product-model)         │
         └──────────────┬─────────────────────┘
                        │
                        ▼
         ┌────────────────────────────────────┐
         │  DB Writer                         │
         │  - upsert_transactions()           │
-        │  - upsert_balance()                │
+        │  - upsert_product()                │
         │  - start/finish_scraper_run()      │
         │  - ON CONFLICT DO NOTHING (dedup)  │
         └──────────────┬─────────────────────┘
@@ -106,7 +108,7 @@
         │  - planning: reads budget_configs  │
         │    + transactions + balances       │
         │    -> computes expected vs real    │
-        │  - wealth: reads snapshots         │
+        │  - wealth: reads product_snapshots │
         │    -> computes derived metrics     │
         └──────────────┬─────────────────────┘
                        │
@@ -147,6 +149,11 @@ drift = 0  =>  exactly on track
 Core hierarchy (since V009): `users -> accounts -> products`. "Account" always
 means the user's enrollment at one institution (what you log into); the
 money-holding elements are **products** (schema.org/FinancialProduct).
+Per-kind product data (since V011) lives in two JSONB payloads typed by the
+shared registry (`packages/product-model`): `attributes` (slow-changing
+identity/config, shallow-merged on write) and `metrics` (per-scrape
+observation; history in `product_snapshots`, latest denormalized on the
+product).
 
 ```
 users ────────────────┐
@@ -162,24 +169,27 @@ institutions ─────────┤       accounts
     asset_manager|     │
     other)             │
                        │
-products ──────────────┘      product_balances (history)
+products ──────────────┘      product_snapshots (history)
   id PK                         id PK
   account_id FK ──────>       < product_id FK
-  parent_product_id FK (self:   balance NUMERIC(20,8)
-    debit->checking,            as_of (unique w/ product_id)
-    línea->cta.cte.)            source
-  kind (checking|savings|
+  parent_product_id FK (self:   balance NUMERIC(20,8) -- headline
+    debit->checking,            metrics JSONB ('{}' pre-V011)
+    línea->cta.cte.)            as_of (unique w/ product_id)
+  kind (checking|savings|       source
     vista|wallet|term_deposit|
     credit_card|debit_card|
     prepaid_card|line_of_credit|
     loan|mortgage|investment|
     crypto|other)
-  name, currency
-  current_balance NUMERIC     -- denormalized latest
+  name, currency, external_ref
+  attributes JSONB            -- typed identity/config, shallow-merged
+  metrics JSONB               -- latest typed observation
+  current_balance NUMERIC     -- denormalized headline (metrics.headline())
   balance_as_of               -- last checked (bumps even if unchanged)
-  credit_limit, external_ref
-  details JSONB               -- kind-specific attributes
   is_active, display_order
+  UNIQUE uq_products_identity
+    (account_id, kind, currency,
+     COALESCE(external_ref, ''))
 
 transactions ──────────┐
   id PK                │      categories
@@ -218,7 +228,7 @@ wealth_snapshots (legacy)     fixed_expenses
   banchile_savings
   -- pre-V009 totals + manual entries;
   -- /api/wealth now derives the series
-  -- from product_balances
+  -- from product_snapshots
 
 
 income_sources                internal_transfers
@@ -251,6 +261,9 @@ scraper_runs                    transfer_date
 | `V007__category_rules.sql` | category_rules + seed default categories |
 | `V008__scraper_runs_method_institution.sql` | splits `scraper_runs.scraper_name` into `method` + `institution` |
 | `V009__users_institutions_products.sql` | users, institutions, accounts (enrollments); old accounts renamed to products (UUIDs preserved); account_balances -> product_balances (history); wealth backfill |
+| `V010__retire_legacy_banchile_savings_product.sql` | deletes the legacy BdC savings product V009 created for the wealth backfill (double-counted net worth) |
+| `V011__typed_product_attributes_and_snapshots.sql` | products gain attributes/metrics JSONB (details + credit_limit dropped, revolving metrics seeded); uq_products_identity; product_balances -> product_snapshots (adds metrics) |
+| `V012__retire_fintual_aggregate_product.sql` | deactivates the summed Fintual product + drops its snapshots (replaced by per-goal products) |
 
 ## Scraper Architecture
 
@@ -259,7 +272,8 @@ Scrapers are split into **agnostic backends** (how we scrape) and
 
 ```
 apps/scrapers/scrapers/
-  base.py                  # BaseScraper + ScrapedTransaction/Balance
+  base.py                  # BaseScraper; re-exports the ScrapedProduct /
+                           # ScrapedTransaction envelopes from product_model
   backends/
     email.py               # ImapSession (shared login + NOOP keepalive),
                            # EmailPattern, fetch_transactions_for_pattern
@@ -272,31 +286,38 @@ apps/scrapers/scrapers/
 ```
 
 BanChile is a hybrid: transactions come from `fintself`, but `fintself` never
-exposes a balance, so `scrape_balances()` runs a **second, self-contained
+exposes a balance, so `scrape_products()` runs a **second, self-contained
 Playwright login** (`backends/banchile_web.py`) and reads the "Mis Productos"
-dashboard. It replicates fintself's `channel="chromium"` new-headless workaround
-(BdC serves a degraded page to the default headless shell) and polls for the
-balance widget (it loads via a later XHR). Because transactions and balances are
-independent legs in `run_scraper`, a fintself timeout never blocks the balance
-(and a balance-scrape failure is swallowed, returning `[]`).
+dashboard plus three detail routes. It replicates fintself's
+`channel="chromium"` new-headless workaround (BdC serves a degraded page to the
+default headless shell) and polls for the balance widget (it loads via a later
+XHR). Because transactions and products are independent legs in `run_scraper`,
+a fintself timeout never blocks the products leg (and a product-scrape failure
+is swallowed, returning `[]`).
 
-`balances_by_kind` maps the dashboard to CLP products: `checking` (cuenta
-corriente disponible), `credit_card` (available cupo), `term_deposit` (depósito
-a plazo) and `investment` (fondos mutuos). Two things are **deliberately
-skipped** to avoid feeding a wrong figure into net worth: USD products (the
-`api/planning` real-balance sum is currency-naive), and the línea de crédito
-(the dashboard shows *available* credit, but a `line_of_credit` balance is read
-as the amount *owed*). Every figure is anchored on the literal CLP `$`, so a
-missing/changed layout records nothing rather than a wrong number.
+Four surfaces feed BanChile's typed products: the dashboard (CLP + USD
+`checking` — the card row there is a static placeholder, so it's skipped), the
+card detail page (CLP "Nacional" + USD "Internacional" `credit_card` metrics:
+`available`/`limit`/`owed` from Disponible / Cupo total / Utilizado, plus the
+masked `last4` attribute), the línea detail page (`line_of_credit` metrics from
+Monto autorizado / Saldo disponible / Monto utilizado), and the inversiones
+resumen (`term_deposit` + `investment` totals). Every figure is anchored on a
+literal `$`/`USD` label, so a missing/changed layout records nothing rather
+than a wrong number.
 
-**Balance sign conventions** (`web/src/lib/networth.ts`, `ASSET_KINDS` /
-`LIABILITY_KINDS` in `db/schema.ts`): assets store their positive value in
-`products.current_balance`; liabilities store the amount *owed*, **except**
-`credit_card`, which stores the *available cupo* (debt = `credit_limit −
-available`; the planning drift relies on the cupo). `debit_card` counts nowhere
-— its money lives in the parent `checking`. Everything is converted to CLP
-before summing patrimonio/deuda. BdC cards currently store cupo with no
-`credit_limit`, so their debt reads as 0 until the limit is scraped.
+**Balance conventions & net worth** are registry-driven: each kind's `role`
+(asset/liability/none) and `balance_convention` (value/available/owed/units)
+live in `packages/product-model` — see `packages/product-model/PRODUCTS.md`
+for the per-kind field matrix — and `web/src/lib/networth.ts` just reads the
+generated `KIND_INFO`. `products.current_balance` holds the kind's headline
+metric (asset value/nav, *available* cupo for cards and líneas, amount *owed*
+for loans, crypto *units*). Debt derivation prefers the institution-reported
+`metrics.owed` (BanChile's Utilizado), falls back to `limit − available` when
+the same observation carries both, uses `abs(balance)` only for kinds whose
+convention *is* owed (loan/mortgage), and otherwise contributes zero — a card
+with no metrics never guesses debt. `debit_card` counts nowhere — its money
+lives in the parent `checking`. Everything is converted to CLP before summing
+patrimonio/deuda.
 
 Each institution scraper implements:
 
@@ -305,18 +326,21 @@ class BaseScraper(ABC):
     method: str                                  # "email" | "fintself" | "http_api" | "open_banking"
     institution: str                             # "mach" | "banchile" | "buda" | ...
     scrape_transactions() -> list[ScrapedTransaction]
-    scrape_balances() -> list[ScrapedBalance]
+    scrape_products() -> list[ScrapedProduct]
 ```
 
 Both `method` and `institution` are stored per `scraper_runs` row.
 
-`ScrapedTransaction`/`ScrapedBalance` carry `institution` (slug),
-`product_kind`, and `currency`. The writer resolves the chain
-institution → account → product (creating missing links; single-user:
-everything attaches to the oldest user), so e.g. each Buda currency
-becomes its own `crypto` product. `upsert_balance` always refreshes
-`products.current_balance`/`balance_as_of` but appends a
-`product_balances` history row only when the value changed.
+`ScrapedTransaction`/`ScrapedProduct` are pydantic envelopes defined in
+`packages/product-model`; both carry `institution` (slug), a kind, and
+`currency` (plus optional `external_ref`, e.g. one product per Fintual
+goal). The writer resolves the chain institution → account → product
+(creating missing links via the `uq_products_identity` upsert;
+single-user: everything attaches to the oldest user), so e.g. each Buda
+currency becomes its own `crypto` product. `upsert_product`
+shallow-merges `attributes`, always refreshes
+`products.current_balance`/`metrics`/`balance_as_of`, and appends a
+`product_snapshots` history row only when the metrics payload changed.
 
 | Institution | Method | Source | Auth | Schedule |
 |---|---|---|---|---|
@@ -330,6 +354,23 @@ becomes its own `crypto` product. `upsert_balance` always refreshes
 
 The three email-based scrapers reuse one `ImapSession`: it runs `NOOP` on
 each acquire and only re-logs-in when the mailbox has been dropped.
+
+### Product model
+
+`packages/product-model` is the single source of truth for product kinds: a
+pydantic v2 registry declaring, per kind, the attribute/metric classes plus
+`role`, `balance_convention` and `label_es`. `make product-model-generate`
+emits the derived artifacts — `generated/index.ts` (per-kind TS types,
+`KIND_INFO`, `ASSET_KINDS`/`LIABILITY_KINDS`, consumed by `db/schema.ts`,
+`networth.ts` and the institutions page), `generated/product-model.schema.json`
+(the JSON Schema wire contract) and `PRODUCTS.md` (the per-kind field matrix
+with placement rationale). A codegen drift test under `make test-py`
+regenerates to a temp dir and diffs against the committed output, so the
+artifacts can't silently fall behind the registry. The `ScrapedProduct` /
+`ScrapedTransaction` envelopes are that wire contract in motion: today they
+travel in-process from scraper to `db/writer.py`, and the plan is to put the
+same validation behind a REST ingest API so non-Python scrapers can submit
+data without direct DB access.
 
 ### Deduplication
 
@@ -419,9 +460,14 @@ el-chanchito/
 │       └── Dockerfile
 │
 ├── packages/
-│   └── db-schema/                   # Shared SQL migrations
-│       ├── migrations/              # V001 through V009
-│       └── migrate.mjs             # Migration runner
+│   ├── db-schema/                   # Shared SQL migrations
+│   │   ├── migrations/              # V001 through V012
+│   │   └── migrate.mjs             # Migration runner
+│   └── product-model/               # Product-kind registry (pydantic v2)
+│       ├── product_model/           # kinds, attributes, metrics, envelopes
+│       ├── scripts/generate.py      # emits the derived artifacts
+│       ├── generated/               # index.ts + product-model.schema.json
+│       └── PRODUCTS.md              # generated per-kind field matrix
 │
 ├── docker-compose.yml
 ├── Makefile
