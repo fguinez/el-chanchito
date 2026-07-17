@@ -151,33 +151,42 @@ class FintualScraper(BaseScraper):
                 )
             resp.raise_for_status()
 
-            # One summed product for now; per-goal products (external_ref =
-            # goal id, nav/deposited/profit metrics) are the planned next step.
+            # One product per goal: the JSON:API resource id is the stable
+            # external_ref, so each goal keeps its own balance history.
             products: list[ScrapedProduct] = []
             total_nav = 0
 
             for goal in resp.json().get("data", []):
                 attrs = goal.get("attributes", {})
-                nav = attrs.get("nav", 0)
-                goal_name = attrs.get("name", "Unknown")
+                nav = int(round(float(attrs.get("nav", 0))))
+                total_nav += nav
 
-                if nav and float(nav) > 0:
-                    balance_clp = int(round(float(nav)))
-                    total_nav += balance_clp
-                    logger.info(
-                        "Fintual goal '%s': $%s CLP",
-                        goal_name,
-                        f"{balance_clp:,}",
-                    )
+                # deposited/profit ride along when the payload reports them.
+                deposited = attrs.get("deposited")
+                profit = attrs.get("profit")
 
-            if total_nav > 0:
                 products.append(
                     ScrapedProduct(
                         institution="fintual",
                         kind="investment",
-                        metrics=InvestmentMetrics(nav=total_nav),
+                        currency="CLP",
+                        external_ref=str(goal["id"]),
+                        name=attrs.get("name", "Unknown"),
+                        metrics=InvestmentMetrics(
+                            nav=nav,
+                            deposited=(
+                                float(deposited) if deposited is not None else None
+                            ),
+                            profit=float(profit) if profit is not None else None,
+                        ),
                     )
                 )
+
+            logger.info(
+                "Fintual: %d goals, total nav $%s CLP",
+                len(products),
+                f"{total_nav:,}",
+            )
 
             return products
 
