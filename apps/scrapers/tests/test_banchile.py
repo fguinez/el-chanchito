@@ -139,6 +139,22 @@ class TestScrapeProducts:
             "BanChile: línea surface failed after 3 attempts",
         ]
 
+    def test_per_holding_surface_labels_reach_warnings(self, monkeypatch):
+        """The issue #36 surfaces warn as depósitos/fondos (not 'inversiones')."""
+        async def fake_fetch(rut, password):
+            return BalanceFetchResult(
+                products=[], failed_surfaces=("depósitos", "fondos")
+            )
+
+        monkeypatch.setattr(banchile_mod, "fetch_balances", fake_fetch)
+
+        result = asyncio.run(self.scraper.scrape_products())
+
+        assert result.warnings == [
+            "BanChile: depósitos surface failed after 3 attempts",
+            "BanChile: fondos surface failed after 3 attempts",
+        ]
+
     def test_backend_failure_is_swallowed(self, monkeypatch):
         """A heavy, flaky second login must not fail the whole run."""
         async def boom(rut, password):
