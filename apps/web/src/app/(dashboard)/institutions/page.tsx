@@ -20,21 +20,27 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatCLP, cn } from "@/lib/utils";
 import { AlertTriangle, Building2, ExternalLink, RefreshCw } from "lucide-react";
+import { KIND_INFO } from "@chanchito/product-model";
+import type {
+  ProductAttributes,
+  ProductKind,
+  ProductMetrics,
+} from "@chanchito/product-model";
 
 interface Product {
   id: string;
   accountId: string;
   accountName: string;
   parentProductId: string | null;
-  kind: string;
+  kind: ProductKind;
   name: string;
   currency: string;
   currentBalance: number | null;
   currentBalanceClp: number | null;
   balanceAsOf: string | null;
   externalRef: string | null;
-  attributes: Record<string, unknown>;
-  metrics: Record<string, unknown> | null;
+  attributes: ProductAttributes | Record<string, never>;
+  metrics: ProductMetrics | null;
   isActive: boolean;
 }
 
@@ -68,6 +74,8 @@ interface ApiResponse {
   totals: Totals;
 }
 
+// Institution kinds (bank/fintech/...) are a page-local vocabulary; product
+// kinds come from the shared registry (KIND_INFO: labels + asset/liability roles).
 const INSTITUTION_KIND_LABELS: Record<string, string> = {
   bank: "Banco",
   fintech: "Fintech",
@@ -75,30 +83,6 @@ const INSTITUTION_KIND_LABELS: Record<string, string> = {
   asset_manager: "Gestora",
   other: "Otro",
 };
-
-const PRODUCT_KIND_LABELS: Record<string, string> = {
-  checking: "Cuenta corriente",
-  savings: "Ahorro",
-  vista: "Cuenta vista",
-  wallet: "Billetera",
-  term_deposit: "Depósito a plazo",
-  credit_card: "Tarjeta de crédito",
-  debit_card: "Tarjeta de débito",
-  prepaid_card: "Tarjeta prepago",
-  line_of_credit: "Línea de crédito",
-  loan: "Préstamo",
-  mortgage: "Hipotecario",
-  investment: "Inversión",
-  crypto: "Cripto",
-  other: "Otro",
-};
-
-const LIABILITY_KINDS = new Set([
-  "credit_card",
-  "line_of_credit",
-  "loan",
-  "mortgage",
-]);
 
 /** Slugs with a live scraper the refresh button can trigger. Everything else
  *  (e.g. `bci_lider`, `manual`) gets a disabled button — see build_scrapers(). */
@@ -182,32 +166,48 @@ function displayProductName(product: Product, institutionName: string): string {
     cleaned === product.kind || cleaned.startsWith(`${product.kind} (`);
   if (isGeneric || !cleaned) {
     if (product.kind === "crypto") return product.currency;
-    return PRODUCT_KIND_LABELS[product.kind] ?? product.kind;
+    return KIND_INFO[product.kind].labelEs;
   }
   return cleaned;
 }
 
 /** The product's credit limit (cupo) as observed in its latest metrics. */
 function productLimit(product: Product): number | null {
-  const limit = product.metrics?.limit;
-  return typeof limit === "number" ? limit : null;
+  const m = product.metrics;
+  if (m && (m.kind === "credit_card" || m.kind === "line_of_credit")) {
+    return m.limit ?? null;
+  }
+  return null;
 }
 
-/** Human-readable detail chips pulled from the product's attributes + account. */
+/** Human-readable detail chips pulled from the product's typed attributes
+ *  (snake_case registry keys) + account, plus the reported revolving debt. */
 function productDetailChips(product: Product): string[] {
   const chips: string[] = [];
-  const d = product.attributes ?? {};
+  const a = product.attributes;
 
   if (product.accountName && product.accountName !== "Personal") {
     chips.push(product.accountName);
   }
-  if (typeof d.brand === "string") chips.push(d.brand);
-  if (typeof d.last4 === "string") chips.push(`•••• ${d.last4}`);
-  if (typeof d.portfolio === "string") chips.push(d.portfolio);
-  if (typeof d.riskProfile === "string") chips.push(d.riskProfile);
-  if (typeof d.statementDay === "number")
-    chips.push(`corte día ${d.statementDay}`);
-  if (typeof d.dueDay === "number") chips.push(`vence día ${d.dueDay}`);
+  if ("brand" in a && a.brand != null) chips.push(a.brand);
+  if ("last4" in a && a.last4 != null) chips.push(`•••• ${a.last4}`);
+  if ("portfolio" in a && a.portfolio != null) chips.push(a.portfolio);
+  if ("risk_profile" in a && a.risk_profile != null) chips.push(a.risk_profile);
+  if ("statement_day" in a && a.statement_day != null)
+    chips.push(`corte día ${a.statement_day}`);
+  if ("due_day" in a && a.due_day != null)
+    chips.push(`vence día ${a.due_day}`);
+
+  // Reported drawn amount (Utilizado) on a card / línea, in product currency.
+  const m = product.metrics;
+  if (
+    m &&
+    (m.kind === "credit_card" || m.kind === "line_of_credit") &&
+    m.owed != null
+  ) {
+    const owed = formatBalance(product.currency, m.owed);
+    if (owed) chips.push(`Utilizado ${owed}`);
+  }
 
   return chips;
 }
@@ -500,7 +500,8 @@ export default function InstitutionsPage() {
                       product.currentBalance
                     );
                     const cupo = productLimit(product);
-                    const isLiability = LIABILITY_KINDS.has(product.kind);
+                    const isLiability =
+                      KIND_INFO[product.kind].role === "liability";
                     return (
                       <TableRow
                         key={product.id}
@@ -526,7 +527,7 @@ export default function InstitutionsPage() {
                                 : "border-green-200 text-green-700"
                             )}
                           >
-                            {PRODUCT_KIND_LABELS[product.kind] ?? product.kind}
+                            {KIND_INFO[product.kind].labelEs}
                           </Badge>
                         </TableCell>
                         <TableCell className="text-right font-medium tabular-nums">
