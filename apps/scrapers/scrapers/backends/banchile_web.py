@@ -30,7 +30,8 @@ import asyncio
 import logging
 import re
 import time
-from typing import Optional
+from dataclasses import dataclass
+from typing import Callable, Optional
 
 from product_model import (
     CheckingMetrics,
@@ -60,9 +61,16 @@ TIMEZONE_ID = "America/Santiago"
 # Timeouts (ms)
 DEFAULT_TIMEOUT = 15000
 LOGIN_TIMEOUT = 45000
-# Post-login, the dashboard "Cuentas" balances arrive via a later XHR; poll the
-# rendered page up to this long for them to appear.
-BALANCE_WAIT_TIMEOUT = 30000
+# Retry/backoff for the product surfaces (dashboard + the three detail routes).
+# The portal intermittently serves slow pages (issue #35), so each surface gets
+# _SURFACE_ATTEMPTS tries with escalating budgets: the figures arrive via late
+# XHRs, and each render budget bounds a 1s poll of the page text. Between
+# attempts we pause, then recover to the portal home so every retry starts from
+# a known state.
+_SURFACE_ATTEMPTS = 3
+_RENDER_TIMEOUTS_MS = (30_000, 45_000, 60_000)   # per-attempt render/poll budget
+_CARD_LINK_TIMEOUTS_MS = (6_000, 9_000, 12_000)  # per-attempt card shortcut budget
+_RETRY_PAUSES_MS = (2_000, 4_000)                # pause before attempt 2 / attempt 3
 
 # --- Selectors, each a fallback list (BdC markup drifts — see issue #27) ------
 _LOGIN_ACCESS_SELECTORS = [
@@ -114,6 +122,20 @@ _POPUP_CLOSE_SELECTORS = [
 
 class BanChileWebError(RuntimeError):
     """Raised when the BdC web session can't log in or reach the balance."""
+
+
+@dataclass(frozen=True)
+class BalanceFetchResult:
+    """What a BdC session scraped, plus which surfaces never yielded a product.
+
+    Every surface on this account always carries ≥1 product, so a surface that
+    stays empty after all its retries lands in `failed_surfaces` — a subset of
+    ("dashboard", "card", "línea", "inversiones") — and the institution scraper
+    turns those into run warnings instead of silently losing figures.
+    """
+
+    products: list[ScrapedProduct]
+    failed_surfaces: tuple[str, ...]
 
 
 # --- Pure helpers (unit-tested; no browser) -----------------------------------
@@ -731,9 +753,12 @@ def _wait_for_balances(page, timeout_ms: int) -> list[ScrapedProduct]:
 
 # --- Detail-page navigation ---------------------------------------------------
 # The card's total cupo and the línea live on their own SPA (hash) routes, off
-# the "Mis Productos" dashboard. Each read below is *best-effort and non-fatal*:
-# any failure returns [] and leaves the dashboard balances untouched, so a drift
-# in this markup can't cost us the checking/depósito/fondos figures.
+# the "Mis Productos" dashboard. Each surface below is read through
+# `_read_surface_with_retries` — bounded attempts with escalating budgets,
+# recovering to the portal home in between — and stays *non-fatal*: a surface
+# that never parses is reported in `failed_surfaces` and leaves the other
+# surfaces untouched, so a drift in this markup can't cost us the
+# checking/depósito/fondos figures.
 #
 # Hard-won from live QA: the dashboard is littered with *marketing* "Tarjeta de
 # Crédito" links pointing at the public site (sitiospublicos.bancochile.cl), so a
@@ -810,76 +835,163 @@ def _wait_for_text(page, ready_re: "re.Pattern[str]", timeout_ms: int) -> Option
     return None
 
 
-def _read_card_detail(page) -> list[ScrapedProduct]:
-    """Click through to the card detail page and read its cupos (best-effort).
+def _recover_to_home(page) -> None:
+    """Reset to the portal home so the next attempt starts from a known state.
 
-    Fenced so a stray click can't strand us off-portal: if the click escapes the
-    authenticated origin we recover to the portal home and skip the card.
+    Re-assigning an unchanged `window.location.hash` is a no-op, so the
+    hash-routed surfaces need the route reset before they can be retried — and
+    the card's dashboard shortcut needs the dashboard back. Cookies live on the
+    browser context, so the navigation stays authenticated.
     """
     try:
-        if not _ensure_on_portal(page):
-            return []
-        if not _click_first(page, _CARD_LINK_SELECTORS, timeout=6000):
-            logger.info("BanChile: card saldos link not found; skipping cupo/límite")
-            return []
-        if not _on_portal(page):
-            logger.warning("BanChile: card link left the portal; recovering, skipping card")
-            _ensure_on_portal(page)
-            return []
-        text = _wait_for_text(page, _CARD_READY_RE, BALANCE_WAIT_TIMEOUT)
-        if text is None:
-            logger.info("BanChile: card detail page did not render; skipping cupo")
-            return []
-        return card_balances_from_text(text)
+        page.goto(_PORTAL_HOME, timeout=LOGIN_TIMEOUT, wait_until="domcontentloaded")
     except Exception:
-        logger.exception("BanChile: card detail read failed")
+        logger.exception("BanChile: could not return to portal home")
+
+
+def _read_surface_with_retries(page, surface: str, read: Callable) -> list[ScrapedProduct]:
+    """Run one surface's reader with bounded retries and escalating budgets.
+
+    An attempt succeeds iff it parses ≥1 product — every surface on this
+    account always has one, so a rendered-but-empty parse is portal slowness
+    worth retrying (issue #35). Between attempts: a pause (through the page
+    clock, which keeps the tests' MagicMock seam), then a recovery to the
+    portal home. Exceptions never escape a surface; a mid-attempt crash just
+    consumes that attempt.
+    """
+    for attempt in range(_SURFACE_ATTEMPTS):
+        if attempt:
+            page.wait_for_timeout(_RETRY_PAUSES_MS[attempt - 1])
+            _recover_to_home(page)
+        try:
+            products = read(page, attempt)
+        except Exception:
+            logger.exception(
+                "BanChile: %s surface read failed (attempt %d/%d)",
+                surface,
+                attempt + 1,
+                _SURFACE_ATTEMPTS,
+            )
+            continue
+        if products:
+            return products
+    logger.warning(
+        "BanChile: %s surface failed after %d attempts", surface, _SURFACE_ATTEMPTS
+    )
+    return []
+
+
+def _read_dashboard(page, attempt: int) -> list[ScrapedProduct]:
+    """Poll the "Mis Productos" dashboard and parse its balances (one attempt)."""
+    return _wait_for_balances(page, _RENDER_TIMEOUTS_MS[attempt])
+
+
+def _read_card_detail(page, attempt: int) -> list[ScrapedProduct]:
+    """Click through to the card detail page and read its cupos (one attempt).
+
+    Fenced so a stray click can't strand us off-portal: if the click escapes the
+    authenticated origin we recover to the portal home and fail the attempt.
+    """
+    if not _ensure_on_portal(page):
         return []
+    if not _click_first(page, _CARD_LINK_SELECTORS, timeout=_CARD_LINK_TIMEOUTS_MS[attempt]):
+        logger.info(
+            "BanChile: card saldos link not found (attempt %d/%d)",
+            attempt + 1,
+            _SURFACE_ATTEMPTS,
+        )
+        return []
+    if not _on_portal(page):
+        logger.warning(
+            "BanChile: card link left the portal; recovering (attempt %d/%d)",
+            attempt + 1,
+            _SURFACE_ATTEMPTS,
+        )
+        _ensure_on_portal(page)
+        return []
+    text = _wait_for_text(page, _CARD_READY_RE, _RENDER_TIMEOUTS_MS[attempt])
+    if text is None:
+        logger.info(
+            "BanChile: card detail page did not render (attempt %d/%d)",
+            attempt + 1,
+            _SURFACE_ATTEMPTS,
+        )
+        return []
+    return card_balances_from_text(text)
 
 
-def _read_linea_detail(page) -> list[ScrapedProduct]:
-    """Open the línea detail route and read its authorized cupo (best-effort).
+def _read_linea_detail(page, attempt: int) -> list[ScrapedProduct]:
+    """Open the línea detail route and read its authorized cupo (one attempt).
 
     The route is static, so we drive the SPA straight to it via a hash change (a
     reload/`page.goto` to a same-document fragment wouldn't re-route Angular). We
     first make sure we're on the portal so the hash lands on the right origin.
     """
-    try:
-        if not _ensure_on_portal(page):
-            return []
-        page.evaluate("route => { window.location.hash = route; }", _LINEA_ROUTE)
-        text = _wait_for_text(page, _LINEA_READY_RE, BALANCE_WAIT_TIMEOUT)
-        if text is None:
-            logger.info("BanChile: línea detail page did not render; skipping")
-            return []
-        return linea_balances_from_text(text)
-    except Exception:
-        logger.exception("BanChile: línea detail read failed")
+    if not _ensure_on_portal(page):
         return []
+    page.evaluate("route => { window.location.hash = route; }", _LINEA_ROUTE)
+    text = _wait_for_text(page, _LINEA_READY_RE, _RENDER_TIMEOUTS_MS[attempt])
+    if text is None:
+        logger.info(
+            "BanChile: línea detail page did not render (attempt %d/%d)",
+            attempt + 1,
+            _SURFACE_ATTEMPTS,
+        )
+        return []
+    return linea_balances_from_text(text)
 
 
-def _read_inversiones_detail(page) -> list[ScrapedProduct]:
+def _read_inversiones_detail(page, attempt: int) -> list[ScrapedProduct]:
     """Open the inversiones resumen route and read the depósito/fondos totals.
 
     Depósitos a plazo and fondos mutuos aren't on the "Mis Productos" dashboard;
     they live on their own "Resumen de Inversión" SPA route, driven straight to
-    via a hash change (like the línea). Best-effort and non-fatal: any failure
-    returns [] and leaves the dashboard/card/línea balances untouched.
+    via a hash change (like the línea).
     """
-    try:
-        if not _ensure_on_portal(page):
-            return []
-        page.evaluate("route => { window.location.hash = route; }", _INVERSION_ROUTE)
-        text = _wait_for_text(page, _INVERSION_READY_RE, BALANCE_WAIT_TIMEOUT)
-        if text is None:
-            logger.info("BanChile: inversiones page did not render; skipping depósitos/fondos")
-            return []
-        return inversiones_balances_from_text(text)
-    except Exception:
-        logger.exception("BanChile: inversiones detail read failed")
+    if not _ensure_on_portal(page):
         return []
+    page.evaluate("route => { window.location.hash = route; }", _INVERSION_ROUTE)
+    text = _wait_for_text(page, _INVERSION_READY_RE, _RENDER_TIMEOUTS_MS[attempt])
+    if text is None:
+        logger.info(
+            "BanChile: inversiones page did not render (attempt %d/%d)",
+            attempt + 1,
+            _SURFACE_ATTEMPTS,
+        )
+        return []
+    return inversiones_balances_from_text(text)
 
 
-def _scrape_sync(rut: str, password: str, headless: bool) -> list[ScrapedProduct]:
+# Surface label -> per-attempt reader, in scrape order. The labels feed
+# `BalanceFetchResult.failed_surfaces`.
+_SURFACE_READERS: list[tuple[str, Callable]] = [
+    ("dashboard", _read_dashboard),
+    ("card", _read_card_detail),
+    ("línea", _read_linea_detail),
+    ("inversiones", _read_inversiones_detail),
+]
+
+
+def _read_all_surfaces(page) -> BalanceFetchResult:
+    """Read every product surface off an authenticated page, with retries.
+
+    This is the seam the retry tests drive with a fake page. A detail reading
+    supersedes the dashboard's entry for the same product (a card picks up its
+    límite; the inversiones page supplies term_deposit/investment), and a
+    surface with no products after all its attempts lands in `failed_surfaces`.
+    """
+    balances: list[ScrapedProduct] = []
+    failed: list[str] = []
+    for surface, read in _SURFACE_READERS:
+        products = _read_surface_with_retries(page, surface, read)
+        if products:
+            balances = _merge_balances(balances, products)
+        else:
+            failed.append(surface)
+    return BalanceFetchResult(products=balances, failed_surfaces=tuple(failed))
+
+
+def _scrape_sync(rut: str, password: str, headless: bool) -> BalanceFetchResult:
     """Synchronous Playwright flow (runs in a worker thread, no event loop)."""
     from playwright.sync_api import sync_playwright  # lazy: keeps tests browser-free
 
@@ -900,29 +1012,21 @@ def _scrape_sync(rut: str, password: str, headless: bool) -> list[ScrapedProduct
 
             _login(page, rut, password)
             _dismiss_popup(page)
-            # Balances render on the post-login dashboard via a later XHR.
-            balances = _wait_for_balances(page, BALANCE_WAIT_TIMEOUT)
-            # Enrich with the per-product detail pages (card cupo/límite, línea,
-            # depósitos/fondos). Each is non-fatal; a detail reading supersedes the
-            # dashboard's entry for the same product so a card picks up its
-            # límite and the inversiones page supplies term_deposit/investment.
-            balances = _merge_balances(balances, _read_card_detail(page))
-            balances = _merge_balances(balances, _read_linea_detail(page))
-            balances = _merge_balances(balances, _read_inversiones_detail(page))
-            return balances
+            return _read_all_surfaces(page)
         finally:
             browser.close()
 
 
 async def fetch_balances(
     rut: str, password: str, *, headless: bool = True
-) -> list[ScrapedProduct]:
+) -> BalanceFetchResult:
     """Log into Banco de Chile and return its scraped balances.
 
     Covers the dashboard checking (CLP/USD) plus the card total cupo/límite, the
     línea, and the depósitos a plazo / fondos mutuos read from their own detail
-    pages. Runs the synchronous Playwright flow in a thread executor so it doesn't
-    block the scheduler's event loop, mirroring backends/fintself.py.
+    pages; surfaces that never yielded a product are reported in the result's
+    `failed_surfaces`. Runs the synchronous Playwright flow in a thread executor
+    so it doesn't block the scheduler's event loop, mirroring backends/fintself.py.
     """
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _scrape_sync, rut, password, headless)

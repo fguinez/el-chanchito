@@ -12,6 +12,7 @@ from product_model import CheckingMetrics, CreditCardMetrics
 from scrapers.backends.banchile_web import (
     _balance_from_text,
     _merge_balances,
+    _read_all_surfaces,
     _usd_checking_from_text,
     balances_by_kind,
     balances_from_page,
@@ -575,3 +576,106 @@ class TestMergeBalances:
     def test_empty_extra_returns_base(self):
         base = [self._checking("CLP", 100)]
         assert _merge_balances(base, []) is base
+
+
+# Synthetic línea detail text — the labels mirror the real "Saldos y movimientos
+# de la línea" page; every figure is fabricated (autorizado 100.000 /
+# disponible 80.000 / utilizado 20.000).
+LINEA_DETAIL = (
+    "Monto autorizado\n$ 100.000\n"
+    "Saldo disponible\n$ 80.000\n"
+    "Monto utilizado\n$ 20.000\n"
+)
+
+
+def _fake_portal_page():
+    """Stateful portal stand-in whose visible text follows the SPA route.
+
+    The dashboard is the initial (and post-recovery) text, the card shortcut
+    click opens the card detail, and a hash assignment opens the routed page —
+    so `_read_all_surfaces` can be driven attempt by attempt with no browser.
+    """
+    page = MagicMock()
+    page.url = (
+        "https://portalpersonas.bancochile.cl/mibancochile-web/front/persona/"
+        "index.html#/home"
+    )
+    state = {"text": REAL_DASHBOARD}
+
+    def evaluate(js, *args):
+        if args:
+            state["text"] = LINEA_DETAIL if "linea" in args[0] else INVERSION_RESUMEN
+            return None
+        return state["text"]
+
+    def click():
+        state["text"] = CARD_DETAIL
+
+    def goto(url, **kwargs):
+        state["text"] = REAL_DASHBOARD
+
+    page.evaluate.side_effect = evaluate
+    page.locator.return_value.first.click.side_effect = click
+    page.goto.side_effect = goto
+    return page
+
+
+class TestSurfaceRetries:
+    def test_all_surfaces_parse_without_retries(self):
+        """Every surface renders on attempt 1: no pauses, no recoveries."""
+        page = _fake_portal_page()
+
+        result = _read_all_surfaces(page)
+
+        assert result.failed_surfaces == ()
+        assert [(b.kind, b.currency) for b in result.products] == [
+            ("checking", "CLP"),
+            ("checking", "USD"),
+            ("credit_card", "CLP"),
+            ("credit_card", "USD"),
+            ("line_of_credit", "CLP"),
+            ("term_deposit", "CLP"),
+            ("investment", "CLP"),
+        ]
+        page.goto.assert_not_called()
+        page.wait_for_timeout.assert_not_called()
+
+    def test_card_link_miss_recovers_on_second_attempt(self):
+        """A card shortcut that misses once parses fine on the retry."""
+        page = _fake_portal_page()
+        link = page.locator.return_value.first
+        link.wait_for.side_effect = [RuntimeError("selector timeout")] * 3 + [None]
+
+        result = _read_all_surfaces(page)
+
+        assert result.failed_surfaces == ()
+        cards = [b for b in result.products if b.kind == "credit_card"]
+        assert [
+            (b.currency, b.metrics.available, b.metrics.limit, b.metrics.owed)
+            for b in cards
+        ] == [
+            ("CLP", 3600000.0, 4000000.0, 400000.0),
+            ("USD", 1950.0, 2000.0, 50.0),
+        ]
+        assert page.goto.call_count == 1
+        assert [c.args[0] for c in page.wait_for_timeout.call_args_list] == [2000]
+
+    def test_card_exhausts_bounded_attempts_and_is_reported_failed(self):
+        """A card shortcut that never appears fails after exactly 3 attempts."""
+        page = _fake_portal_page()
+        link = page.locator.return_value.first
+        link.wait_for.side_effect = RuntimeError("selector timeout")
+
+        result = _read_all_surfaces(page)
+
+        assert result.failed_surfaces == ("card",)
+        assert [(b.kind, b.currency) for b in result.products] == [
+            ("checking", "CLP"),
+            ("checking", "USD"),
+            ("line_of_credit", "CLP"),
+            ("term_deposit", "CLP"),
+            ("investment", "CLP"),
+        ]
+        assert link.wait_for.call_count == 9
+        assert page.goto.call_count == 2
+        assert [c.args[0] for c in page.wait_for_timeout.call_args_list] == [2000, 4000]
