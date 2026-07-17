@@ -146,8 +146,7 @@ export default function SettingsPage() {
         <CardHeader>
           <CardTitle>Parametros del presupuesto</CardTitle>
           <CardDescription>
-            Estos valores definen el presupuesto del mes actual (equivale a la
-            hoja &quot;Inputs&quot; del Excel)
+            Estos valores definen el presupuesto del mes actual
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -229,8 +228,7 @@ export default function SettingsPage() {
         <CardHeader>
           <CardTitle>Calculadora de division de pagos</CardTitle>
           <CardDescription>
-            Divide un monto entre fuentes de ingreso proporcionalmente (equivale
-            a &quot;Porcentaje pagos&quot; del Excel)
+            Divide un monto entre fuentes de ingreso proporcionalmente
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -358,7 +356,7 @@ export default function SettingsPage() {
           <CardTitle>Inicio de mes</CardTitle>
           <CardDescription>
             Crea la configuracion del proximo mes copiando los parametros
-            actuales (equivale a &quot;Pasos inicio mes&quot; del Excel)
+            actuales
           </CardDescription>
         </CardHeader>
         <CardContent>

@@ -4,11 +4,11 @@ Personal finance tracker for Chilean banks and fintechs: automated scrapers, a d
 
 ## Overview
 
-El Chanchito (“the piggy bank”) is a self-hosted personal finance tracker that replaces a hand-maintained Excel budgeting sheet. Python scrapers pull balances and transactions from Chilean financial institutions (Banco de Chile, Fintual, Buda, MACH, MercadoPago and Tenpo) into PostgreSQL, and a Next.js dashboard turns them into a daily budget plan, a spending history, and a net-worth timeline. Everything runs locally via the Makefile or Docker Compose, and credentials stay on your machine in the macOS Keychain.
+El Chanchito (“the piggy bank”) is a self-hosted personal finance tracker. Python scrapers pull balances and transactions from Chilean financial institutions (Banco de Chile, Fintual, Buda, MACH, MercadoPago and Tenpo) into PostgreSQL, and a Next.js dashboard turns them into a daily budget plan, a spending history, and a net-worth timeline. Everything runs locally via the Makefile or Docker Compose, and credentials stay on your machine in the macOS Keychain.
 
 ## Highlights
 
-- **Daily budget engine**: an expected balance for every day of the month, and the drift of your real balance against it (the Excel “Planificación” sheet, automated).
+- **Daily budget engine**: an expected balance for every day of the month, and the drift of your real balance against it.
 - **Six institution scrapers** on independent schedules, mixing REST APIs (Fintual, Buda), Playwright browser automation (Banco de Chile), and Gmail inbox parsing (MACH, MercadoPago, Tenpo).
 - **Typed product registry**: every product kind (checking, credit card, crypto, ...) is declared once in pydantic and code-generated into TypeScript types, a JSON Schema, and per-kind docs.
 - **Net worth from snapshots**: derived from per-product snapshot history, with per-kind asset/liability conventions and multi-currency conversion to CLP.

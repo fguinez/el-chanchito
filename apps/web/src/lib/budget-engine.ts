@@ -1,6 +1,5 @@
 /**
  * Core budget calculation engine.
- * Replicates the Excel formulas from "Presupuesto mensual.xlsx".
  *
  * All amounts are integers in CLP.
  */

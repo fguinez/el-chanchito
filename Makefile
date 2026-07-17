@@ -147,7 +147,7 @@ logs-scrapers: ## Tail scraper logs
 
 # ─── Utilities ───────────────────────────────────────────────────────────────
 
-seed-history: ## Seed wealth history from Excel data
+seed-history: ## Seed wealth history with sample snapshots
 	@echo "Seeding historical wealth snapshots..."
 	@curl -s -X POST http://localhost:3000/api/wealth -H "Content-Type: application/json" -d '{"snapshotDate":"2023-02-01","patrimonio":1000000,"deuda":0}' > /dev/null
 	@curl -s -X POST http://localhost:3000/api/wealth -H "Content-Type: application/json" -d '{"snapshotDate":"2023-04-01","patrimonio":1500000,"deuda":200000}' > /dev/null

@@ -6,7 +6,7 @@ import { desc, eq } from "drizzle-orm";
 /**
  * POST /api/month-reset — create next month's budget config from current.
  *
- * Replaces the manual "Pasos inicio mes" Excel checklist:
+ * Automates the manual "Pasos inicio mes" checklist:
  * 1. Copy current month's budget params to a new month
  * 2. Reset checking initial balance to 0
  * 3. New month starts with fresh adjustments (none carried over)

@@ -123,7 +123,7 @@
 
 ## Budget Engine
 
-The core formula replicating the Excel "Planificacion" sheet:
+The core formula behind the "Planificacion" table:
 
 ```
 presup_diario = variable_budget / days_in_month

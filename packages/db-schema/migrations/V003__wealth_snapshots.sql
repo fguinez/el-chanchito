@@ -1,4 +1,4 @@
--- Wealth snapshots (maps to Excel "Historial" sheet)
+-- Wealth snapshots
 CREATE TABLE wealth_snapshots (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   snapshot_date DATE NOT NULL UNIQUE,

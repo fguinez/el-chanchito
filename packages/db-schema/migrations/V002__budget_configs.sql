@@ -1,4 +1,4 @@
--- Budget configuration per month (maps to Excel "Inputs" sheet)
+-- Budget configuration per month
 CREATE TABLE budget_configs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   month DATE NOT NULL UNIQUE,                     -- first day of month

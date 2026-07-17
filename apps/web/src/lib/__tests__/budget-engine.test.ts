@@ -15,7 +15,7 @@ import {
 } from "../budget-engine";
 
 // Synthetic default config shared by the planning tests
-const EXCEL_CONFIG: BudgetConfig = {
+const BASE_CONFIG: BudgetConfig = {
   variableBudget: 600_000,
   fixedBudget: 1_000_000,
   creditCardLimit: 2_000_000,
@@ -94,13 +94,13 @@ describe("calcAhorroPorMes", () => {
 
 describe("generatePlanningTable", () => {
   it("generates correct number of rows", () => {
-    const plans = generatePlanningTable(EXCEL_CONFIG, 30, [], 0, 12);
+    const plans = generatePlanningTable(BASE_CONFIG, 30, [], 0, 12);
     expect(plans).toHaveLength(30);
   });
 
   it("computes the day 1 balance", () => {
     // cupo_tc_mes - presup_diario * 1 = 2000000 - 20000*1 = 1980000
-    const plans = generatePlanningTable(EXCEL_CONFIG, 30, [], 0, 1);
+    const plans = generatePlanningTable(BASE_CONFIG, 30, [], 0, 1);
     const presupDiario = calcPresupDiario(600_000, 30); // 20000
     expect(plans[0].expectedTcBalance).toBe(2_000_000 - presupDiario * 1);
     expect(plans[0].expectedCcBalance).toBe(0);
@@ -108,7 +108,7 @@ describe("generatePlanningTable", () => {
   });
 
   it("computes day 12 for a 30-day month", () => {
-    const plans = generatePlanningTable(EXCEL_CONFIG, 30, [], 0, 12);
+    const plans = generatePlanningTable(BASE_CONFIG, 30, [], 0, 12);
     const presupDiario = calcPresupDiario(600_000, 30); // 20000
     const day12 = plans[11]; // index 11 = day 12
     expect(day12.day).toBe(12);
@@ -118,7 +118,7 @@ describe("generatePlanningTable", () => {
   });
 
   it("last day has lowest expected balance", () => {
-    const plans = generatePlanningTable(EXCEL_CONFIG, 30, [], 0, 1);
+    const plans = generatePlanningTable(BASE_CONFIG, 30, [], 0, 1);
     const last = plans[29];
     const presupDiario = calcPresupDiario(600_000, 30);
     expect(last.expectedTotal).toBe(2_000_000 - presupDiario * 30);
@@ -129,7 +129,7 @@ describe("generatePlanningTable", () => {
       { day: 5, amount: -50_000 }, // extra expense on day 5
       { day: 10, amount: 100_000 }, // extra income on day 10
     ];
-    const plans = generatePlanningTable(EXCEL_CONFIG, 30, adjustments, 0, 1);
+    const plans = generatePlanningTable(BASE_CONFIG, 30, adjustments, 0, 1);
 
     // Day 4: no adjustments yet
     expect(plans[3].cumulativeAdjustments).toBe(0);
@@ -148,7 +148,7 @@ describe("generatePlanningTable", () => {
   });
 
   it("includes checking balance in total", () => {
-    const config = { ...EXCEL_CONFIG, checkingInitialBalance: 200_000 };
+    const config = { ...BASE_CONFIG, checkingInitialBalance: 200_000 };
     const plans = generatePlanningTable(config, 30, [], 0, 1);
     const presupDiario = calcPresupDiario(600_000, 30);
     expect(plans[0].expectedCcBalance).toBe(200_000);
@@ -158,7 +158,7 @@ describe("generatePlanningTable", () => {
   });
 
   it("accounts for future debts", () => {
-    const plans = generatePlanningTable(EXCEL_CONFIG, 30, [], 500_000, 1);
+    const plans = generatePlanningTable(BASE_CONFIG, 30, [], 500_000, 1);
     const presupDiario = calcPresupDiario(600_000, 30);
     // cupo_tc_mes = 2000000 - 500000 = 1500000
     expect(plans[0].expectedTcBalance).toBe(1_500_000 - presupDiario);
@@ -168,7 +168,7 @@ describe("generatePlanningTable", () => {
 describe("getTodayStatus", () => {
   it("calculates drift when real balance is available", () => {
     const status = getTodayStatus(
-      EXCEL_CONFIG, 30, [], 0, 12, 1_800_000, 100_000
+      BASE_CONFIG, 30, [], 0, 12, 1_800_000, 100_000
     );
     const presupDiario = calcPresupDiario(600_000, 30);
     const expected = 2_000_000 - presupDiario * 12;
@@ -179,7 +179,7 @@ describe("getTodayStatus", () => {
 
   it("returns null drift when real balance is not available", () => {
     const status = getTodayStatus(
-      EXCEL_CONFIG, 30, [], 0, 12, null, 0
+      BASE_CONFIG, 30, [], 0, 12, null, 0
     );
     expect(status.drift).toBeNull();
     expect(status.realBalance).toBeNull();
@@ -187,7 +187,7 @@ describe("getTodayStatus", () => {
 
   it("calculates remaining budget correctly", () => {
     const status = getTodayStatus(
-      EXCEL_CONFIG, 30, [], 0, 12, null, 300_000
+      BASE_CONFIG, 30, [], 0, 12, null, 300_000
     );
     expect(status.budgetRemainingMonth).toBe(300_000); // 600000 - 300000
     expect(status.daysRemaining).toBe(18); // 30 - 12

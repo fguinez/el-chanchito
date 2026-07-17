@@ -1,4 +1,4 @@
--- Fixed monthly expenses (maps to Excel "Mensual fijo" sheet)
+-- Fixed monthly expenses
 CREATE TABLE fixed_expenses (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL,
@@ -11,7 +11,7 @@ CREATE TABLE fixed_expenses (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Income sources (maps to Excel "Porcentaje pagos" sheet)
+-- Income sources
 CREATE TABLE income_sources (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL,
@@ -20,7 +20,7 @@ CREATE TABLE income_sources (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Internal transfers (maps to Excel "Movimientos internos" sheet)
+-- Internal transfers
 CREATE TABLE internal_transfers (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   description TEXT NOT NULL,
