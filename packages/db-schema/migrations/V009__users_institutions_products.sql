@@ -21,7 +21,7 @@ CREATE TABLE users (
 );
 
 INSERT INTO users (id, name)
-VALUES ('00000000-0000-0000-0000-000000000001', 'Francisco');
+VALUES ('00000000-0000-0000-0000-000000000001', 'Demo User');
 
 -- 2. institutions ------------------------------------------------------------
 CREATE TABLE institutions (

@@ -255,7 +255,7 @@ export default function SettingsPage() {
                   type="number"
                   value={newIncomeAmount}
                   onChange={(e) => setNewIncomeAmount(e.target.value)}
-                  placeholder="1500000"
+                  placeholder="1000000"
                 />
               </div>
               <Button
@@ -326,7 +326,7 @@ export default function SettingsPage() {
                       type="number"
                       value={splitAmount}
                       onChange={(e) => setSplitAmount(e.target.value)}
-                      placeholder="800000"
+                      placeholder="999999"
                     />
                   </div>
                 </div>

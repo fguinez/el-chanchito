@@ -260,7 +260,7 @@ export default function HistoryPage() {
                 onChange={(e) =>
                   setForm((p) => ({ ...p, patrimonio: e.target.value }))
                 }
-                placeholder="25000000"
+                placeholder="2500000"
               />
             </div>
             <div>
@@ -273,7 +273,7 @@ export default function HistoryPage() {
                 onChange={(e) =>
                   setForm((p) => ({ ...p, deuda: e.target.value }))
                 }
-                placeholder="1200000"
+                placeholder="999999"
               />
             </div>
             <div>
@@ -286,7 +286,7 @@ export default function HistoryPage() {
                 onChange={(e) =>
                   setForm((p) => ({ ...p, fintualBalance: e.target.value }))
                 }
-                placeholder="15000000"
+                placeholder="1000000"
               />
             </div>
             <div>
@@ -299,7 +299,7 @@ export default function HistoryPage() {
                 onChange={(e) =>
                   setForm((p) => ({ ...p, mercadopagoBalance: e.target.value }))
                 }
-                placeholder="3200000"
+                placeholder="1000000"
               />
             </div>
             <div>
@@ -312,7 +312,7 @@ export default function HistoryPage() {
                 onChange={(e) =>
                   setForm((p) => ({ ...p, banchileSavings: e.target.value }))
                 }
-                placeholder="4100000"
+                placeholder="999999"
               />
             </div>
           </div>
