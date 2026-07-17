@@ -3,7 +3,7 @@
 import os
 
 from scrapers.backends.email import EmailPattern, fetch_transactions_for_pattern
-from scrapers.base import BaseScraper, ScrapedProduct, ScrapedTransaction
+from scrapers.base import BaseScraper, ProductScrapeResult, ScrapedTransaction
 
 PATTERN = EmailPattern(
     institution="mercadopago",
@@ -31,5 +31,5 @@ class MercadoPagoScraper(BaseScraper):
     async def scrape_transactions(self) -> list[ScrapedTransaction]:
         return await fetch_transactions_for_pattern(PATTERN, self.lookback_days)
 
-    async def scrape_products(self) -> list[ScrapedProduct]:
-        return []
+    async def scrape_products(self) -> ProductScrapeResult:
+        return ProductScrapeResult([])

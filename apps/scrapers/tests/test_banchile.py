@@ -12,6 +12,7 @@ os.environ.setdefault("BANCHILE_PASSWORD", "test")
 
 from product_model import CheckingMetrics
 
+from scrapers.backends.banchile_web import BalanceFetchResult
 from scrapers.base import ScrapedProduct
 from scrapers.institutions import banchile as banchile_mod
 from scrapers.institutions.banchile import BanChileScraper
@@ -114,15 +115,38 @@ class TestScrapeProducts:
 
         async def fake_fetch(rut, password):
             assert (rut, password) == (self.scraper.rut, self.scraper.password)
-            return expected
+            return BalanceFetchResult(products=expected, failed_surfaces=())
 
         monkeypatch.setattr(banchile_mod, "fetch_balances", fake_fetch)
-        assert asyncio.run(self.scraper.scrape_products()) == expected
+
+        result = asyncio.run(self.scraper.scrape_products())
+
+        assert result.products == expected
+        assert result.warnings == []
+
+    def test_failed_surfaces_become_warnings(self, monkeypatch):
+        """Surfaces the backend exhausted are reported, one warning each."""
+        async def fake_fetch(rut, password):
+            return BalanceFetchResult(products=[], failed_surfaces=("card", "línea"))
+
+        monkeypatch.setattr(banchile_mod, "fetch_balances", fake_fetch)
+
+        result = asyncio.run(self.scraper.scrape_products())
+
+        assert result.products == []
+        assert result.warnings == [
+            "BanChile: card surface failed after 3 attempts",
+            "BanChile: línea surface failed after 3 attempts",
+        ]
 
     def test_backend_failure_is_swallowed(self, monkeypatch):
+        """A heavy, flaky second login must not fail the whole run."""
         async def boom(rut, password):
             raise RuntimeError("login failed")
 
         monkeypatch.setattr(banchile_mod, "fetch_balances", boom)
-        # A heavy, flaky second login must not fail the whole run.
-        assert asyncio.run(self.scraper.scrape_products()) == []
+
+        result = asyncio.run(self.scraper.scrape_products())
+
+        assert result.products == []
+        assert result.warnings == ["BanChile: product scrape crashed: login failed"]

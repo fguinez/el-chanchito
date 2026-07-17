@@ -72,10 +72,11 @@ class TestScrapeProducts:
             ),
         ]
 
-        products = self._scrape(monkeypatch, goals)
+        result = self._scrape(monkeypatch, goals)
 
-        assert len(products) == 2
-        first, second = products
+        assert result.warnings == []
+        assert len(result.products) == 2
+        first, second = result.products
         assert first.institution == "fintual"
         assert first.kind == "investment"
         assert first.currency == "CLP"
@@ -93,7 +94,7 @@ class TestScrapeProducts:
         """A goal without deposited/profit still emits; the fields stay None."""
         goals = [_goal(777, name="Solo", nav=100000)]
 
-        products = self._scrape(monkeypatch, goals)
+        products = self._scrape(monkeypatch, goals).products
 
         assert len(products) == 1
         product = products[0]
@@ -106,7 +107,7 @@ class TestScrapeProducts:
         """An explicit `"nav": null` emits the goal valued at 0, not an error."""
         goals = [_goal("901", name="Fresh Goal", nav=None)]
 
-        products = self._scrape(monkeypatch, goals)
+        products = self._scrape(monkeypatch, goals).products
 
         assert len(products) == 1
         product = products[0]
@@ -121,12 +122,16 @@ class TestScrapeProducts:
             _goal("34567", name="Risky Norris", nav=12345678.33),
         ]
 
-        products = self._scrape(monkeypatch, goals)
+        result = self._scrape(monkeypatch, goals)
 
-        assert len(products) == 1
-        assert products[0].external_ref == "34567"
-        assert products[0].metrics.nav == 12345678
+        assert len(result.products) == 1
+        assert result.products[0].external_ref == "34567"
+        assert result.products[0].metrics.nav == 12345678
+        assert result.warnings == ["Fintual: skipped 2 goal(s) without an id"]
 
     def test_empty_goals_list(self, monkeypatch):
         """No goals means no products, not an error."""
-        assert self._scrape(monkeypatch, []) == []
+        result = self._scrape(monkeypatch, [])
+
+        assert result.products == []
+        assert result.warnings == []

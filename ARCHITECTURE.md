@@ -292,8 +292,8 @@ dashboard plus three detail routes. It replicates fintself's
 `channel="chromium"` new-headless workaround (BdC serves a degraded page to the
 default headless shell) and polls for the balance widget (it loads via a later
 XHR). Because transactions and products are independent legs in `run_scraper`,
-a fintself timeout never blocks the products leg (and a product-scrape failure
-is swallowed, returning `[]`).
+a fintself timeout never blocks the products leg (and a product-scrape crash
+is swallowed into a run warning, never raised).
 
 Four surfaces feed BanChile's typed products: the dashboard (CLP + USD
 `checking` — the card row there is a static placeholder, so it's skipped), the
@@ -303,7 +303,10 @@ masked `last4` attribute), the línea detail page (`line_of_credit` metrics from
 Monto autorizado / Saldo disponible / Monto utilizado), and the inversiones
 resumen (`term_deposit` + `investment` totals). Every figure is anchored on a
 literal `$`/`USD` label, so a missing/changed layout records nothing rather
-than a wrong number.
+than a wrong number. The portal intermittently serves slow pages, so each
+surface is read with bounded retries (three attempts with escalating render
+budgets, pausing and recovering to the portal home in between); a surface that
+still yields nothing becomes a run warning instead of a silent gap.
 
 **Balance conventions & net worth** are registry-driven: each kind's `role`
 (asset/liability/none) and `balance_convention` (value/available/owed/units)
@@ -326,10 +329,14 @@ class BaseScraper(ABC):
     method: str                                  # "email" | "fintself" | "http_api" | "open_banking"
     institution: str                             # "mach" | "banchile" | "buda" | ...
     scrape_transactions() -> list[ScrapedTransaction]
-    scrape_products() -> list[ScrapedProduct]
+    scrape_products() -> ProductScrapeResult     # products + non-fatal warnings
 ```
 
-Both `method` and `institution` are stored per `scraper_runs` row.
+Both `method` and `institution` are stored per `scraper_runs` row, and
+`run_scraper` finishes the row as `success`, `partial` (both legs ran but a
+scraper reported warnings, e.g. a BanChile surface that failed all its retries
+or Fintual goals skipped for lacking an id; the warnings land in
+`error_message`), or `error` (a leg raised).
 
 `ScrapedTransaction`/`ScrapedProduct` are pydantic envelopes defined in
 `packages/product-model`; both carry `institution` (slug), a kind, and

@@ -17,7 +17,12 @@ import httpx
 
 from product_model import CryptoMetrics
 
-from scrapers.base import BaseScraper, ScrapedProduct, ScrapedTransaction
+from scrapers.base import (
+    BaseScraper,
+    ProductScrapeResult,
+    ScrapedProduct,
+    ScrapedTransaction,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +129,7 @@ class BudaScraper(BaseScraper):
 
         return transactions
 
-    async def scrape_products(self) -> list[ScrapedProduct]:
+    async def scrape_products(self) -> ProductScrapeResult:
         """Fetch all currency balances as crypto products."""
         path = "/api/v2/balances.json"
         headers = self._sign("GET", path)
@@ -152,4 +157,4 @@ class BudaScraper(BaseScraper):
                         )
                     )
 
-            return products
+            return ProductScrapeResult(products)

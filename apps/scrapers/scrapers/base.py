@@ -7,10 +7,29 @@ here so scrapers keep a single import point.
 """
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 
 from product_model import ScrapedProduct, ScrapedTransaction
 
-__all__ = ["BaseScraper", "ScrapedProduct", "ScrapedTransaction"]
+__all__ = [
+    "BaseScraper",
+    "ProductScrapeResult",
+    "ScrapedProduct",
+    "ScrapedTransaction",
+]
+
+
+@dataclass
+class ProductScrapeResult:
+    """Outcome of a products leg: the scraped products plus non-fatal warnings.
+
+    Warnings flag partial coverage — e.g. a BanChile surface that stayed empty
+    after all its retries — so `run_scraper` can record the run as `partial`
+    without failing the leg.
+    """
+
+    products: list[ScrapedProduct]
+    warnings: list[str] = field(default_factory=list)
 
 
 class BaseScraper(ABC):
@@ -42,6 +61,6 @@ class BaseScraper(ABC):
         ...
 
     @abstractmethod
-    async def scrape_products(self) -> list[ScrapedProduct]:
+    async def scrape_products(self) -> ProductScrapeResult:
         """Fetch current products as typed observations (attributes/metrics)."""
         ...

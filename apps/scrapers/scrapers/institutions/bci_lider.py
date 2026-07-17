@@ -1,6 +1,6 @@
 """Tarjeta Lider BCI scraper (stub wrapping open-banking-chile)."""
 
-from scrapers.base import BaseScraper, ScrapedProduct, ScrapedTransaction
+from scrapers.base import BaseScraper, ProductScrapeResult, ScrapedTransaction
 
 
 class BciLiderScraper(BaseScraper):
@@ -11,6 +11,6 @@ class BciLiderScraper(BaseScraper):
         # TODO: Integrate open-banking-chile for BCI Lider card
         return []
 
-    async def scrape_products(self) -> list[ScrapedProduct]:
+    async def scrape_products(self) -> ProductScrapeResult:
         # TODO: Integrate open-banking-chile for BCI Lider balance
-        return []
+        return ProductScrapeResult([])

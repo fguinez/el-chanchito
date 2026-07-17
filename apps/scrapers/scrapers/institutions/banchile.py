@@ -5,9 +5,9 @@ import logging
 import os
 from datetime import date, datetime
 
-from scrapers.backends.banchile_web import fetch_balances
+from scrapers.backends.banchile_web import _SURFACE_ATTEMPTS, fetch_balances
 from scrapers.backends.fintself import run_fintself_scraper
-from scrapers.base import BaseScraper, ScrapedProduct, ScrapedTransaction
+from scrapers.base import BaseScraper, ProductScrapeResult, ScrapedTransaction
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +79,7 @@ class BanChileScraper(BaseScraper):
         )
         return transactions
 
-    async def scrape_products(self) -> list[ScrapedProduct]:
+    async def scrape_products(self) -> ProductScrapeResult:
         """Scrape BdC products via our own web session (see `banchile_web.py`).
 
         `fintself` (used for transactions) never exposes a balance, so this
@@ -90,15 +90,22 @@ class BanChileScraper(BaseScraper):
         detail page (see `banchile_web.py`). USD figures convert to CLP via
         lib/rates' multi-currency FX.
 
-        It's a heavy login; a failure here is logged and swallowed (returns [])
+        It's a heavy login; a failure here is logged and reported as a warning
         rather than raised, so a flaky balance scrape can't fail the whole run
-        or lose the transactions that were already imported. APScheduler's
-        `max_instances=1`/`coalesce` already stop back-to-back manual refreshes
-        (#26) from overlapping; a cookie-session cache would be the next step if
-        BdC rate-limits us (#28).
+        or lose the transactions that were already imported. Surfaces that
+        stayed empty after all their retries become warnings too, so the run
+        records `partial` coverage instead of silently losing figures.
+        APScheduler's `max_instances=1`/`coalesce` already stop back-to-back
+        manual refreshes (#26) from overlapping; a cookie-session cache would
+        be the next step if BdC rate-limits us (#28).
         """
         try:
-            return await fetch_balances(self.rut, self.password)
-        except Exception:
+            result = await fetch_balances(self.rut, self.password)
+        except Exception as e:
             logger.exception("BanChile balance scrape failed")
-            return []
+            return ProductScrapeResult([], [f"BanChile: product scrape crashed: {e}"])
+        warnings = [
+            f"BanChile: {surface} surface failed after {_SURFACE_ATTEMPTS} attempts"
+            for surface in result.failed_surfaces
+        ]
+        return ProductScrapeResult(result.products, warnings)

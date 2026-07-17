@@ -26,7 +26,12 @@ import httpx
 
 from product_model import InvestmentMetrics
 
-from scrapers.base import BaseScraper, ScrapedProduct, ScrapedTransaction
+from scrapers.base import (
+    BaseScraper,
+    ProductScrapeResult,
+    ScrapedProduct,
+    ScrapedTransaction,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +140,7 @@ class FintualScraper(BaseScraper):
         # Fintual doesn't expose individual buy/sell transactions via API.
         return []
 
-    async def scrape_products(self) -> list[ScrapedProduct]:
+    async def scrape_products(self) -> ProductScrapeResult:
         async with httpx.AsyncClient(
             timeout=30.0, follow_redirects=True, headers=self._base_headers()
         ) as client:
@@ -154,6 +159,7 @@ class FintualScraper(BaseScraper):
             # One product per goal: the JSON:API resource id is the stable
             # external_ref, so each goal keeps its own balance history.
             products: list[ScrapedProduct] = []
+            warnings: list[str] = []
             total_nav = 0
             skipped = 0
 
@@ -193,6 +199,7 @@ class FintualScraper(BaseScraper):
 
             if skipped:
                 logger.warning("Fintual: skipped %d goal(s) without an id", skipped)
+                warnings.append(f"Fintual: skipped {skipped} goal(s) without an id")
 
             logger.info(
                 "Fintual: %d goals, total nav $%s CLP",
@@ -200,7 +207,7 @@ class FintualScraper(BaseScraper):
                 f"{total_nav:,}",
             )
 
-            return products
+            return ProductScrapeResult(products, warnings)
 
 
 def _login_cli() -> None:

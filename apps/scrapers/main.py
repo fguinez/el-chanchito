@@ -50,11 +50,16 @@ async def run_scraper(scraper: BaseScraper) -> None:
     must not stop the other. BanChile in particular scrapes transactions via the
     (flaky) fintself browser login and products via its own login, so a fintself
     timeout must still leave the balances refreshable — and vice versa.
+
+    The products leg can also report non-fatal warnings (e.g. a BanChile
+    surface that failed all its retries): a run with warnings but no errors is
+    recorded as `partial`, with the warnings as its message.
     """
     run_id = start_scraper_run(scraper.method, scraper.institution)
     logger.info("Starting scraper: %s (run=%s)", scraper.name, run_id)
 
     errors: list[str] = []
+    warnings: list[str] = []
     n_tx = 0
     inserted = 0
     n_prod = 0
@@ -68,9 +73,10 @@ async def run_scraper(scraper: BaseScraper) -> None:
         errors.append(f"transactions: {e}")
 
     try:
-        products = await scraper.scrape_products()
-        n_prod = len(products)
-        for sp in products:
+        result = await scraper.scrape_products()
+        n_prod = len(result.products)
+        warnings.extend(result.warnings)
+        for sp in result.products:
             upsert_product(sp)
     except Exception as e:
         logger.exception("Scraper %s: products failed", scraper.name)
@@ -86,7 +92,12 @@ async def run_scraper(scraper: BaseScraper) -> None:
     if errors:
         finish_scraper_run(
             run_id, "error", transactions_imported=inserted,
-            error_message="; ".join(errors),
+            error_message="; ".join(errors + warnings),
+        )
+    elif warnings:
+        finish_scraper_run(
+            run_id, "partial", transactions_imported=inserted,
+            error_message="; ".join(warnings),
         )
     else:
         finish_scraper_run(run_id, "success", transactions_imported=inserted)
