@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 from product_model import CheckingMetrics, CreditCardMetrics
 
+from scrapers.backends import banchile_web as banchile_web_mod
 from scrapers.backends.banchile_web import (
     _balance_from_text,
     _merge_balances,
@@ -679,3 +680,17 @@ class TestSurfaceRetries:
         assert link.wait_for.call_count == 9
         assert page.goto.call_count == 2
         assert [c.args[0] for c in page.wait_for_timeout.call_args_list] == [2000, 4000]
+
+    def test_extra_attempts_reuse_the_last_configured_budgets(self, monkeypatch):
+        """Bumping _SURFACE_ATTEMPTS past the budget tuples clamps to their last values."""
+        page = _fake_portal_page()
+        link = page.locator.return_value.first
+        link.wait_for.side_effect = RuntimeError("selector timeout")
+        monkeypatch.setattr(banchile_web_mod, "_SURFACE_ATTEMPTS", 4)
+
+        result = _read_all_surfaces(page)
+
+        assert result.failed_surfaces == ("card",)
+        assert link.wait_for.call_count == 12
+        assert page.goto.call_count == 3
+        assert [c.args[0] for c in page.wait_for_timeout.call_args_list] == [2000, 4000, 4000]

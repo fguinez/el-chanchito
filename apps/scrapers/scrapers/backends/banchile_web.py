@@ -849,6 +849,11 @@ def _recover_to_home(page) -> None:
         logger.exception("BanChile: could not return to portal home")
 
 
+def _budget(values: tuple[int, ...], index: int) -> int:
+    """`values[index]`, clamped so attempts beyond the tuple reuse its last budget."""
+    return values[min(index, len(values) - 1)]
+
+
 def _read_surface_with_retries(page, surface: str, read: Callable) -> list[ScrapedProduct]:
     """Run one surface's reader with bounded retries and escalating budgets.
 
@@ -861,7 +866,7 @@ def _read_surface_with_retries(page, surface: str, read: Callable) -> list[Scrap
     """
     for attempt in range(_SURFACE_ATTEMPTS):
         if attempt:
-            page.wait_for_timeout(_RETRY_PAUSES_MS[attempt - 1])
+            page.wait_for_timeout(_budget(_RETRY_PAUSES_MS, attempt - 1))
             _recover_to_home(page)
         try:
             products = read(page, attempt)
@@ -883,7 +888,7 @@ def _read_surface_with_retries(page, surface: str, read: Callable) -> list[Scrap
 
 def _read_dashboard(page, attempt: int) -> list[ScrapedProduct]:
     """Poll the "Mis Productos" dashboard and parse its balances (one attempt)."""
-    return _wait_for_balances(page, _RENDER_TIMEOUTS_MS[attempt])
+    return _wait_for_balances(page, _budget(_RENDER_TIMEOUTS_MS, attempt))
 
 
 def _read_card_detail(page, attempt: int) -> list[ScrapedProduct]:
@@ -894,7 +899,7 @@ def _read_card_detail(page, attempt: int) -> list[ScrapedProduct]:
     """
     if not _ensure_on_portal(page):
         return []
-    if not _click_first(page, _CARD_LINK_SELECTORS, timeout=_CARD_LINK_TIMEOUTS_MS[attempt]):
+    if not _click_first(page, _CARD_LINK_SELECTORS, timeout=_budget(_CARD_LINK_TIMEOUTS_MS, attempt)):
         logger.info(
             "BanChile: card saldos link not found (attempt %d/%d)",
             attempt + 1,
@@ -909,7 +914,7 @@ def _read_card_detail(page, attempt: int) -> list[ScrapedProduct]:
         )
         _ensure_on_portal(page)
         return []
-    text = _wait_for_text(page, _CARD_READY_RE, _RENDER_TIMEOUTS_MS[attempt])
+    text = _wait_for_text(page, _CARD_READY_RE, _budget(_RENDER_TIMEOUTS_MS, attempt))
     if text is None:
         logger.info(
             "BanChile: card detail page did not render (attempt %d/%d)",
@@ -930,7 +935,7 @@ def _read_linea_detail(page, attempt: int) -> list[ScrapedProduct]:
     if not _ensure_on_portal(page):
         return []
     page.evaluate("route => { window.location.hash = route; }", _LINEA_ROUTE)
-    text = _wait_for_text(page, _LINEA_READY_RE, _RENDER_TIMEOUTS_MS[attempt])
+    text = _wait_for_text(page, _LINEA_READY_RE, _budget(_RENDER_TIMEOUTS_MS, attempt))
     if text is None:
         logger.info(
             "BanChile: línea detail page did not render (attempt %d/%d)",
@@ -951,7 +956,7 @@ def _read_inversiones_detail(page, attempt: int) -> list[ScrapedProduct]:
     if not _ensure_on_portal(page):
         return []
     page.evaluate("route => { window.location.hash = route; }", _INVERSION_ROUTE)
-    text = _wait_for_text(page, _INVERSION_READY_RE, _RENDER_TIMEOUTS_MS[attempt])
+    text = _wait_for_text(page, _INVERSION_READY_RE, _budget(_RENDER_TIMEOUTS_MS, attempt))
     if text is None:
         logger.info(
             "BanChile: inversiones page did not render (attempt %d/%d)",
