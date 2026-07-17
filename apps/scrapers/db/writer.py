@@ -190,6 +190,76 @@ def _resolve_product(
     return product_row[0]
 
 
+def _resolve_product_row(conn, product_id: str):
+    """The (account_id, kind, currency, external_ref, is_active) of a product."""
+    return conn.execute(
+        "SELECT account_id, kind, currency, external_ref, is_active "
+        "FROM products WHERE id = %s",
+        (product_id,),
+    ).fetchone()
+
+
+def _has_active_ref_sibling(conn, account_id, kind: str, currency: str) -> bool:
+    """True when an active per-holding (external_ref set) product exists for the
+    same account/kind/currency, so a NULL-ref roll-up would double-count it."""
+    return (
+        conn.execute(
+            "SELECT 1 FROM products "
+            "WHERE account_id = %s AND kind = %s AND currency = %s "
+            "AND external_ref IS NOT NULL AND is_active LIMIT 1",
+            (account_id, kind, currency),
+        ).fetchone()
+        is not None
+    )
+
+
+def _retire_rollup_sibling(conn, account_id, kind: str, currency: str) -> str | None:
+    """Deactivate the active NULL-ref roll-up sibling of a per-holding product.
+
+    Drops the sibling's snapshots and nulls its balances (mirrors migrations
+    V012/V013), so the roll-up and per-holding representations never both count
+    toward net worth. Idempotent; returns the retired product id, or None when
+    there was nothing to retire.
+    """
+    row = conn.execute(
+        "SELECT id FROM products "
+        "WHERE account_id = %s AND kind = %s AND currency = %s "
+        "AND external_ref IS NULL AND is_active LIMIT 1",
+        (account_id, kind, currency),
+    ).fetchone()
+    if not row:
+        return None
+    sibling_id = row[0]
+    conn.execute(
+        "DELETE FROM product_snapshots WHERE product_id = %s", (sibling_id,)
+    )
+    conn.execute(
+        "UPDATE products SET is_active = false, current_balance = NULL, "
+        "metrics = NULL, balance_as_of = NULL, updated_at = now() WHERE id = %s",
+        (sibling_id,),
+    )
+    return sibling_id
+
+
+def _write_decision(
+    is_active: bool, external_ref: str | None, has_active_ref_sibling: bool
+) -> str:
+    """What `upsert_product` should do with a resolved product row.
+
+    - ``"skip_inactive"``: the row is retired (a roll-up superseded by
+      per-holding products, or the retired Fintual aggregate). Leave it frozen
+      so a fallback scrape can't resurrect a double-counting aggregate.
+    - ``"skip_superseded"``: a NULL-ref roll-up whose per-holding siblings are
+      active. Writing it would double-count, so the per-holding rows win.
+    - ``"write"``: proceed normally.
+    """
+    if not is_active:
+        return "skip_inactive"
+    if external_ref is None and has_active_ref_sibling:
+        return "skip_superseded"
+    return "write"
+
+
 def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
     """Insert transactions, skipping duplicates. Returns count of new rows."""
     if not transactions:
@@ -239,6 +309,11 @@ def upsert_product(sp: ScrapedProduct) -> None:
     products.current_balance/metrics/balance_as_of ("last checked"), but append
     a product_snapshots history row only when the payload changed — both in the
     same transaction so the denormalized columns can't drift.
+
+    Two guards keep a roll-up total and its per-holding rows from both counting
+    (see `_write_decision`): a retired product is left frozen, and a NULL-ref
+    roll-up is dropped when active per-holding siblings exist. Conversely, a
+    per-holding write retires any active NULL-ref sibling for its account/kind.
     """
     pool = get_pool()
     with pool.connection() as conn:
@@ -250,6 +325,45 @@ def upsert_product(sp: ScrapedProduct) -> None:
             external_ref=sp.external_ref,
             name=sp.name,
         )
+
+        account_id, kind, currency, external_ref, is_active = _resolve_product_row(
+            conn, product_id
+        )
+        has_sibling = external_ref is None and _has_active_ref_sibling(
+            conn, account_id, kind, currency
+        )
+        decision = _write_decision(is_active, external_ref, has_sibling)
+        if decision == "skip_inactive":
+            logger.warning(
+                "Skipping retired product %s/%s %s (external_ref=%s); left frozen",
+                sp.institution,
+                sp.kind,
+                sp.currency,
+                external_ref,
+            )
+            return
+        if decision == "skip_superseded":
+            logger.warning(
+                "Skipping roll-up %s/%s %s: active per-holding products own it",
+                sp.institution,
+                sp.kind,
+                sp.currency,
+            )
+            return
+
+        # A per-holding write owns the account/kind balance: retire any active
+        # summed roll-up so the two representations can't both count.
+        if external_ref is not None:
+            retired = _retire_rollup_sibling(conn, account_id, kind, currency)
+            if retired:
+                logger.warning(
+                    "Retired roll-up %s (%s/%s %s) superseded by per-holding %s",
+                    retired,
+                    sp.institution,
+                    kind,
+                    currency,
+                    external_ref,
+                )
 
         if sp.attributes is not None:
             attrs = sp.attributes.model_dump(mode="json", exclude_none=True)
