@@ -239,8 +239,8 @@ income_sources                internal_transfers
                                 to_product_id FK
 scraper_runs                    transfer_date
   id PK                         status (pending|resolved)
-  method                         (email|fintself|http_api|open_banking)
-  institution                    (mach|mercadopago|tenpo|banchile|...)
+  method                         (email|fintself|web|http_api|open_banking)
+  institution                    (mach|mercadopago|tenpo|banchile|bci_lider|...)
   started_at
   finished_at
   status
@@ -280,10 +280,12 @@ apps/scrapers/scrapers/
                            # EmailPattern, fetch_transactions_for_pattern
     fintself.py            # run_fintself_scraper(bank_key, user, password)
     banchile_web.py        # own BdC Playwright login -> fetch_balances()
+    bci_lider_web.py       # real Chrome over CDP -> scrape_card() / save_login_session()
   institutions/
     mach.py  mercadopago.py  tenpo.py       -> consume backends/email
     banchile.py                              -> fintself (tx) + banchile_web (balances)
-    buda.py  fintual.py  bci_lider.py        -> self-contained (HTTP/stub)
+    bci_lider.py                             -> bci_lider_web (one CDP drive: tx + balances)
+    buda.py  fintual.py                      -> self-contained (HTTP APIs)
 ```
 
 BanChile is a hybrid: transactions come from `fintself`, but `fintself` never
@@ -316,6 +318,29 @@ fall back to a single summed roll-up per kind (the listing header total),
 shaped like the products issue #36 retired; the DB writer keeps the roll-up
 and per-holding representations mutually exclusive so neither double-counts.
 
+BCI Lider (Tarjeta Lider Bci, the retailcard.cl card co-branded by BCI) has no
+open-banking API for individuals and isn't covered by `fintself`, and its login
+sits behind a Cloudflare Turnstile that passes invisibly only for a *genuine*
+browser: a Playwright-launched Chromium (headless or headed) gets an unsolvable
+interactive "Verifique que es un ser humano" check, and a captured session doesn't
+survive headless reuse (the auth token lives in tab-scoped sessionStorage and
+Cloudflare rebinds on a fresh browser). So both sign-in and scraping drive a *real*
+Chrome over CDP: `make bci-lider-login` (`save_login_session`) launches an ordinary
+Chrome on a debug port (not a Playwright browser), autofills the RUT + clave and
+submits once Turnstile clears (invisibly, or after the human ticks the check, which
+we never do), and leaves it running. `scrape_card` connects to that Chrome
+(`LIDER_BCI_CDP_URL`), reuses an already-signed-in tab or re-logs-in via autofill,
+so it runs unattended as long as the debuggable Chrome stays up; it raises a "run
+make bci-lider-login" error when that Chrome is unreachable. Both legs share one
+drive per cycle: `scrape_transactions` opens it and caches the result for
+`scrape_products` (a session error is re-raised, never retried). The "Mi Tarjeta
+-> Saldos" page yields the CLP "Nacional" and USD "Internacional" `credit_card`
+metrics (`available`/`limit`/`owed` from Disponible / Autorizado / Utilizado,
+plus the masked `last4` and card-name attributes), and the "Movimientos" page
+yields the Nacionales (CLP) charges, paged. Figures are anchored on their
+`$`/`US$` labels (a drift records nothing rather than a wrong number), and USD
+balances convert to CLP via lib/rates' multi-currency FX.
+
 **Balance conventions & net worth** are registry-driven: each kind's `role`
 (asset/liability/none) and `balance_convention` (value/available/owed/units)
 live in `packages/product-model` — see `packages/product-model/PRODUCTS.md`
@@ -334,7 +359,7 @@ Each institution scraper implements:
 
 ```python
 class BaseScraper(ABC):
-    method: str                                  # "email" | "fintself" | "http_api" | "open_banking"
+    method: str                                  # "email" | "fintself" | "web" | "http_api" | "open_banking"
     institution: str                             # "mach" | "banchile" | "buda" | ...
     scrape_transactions() -> list[ScrapedTransaction]
     scrape_products() -> ProductScrapeResult     # products + non-fatal warnings
@@ -365,7 +390,7 @@ shallow-merges `attributes`, always refreshes
 | `mach` | `email` | IMAP (Gmail) | Shared IMAP session | 30m |
 | `mercadopago` | `email` | IMAP (Gmail) | Shared IMAP session | 30m |
 | `tenpo` | `email` | IMAP (Gmail) | Shared IMAP session | 30m |
-| `bci_lider` | `open_banking` | Stub (open-banking-chile) | RUT + password | - |
+| `bci_lider` | `web` | Real Chrome over CDP (`bci_lider_web`) | Debuggable Chrome + autofill (`make bci-lider-login`, `LIDER_BCI_CDP_URL`; Cloudflare Turnstile) | 24h |
 
 The three email-based scrapers reuse one `ImapSession`: it runs `NOOP` on
 each acquire and only re-logs-in when the mailbox has been dropped.
@@ -394,6 +419,7 @@ Transactions are deduplicated via `UNIQUE(product_id, external_id)`:
 - Fintual: no transactions (balance-only)
 - Buda: `buda_{deposit/withdrawal_id}`
 - BanChile: `bch_{md5(date|description|amount|account_id)[:16]}` (fintself's account_id)
+- BCI Lider: `bcl_{md5(date|description|amount|CLP)[:16]}` (no per-movement id in the DOM)
 - Email: `email_{institution}_{hash(message_id)}`
 - CSV: `csv_{base64url(date|description|amount)[:24]}`
 

@@ -51,6 +51,8 @@ DATABASE_URL=postgres://finance:finance@localhost:5435/finance
 
 # Scraper identifiers (enable only the ones you need)
 BANCHILE_RUT=12345678-9          # Banco de Chile (via fintself)
+LIDER_BCI_RUT=12345678-9         # Tarjeta Lider Bci (real Chrome over CDP)
+LIDER_BCI_CDP_URL=http://localhost:9222  # Tarjeta Lider Bci: the make bci-lider-login Chrome
 FINTUAL_EMAIL=your@email.com     # Fintual (web session; run `make fintual-login` once)
 EMAIL_IMAP_HOST=imap.gmail.com   # Email parser (MercadoPago, MACH, Tenpo)
 EMAIL_IMAP_USER=your@gmail.com
@@ -70,6 +72,7 @@ Secrets and their meaning:
 | Keychain item | Value |
 |---|---|
 | `chanchito.BANCHILE_PASSWORD` | Banco de Chile web password |
+| `chanchito.LIDER_BCI_PASSWORD` | Tarjeta Lider Bci clave (optional; only prefills the `make bci-lider-login` browser) |
 | `chanchito.FINTUAL_PASSWORD` | Fintual account password (used by `make fintual-login` to open a web session) |
 | `chanchito.BUDA_API_KEY` | Buda.com API key |
 | `chanchito.BUDA_API_SECRET` | Buda.com API secret |
@@ -144,6 +147,35 @@ container so it writes to that volume:
 docker compose run --rm scrapers python -m scrapers.institutions.fintual
 ```
 
+### Tarjeta Lider Bci sign-in
+
+The Tarjeta Lider Bci portal guards its login with a Cloudflare "Verifique que es
+un ser humano" check that passes only for a genuine browser (a headless/automated
+one gets an unsolvable interactive check). So the scraper drives a **real Chrome**
+over the DevTools protocol. Start it once, leave it running:
+
+```bash
+make bci-lider-login   # launches a real Chrome, autofills the login, leaves it running
+```
+
+This needs a genuine Google Chrome installed on the machine (not the Playwright
+Chromium `make install` fetches; set `LIDER_BCI_CHROME_PATH` if it lives
+elsewhere). It opens an ordinary Chrome (its own profile, separate from your main one),
+autofills your RUT (and clave, if `chanchito.LIDER_BCI_PASSWORD` is stored) and
+signs in; if Cloudflare shows the human-verification check, tick it and the submit
+fires automatically. Then point the scraper at that Chrome:
+
+```bash
+LIDER_BCI_CDP_URL=http://localhost:9222   # add to .env
+```
+
+Scrapes connect to that Chrome, reusing the signed-in tab or re-logging-in via
+autofill (which clears Cloudflare because it's a real Chrome), so they run
+unattended **as long as that Chrome stays running**. They report `Could not reach
+the Chrome debug port…` when it isn't up. This is a browser-based flow, so run it
+on a machine with a display, not inside the headless container. (Override the debug
+port with `LIDER_BCI_CDP_PORT`, or the Chrome binary with `LIDER_BCI_CHROME_PATH`.)
+
 ### Running scrapers once
 
 ```bash
@@ -160,6 +192,7 @@ Schedule per scraper:
 - **Fintual**: every 6 hours
 - **Buda**: every 1 hour
 - **BanChile**: every 24 hours
+- **BCI Lider**: every 24 hours
 - **Email parser**: every 30 minutes
 
 ### Checking scraper status
@@ -175,7 +208,7 @@ The **Instituciones** page has an **"Actualizar todo"** button plus a per-instit
 refresh icon. Clicking one triggers an immediate scrape instead of waiting for the
 next scheduled run; the button spins ("Sincronizando…") and the page reloads the
 balances once the run finishes. Institutions without a live scraper
-(`bci_lider`, `manual`) have the button disabled.
+(`manual`) have the button disabled.
 
 This works only while the scraper service is running with its **internal control
 endpoint** enabled. The endpoint is an unauthenticated trigger, so it must stay on
