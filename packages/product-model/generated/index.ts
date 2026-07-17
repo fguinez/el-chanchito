@@ -24,7 +24,7 @@ export interface CheckingAttributes {
   /** Payload discriminator; always "checking". */
   kind: "checking";
   /** Account number as shown by the institution. */
-  account_number?: string;
+  account_number?: string | null;
 }
 
 /** Observation for a checking account; headline is `balance`. */
@@ -34,9 +34,9 @@ export interface CheckingMetrics {
   /** Available balance in account currency (Saldo disponible). */
   balance: number;
   /** Accounting balance in account currency (Saldo contable). */
-  accounting_balance?: number;
+  accounting_balance?: number | null;
   /** Date the institution printed next to the balance. */
-  reported_as_of?: string;
+  reported_as_of?: string | null;
 }
 
 /** Identity fields for a savings account (cuenta de ahorro). */
@@ -44,7 +44,7 @@ export interface SavingsAttributes {
   /** Payload discriminator; always "savings". */
   kind: "savings";
   /** Account number as shown by the institution. */
-  account_number?: string;
+  account_number?: string | null;
 }
 
 /** Observation for a savings account; headline is `balance`. */
@@ -54,9 +54,9 @@ export interface SavingsMetrics {
   /** Available balance in account currency (Saldo disponible). */
   balance: number;
   /** Accounting balance in account currency (Saldo contable). */
-  accounting_balance?: number;
+  accounting_balance?: number | null;
   /** Date the institution printed next to the balance. */
-  reported_as_of?: string;
+  reported_as_of?: string | null;
 }
 
 /** Identity fields for a vista account (cuenta vista). */
@@ -64,7 +64,7 @@ export interface VistaAttributes {
   /** Payload discriminator; always "vista". */
   kind: "vista";
   /** Account number as shown by the institution. */
-  account_number?: string;
+  account_number?: string | null;
 }
 
 /** Observation for a vista account; headline is `balance`. */
@@ -74,9 +74,9 @@ export interface VistaMetrics {
   /** Available balance in account currency (Saldo disponible). */
   balance: number;
   /** Accounting balance in account currency (Saldo contable). */
-  accounting_balance?: number;
+  accounting_balance?: number | null;
   /** Date the institution printed next to the balance. */
-  reported_as_of?: string;
+  reported_as_of?: string | null;
 }
 
 /** Identity fields for an app wallet (MACH, Tenpo, Mercado Pago). */
@@ -98,19 +98,19 @@ export interface TermDepositAttributes {
   /** Payload discriminator; always "term_deposit". */
   kind: "term_deposit";
   /** Date the deposit was taken out (Fecha inicio). */
-  issue_date?: string;
+  issue_date?: string | null;
   /** Date the deposit matures (Fecha vencimiento). */
-  maturity_date?: string;
+  maturity_date?: string | null;
   /** Term length in days. */
-  term_days?: number;
+  term_days?: number | null;
   /** Agreed period rate as a percent number (Tasa período). */
-  interest_rate_pct?: number;
+  interest_rate_pct?: number | null;
   /** Deposit modality (e.g. 'Renovable', 'Plazo fijo'). */
-  deposit_type?: string;
+  deposit_type?: string | null;
   /** Invested principal in CLP (Monto invertido). */
-  principal?: number;
+  principal?: number | null;
   /** Amount payable at maturity in CLP (Monto al vencimiento). */
-  maturity_value?: number;
+  maturity_value?: number | null;
 }
 
 /** Observation for a term deposit; headline is `balance`. */
@@ -126,13 +126,13 @@ export interface CreditCardAttributes {
   /** Payload discriminator; always "credit_card". */
   kind: "credit_card";
   /** Last four digits of the card number (from the masked '****0000'). */
-  last4?: string;
+  last4?: string | null;
   /** Card network or product brand (e.g. 'Visa Signature'). */
-  brand?: string;
+  brand?: string | null;
   /** Day of month the statement closes (facturación). */
-  statement_day?: number;
+  statement_day?: number | null;
   /** Day of month the payment is due (vencimiento). */
-  due_day?: number;
+  due_day?: number | null;
 }
 
 /** Observation for a credit card; headline is `available`. */
@@ -142,11 +142,11 @@ export interface CreditCardMetrics {
   /** Available credit in product currency (Disponible). */
   available: number;
   /** Total credit limit in product currency (Cupo total). */
-  limit?: number;
+  limit?: number | null;
   /** Amount drawn as reported by the bank (Utilizado / Monto utilizado). */
-  owed?: number;
+  owed?: number | null;
   /** Date the institution printed next to the card figures. */
-  reported_as_of?: string;
+  reported_as_of?: string | null;
 }
 
 /** Identity fields for a debit card; money lives in the parent checking. */
@@ -154,9 +154,9 @@ export interface DebitCardAttributes {
   /** Payload discriminator; always "debit_card". */
   kind: "debit_card";
   /** Last four digits of the card number (from the masked '****0000'). */
-  last4?: string;
+  last4?: string | null;
   /** Card network or product brand (e.g. 'Visa Signature'). */
-  brand?: string;
+  brand?: string | null;
 }
 
 /** Observation for a debit card; empty — money lives in the parent checking. */
@@ -170,9 +170,9 @@ export interface PrepaidCardAttributes {
   /** Payload discriminator; always "prepaid_card". */
   kind: "prepaid_card";
   /** Last four digits of the card number (from the masked '****0000'). */
-  last4?: string;
+  last4?: string | null;
   /** Card network or product brand (e.g. 'Visa Signature'). */
-  brand?: string;
+  brand?: string | null;
 }
 
 /** Observation for a prepaid card; headline is `balance`. */
@@ -188,7 +188,7 @@ export interface LineOfCreditAttributes {
   /** Payload discriminator; always "line_of_credit". */
   kind: "line_of_credit";
   /** Annual interest rate as a percent number. */
-  interest_rate_pct?: number;
+  interest_rate_pct?: number | null;
 }
 
 /** Observation for a line of credit; headline is `available`. */
@@ -198,9 +198,9 @@ export interface LineOfCreditMetrics {
   /** Available credit in product currency (Disponible). */
   available: number;
   /** Total credit limit in product currency (Cupo total). */
-  limit?: number;
+  limit?: number | null;
   /** Amount drawn as reported by the bank (Utilizado / Monto utilizado). */
-  owed?: number;
+  owed?: number | null;
 }
 
 /** Config fields for a consumer loan (préstamo). */
@@ -208,15 +208,15 @@ export interface LoanAttributes {
   /** Payload discriminator; always "loan". */
   kind: "loan";
   /** Original loan principal in CLP. */
-  original_principal?: number;
+  original_principal?: number | null;
   /** Annual interest rate as a percent number (e.g. 18.9). */
-  interest_rate_pct?: number;
+  interest_rate_pct?: number | null;
   /** Total number of installments (cuotas). */
-  installments_total?: number;
+  installments_total?: number | null;
   /** Date the loan was granted. */
-  opened_date?: string;
+  opened_date?: string | null;
   /** Day of month each installment is due. */
-  due_day?: number;
+  due_day?: number | null;
 }
 
 /** Observation for a consumer loan; headline is `owed`. */
@@ -226,11 +226,11 @@ export interface LoanMetrics {
   /** Outstanding amount owed in CLP. */
   owed: number;
   /** Number of installments already paid. */
-  installments_paid?: number;
+  installments_paid?: number | null;
   /** Due date of the next installment. */
-  next_payment_date?: string;
+  next_payment_date?: string | null;
   /** Amount of the next installment in CLP. */
-  next_payment_amount?: number;
+  next_payment_amount?: number | null;
 }
 
 /** Config fields for a mortgage (crédito hipotecario). */
@@ -238,15 +238,15 @@ export interface MortgageAttributes {
   /** Payload discriminator; always "mortgage". */
   kind: "mortgage";
   /** Original loan principal in CLP. */
-  original_principal?: number;
+  original_principal?: number | null;
   /** Annual interest rate as a percent number (e.g. 18.9). */
-  interest_rate_pct?: number;
+  interest_rate_pct?: number | null;
   /** Total number of installments (cuotas). */
-  installments_total?: number;
+  installments_total?: number | null;
   /** Date the loan was granted. */
-  opened_date?: string;
+  opened_date?: string | null;
   /** Day of month each installment is due. */
-  due_day?: number;
+  due_day?: number | null;
 }
 
 /** Observation for a mortgage; headline is `owed`. */
@@ -256,11 +256,11 @@ export interface MortgageMetrics {
   /** Outstanding amount owed in CLP. */
   owed: number;
   /** Number of installments already paid. */
-  installments_paid?: number;
+  installments_paid?: number | null;
   /** Due date of the next installment. */
-  next_payment_date?: string;
+  next_payment_date?: string | null;
   /** Amount of the next installment in CLP. */
-  next_payment_amount?: number;
+  next_payment_amount?: number | null;
 }
 
 /** Identity fields for an investment position (fund, goal, portfolio). */
@@ -268,11 +268,11 @@ export interface InvestmentAttributes {
   /** Payload discriminator; always "investment". */
   kind: "investment";
   /** Portfolio the money is invested in (e.g. 'Risky Norris'). */
-  portfolio?: string;
+  portfolio?: string | null;
   /** Risk profile label (e.g. 'Arriesgado'). */
-  risk_profile?: string;
+  risk_profile?: string | null;
   /** Fund name for single-fund products (e.g. a fondo mutuo). */
-  fund_name?: string;
+  fund_name?: string | null;
 }
 
 /** Observation for an investment position; headline is `nav`. */
@@ -282,15 +282,15 @@ export interface InvestmentMetrics {
   /** Current market value of the position (net asset value). */
   nav: number;
   /** Total amount deposited to date. */
-  deposited?: number;
+  deposited?: number | null;
   /** Cumulative profit as reported (nav minus deposited). */
-  profit?: number;
+  profit?: number | null;
   /** Daily variation as a percent number (Var. diaria). */
-  var_daily_pct?: number;
+  var_daily_pct?: number | null;
   /** 30-day variation as a percent number (Var. 30 días). */
-  var_30d_pct?: number;
+  var_30d_pct?: number | null;
   /** Year-to-date variation as a percent number (Var. año). */
-  var_ytd_pct?: number;
+  var_ytd_pct?: number | null;
 }
 
 /** Identity fields for a crypto holding. */
@@ -306,9 +306,9 @@ export interface CryptoMetrics {
   /** Coin units held (fractional). */
   units: number;
   /** Units locked in open orders. */
-  frozen?: number;
+  frozen?: number | null;
   /** Units pending confirmation. */
-  pending?: number;
+  pending?: number | null;
 }
 
 /** Identity fields for products that fit no other kind. */
@@ -316,7 +316,7 @@ export interface OtherAttributes {
   /** Payload discriminator; always "other". */
   kind: "other";
   /** Free-form note describing the product. */
-  note?: string;
+  note?: string | null;
 }
 
 /** Observation for an uncategorized product; headline is `balance` if known. */
@@ -324,7 +324,7 @@ export interface OtherMetrics {
   /** Payload discriminator; always "other". */
   kind: "other";
   /** Balance in CLP when known. */
-  balance?: number;
+  balance?: number | null;
 }
 
 export type ProductAttributes =

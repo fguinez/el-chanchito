@@ -31,6 +31,14 @@ def test_committed_artifact_matches_generator_output(artifact, tmp_path):
     assert fresh == committed, f"{artifact} drifted; run `make product-model-generate`"
 
 
+def test_generated_ts_marks_nullable_optionals():
+    """Nullable optional fields must emit `field?: T | null;` in index.ts."""
+    index_ts = (PACKAGE_ROOT / "generated" / "index.ts").read_text(encoding="utf-8")
+
+    assert "last4?: string | null;" in index_ts
+    assert "account_number?: string | null;" in index_ts
+
+
 def test_generator_raises_on_unsupported_construct():
     """Constructs outside the closed scalar set must fail generation loudly."""
 

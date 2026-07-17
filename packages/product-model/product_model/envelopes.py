@@ -7,8 +7,9 @@ time; bank-printed dates travel inside metrics as `reported_as_of`.
 """
 
 import datetime
+from typing import Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .kinds import ProductKind
 from .registry import ProductAttributes, ProductMetrics
@@ -50,6 +51,21 @@ class ScrapedProduct(BaseModel):
         None,
         description="Per-scrape observation payload; snapshotted by the writer.",
     )
+
+    @model_validator(mode="after")
+    def _payload_kinds_match(self) -> Self:
+        """Reject payloads whose discriminator disagrees with the envelope kind."""
+        if self.attributes is not None and self.attributes.kind != self.kind:
+            raise ValueError(
+                f"attributes.kind '{self.attributes.kind}' does not match "
+                f"product kind '{self.kind}'"
+            )
+        if self.metrics is not None and self.metrics.kind != self.kind:
+            raise ValueError(
+                f"metrics.kind '{self.metrics.kind}' does not match "
+                f"product kind '{self.kind}'"
+            )
+        return self
 
 
 class ScrapedTransaction(BaseModel):

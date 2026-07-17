@@ -185,6 +185,51 @@ def test_scraped_product_envelope_discriminates_payloads():
     assert product.external_ref is None
 
 
+def test_scraped_product_rejects_mismatched_attributes_kind():
+    """An attributes payload of a different kind fails the envelope."""
+    with pytest.raises(
+        ValidationError,
+        match=r"attributes\.kind 'crypto' does not match product kind 'checking'",
+    ):
+        ScrapedProduct.model_validate(
+            {
+                "institution": "banchile",
+                "kind": "checking",
+                "attributes": {"kind": "crypto"},
+            }
+        )
+
+
+def test_scraped_product_rejects_mismatched_metrics_kind():
+    """A metrics payload of a different kind fails the envelope."""
+    with pytest.raises(
+        ValidationError,
+        match=r"metrics\.kind 'wallet' does not match product kind 'checking'",
+    ):
+        ScrapedProduct.model_validate(
+            {
+                "institution": "banchile",
+                "kind": "checking",
+                "metrics": {"kind": "wallet", "balance": 1_000},
+            }
+        )
+
+
+def test_scraped_product_accepts_matching_payload_kinds():
+    """Payloads whose discriminators agree with the envelope kind validate."""
+    product = ScrapedProduct.model_validate(
+        {
+            "institution": "banchile",
+            "kind": "checking",
+            "attributes": {"kind": "checking", "account_number": "00-123-45678-90"},
+            "metrics": {"kind": "checking", "balance": 1_000},
+        }
+    )
+
+    assert product.attributes.kind == "checking"
+    assert product.metrics.kind == "checking"
+
+
 def test_scraped_transaction_mirrors_the_scraper_dataclass():
     """Field names and defaults match the base.py dataclass for drop-in use."""
     txn = ScrapedTransaction(

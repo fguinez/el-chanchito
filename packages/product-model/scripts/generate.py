@@ -109,12 +109,13 @@ def _emit_interface(cls: type[BaseModel]) -> str:
         lines.append(f"/** {description} */")
     lines.append(f"export interface {cls.__name__} {{")
     for name, prop in _ordered_properties(schema):
-        token, _ = _resolve_type(prop, where=f"{cls.__name__}.{name}")
+        token, nullable = _resolve_type(prop, where=f"{cls.__name__}.{name}")
         prop_description = prop.get("description")
         if prop_description:
             lines.append(f"  /** {prop_description} */")
         optional = "" if name == "kind" or name in required else "?"
-        lines.append(f"  {name}{optional}: {_ts_type(token)};")
+        ts_type = _ts_type(token) + (" | null" if nullable else "")
+        lines.append(f"  {name}{optional}: {ts_type};")
     lines.append("}")
     return "\n".join(lines)
 
