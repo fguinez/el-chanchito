@@ -36,6 +36,24 @@ class TestCanonicalMetrics:
             {"a": {"x": 2}}
         )
 
+    def test_int_and_float_of_equal_value_are_unchanged(self):
+        """A jsonb integer literal (e.g. the V011 seed's `"limit": 4000000`)
+        loads as int while a pydantic dump of the same quantity is a float —
+        the numeric type alone must not read as a change."""
+        seeded = {"kind": "credit_card", "available": 3600000, "limit": 4000000}
+        scraped = {
+            "kind": "credit_card",
+            "available": 3600000.0,
+            "limit": 4000000.0,
+        }
+
+        assert _canonical_metrics(scraped) == _canonical_metrics(seeded)
+
+    def test_int_vs_float_of_different_value_still_changed(self):
+        assert _canonical_metrics(
+            {"kind": "credit_card", "available": 3600000.0}
+        ) != _canonical_metrics({"kind": "credit_card", "available": 3500000})
+
     @pytest.mark.parametrize(
         ("new", "current", "changed"),
         [

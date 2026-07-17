@@ -66,15 +66,38 @@ def finish_scraper_run(
 _NO_METRICS = "\x00none"
 
 
+def _normalize_numbers(value):
+    """Recursively convert ints to floats so equal quantities compare equal.
+
+    Comparison-only — never applied to what gets stored. bool is an int
+    subclass and stays a bool.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return float(value)
+    if isinstance(value, dict):
+        return {k: _normalize_numbers(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_normalize_numbers(v) for v in value]
+    return value
+
+
 def _canonical_metrics(metrics: dict | None) -> str:
     """Canonical form of a metrics payload for change detection.
 
     Key order must not matter (Postgres jsonb reorders keys), so the dict is
-    serialized sorted and compact. None maps to a sentinel distinct from `{}`.
+    serialized sorted and compact. Numeric type must not matter either: a
+    jsonb integer literal (e.g. the V011-seeded `"limit": 4000000`) loads as
+    int while a pydantic dump of the same quantity is the float 4000000.0 —
+    ints are normalized to floats before dumping so that doesn't read as a
+    change. None maps to a sentinel distinct from `{}`.
     """
     if metrics is None:
         return _NO_METRICS
-    return json.dumps(metrics, sort_keys=True, separators=(",", ":"))
+    return json.dumps(
+        _normalize_numbers(metrics), sort_keys=True, separators=(",", ":")
+    )
 
 
 def _headline_decimal(headline: float | int | None) -> Decimal | None:
