@@ -83,6 +83,7 @@ export default function MonitorDetailPage() {
   useEffect(() => {
     let cancelled = false;
     setHistoryLoading(true);
+    setError(false);
     fetch(`/api/monitors/${id}?${query}`)
       .then((res) => {
         if (res.status === 404) {
@@ -254,6 +255,11 @@ export default function MonitorDetailPage() {
             <CardDescription>
               Valor de la expresión frente a sus umbrales, día a día
             </CardDescription>
+            {error && (
+              <p className="text-xs text-destructive">
+                No se pudo actualizar el rango; se muestra el anterior.
+              </p>
+            )}
             <CardAction>
               <div
                 className="flex flex-wrap items-center gap-1"

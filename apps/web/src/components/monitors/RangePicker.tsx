@@ -111,10 +111,11 @@ export function ChartRangePicker({
     draftsOrdered && spanDays(fromDraft, toDraft) > MAX_RANGE_DAYS;
 
   const handleOpenChange = (next: boolean) => {
-    // Seed the inputs with the active range so reopening shows the selection.
-    if (next && value.kind === "absolute") {
-      setFromDraft(value.from);
-      setToDraft(value.to);
+    // Seed the inputs with the active range (or clear leftovers from an
+    // abandoned edit) so reopening always reflects the current selection.
+    if (next) {
+      setFromDraft(value.kind === "absolute" ? value.from : "");
+      setToDraft(value.kind === "absolute" ? value.to : "");
     }
     setOpen(next);
   };
