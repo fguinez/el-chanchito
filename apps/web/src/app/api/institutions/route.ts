@@ -20,6 +20,7 @@ interface ApiProduct {
   parentProductId: string | null;
   kind: ProductKind;
   name: string;
+  slug: string;
   currency: string;
   currentBalance: number | null;
   currentBalanceClp: number | null;
@@ -83,6 +84,7 @@ export async function GET() {
         parentProductId: products.parentProductId,
         kind: products.kind,
         productName: products.name,
+        productSlug: products.slug,
         currency: products.currency,
         currentBalance: products.currentBalance,
         balanceAsOf: products.balanceAsOf,
@@ -137,6 +139,7 @@ export async function GET() {
       parentProductId: row.parentProductId,
       kind: row.kind,
       name: row.productName,
+      slug: row.productSlug,
       currency: row.currency,
       currentBalance: balance,
       currentBalanceClp:

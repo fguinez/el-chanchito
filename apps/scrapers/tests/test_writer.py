@@ -6,7 +6,9 @@ stored one. `_headline_decimal` converts a metrics headline into the Decimal
 persisted in the NUMERIC current_balance/balance columns. `_write_decision`
 and the sibling helpers keep a summed roll-up and its per-holding rows from
 both counting toward net worth; the fake connection below exercises the SQL
-side-effects `upsert_product` issues for them.
+side-effects `upsert_product` issues for them. `_FakeResolveConn` drives the
+real `_resolve_product` to check a new product's INSERT carries an
+institution-unique slug (the slug helpers themselves live in test_slug.py).
 """
 
 from decimal import Decimal
@@ -144,6 +146,9 @@ class _FakeCursor:
     def fetchone(self):
         return self._result
 
+    def fetchall(self):
+        return self._result or []
+
 
 class _FakeConn:
     """A products/snapshots stand-in that answers `upsert_product`'s queries.
@@ -215,6 +220,35 @@ class _FakeConn:
         if "UPDATE products SET current_balance" in q:
             self.products[p[-1]].update(current_balance=p[0])
             return _FakeCursor()
+        return _FakeCursor()
+
+
+class _FakeResolveConn:
+    """Answers `_resolve_product`'s own query chain, unlike `_FakeConn` which
+    only sees the post-resolve writes.
+
+    Same routing-by-SQL-fragment idea: institution, user and account lookups
+    all hit, `taken_slugs` is what the institution already holds, and the
+    product INSERT echoes back its id param. Assertions read `executed`.
+    """
+
+    def __init__(self, taken_slugs):
+        self.taken_slugs = taken_slugs
+        self.executed = []
+
+    def execute(self, sql, params=None):
+        q = " ".join(sql.split())
+        self.executed.append((q, params))
+        if "SELECT id, name FROM institutions" in q:
+            return _FakeCursor(("inst-1", "Banco Sintético"))
+        if "SELECT id FROM users" in q:
+            return _FakeCursor(("user-1",))
+        if "SELECT id FROM accounts" in q:
+            return _FakeCursor(("acc-1",))
+        if "SELECT p.slug FROM products p" in q:
+            return _FakeCursor([(s,) for s in self.taken_slugs])
+        if "INSERT INTO products" in q:
+            return _FakeCursor((params[0],))
         return _FakeCursor()
 
 
@@ -383,3 +417,37 @@ class TestUpsertProductExclusivity:
 
         assert _executed(conn, "UPDATE products SET is_active = false") == []
         assert conn.products["dep-1"]["current_balance"] == Decimal("2500000")
+
+
+class TestResolveProductSlug:
+    """`_resolve_product` mints an institution-unique slug on its INSERT path."""
+
+    def _product_insert(self, conn):
+        return next(
+            (q, p) for q, p in conn.executed if "INSERT INTO products" in q
+        )
+
+    def test_new_product_gets_suffixed_slug(self):
+        """A name whose slug the institution already holds gets the -2 suffix,
+        with columns and params in matching order (name then slug)."""
+        conn = _FakeResolveConn(taken_slugs=["cuenta-corriente"])
+
+        writer._resolve_product(
+            conn, "banco-sintetico", "checking", name="Cuenta Corriente"
+        )
+
+        q, p = self._product_insert(conn)
+        assert "(id, account_id, name, slug, kind, currency, external_ref)" in q
+        assert p[2] == "Cuenta Corriente"
+        assert p[3] == "cuenta-corriente-2"
+
+    def test_first_product_keeps_bare_slug(self):
+        """With no slugs taken the bare slugified name is used."""
+        conn = _FakeResolveConn(taken_slugs=[])
+
+        writer._resolve_product(
+            conn, "banco-sintetico", "checking", name="Cuenta Corriente"
+        )
+
+        _, p = self._product_insert(conn)
+        assert p[3] == "cuenta-corriente"
