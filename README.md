@@ -93,4 +93,4 @@ For full detail, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## License
 
-Released under the [PolyForm Noncommercial License 1.0.0](LICENSE): you may fork, modify, self-host, and use El Chanchito freely for any noncommercial purpose (personal use, hobby projects, research, nonprofits). Commercial use is not granted by this license; contact the author for commercial terms.
+Released under the [PolyForm Noncommercial License 1.0.0](LICENSE.md): you may fork, modify, self-host, and use El Chanchito freely for any noncommercial purpose (personal use, hobby projects, research, nonprofits). Commercial use is not granted by this license; contact the author for commercial terms.
