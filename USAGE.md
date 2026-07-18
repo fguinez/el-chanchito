@@ -147,34 +147,35 @@ container so it writes to that volume:
 docker compose run --rm scrapers python -m scrapers.institutions.fintual
 ```
 
-### Tarjeta Lider Bci sign-in
+### Tarjeta Lider Bci
 
 The Tarjeta Lider Bci portal guards its login with a Cloudflare "Verifique que es
 un ser humano" check that passes only for a genuine browser (a headless/automated
 one gets an unsolvable interactive check). So the scraper drives a **real Chrome**
-over the DevTools protocol. Start it once, leave it running:
+over the DevTools protocol, and by default runs it **managed**: each scrape
+launches Chrome, autofills the login, reads the card, and closes Chrome. Nothing to
+keep running: just set `LIDER_BCI_RUT` (+ `chanchito.LIDER_BCI_PASSWORD` in the
+Keychain) and it runs unattended.
+
+Requirements: a genuine Google Chrome installed on the machine (not the Playwright
+Chromium `make install` fetches; set `LIDER_BCI_CHROME_PATH` if it's elsewhere) and
+a display (Chrome must be headed: Cloudflare blocks headless), so this runs on your
+Mac, not inside the headless Docker container. The window is launched off-screen so
+it doesn't flash on your desktop; if that ever misbehaves the run retries once with
+a normal visible window. If Cloudflare ever shows the human-verification check (rare
+for a genuine Chrome), the run falls back to a visible window so you can tick it.
+
+To instead reuse one long-running Chrome (e.g. to avoid the window flashing, or to
+sign in by hand once), start it and point the scraper at it:
 
 ```bash
-make bci-lider-login   # launches a real Chrome, autofills the login, leaves it running
+make bci-lider-login                      # launches a real Chrome, signs in, leaves it running
+LIDER_BCI_CDP_URL=http://localhost:9222   # add to .env; scrapes then drive this Chrome
 ```
 
-This needs a genuine Google Chrome installed on the machine (not the Playwright
-Chromium `make install` fetches; set `LIDER_BCI_CHROME_PATH` if it lives
-elsewhere). It opens an ordinary Chrome (its own profile, separate from your main one),
-autofills your RUT (and clave, if `chanchito.LIDER_BCI_PASSWORD` is stored) and
-signs in; if Cloudflare shows the human-verification check, tick it and the submit
-fires automatically. Then point the scraper at that Chrome:
-
-```bash
-LIDER_BCI_CDP_URL=http://localhost:9222   # add to .env
-```
-
-Scrapes connect to that Chrome, reusing the signed-in tab or re-logging-in via
-autofill (which clears Cloudflare because it's a real Chrome), so they run
-unattended **as long as that Chrome stays running**. They report `Could not reach
-the Chrome debug port…` when it isn't up. This is a browser-based flow, so run it
-on a machine with a display, not inside the headless container. (Override the debug
-port with `LIDER_BCI_CDP_PORT`, or the Chrome binary with `LIDER_BCI_CHROME_PATH`.)
+In reuse mode scrapes drive that Chrome (reusing the signed-in tab or re-logging-in
+via autofill) and report `Could not reach the Chrome debug port…` when it isn't up.
+(Override the debug port with `LIDER_BCI_CDP_PORT`.)
 
 ### Running scrapers once
 

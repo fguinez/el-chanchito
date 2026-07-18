@@ -18,11 +18,16 @@ token lives in tab-scoped sessionStorage and Cloudflare rebinds on a fresh brows
 So both sign-in and scraping drive a *genuine* Chrome: an ordinary OS process on a
 debug port (`_launch_real_chrome`), not a Playwright-launched browser. Playwright
 connects over CDP only to autofill the login (Turnstile then clears invisibly, or
-after the human ticks the check, which we never do) and to read pages. Scraping
-reuses an already-signed-in tab or re-logs-in via autofill, so it can run
-unattended as long as a debuggable Chrome stays running (`LIDER_BCI_CDP_URL`).
-`scrape_card` raises `BciLiderSessionError` (with a "run make bci-lider-login"
-message) when that Chrome is unreachable or sign-in can't complete.
+after the human ticks the check, which we never do) and to read pages.
+
+`scrape_card` runs in one of two modes:
+  * managed (default, fully unattended): it launches a headed Chrome, signs in via
+    autofill, scrapes, and closes it. Needs a machine with a display (Cloudflare
+    blocks headless), so not the headless Docker container.
+  * reuse: when `LIDER_BCI_CDP_URL` points at an already-running debuggable Chrome
+    (`make bci-lider-login`, or one you manage), it drives that and leaves it open.
+Either way it reuses an already-signed-in tab or re-logs-in via autofill, and
+raises `BciLiderSessionError` when Chrome is unreachable or sign-in can't complete.
 
 Design note (why DOM scraping, not the XHR API): the balances are bootstrapped
 into the Angular app state at login and never re-fetched on a route change, and
@@ -35,10 +40,13 @@ for the XHR endpoint later without touching the mapping.
 """
 
 import datetime
+import importlib.util
 import logging
 import os
 import re
 import shutil
+import signal
+import socket
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -100,8 +108,15 @@ def _chrome_executable() -> str:
     )
 
 
-def _launch_real_chrome(port: int, url: str) -> subprocess.Popen:
-    """Launch a genuine Chrome with remote debugging on `port`, opening `url`."""
+def _launch_real_chrome(port: int, url: str, offscreen: bool = False) -> subprocess.Popen:
+    """Launch a genuine Chrome with remote debugging on `port`, opening `url`.
+
+    `offscreen` parks the window off-screen and stops Chrome throttling a window it
+    thinks is hidden, so a managed scrape doesn't flash a visible window; it stays a
+    real headed browser (Cloudflare still passes). Managed mode falls back to a
+    visible window if the off-screen launch misbehaves. Interactive sign-in
+    (`save_login_session`) always launches visible so a human can see it.
+    """
     exe = _chrome_executable()
     args = [
         exe,
@@ -109,10 +124,25 @@ def _launch_real_chrome(port: int, url: str) -> subprocess.Popen:
         f"--user-data-dir={_CHROME_PROFILE}",
         "--no-first-run",
         "--no-default-browser-check",
-        url,
     ]
-    logger.info("Launching Chrome for sign-in: %s (debug port %s)", exe, port)
-    return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if offscreen:
+        args += ["--window-position=-32000,-32000", "--disable-backgrounding-occluded-windows"]
+    args.append(url)
+    logger.info(
+        "Launching Chrome: %s (debug port %s, offscreen=%s)", exe, port, offscreen
+    )
+    # start_new_session makes this Chrome its own process-group leader, so managed
+    # mode can tear down the whole tree (renderers/GPU/zygote) in one signal.
+    return subprocess.Popen(
+        args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True
+    )
+
+
+def _port_in_use(port: int) -> bool:
+    """True if something is already listening on localhost:`port`."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.5)
+        return sock.connect_ex(("127.0.0.1", port)) == 0
 
 
 # Timeouts (ms). We drive a real Chrome over CDP, so no browser-context tuning
@@ -580,18 +610,18 @@ def _read_balances(page) -> list[ScrapedProduct]:
     page.goto(BALANCES_URL, timeout=LOGIN_TIMEOUT, wait_until="domcontentloaded")
     _dismiss_popup(page)
     deadline = time.monotonic() + RENDER_TIMEOUT_MS / 1000
-    products: list[ScrapedProduct] = []
     while time.monotonic() < deadline:
         if "/login" in page.url:
             raise BciLiderSessionError(
                 "BciLider not signed in (redirected to /login). "
                 "Run `make bci-lider-login` to sign in again."
             )
-        products = card_products_from_text(_inner_text(page))
-        if products:
-            return products
+        text = _inner_text(page)
+        if card_saldos_from_text(text):  # quiet check while the widget renders
+            return card_products_from_text(text)
         page.wait_for_timeout(1000)
-    return products
+    # Final attempt: build once (logs "no card cupos" only if it's genuinely empty).
+    return card_products_from_text(_inner_text(page))
 
 
 def _read_movements(page) -> list[dict]:
@@ -706,33 +736,82 @@ def _ensure_logged_in(page, rut: Optional[str], password: Optional[str], deadlin
         if "/login" in page.url:
             _login_via_autofill(page, rut, password, deadline)
             return
-        if card_products_from_text(_inner_text(page)):
-            return  # authenticated and already rendering
+        if card_saldos_from_text(_inner_text(page)):  # quiet: authenticated + rendering
+            return
         page.wait_for_timeout(500)
     if "/login" in page.url:  # a bounce that landed just after the probe window
         _login_via_autofill(page, rut, password, deadline)
 
 
-def _scrape_via_cdp_sync(cdp_url: str, rut: Optional[str], password: Optional[str]) -> BciLiderCardResult:
-    """Read the card by driving a real Chrome connected over CDP.
+def _connect_cdp(playwright, cdp_url: str, deadline: float):
+    """Connect to a Chrome debug port, retrying until it's up or `deadline`.
+
+    Managed mode launches Chrome and connects immediately, so the port needs a few
+    seconds to come up; attended mode connects on the first try.
+    """
+    last_exc: Optional[Exception] = None
+    while time.monotonic() < deadline:
+        try:
+            return playwright.chromium.connect_over_cdp(cdp_url)
+        except Exception as exc:
+            last_exc = exc
+            time.sleep(1)
+    raise BciLiderSessionError(
+        f"Could not reach the Chrome debug port {cdp_url}. In managed mode Chrome "
+        "failed to start (a machine with a display is required); in reuse mode start "
+        "it with `make bci-lider-login`."
+    ) from last_exc
+
+
+def _terminate_chrome(proc: subprocess.Popen) -> None:
+    """Stop a Chrome we launched (managed mode), including its child processes.
+
+    Signals the whole process group (Chrome spawns renderer/GPU/zygote children) so
+    a SIGKILL fallback can't orphan them, and reaps the process after each signal so
+    no zombie lingers and the debug port / profile lock is released for the next run.
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+    except Exception:
+        pgid = None
+
+    def _kill(sig: int) -> None:
+        try:
+            if pgid is not None:
+                os.killpg(pgid, sig)
+            else:
+                proc.send_signal(sig)
+        except ProcessLookupError:
+            pass
+        except Exception:
+            logger.warning("BciLider: error signalling managed Chrome", exc_info=True)
+
+    _kill(signal.SIGTERM)
+    try:
+        proc.wait(timeout=10)
+        return
+    except Exception:
+        pass
+    _kill(signal.SIGKILL)
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        logger.warning("BciLider: managed Chrome did not exit after SIGKILL")
+
+
+def _scrape_over_cdp(cdp_url: str, rut: Optional[str], password: Optional[str]) -> BciLiderCardResult:
+    """Read the card by driving a Chrome reachable at `cdp_url`; never closes it.
 
     Reuses an existing tab (an already-signed-in one keeps its tab-scoped
     sessionStorage auth) and ensures it's logged in, re-logging-in via autofill on a
     genuine-Chrome tab when the session has expired: that is what clears Cloudflare.
-    The user's Chrome is left open (never closed).
     """
     from playwright.sync_api import sync_playwright
 
     result = BciLiderCardResult()
     deadline = time.monotonic() + _LOGIN_WAIT_S
     with sync_playwright() as playwright:
-        try:
-            browser = playwright.chromium.connect_over_cdp(cdp_url)
-        except Exception as exc:
-            raise BciLiderSessionError(
-                f"Could not reach the Chrome debug port {cdp_url}. Start it with "
-                "`make bci-lider-login`."
-            ) from exc
+        browser = _connect_cdp(playwright, cdp_url, min(deadline, time.monotonic() + 30))
         # Prefer an already-authenticated tab (keeps its sessionStorage), else any
         # existing tab, else a new one; then ensure it's signed in before reading.
         page = (
@@ -752,8 +831,54 @@ def _scrape_via_cdp_sync(cdp_url: str, rut: Optional[str], password: Optional[st
             _login_via_autofill(page, rut, password, time.monotonic() + _LOGIN_WAIT_S)
             result = BciLiderCardResult()
             _read_card(page, result)
-        # Do NOT close the page or the browser: it's the user's live Chrome.
+        # Do NOT close the browser here: in reuse mode it's the user's live Chrome;
+        # in managed mode _scrape_managed_sync terminates the process it launched.
     return result
+
+
+def _scrape_managed_sync(rut: Optional[str], password: Optional[str]) -> BciLiderCardResult:
+    """Launch a real Chrome, scrape (logging in via autofill), then close it.
+
+    Fully unattended: no long-running Chrome to keep alive. Chrome must be a
+    genuine, headed browser (Cloudflare blocks headless), so this needs a machine
+    with a display. The dedicated profile persists across runs, so Cloudflare's
+    clearance cookie can carry over and speed up the next sign-in.
+    """
+    # Fail before opening a Chrome window on a broken deploy.
+    if importlib.util.find_spec("playwright") is None:
+        raise ImportError("playwright is not installed. Run: pip install -r requirements.txt")
+    port = _cdp_port()
+    # A Chrome already on this port+profile would make our launch forward to it and
+    # exit, so we'd scrape (and then fail to close) someone else's Chrome. Refuse
+    # instead: the operator can close it or reuse it via LIDER_BCI_CDP_URL.
+    if _port_in_use(port):
+        raise BciLiderSessionError(
+            f"Port {port} is already in use. Close the Chrome on it, or set "
+            f"LIDER_BCI_CDP_URL=http://localhost:{port} to reuse that Chrome."
+        )
+    cdp_url = f"http://localhost:{port}"
+    # Prefer an off-screen window (no flash); if that misbehaves, fall back once to a
+    # normal visible window, which is the most reliable. `_terminate_chrome` waits
+    # for exit, so the port is free again before the fallback launch.
+    try:
+        return _scrape_managed_once(port, cdp_url, rut, password, offscreen=True)
+    except Exception as exc:
+        logger.warning(
+            "BciLider: off-screen Chrome scrape failed (%s); retrying with a "
+            "visible window", exc,
+        )
+    return _scrape_managed_once(port, cdp_url, rut, password, offscreen=False)
+
+
+def _scrape_managed_once(
+    port: int, cdp_url: str, rut: Optional[str], password: Optional[str], offscreen: bool,
+) -> BciLiderCardResult:
+    """Launch Chrome, scrape, and terminate it (one managed attempt)."""
+    proc = _launch_real_chrome(port, LOGIN_URL, offscreen=offscreen)
+    try:
+        return _scrape_over_cdp(cdp_url, rut, password)
+    finally:
+        _terminate_chrome(proc)
 
 
 async def scrape_card(
@@ -762,22 +887,24 @@ async def scrape_card(
 ) -> BciLiderCardResult:
     """Read the card's balances + movements by driving a real Chrome over CDP.
 
-    Connects to a debuggable Chrome (`cdp_url` arg or the LIDER_BCI_CDP_URL env
-    var), reusing an authenticated tab or logging in via autofill (the only path
-    past the portal's Cloudflare check). Raises `ImportError` if Playwright isn't
-    installed and `BciLiderSessionError` when the debuggable Chrome is unreachable
-    or sign-in can't complete, so the caller can prompt `make bci-lider-login`. A
+    Two modes:
+      * reuse: when a CDP URL is given (`cdp_url` arg or LIDER_BCI_CDP_URL env), it
+        connects to an already-running Chrome and leaves it open (attended, or a
+        Chrome you manage separately);
+      * managed (default): it launches a headed Chrome, signs in via autofill,
+        scrapes, and closes it, so scheduled runs are fully unattended (needs a
+        machine with a display; Cloudflare blocks headless).
+    Either way the login autofill is the only path past the portal's Cloudflare
+    check. Raises `ImportError` if Playwright isn't installed and
+    `BciLiderSessionError` when Chrome is unreachable or sign-in can't complete. A
     flaky movements leg after a valid session is a warning on the result instead.
     """
     import asyncio
 
     cdp = cdp_url if cdp_url is not None else os.environ.get(CDP_URL_ENV)
-    if not cdp:
-        raise BciLiderSessionError(
-            "LIDER_BCI_CDP_URL is not set. Start a debuggable Chrome with "
-            "`make bci-lider-login` and set LIDER_BCI_CDP_URL to its port."
-        )
     rut = rut or os.environ.get("LIDER_BCI_RUT")
     password = password or os.environ.get("LIDER_BCI_PASSWORD")
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _scrape_via_cdp_sync, cdp, rut, password)
+    if cdp:
+        return await loop.run_in_executor(None, _scrape_over_cdp, cdp, rut, password)
+    return await loop.run_in_executor(None, _scrape_managed_sync, rut, password)

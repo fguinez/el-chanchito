@@ -325,13 +325,16 @@ browser: a Playwright-launched Chromium (headless or headed) gets an unsolvable
 interactive "Verifique que es un ser humano" check, and a captured session doesn't
 survive headless reuse (the auth token lives in tab-scoped sessionStorage and
 Cloudflare rebinds on a fresh browser). So both sign-in and scraping drive a *real*
-Chrome over CDP: `make bci-lider-login` (`save_login_session`) launches an ordinary
-Chrome on a debug port (not a Playwright browser), autofills the RUT + clave and
-submits once Turnstile clears (invisibly, or after the human ticks the check, which
-we never do), and leaves it running. `scrape_card` connects to that Chrome
-(`LIDER_BCI_CDP_URL`), reuses an already-signed-in tab or re-logs-in via autofill,
-so it runs unattended as long as the debuggable Chrome stays up; it raises a "run
-make bci-lider-login" error when that Chrome is unreachable. Both legs share one
+Chrome over CDP: an ordinary Chrome on a debug port (`_launch_real_chrome`, not a
+Playwright browser), driven to autofill the RUT + clave and submit once Turnstile
+clears (invisibly, or after the human ticks the check, which we never do). By
+default `scrape_card` runs *managed*: it launches a headed Chrome off-screen (with
+a visible-window fallback so it doesn't flash on the desktop), signs in, scrapes,
+and closes it, so scheduled runs are fully unattended (needs a machine with a
+display: Cloudflare blocks headless). Setting `LIDER_BCI_CDP_URL` switches to *reuse*
+mode, driving a long-running Chrome from `make bci-lider-login` instead.
+Either way it reuses an already-signed-in tab or re-logs-in via autofill, and raises
+a "run make bci-lider-login" error when Chrome is unreachable. Both legs share one
 drive per cycle: `scrape_transactions` opens it and caches the result for
 `scrape_products` (a session error is re-raised, never retried). The "Mi Tarjeta
 -> Saldos" page yields the CLP "Nacional" and USD "Internacional" `credit_card`
@@ -390,7 +393,7 @@ shallow-merges `attributes`, always refreshes
 | `mach` | `email` | IMAP (Gmail) | Shared IMAP session | 30m |
 | `mercadopago` | `email` | IMAP (Gmail) | Shared IMAP session | 30m |
 | `tenpo` | `email` | IMAP (Gmail) | Shared IMAP session | 30m |
-| `bci_lider` | `web` | Real Chrome over CDP (`bci_lider_web`) | Debuggable Chrome + autofill (`make bci-lider-login`, `LIDER_BCI_CDP_URL`; Cloudflare Turnstile) | 24h |
+| `bci_lider` | `web` | Real Chrome over CDP (`bci_lider_web`) | Autofill in a real Chrome (managed by default; reuse via `LIDER_BCI_CDP_URL` + `make bci-lider-login`; Cloudflare Turnstile) | 24h |
 
 The three email-based scrapers reuse one `ImapSession`: it runs `NOOP` on
 each acquire and only re-logs-in when the mailbox has been dropped.
