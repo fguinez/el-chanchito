@@ -3,7 +3,7 @@
 # Product model
 
 Every product row keeps a small set of **universal promoted columns** (id,
-account, parent product, `kind`, `name`, `currency`, `external_ref`,
+account, parent product, `kind`, `name`, `slug`, `currency`, `external_ref`,
 `current_balance`, `balance_as_of`, `is_active`, `display_order`, timestamps).
 Everything kind-specific lives in two validated JSONB payloads:
 
