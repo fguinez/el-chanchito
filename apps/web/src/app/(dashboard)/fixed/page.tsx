@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Card,
   CardContent,
@@ -16,8 +16,10 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { SortableTableHead } from "@/components/ui/sortable-table-head";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { useSortableData } from "@/lib/use-sortable-data";
 import { formatCLP } from "@/lib/utils";
 import { calcPersonalAmount } from "@/lib/budget-engine";
 import { Trash2 } from "lucide-react";
@@ -29,6 +31,8 @@ interface FixedExpense {
   isShared: boolean;
   sharedRatio: string | null;
 }
+
+type ExpenseSortKey = "gasto" | "total" | "personal" | "compartido";
 
 export default function FixedExpensesPage() {
   const [expenses, setExpenses] = useState<FixedExpense[]>([]);
@@ -91,6 +95,28 @@ export default function FixedExpensesPage() {
   }, 0);
 
   const totalFull = expenses.reduce((sum, e) => sum + e.amount, 0);
+
+  const getValue = useCallback(
+    (expense: FixedExpense, key: ExpenseSortKey): string | number | null => {
+      const ratio = expense.sharedRatio ? parseFloat(expense.sharedRatio) : 0;
+      switch (key) {
+        case "gasto":
+          return expense.name;
+        case "total":
+          return expense.amount;
+        case "personal":
+          return calcPersonalAmount(expense.amount, expense.isShared, ratio);
+        case "compartido":
+          // "Compartido" renders a share % (or "No", i.e. 0%): sort numerically.
+          return expense.isShared ? ratio : 0;
+      }
+    },
+    []
+  );
+
+  const { sorted, sort, toggleSort } = useSortableData(expenses, getValue);
+  // Bridge the generic header's string key to our typed key union.
+  const handleSort = (key: string) => toggleSort(key as ExpenseSortKey);
 
   return (
     <div className="space-y-6">
@@ -189,15 +215,46 @@ export default function FixedExpensesPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Gasto</TableHead>
-                  <TableHead className="text-right">Monto total</TableHead>
-                  <TableHead className="text-right">Monto personal</TableHead>
-                  <TableHead>Compartido</TableHead>
+                  <SortableTableHead
+                    label="Gasto"
+                    columnKey="gasto"
+                    active={sort?.key === "gasto"}
+                    direction={sort?.key === "gasto" ? sort.direction : undefined}
+                    onSort={handleSort}
+                  />
+                  <SortableTableHead
+                    label="Monto total"
+                    columnKey="total"
+                    align="right"
+                    active={sort?.key === "total"}
+                    direction={sort?.key === "total" ? sort.direction : undefined}
+                    onSort={handleSort}
+                  />
+                  <SortableTableHead
+                    label="Monto personal"
+                    columnKey="personal"
+                    align="right"
+                    active={sort?.key === "personal"}
+                    direction={
+                      sort?.key === "personal" ? sort.direction : undefined
+                    }
+                    onSort={handleSort}
+                  />
+                  <SortableTableHead
+                    label="Compartido"
+                    columnKey="compartido"
+                    align="right"
+                    active={sort?.key === "compartido"}
+                    direction={
+                      sort?.key === "compartido" ? sort.direction : undefined
+                    }
+                    onSort={handleSort}
+                  />
                   <TableHead className="w-12"></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {expenses.map((expense) => {
+                {sorted.map((expense) => {
                   const ratio = expense.sharedRatio
                     ? parseFloat(expense.sharedRatio)
                     : 0;
@@ -217,7 +274,7 @@ export default function FixedExpensesPage() {
                       <TableCell className="text-right">
                         {formatCLP(personal)}
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="text-right">
                         {expense.isShared
                           ? `${Math.round(ratio * 100)}%`
                           : "No"}

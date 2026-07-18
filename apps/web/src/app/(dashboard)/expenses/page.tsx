@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Card,
   CardContent,
@@ -12,13 +12,14 @@ import {
   Table,
   TableBody,
   TableCell,
-  TableHead,
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { SortableTableHead } from "@/components/ui/sortable-table-head";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { useSortableData } from "@/lib/use-sortable-data";
 import { formatCLP } from "@/lib/utils";
 import { CsvImport } from "@/components/dashboard/CsvImport";
 
@@ -31,6 +32,8 @@ interface Transaction {
   source: string;
   notes: string | null;
 }
+
+type TransactionSortKey = "fecha" | "descripcion" | "fuente" | "monto";
 
 export default function ExpensesPage() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
@@ -85,6 +88,26 @@ export default function ExpensesPage() {
   const totalIncome = transactions
     .filter((t) => t.amount > 0)
     .reduce((sum, t) => sum + t.amount, 0);
+
+  const getValue = useCallback(
+    (txn: Transaction, key: TransactionSortKey): string | number | null => {
+      switch (key) {
+        case "fecha":
+          return txn.transactionDate; // ISO strings sort correctly as strings.
+        case "descripcion":
+          return txn.description;
+        case "fuente":
+          return txn.source;
+        case "monto":
+          return txn.amount;
+      }
+    },
+    []
+  );
+
+  const { sorted, sort, toggleSort } = useSortableData(transactions, getValue);
+  // Bridge the generic header's string key to our typed key union.
+  const handleSort = (key: string) => toggleSort(key as TransactionSortKey);
 
   return (
     <div className="space-y-6">
@@ -186,14 +209,43 @@ export default function ExpensesPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Fecha</TableHead>
-                  <TableHead>Descripcion</TableHead>
-                  <TableHead>Fuente</TableHead>
-                  <TableHead className="text-right">Monto</TableHead>
+                  <SortableTableHead
+                    label="Fecha"
+                    columnKey="fecha"
+                    active={sort?.key === "fecha"}
+                    direction={sort?.key === "fecha" ? sort.direction : undefined}
+                    onSort={handleSort}
+                  />
+                  <SortableTableHead
+                    label="Descripcion"
+                    columnKey="descripcion"
+                    active={sort?.key === "descripcion"}
+                    direction={
+                      sort?.key === "descripcion" ? sort.direction : undefined
+                    }
+                    onSort={handleSort}
+                  />
+                  <SortableTableHead
+                    label="Fuente"
+                    columnKey="fuente"
+                    active={sort?.key === "fuente"}
+                    direction={
+                      sort?.key === "fuente" ? sort.direction : undefined
+                    }
+                    onSort={handleSort}
+                  />
+                  <SortableTableHead
+                    label="Monto"
+                    columnKey="monto"
+                    align="right"
+                    active={sort?.key === "monto"}
+                    direction={sort?.key === "monto" ? sort.direction : undefined}
+                    onSort={handleSort}
+                  />
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {transactions.map((txn) => (
+                {sorted.map((txn) => (
                   <TableRow key={txn.id}>
                     <TableCell className="text-sm">
                       {new Date(txn.transactionDate).toLocaleDateString("es-CL")}

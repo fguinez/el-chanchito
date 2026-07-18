@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Card,
   CardContent,
@@ -16,9 +16,11 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { SortableTableHead } from "@/components/ui/sortable-table-head";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { useSortableData } from "@/lib/use-sortable-data";
 import { formatCLP, cn } from "@/lib/utils";
 import { Trash2, Check } from "lucide-react";
 
@@ -32,6 +34,13 @@ interface InternalTransfer {
   status: string;
   notes: string | null;
 }
+
+type TransferSortKey =
+  | "fecha"
+  | "descripcion"
+  | "monto"
+  | "notas"
+  | "estado";
 
 export default function TransfersPage() {
   const [transfers, setTransfers] = useState<InternalTransfer[]>([]);
@@ -98,6 +107,42 @@ export default function TransfersPage() {
   const pending = transfers.filter((t) => t.status === "pending");
   const resolved = transfers.filter((t) => t.status === "resolved");
   const pendingTotal = pending.reduce((sum, t) => sum + t.amount, 0);
+
+  // Shared value extractor: the two tables' columns overlap, so one getValue
+  // covers both. Each table keeps its own independent sort state below.
+  const getValue = useCallback(
+    (t: InternalTransfer, key: TransferSortKey): string | number | null => {
+      switch (key) {
+        case "fecha":
+          return t.transferDate; // ISO strings sort correctly as strings.
+        case "descripcion":
+          return t.description;
+        case "monto":
+          return t.amount;
+        case "notas":
+          return t.notes;
+        case "estado":
+          return t.status;
+      }
+    },
+    []
+  );
+
+  const {
+    sorted: pendingSorted,
+    sort: pendingSort,
+    toggleSort: togglePending,
+  } = useSortableData(pending, getValue);
+  const {
+    sorted: resolvedSorted,
+    sort: resolvedSort,
+    toggleSort: toggleResolved,
+  } = useSortableData(resolved, getValue);
+  // Bridge the generic header's string key to our typed key union.
+  const handlePendingSort = (key: string) =>
+    togglePending(key as TransferSortKey);
+  const handleResolvedSort = (key: string) =>
+    toggleResolved(key as TransferSortKey);
 
   return (
     <div className="space-y-6">
@@ -193,15 +238,56 @@ export default function TransfersPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Fecha</TableHead>
-                  <TableHead>Descripcion</TableHead>
-                  <TableHead className="text-right">Monto</TableHead>
-                  <TableHead>Notas</TableHead>
+                  <SortableTableHead
+                    label="Fecha"
+                    columnKey="fecha"
+                    active={pendingSort?.key === "fecha"}
+                    direction={
+                      pendingSort?.key === "fecha"
+                        ? pendingSort.direction
+                        : undefined
+                    }
+                    onSort={handlePendingSort}
+                  />
+                  <SortableTableHead
+                    label="Descripcion"
+                    columnKey="descripcion"
+                    active={pendingSort?.key === "descripcion"}
+                    direction={
+                      pendingSort?.key === "descripcion"
+                        ? pendingSort.direction
+                        : undefined
+                    }
+                    onSort={handlePendingSort}
+                  />
+                  <SortableTableHead
+                    label="Monto"
+                    columnKey="monto"
+                    align="right"
+                    active={pendingSort?.key === "monto"}
+                    direction={
+                      pendingSort?.key === "monto"
+                        ? pendingSort.direction
+                        : undefined
+                    }
+                    onSort={handlePendingSort}
+                  />
+                  <SortableTableHead
+                    label="Notas"
+                    columnKey="notas"
+                    active={pendingSort?.key === "notas"}
+                    direction={
+                      pendingSort?.key === "notas"
+                        ? pendingSort.direction
+                        : undefined
+                    }
+                    onSort={handlePendingSort}
+                  />
                   <TableHead className="w-24"></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {pending.map((t) => (
+                {pendingSorted.map((t) => (
                   <TableRow key={t.id}>
                     <TableCell className="whitespace-nowrap">
                       {new Date(t.transferDate).toLocaleDateString("es-CL")}
@@ -249,15 +335,56 @@ export default function TransfersPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Fecha</TableHead>
-                  <TableHead>Descripcion</TableHead>
-                  <TableHead className="text-right">Monto</TableHead>
-                  <TableHead>Estado</TableHead>
+                  <SortableTableHead
+                    label="Fecha"
+                    columnKey="fecha"
+                    active={resolvedSort?.key === "fecha"}
+                    direction={
+                      resolvedSort?.key === "fecha"
+                        ? resolvedSort.direction
+                        : undefined
+                    }
+                    onSort={handleResolvedSort}
+                  />
+                  <SortableTableHead
+                    label="Descripcion"
+                    columnKey="descripcion"
+                    active={resolvedSort?.key === "descripcion"}
+                    direction={
+                      resolvedSort?.key === "descripcion"
+                        ? resolvedSort.direction
+                        : undefined
+                    }
+                    onSort={handleResolvedSort}
+                  />
+                  <SortableTableHead
+                    label="Monto"
+                    columnKey="monto"
+                    align="right"
+                    active={resolvedSort?.key === "monto"}
+                    direction={
+                      resolvedSort?.key === "monto"
+                        ? resolvedSort.direction
+                        : undefined
+                    }
+                    onSort={handleResolvedSort}
+                  />
+                  <SortableTableHead
+                    label="Estado"
+                    columnKey="estado"
+                    active={resolvedSort?.key === "estado"}
+                    direction={
+                      resolvedSort?.key === "estado"
+                        ? resolvedSort.direction
+                        : undefined
+                    }
+                    onSort={handleResolvedSort}
+                  />
                   <TableHead className="w-10"></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {resolved.map((t) => (
+                {resolvedSorted.map((t) => (
                   <TableRow key={t.id} className="opacity-60">
                     <TableCell className="whitespace-nowrap">
                       {new Date(t.transferDate).toLocaleDateString("es-CL")}

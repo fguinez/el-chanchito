@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Card,
   CardContent,
@@ -12,12 +12,13 @@ import {
   Table,
   TableBody,
   TableCell,
-  TableHead,
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { SortableTableHead } from "@/components/ui/sortable-table-head";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useSortableData } from "@/lib/use-sortable-data";
 import { formatCLP, cn } from "@/lib/utils";
 import { AlertTriangle, Building2, ExternalLink, RefreshCw } from "lucide-react";
 import { KIND_INFO } from "@chanchito/product-model";
@@ -482,80 +483,10 @@ export default function InstitutionsPage() {
               </div>
             </CardHeader>
             <CardContent>
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Producto</TableHead>
-                    <TableHead>Tipo</TableHead>
-                    <TableHead className="text-right">Saldo</TableHead>
-                    <TableHead className="text-right">Cupo</TableHead>
-                    <TableHead className="text-right">Actualizado</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {inst.products.map((product) => {
-                    const chips = productDetailChips(product);
-                    const balance = formatBalance(
-                      product.currency,
-                      product.currentBalance
-                    );
-                    const cupo = productLimit(product);
-                    const isLiability =
-                      KIND_INFO[product.kind].role === "liability";
-                    return (
-                      <TableRow
-                        key={product.id}
-                        className={cn(!product.isActive && "opacity-50")}
-                      >
-                        <TableCell>
-                          <div className="font-medium">
-                            {displayProductName(product, inst.name)}
-                          </div>
-                          {chips.length > 0 && (
-                            <div className="mt-0.5 text-xs text-muted-foreground">
-                              {chips.join(" · ")}
-                            </div>
-                          )}
-                        </TableCell>
-                        <TableCell>
-                          <Badge
-                            variant="outline"
-                            className={cn(
-                              "text-xs",
-                              isLiability
-                                ? "border-red-200 text-red-600"
-                                : "border-green-200 text-green-700"
-                            )}
-                          >
-                            {KIND_INFO[product.kind].labelEs}
-                          </Badge>
-                        </TableCell>
-                        <TableCell className="text-right font-medium tabular-nums">
-                          {balance ?? (
-                            <span className="text-muted-foreground">
-                              sin dato
-                            </span>
-                          )}
-                          {product.currency !== "CLP" &&
-                            product.currentBalanceClp != null && (
-                              <div className="text-xs font-normal text-muted-foreground">
-                                ≈ {formatCLP(product.currentBalanceClp)}
-                              </div>
-                            )}
-                        </TableCell>
-                        <TableCell className="text-right tabular-nums text-muted-foreground">
-                          {cupo != null ? formatCLP(cupo) : "—"}
-                        </TableCell>
-                        <TableCell className="text-right text-sm text-muted-foreground">
-                          {product.balanceAsOf
-                            ? timeAgo(product.balanceAsOf)
-                            : "—"}
-                        </TableCell>
-                      </TableRow>
-                    );
-                  })}
-                </TableBody>
-              </Table>
+              <InstitutionProductsTable
+                products={inst.products}
+                institutionName={inst.name}
+              />
 
               {/* Per-institution subtotals: holdings by currency + CLP total */}
               {inst.subtotals.clp != null && (
@@ -599,5 +530,150 @@ export default function InstitutionsPage() {
         ))
       )}
     </div>
+  );
+}
+
+type ProductSortKey = "producto" | "tipo" | "saldo" | "cupo" | "actualizado";
+
+/** The per-institution products table, with client-side column sorting. Sort
+ *  state is local so each institution's table sorts independently; the caller's
+ *  subtotals footer stays computed from the full, unsorted set. */
+function InstitutionProductsTable({
+  products,
+  institutionName,
+}: {
+  products: Product[];
+  institutionName: string;
+}) {
+  const getValue = useCallback(
+    (product: Product, key: ProductSortKey): string | number | null => {
+      switch (key) {
+        case "producto":
+          return displayProductName(product, institutionName);
+        case "tipo":
+          return KIND_INFO[product.kind].labelEs;
+        case "saldo":
+          // Sort by the CLP-normalized value so cross-currency rows are
+          // comparable; a product with no conversion (foreign/crypto without a
+          // rate) stays null and sorts last rather than mixing raw amounts in.
+          return product.currentBalanceClp;
+        case "cupo":
+          return productLimit(product);
+        case "actualizado":
+          return product.balanceAsOf; // ISO strings sort correctly as strings.
+      }
+    },
+    [institutionName]
+  );
+
+  const { sorted, sort, toggleSort } = useSortableData(products, getValue);
+  // Bridge the generic header's string key to our typed key union.
+  const handleSort = (key: string) => toggleSort(key as ProductSortKey);
+
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <SortableTableHead
+            label="Producto"
+            columnKey="producto"
+            active={sort?.key === "producto"}
+            direction={sort?.key === "producto" ? sort.direction : undefined}
+            onSort={handleSort}
+          />
+          <SortableTableHead
+            label="Tipo"
+            columnKey="tipo"
+            active={sort?.key === "tipo"}
+            direction={sort?.key === "tipo" ? sort.direction : undefined}
+            onSort={handleSort}
+          />
+          <SortableTableHead
+            label="Saldo"
+            columnKey="saldo"
+            align="right"
+            active={sort?.key === "saldo"}
+            direction={sort?.key === "saldo" ? sort.direction : undefined}
+            onSort={handleSort}
+          />
+          <SortableTableHead
+            label="Cupo"
+            columnKey="cupo"
+            align="right"
+            active={sort?.key === "cupo"}
+            direction={sort?.key === "cupo" ? sort.direction : undefined}
+            onSort={handleSort}
+          />
+          <SortableTableHead
+            label="Actualizado"
+            columnKey="actualizado"
+            align="right"
+            active={sort?.key === "actualizado"}
+            direction={
+              sort?.key === "actualizado" ? sort.direction : undefined
+            }
+            onSort={handleSort}
+          />
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {sorted.map((product) => {
+          const chips = productDetailChips(product);
+          const balance = formatBalance(
+            product.currency,
+            product.currentBalance
+          );
+          const cupo = productLimit(product);
+          const isLiability = KIND_INFO[product.kind].role === "liability";
+          return (
+            <TableRow
+              key={product.id}
+              className={cn(!product.isActive && "opacity-50")}
+            >
+              <TableCell>
+                <div className="font-medium">
+                  {displayProductName(product, institutionName)}
+                </div>
+                {chips.length > 0 && (
+                  <div className="mt-0.5 text-xs text-muted-foreground">
+                    {chips.join(" · ")}
+                  </div>
+                )}
+              </TableCell>
+              <TableCell>
+                <Badge
+                  variant="outline"
+                  className={cn(
+                    "text-xs",
+                    isLiability
+                      ? "border-red-200 text-red-600"
+                      : "border-green-200 text-green-700"
+                  )}
+                >
+                  {KIND_INFO[product.kind].labelEs}
+                </Badge>
+              </TableCell>
+              <TableCell className="text-right font-medium tabular-nums">
+                {balance ?? (
+                  <span className="text-muted-foreground">sin dato</span>
+                )}
+                {product.currency !== "CLP" &&
+                  product.currentBalanceClp != null && (
+                    <div className="text-xs font-normal text-muted-foreground">
+                      ≈ {formatCLP(product.currentBalanceClp)}
+                    </div>
+                  )}
+              </TableCell>
+              <TableCell className="text-right tabular-nums text-muted-foreground">
+                {cupo != null ? formatCLP(cupo) : "—"}
+              </TableCell>
+              <TableCell className="text-right text-sm text-muted-foreground">
+                {product.balanceAsOf ? timeAgo(product.balanceAsOf) : "—"}
+              </TableCell>
+            </TableRow>
+          );
+        })}
+      </TableBody>
+    </Table>
   );
 }
