@@ -10,6 +10,7 @@ import {
   jsonb,
   uniqueIndex,
   index,
+  type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import { relations } from "drizzle-orm";
 import type {
@@ -17,6 +18,7 @@ import type {
   ProductKind,
   ProductMetrics,
 } from "@chanchito/product-model";
+import type { MonitorDisplay, MonitorThreshold } from "@/lib/monitors/types";
 
 // Kind vocabulary, roles, and labels are generated from the shared registry
 // (packages/product-model); re-exported here so callers keep one import path.
@@ -110,7 +112,7 @@ export const products = pgTable(
       .notNull()
       .references(() => accounts.id),
     parentProductId: uuid("parent_product_id").references(
-      (): any => products.id
+      (): AnyPgColumn => products.id
     ),
     kind: text("kind").$type<ProductKind>().notNull(),
     name: text("name").notNull(),
@@ -178,7 +180,7 @@ export const productSnapshots = pgTable(
 export const categories = pgTable("categories", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: text("name").notNull(),
-  parentId: uuid("parent_id").references((): any => categories.id),
+  parentId: uuid("parent_id").references((): AnyPgColumn => categories.id),
   color: text("color"),
   icon: text("icon"),
   createdAt: timestamp("created_at", { withTimezone: true })
@@ -392,6 +394,33 @@ export const scraperRuns = pgTable(
     ),
   ]
 );
+
+// ---------------------------------------------------------------------------
+// Monitors
+// ---------------------------------------------------------------------------
+
+// User-defined monitors: one left expression plus {severity, comparator,
+// expression} thresholds, all persisted in uuid-ref form and evaluated on
+// read (see lib/monitors). display is passed raw like product metrics.
+export const monitors = pgTable("monitors", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull(),
+  description: text("description"),
+  currency: text("currency").notNull().default("CLP"),
+  expression: text("expression").notNull(),
+  thresholds: jsonb("thresholds").$type<MonitorThreshold[]>().notNull(),
+  display: jsonb("display")
+    .$type<MonitorDisplay>()
+    .notNull()
+    .default({ chart: "line", show_margin: true }),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
 
 // ---------------------------------------------------------------------------
 // Relations

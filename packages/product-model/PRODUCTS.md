@@ -23,7 +23,9 @@ envelopes — the generated JSON Schema is the future REST wire contract.
 
 Conventions: snake_case keys; CLP amounts `int`, USD/crypto amounts `float`;
 dates as ISO `YYYY-MM-DD` strings; percentages as percent numbers (4.2 = 4.2%).
-Optional fields are marked `?`.
+Optional fields are marked `?`. Every numeric metric field declares a
+denomination: `currency` (amount in the product's `currency` column,
+convertible), `percent` (raw percent number), or `count` (raw unit count).
 
 ## Cuenta corriente (`checking`)
 
@@ -38,12 +40,12 @@ Net-worth role: **asset** · balance convention: **value**
 
 ### Metrics
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `kind` | `"checking"` | Payload discriminator; always "checking". |
-| `balance` | `float` | Available balance in account currency (Saldo disponible). |
-| `accounting_balance` | `float?` | Accounting balance in account currency (Saldo contable). |
-| `reported_as_of` | `date?` | Date the institution printed next to the balance. |
+| Field | Type | Denomination | Description |
+| --- | --- | --- | --- |
+| `kind` | `"checking"` |  | Payload discriminator; always "checking". |
+| `balance` | `float` | currency | Available balance in account currency (Saldo disponible). |
+| `accounting_balance` | `float?` | currency | Accounting balance in account currency (Saldo contable). |
+| `reported_as_of` | `date?` |  | Date the institution printed next to the balance. |
 
 ## Ahorro (`savings`)
 
@@ -58,12 +60,12 @@ Net-worth role: **asset** · balance convention: **value**
 
 ### Metrics
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `kind` | `"savings"` | Payload discriminator; always "savings". |
-| `balance` | `float` | Available balance in account currency (Saldo disponible). |
-| `accounting_balance` | `float?` | Accounting balance in account currency (Saldo contable). |
-| `reported_as_of` | `date?` | Date the institution printed next to the balance. |
+| Field | Type | Denomination | Description |
+| --- | --- | --- | --- |
+| `kind` | `"savings"` |  | Payload discriminator; always "savings". |
+| `balance` | `float` | currency | Available balance in account currency (Saldo disponible). |
+| `accounting_balance` | `float?` | currency | Accounting balance in account currency (Saldo contable). |
+| `reported_as_of` | `date?` |  | Date the institution printed next to the balance. |
 
 ## Cuenta vista (`vista`)
 
@@ -78,12 +80,12 @@ Net-worth role: **asset** · balance convention: **value**
 
 ### Metrics
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `kind` | `"vista"` | Payload discriminator; always "vista". |
-| `balance` | `float` | Available balance in account currency (Saldo disponible). |
-| `accounting_balance` | `float?` | Accounting balance in account currency (Saldo contable). |
-| `reported_as_of` | `date?` | Date the institution printed next to the balance. |
+| Field | Type | Denomination | Description |
+| --- | --- | --- | --- |
+| `kind` | `"vista"` |  | Payload discriminator; always "vista". |
+| `balance` | `float` | currency | Available balance in account currency (Saldo disponible). |
+| `accounting_balance` | `float?` | currency | Accounting balance in account currency (Saldo contable). |
+| `reported_as_of` | `date?` |  | Date the institution printed next to the balance. |
 
 ## Billetera (`wallet`)
 
@@ -97,10 +99,10 @@ Net-worth role: **asset** · balance convention: **value**
 
 ### Metrics
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `kind` | `"wallet"` | Payload discriminator; always "wallet". |
-| `balance` | `int` | Wallet balance in CLP. |
+| Field | Type | Denomination | Description |
+| --- | --- | --- | --- |
+| `kind` | `"wallet"` |  | Payload discriminator; always "wallet". |
+| `balance` | `int` | currency | Wallet balance in CLP. |
 
 ## Depósito a plazo (`term_deposit`)
 
@@ -121,10 +123,10 @@ Net-worth role: **asset** · balance convention: **value**
 
 ### Metrics
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `kind` | `"term_deposit"` | Payload discriminator; always "term_deposit". |
-| `balance` | `int` | Current value of the deposit in CLP. |
+| Field | Type | Denomination | Description |
+| --- | --- | --- | --- |
+| `kind` | `"term_deposit"` |  | Payload discriminator; always "term_deposit". |
+| `balance` | `int` | currency | Current value of the deposit in CLP. |
 
 ## Tarjeta de crédito (`credit_card`)
 
@@ -142,13 +144,13 @@ Net-worth role: **liability** · balance convention: **available**
 
 ### Metrics
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `kind` | `"credit_card"` | Payload discriminator; always "credit_card". |
-| `available` | `float` | Available credit in product currency (Disponible). |
-| `limit` | `float?` | Total credit limit in product currency (Cupo total). |
-| `owed` | `float?` | Amount drawn as reported by the bank (Utilizado / Monto utilizado). |
-| `reported_as_of` | `date?` | Date the institution printed next to the card figures. |
+| Field | Type | Denomination | Description |
+| --- | --- | --- | --- |
+| `kind` | `"credit_card"` |  | Payload discriminator; always "credit_card". |
+| `available` | `float` | currency | Available credit in product currency (Disponible). |
+| `limit` | `float?` | currency | Total credit limit in product currency (Cupo total). |
+| `owed` | `float?` | currency | Amount drawn as reported by the bank (Utilizado / Monto utilizado). |
+| `reported_as_of` | `date?` |  | Date the institution printed next to the card figures. |
 
 ## Tarjeta de débito (`debit_card`)
 
@@ -164,9 +166,9 @@ Net-worth role: **none** · balance convention: **none**
 
 ### Metrics
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `kind` | `"debit_card"` | Payload discriminator; always "debit_card". |
+| Field | Type | Denomination | Description |
+| --- | --- | --- | --- |
+| `kind` | `"debit_card"` |  | Payload discriminator; always "debit_card". |
 
 ## Tarjeta prepago (`prepaid_card`)
 
@@ -182,10 +184,10 @@ Net-worth role: **asset** · balance convention: **value**
 
 ### Metrics
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `kind` | `"prepaid_card"` | Payload discriminator; always "prepaid_card". |
-| `balance` | `int` | Prepaid balance in CLP. |
+| Field | Type | Denomination | Description |
+| --- | --- | --- | --- |
+| `kind` | `"prepaid_card"` |  | Payload discriminator; always "prepaid_card". |
+| `balance` | `int` | currency | Prepaid balance in CLP. |
 
 ## Línea de crédito (`line_of_credit`)
 
@@ -200,12 +202,12 @@ Net-worth role: **liability** · balance convention: **available**
 
 ### Metrics
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `kind` | `"line_of_credit"` | Payload discriminator; always "line_of_credit". |
-| `available` | `float` | Available credit in product currency (Disponible). |
-| `limit` | `float?` | Total credit limit in product currency (Cupo total). |
-| `owed` | `float?` | Amount drawn as reported by the bank (Utilizado / Monto utilizado). |
+| Field | Type | Denomination | Description |
+| --- | --- | --- | --- |
+| `kind` | `"line_of_credit"` |  | Payload discriminator; always "line_of_credit". |
+| `available` | `float` | currency | Available credit in product currency (Disponible). |
+| `limit` | `float?` | currency | Total credit limit in product currency (Cupo total). |
+| `owed` | `float?` | currency | Amount drawn as reported by the bank (Utilizado / Monto utilizado). |
 
 ## Préstamo (`loan`)
 
@@ -224,13 +226,13 @@ Net-worth role: **liability** · balance convention: **owed**
 
 ### Metrics
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `kind` | `"loan"` | Payload discriminator; always "loan". |
-| `owed` | `int` | Outstanding amount owed in CLP. |
-| `installments_paid` | `int?` | Number of installments already paid. |
-| `next_payment_date` | `date?` | Due date of the next installment. |
-| `next_payment_amount` | `int?` | Amount of the next installment in CLP. |
+| Field | Type | Denomination | Description |
+| --- | --- | --- | --- |
+| `kind` | `"loan"` |  | Payload discriminator; always "loan". |
+| `owed` | `int` | currency | Outstanding amount owed in CLP. |
+| `installments_paid` | `int?` | count | Number of installments already paid. |
+| `next_payment_date` | `date?` |  | Due date of the next installment. |
+| `next_payment_amount` | `int?` | currency | Amount of the next installment in CLP. |
 
 ## Hipotecario (`mortgage`)
 
@@ -249,13 +251,13 @@ Net-worth role: **liability** · balance convention: **owed**
 
 ### Metrics
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `kind` | `"mortgage"` | Payload discriminator; always "mortgage". |
-| `owed` | `int` | Outstanding amount owed in CLP. |
-| `installments_paid` | `int?` | Number of installments already paid. |
-| `next_payment_date` | `date?` | Due date of the next installment. |
-| `next_payment_amount` | `int?` | Amount of the next installment in CLP. |
+| Field | Type | Denomination | Description |
+| --- | --- | --- | --- |
+| `kind` | `"mortgage"` |  | Payload discriminator; always "mortgage". |
+| `owed` | `int` | currency | Outstanding amount owed in CLP. |
+| `installments_paid` | `int?` | count | Number of installments already paid. |
+| `next_payment_date` | `date?` |  | Due date of the next installment. |
+| `next_payment_amount` | `int?` | currency | Amount of the next installment in CLP. |
 
 ## Inversión (`investment`)
 
@@ -272,15 +274,15 @@ Net-worth role: **asset** · balance convention: **value**
 
 ### Metrics
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `kind` | `"investment"` | Payload discriminator; always "investment". |
-| `nav` | `float` | Current market value of the position (net asset value). |
-| `deposited` | `float?` | Total amount deposited to date. |
-| `profit` | `float?` | Cumulative profit as reported (nav minus deposited). |
-| `var_daily_pct` | `float?` | Daily variation as a percent number (Var. diaria). |
-| `var_30d_pct` | `float?` | 30-day variation as a percent number (Var. 30 días). |
-| `var_ytd_pct` | `float?` | Year-to-date variation as a percent number (Var. año). |
+| Field | Type | Denomination | Description |
+| --- | --- | --- | --- |
+| `kind` | `"investment"` |  | Payload discriminator; always "investment". |
+| `nav` | `float` | currency | Current market value of the position (net asset value). |
+| `deposited` | `float?` | currency | Total amount deposited to date. |
+| `profit` | `float?` | currency | Cumulative profit as reported (nav minus deposited). |
+| `var_daily_pct` | `float?` | percent | Daily variation as a percent number (Var. diaria). |
+| `var_30d_pct` | `float?` | percent | 30-day variation as a percent number (Var. 30 días). |
+| `var_ytd_pct` | `float?` | percent | Year-to-date variation as a percent number (Var. año). |
 
 ## Cripto (`crypto`)
 
@@ -294,12 +296,12 @@ Net-worth role: **asset** · balance convention: **units**
 
 ### Metrics
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `kind` | `"crypto"` | Payload discriminator; always "crypto". |
-| `units` | `float` | Coin units held (fractional). |
-| `frozen` | `float?` | Units locked in open orders. |
-| `pending` | `float?` | Units pending confirmation. |
+| Field | Type | Denomination | Description |
+| --- | --- | --- | --- |
+| `kind` | `"crypto"` |  | Payload discriminator; always "crypto". |
+| `units` | `float` | currency | Coin units held (fractional). |
+| `frozen` | `float?` | currency | Units locked in open orders. |
+| `pending` | `float?` | currency | Units pending confirmation. |
 
 ## Otro (`other`)
 
@@ -314,7 +316,7 @@ Net-worth role: **none** · balance convention: **none**
 
 ### Metrics
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `kind` | `"other"` | Payload discriminator; always "other". |
-| `balance` | `int?` | Balance in CLP when known. |
+| Field | Type | Denomination | Description |
+| --- | --- | --- | --- |
+| `kind` | `"other"` |  | Payload discriminator; always "other". |
+| `balance` | `int?` | currency | Balance in CLP when known. |

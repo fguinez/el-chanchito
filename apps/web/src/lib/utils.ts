@@ -13,3 +13,13 @@ export function formatCLP(amount: number): string {
     maximumFractionDigits: 0,
   }).format(amount);
 }
+
+/** Format an amount in an arbitrary currency: CLP as pesos, anything else
+ *  (crypto, foreign) as a trimmed decimal followed by its currency code. */
+export function formatAmount(currency: string, amount: number): string {
+  if (currency === "CLP") return formatCLP(amount);
+  const formatted = new Intl.NumberFormat("en-US", {
+    maximumFractionDigits: 8,
+  }).format(amount);
+  return `${formatted} ${currency}`;
+}

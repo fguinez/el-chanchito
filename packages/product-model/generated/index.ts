@@ -383,6 +383,72 @@ export const KIND_INFO: Record<
   other: { role: "none", balanceConvention: "none", labelEs: "Otro" },
 };
 
+export type MetricDenomination = "currency" | "percent" | "count";
+
+export const METRIC_FIELDS: Record<
+  ProductKind,
+  Record<string, { denomination: MetricDenomination }>
+> = {
+  checking: {
+    balance: { denomination: "currency" },
+    accounting_balance: { denomination: "currency" },
+  },
+  savings: {
+    balance: { denomination: "currency" },
+    accounting_balance: { denomination: "currency" },
+  },
+  vista: {
+    balance: { denomination: "currency" },
+    accounting_balance: { denomination: "currency" },
+  },
+  wallet: {
+    balance: { denomination: "currency" },
+  },
+  term_deposit: {
+    balance: { denomination: "currency" },
+  },
+  credit_card: {
+    available: { denomination: "currency" },
+    limit: { denomination: "currency" },
+    owed: { denomination: "currency" },
+  },
+  debit_card: {},
+  prepaid_card: {
+    balance: { denomination: "currency" },
+  },
+  line_of_credit: {
+    available: { denomination: "currency" },
+    limit: { denomination: "currency" },
+    owed: { denomination: "currency" },
+  },
+  loan: {
+    owed: { denomination: "currency" },
+    installments_paid: { denomination: "count" },
+    next_payment_amount: { denomination: "currency" },
+  },
+  mortgage: {
+    owed: { denomination: "currency" },
+    installments_paid: { denomination: "count" },
+    next_payment_amount: { denomination: "currency" },
+  },
+  investment: {
+    nav: { denomination: "currency" },
+    deposited: { denomination: "currency" },
+    profit: { denomination: "currency" },
+    var_daily_pct: { denomination: "percent" },
+    var_30d_pct: { denomination: "percent" },
+    var_ytd_pct: { denomination: "percent" },
+  },
+  crypto: {
+    units: { denomination: "currency" },
+    frozen: { denomination: "currency" },
+    pending: { denomination: "currency" },
+  },
+  other: {
+    balance: { denomination: "currency" },
+  },
+};
+
 export const ASSET_KINDS: ProductKind[] = PRODUCT_KINDS.filter(
   (kind) => KIND_INFO[kind].role === "asset",
 );

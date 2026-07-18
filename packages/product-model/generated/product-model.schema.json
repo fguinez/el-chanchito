@@ -42,10 +42,12 @@
             }
           ],
           "default": null,
+          "denomination": "currency",
           "description": "Accounting balance in account currency (Saldo contable).",
           "title": "Accounting Balance"
         },
         "balance": {
+          "denomination": "currency",
           "description": "Available balance in account currency (Saldo disponible).",
           "title": "Balance",
           "type": "number"
@@ -150,6 +152,7 @@
       "description": "Observation for a credit card; headline is `available`.",
       "properties": {
         "available": {
+          "denomination": "currency",
           "description": "Available credit in product currency (Disponible).",
           "title": "Available",
           "type": "number"
@@ -171,6 +174,7 @@
             }
           ],
           "default": null,
+          "denomination": "currency",
           "description": "Total credit limit in product currency (Cupo total).",
           "title": "Limit"
         },
@@ -184,6 +188,7 @@
             }
           ],
           "default": null,
+          "denomination": "currency",
           "description": "Amount drawn as reported by the bank (Utilizado / Monto utilizado).",
           "title": "Owed"
         },
@@ -237,6 +242,7 @@
             }
           ],
           "default": null,
+          "denomination": "currency",
           "description": "Units locked in open orders.",
           "title": "Frozen"
         },
@@ -257,10 +263,12 @@
             }
           ],
           "default": null,
+          "denomination": "currency",
           "description": "Units pending confirmation.",
           "title": "Pending"
         },
         "units": {
+          "denomination": "currency",
           "description": "Coin units held (fractional).",
           "title": "Units",
           "type": "number"
@@ -396,6 +404,7 @@
             }
           ],
           "default": null,
+          "denomination": "currency",
           "description": "Total amount deposited to date.",
           "title": "Deposited"
         },
@@ -407,6 +416,7 @@
           "type": "string"
         },
         "nav": {
+          "denomination": "currency",
           "description": "Current market value of the position (net asset value).",
           "title": "Nav",
           "type": "number"
@@ -421,6 +431,7 @@
             }
           ],
           "default": null,
+          "denomination": "currency",
           "description": "Cumulative profit as reported (nav minus deposited).",
           "title": "Profit"
         },
@@ -434,6 +445,7 @@
             }
           ],
           "default": null,
+          "denomination": "percent",
           "description": "30-day variation as a percent number (Var. 30 días).",
           "title": "Var 30D Pct"
         },
@@ -447,6 +459,7 @@
             }
           ],
           "default": null,
+          "denomination": "percent",
           "description": "Daily variation as a percent number (Var. diaria).",
           "title": "Var Daily Pct"
         },
@@ -460,6 +473,7 @@
             }
           ],
           "default": null,
+          "denomination": "percent",
           "description": "Year-to-date variation as a percent number (Var. año).",
           "title": "Var Ytd Pct"
         }
@@ -503,6 +517,7 @@
       "description": "Observation for a line of credit; headline is `available`.",
       "properties": {
         "available": {
+          "denomination": "currency",
           "description": "Available credit in product currency (Disponible).",
           "title": "Available",
           "type": "number"
@@ -524,6 +539,7 @@
             }
           ],
           "default": null,
+          "denomination": "currency",
           "description": "Total credit limit in product currency (Cupo total).",
           "title": "Limit"
         },
@@ -537,6 +553,7 @@
             }
           ],
           "default": null,
+          "denomination": "currency",
           "description": "Amount drawn as reported by the bank (Utilizado / Monto utilizado).",
           "title": "Owed"
         }
@@ -642,6 +659,7 @@
             }
           ],
           "default": null,
+          "denomination": "count",
           "description": "Number of installments already paid.",
           "title": "Installments Paid"
         },
@@ -662,6 +680,7 @@
             }
           ],
           "default": null,
+          "denomination": "currency",
           "description": "Amount of the next installment in CLP.",
           "title": "Next Payment Amount"
         },
@@ -680,6 +699,7 @@
           "title": "Next Payment Date"
         },
         "owed": {
+          "denomination": "currency",
           "description": "Outstanding amount owed in CLP.",
           "title": "Owed",
           "type": "integer"
@@ -786,6 +806,7 @@
             }
           ],
           "default": null,
+          "denomination": "count",
           "description": "Number of installments already paid.",
           "title": "Installments Paid"
         },
@@ -806,6 +827,7 @@
             }
           ],
           "default": null,
+          "denomination": "currency",
           "description": "Amount of the next installment in CLP.",
           "title": "Next Payment Amount"
         },
@@ -824,6 +846,7 @@
           "title": "Next Payment Date"
         },
         "owed": {
+          "denomination": "currency",
           "description": "Outstanding amount owed in CLP.",
           "title": "Owed",
           "type": "integer"
@@ -877,6 +900,7 @@
             }
           ],
           "default": null,
+          "denomination": "currency",
           "description": "Balance in CLP when known.",
           "title": "Balance"
         },
@@ -937,6 +961,7 @@
       "description": "Observation for a prepaid card; headline is `balance`.",
       "properties": {
         "balance": {
+          "denomination": "currency",
           "description": "Prepaid balance in CLP.",
           "title": "Balance",
           "type": "integer"
@@ -997,10 +1022,12 @@
             }
           ],
           "default": null,
+          "denomination": "currency",
           "description": "Accounting balance in account currency (Saldo contable).",
           "title": "Accounting Balance"
         },
         "balance": {
+          "denomination": "currency",
           "description": "Available balance in account currency (Saldo disponible).",
           "title": "Balance",
           "type": "number"
@@ -1446,6 +1473,7 @@
       "description": "Observation for a term deposit; headline is `balance`.",
       "properties": {
         "balance": {
+          "denomination": "currency",
           "description": "Current value of the deposit in CLP.",
           "title": "Balance",
           "type": "integer"
@@ -1506,10 +1534,12 @@
             }
           ],
           "default": null,
+          "denomination": "currency",
           "description": "Accounting balance in account currency (Saldo contable).",
           "title": "Accounting Balance"
         },
         "balance": {
+          "denomination": "currency",
           "description": "Available balance in account currency (Saldo disponible).",
           "title": "Balance",
           "type": "number"
@@ -1562,6 +1592,7 @@
       "description": "Observation for an app wallet; headline is `balance`.",
       "properties": {
         "balance": {
+          "denomination": "currency",
           "description": "Wallet balance in CLP.",
           "title": "Balance",
           "type": "integer"

@@ -40,6 +40,8 @@ _MD_SCALARS = {
     "boolean": "bool",
 }
 
+_DENOMINATIONS = ("currency", "percent", "count")
+
 
 class UnsupportedSchemaError(ValueError):
     """A model field uses a construct outside the closed, TS-mappable set."""
@@ -126,6 +128,51 @@ def _emit_union(name: str, members: list[str]) -> str:
     return "\n".join(lines)
 
 
+def _metric_denominations(cls: type[BaseModel]) -> list[tuple[str, str]]:
+    """Numeric metric fields with their denomination marker, in field order.
+
+    Every int/float metric field must declare a denomination via
+    `json_schema_extra={"denomination": ...}`; a missing or unknown value
+    raises UnsupportedSchemaError so future kinds cannot forget it. Date
+    fields and the `kind` discriminator carry no marker.
+    """
+    schema = cls.model_json_schema()
+    fields: list[tuple[str, str]] = []
+    for name, prop in _ordered_properties(schema):
+        token, _ = _resolve_type(prop, where=f"{cls.__name__}.{name}")
+        if token not in ("integer", "number"):
+            continue
+        denomination = prop.get("denomination")
+        if denomination not in _DENOMINATIONS:
+            raise UnsupportedSchemaError(
+                f"{cls.__name__}.{name}: numeric metric field lacks a valid "
+                f"denomination marker (expected one of {_DENOMINATIONS}, "
+                f"got {denomination!r})"
+            )
+        fields.append((name, denomination))
+    return fields
+
+
+def _emit_metric_fields() -> str:
+    lines = [
+        "export const METRIC_FIELDS: Record<",
+        "  ProductKind,",
+        "  Record<string, { denomination: MetricDenomination }>",
+        "> = {",
+    ]
+    for kind in PRODUCT_KINDS:
+        fields = _metric_denominations(REGISTRY[kind].metrics_cls)
+        if not fields:
+            lines.append(f"  {kind}: {{}},")
+            continue
+        lines.append(f"  {kind}: {{")
+        for name, denomination in fields:
+            lines.append(f'    {name}: {{ denomination: "{denomination}" }},')
+        lines.append("  },")
+    lines.append("};")
+    return "\n".join(lines)
+
+
 def _emit_kind_info() -> str:
     lines = [
         "export const KIND_INFO: Record<",
@@ -178,6 +225,12 @@ def _render_index_ts() -> str:
     )
     blocks.append(_emit_kind_info())
     blocks.append(
+        "export type MetricDenomination = "
+        + " | ".join(f'"{denomination}"' for denomination in _DENOMINATIONS)
+        + ";"
+    )
+    blocks.append(_emit_metric_fields())
+    blocks.append(
         "export const ASSET_KINDS: ProductKind[] = PRODUCT_KINDS.filter(\n"
         '  (kind) => KIND_INFO[kind].role === "asset",\n'
         ");"
@@ -211,15 +264,29 @@ def _render_schema_json() -> str:
     return json.dumps(document, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
 
 
-def _md_table(cls: type[BaseModel]) -> str:
+def _md_table(cls: type[BaseModel], denominations: dict[str, str] | None = None) -> str:
+    """Markdown field table; pass `denominations` to add the metrics column."""
     schema = cls.model_json_schema()
     required = set(schema.get("required", []))
-    lines = ["| Field | Type | Description |", "| --- | --- | --- |"]
+    if denominations is None:
+        lines = ["| Field | Type | Description |", "| --- | --- | --- |"]
+    else:
+        lines = [
+            "| Field | Type | Denomination | Description |",
+            "| --- | --- | --- | --- |",
+        ]
     for name, prop in _ordered_properties(schema):
         token, _ = _resolve_type(prop, where=f"{cls.__name__}.{name}")
         optional = name != "kind" and name not in required
         type_str = _md_type(token) + ("?" if optional else "")
-        lines.append(f"| `{name}` | `{type_str}` | {prop.get('description', '')} |")
+        description = prop.get("description", "")
+        if denominations is None:
+            lines.append(f"| `{name}` | `{type_str}` | {description} |")
+        else:
+            denomination = denominations.get(name, "")
+            lines.append(
+                f"| `{name}` | `{type_str}` | {denomination} | {description} |"
+            )
     return "\n".join(lines)
 
 
@@ -245,7 +312,9 @@ envelopes — the generated JSON Schema is the future REST wire contract.
 
 Conventions: snake_case keys; CLP amounts `int`, USD/crypto amounts `float`;
 dates as ISO `YYYY-MM-DD` strings; percentages as percent numbers (4.2 = 4.2%).
-Optional fields are marked `?`."""
+Optional fields are marked `?`. Every numeric metric field declares a
+denomination: `currency` (amount in the product's `currency` column,
+convertible), `percent` (raw percent number), or `count` (raw unit count)."""
 
 
 def _render_products_md() -> str:
@@ -260,7 +329,12 @@ def _render_products_md() -> str:
         blocks.append("### Attributes")
         blocks.append(_md_table(spec.attributes_cls))
         blocks.append("### Metrics")
-        blocks.append(_md_table(spec.metrics_cls))
+        blocks.append(
+            _md_table(
+                spec.metrics_cls,
+                denominations=dict(_metric_denominations(spec.metrics_cls)),
+            )
+        )
     return "\n\n".join(blocks) + "\n"
 
 

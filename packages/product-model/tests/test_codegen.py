@@ -4,7 +4,7 @@ import importlib.util
 from pathlib import Path
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 
@@ -47,3 +47,36 @@ def test_generator_raises_on_unsupported_construct():
 
     with pytest.raises(generate.UnsupportedSchemaError):
         generate._emit_interface(Unsupported)
+
+
+def test_generated_ts_exports_metric_fields():
+    """METRIC_FIELDS maps each kind's numeric metrics to a denomination."""
+    index_ts = (PACKAGE_ROOT / "generated" / "index.ts").read_text(encoding="utf-8")
+
+    assert 'export type MetricDenomination = "currency" | "percent" | "count";' in index_ts
+    assert "export const METRIC_FIELDS: Record<" in index_ts
+    assert '    owed: { denomination: "currency" },' in index_ts
+    assert '    installments_paid: { denomination: "count" },' in index_ts
+    assert '    var_daily_pct: { denomination: "percent" },' in index_ts
+    assert "  debit_card: {}," in index_ts
+    assert "reported_as_of: { denomination" not in index_ts
+
+
+def test_generator_raises_on_unmarked_numeric_metric():
+    """A numeric metric field without a denomination marker must fail loudly."""
+
+    class Unmarked(BaseModel):
+        balance: int
+
+    with pytest.raises(generate.UnsupportedSchemaError):
+        generate._metric_denominations(Unmarked)
+
+
+def test_generator_raises_on_invalid_denomination_marker():
+    """A numeric metric field with an unknown denomination value must fail loudly."""
+
+    class Misdenominated(BaseModel):
+        balance: int = Field(json_schema_extra={"denomination": "currncy"})
+
+    with pytest.raises(generate.UnsupportedSchemaError):
+        generate._metric_denominations(Misdenominated)
