@@ -60,7 +60,8 @@ function toLocalDate(dateStr: string): Date {
   return new Date(year, month - 1, day);
 }
 
-function formatLocalDate(date: Date): string {
+/** YYYY-MM-DD from a Date's local parts (the replay window's day unit). */
+export function formatLocalDate(date: Date): string {
   const y = date.getFullYear();
   const m = String(date.getMonth() + 1).padStart(2, "0");
   const d = String(date.getDate()).padStart(2, "0");
