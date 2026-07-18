@@ -125,7 +125,7 @@ fintual-login: ## Sign in to Fintual (prompts for the e-mailed 2FA code) and cac
 	@. ./scripts/load-secrets.sh && cd apps/scrapers && \
 		../../.venv/bin/python -m scrapers.institutions.fintual
 
-bci-lider-login: ## Sign in to Tarjeta Lider Bci: launches a real Chrome, autofills the login (tick the Cloudflare check if shown), leaves it running for CDP scraping
+bci-lider-login: ## Tarjeta Lider Bci reuse mode (optional; managed is default): launch a real Chrome, autofill the login, leave it running; then set LIDER_BCI_CDP_URL
 	@. ./scripts/load-secrets.sh && cd apps/scrapers && \
 		../../.venv/bin/python -m scrapers.institutions.bci_lider
 

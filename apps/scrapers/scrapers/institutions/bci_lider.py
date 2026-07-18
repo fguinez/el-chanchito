@@ -3,13 +3,14 @@
 Tarjeta Lider Bci (the retailcard.cl credit card co-branded by BCI) has no
 open-banking API for individuals and isn't covered by `fintself`, and its login
 sits behind a Cloudflare Turnstile that passes only for a genuine browser (a
-Playwright-launched or headless one gets an unsolvable interactive check). So a
-real Chrome is kept running on a debug port (`make bci-lider-login`), and the
-scraper drives it over CDP (`backends/bci_lider_web.py`): it reuses an
-already-signed-in tab or re-logs-in via autofill (which clears Turnstile because
-it's a real Chrome). It fails with a clear "run make bci-lider-login" message when
-that Chrome isn't reachable. Auth is CDP-based, so `LIDER_BCI_CDP_URL` must point
-at that Chrome for scheduled scrapes.
+Playwright-launched or headless one gets an unsolvable interactive check). So the
+scraper drives a real Chrome over CDP (`backends/bci_lider_web.py`): by default it
+runs *managed* (launches a headed Chrome, signs in via autofill, scrapes, closes
+it) so scheduled runs are fully unattended (needs a machine with a display).
+Setting `LIDER_BCI_CDP_URL` switches to reusing a long-running Chrome from `make
+bci-lider-login`. Either way it reuses an already-signed-in tab or re-logs-in via
+autofill, and fails with a clear "run make bci-lider-login" message when Chrome
+isn't reachable.
 
 `scrape_transactions()` maps the Nacionales (CLP) charges to `ScrapedTransaction`s
 and `scrape_products()` emits the CLP + USD `credit_card` observations. Both come
