@@ -4,6 +4,7 @@ import { db } from "@/lib/db";
 import { monitors } from "@/lib/db/schema";
 import { getClpRates } from "@/lib/rates";
 import { evaluateMonitor } from "@/lib/monitors/evaluate";
+import { replayHistory } from "@/lib/monitors/history";
 import {
   loadProductCatalog,
   loadSnapshotsForProducts,
@@ -13,7 +14,7 @@ import {
   buildReferences,
   enrichMonitor,
   referencedProductIds,
-  replayWindow,
+  resolveHistoryRange,
 } from "@/lib/monitors/serialize";
 
 const UUID_RE =
@@ -22,13 +23,12 @@ const UUID_RE =
 // Next 16: dynamic segment params arrive as a Promise on the context arg.
 type Context = { params: Promise<{ id: string }> };
 
-const DEFAULT_HISTORY_DAYS = 90;
-const MAX_HISTORY_DAYS = 365;
-
 /**
  * GET /api/monitors/[id]: one monitor with evaluation, snapshot-replayed
- * `history` (default 90 days, `?days=N` clamped to [1, 365]), and a
- * `references` row per distinct product/field the expressions mention.
+ * `history`, and a `references` row per distinct product/field the
+ * expressions mention. The history window comes from `?days=N` (default 90,
+ * clamped to [1, 365]) or an explicit `?from`/`?to` day range (inclusive,
+ * max 365 days, `to` defaults to today).
  */
 export async function GET(request: NextRequest, { params }: Context) {
   try {
@@ -37,17 +37,21 @@ export async function GET(request: NextRequest, { params }: Context) {
       return NextResponse.json({ error: "Invalid id" }, { status: 400 });
     }
 
-    const daysParam = request.nextUrl.searchParams.get("days");
-    let days = DEFAULT_HISTORY_DAYS;
-    if (daysParam != null) {
-      const parsed = Number(daysParam);
-      if (!Number.isFinite(parsed)) {
-        return NextResponse.json(
-          { error: "Invalid days parameter", field: "days" },
-          { status: 400 }
-        );
-      }
-      days = Math.min(MAX_HISTORY_DAYS, Math.max(1, Math.trunc(parsed)));
+    const now = new Date();
+    const { searchParams } = request.nextUrl;
+    const range = resolveHistoryRange(
+      {
+        days: searchParams.get("days"),
+        from: searchParams.get("from"),
+        to: searchParams.get("to"),
+      },
+      now
+    );
+    if (!range.ok) {
+      return NextResponse.json(
+        { error: range.error, field: range.field },
+        { status: 400 }
+      );
     }
 
     const [row] = await db.select().from(monitors).where(eq(monitors.id, id));
@@ -59,7 +63,6 @@ export async function GET(request: NextRequest, { params }: Context) {
       loadProductCatalog(),
       getClpRates(),
     ]);
-    const now = new Date();
     const evaluation = evaluateMonitor(row, {
       date: now,
       products: catalog.byId,
@@ -67,11 +70,13 @@ export async function GET(request: NextRequest, { params }: Context) {
       currency: row.currency,
     });
     const snapshots = await loadSnapshotsForProducts(referencedProductIds(row));
-    const history = replayWindow(
-      row,
-      { snapshots, products: catalog.byId, rates, now },
-      days
-    );
+    const history = replayHistory(row, {
+      snapshots,
+      products: catalog.byId,
+      rates,
+      from: range.from,
+      to: range.to,
+    });
     const references = buildReferences(row, catalog.byId);
 
     return NextResponse.json({

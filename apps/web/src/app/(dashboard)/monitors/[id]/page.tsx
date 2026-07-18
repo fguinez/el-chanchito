@@ -43,22 +43,18 @@ import {
   type HistoryPoint,
   type MonitorReference,
 } from "@/components/monitors/shared";
+import {
+  ChartRangePicker,
+  DAY_PRESETS,
+  DEFAULT_CHART_RANGE,
+  rangeQuery,
+  type ChartRange,
+} from "@/components/monitors/RangePicker";
 
 interface MonitorDetail extends ApiMonitor {
   history: HistoryPoint[];
   references: MonitorReference[];
 }
-
-/** Selectable chart windows, passed to the API as `?days=N`. */
-const RANGE_OPTIONS = [
-  { days: 7, label: "7d" },
-  { days: 30, label: "30d" },
-  { days: 90, label: "90d" },
-  { days: 180, label: "180d" },
-  { days: 365, label: "1a" },
-] as const;
-
-const DEFAULT_RANGE_DAYS = 30;
 
 /** Recharts rows: the value plus one column per threshold severity. */
 function buildChartData(history: HistoryPoint[]) {
@@ -80,13 +76,14 @@ export default function MonitorDetailPage() {
   const [notFound, setNotFound] = useState(false);
   const [error, setError] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [rangeDays, setRangeDays] = useState<number>(DEFAULT_RANGE_DAYS);
+  const [range, setRange] = useState<ChartRange>(DEFAULT_CHART_RANGE);
   const [historyLoading, setHistoryLoading] = useState(false);
 
+  const query = rangeQuery(range);
   useEffect(() => {
     let cancelled = false;
     setHistoryLoading(true);
-    fetch(`/api/monitors/${id}?days=${rangeDays}`)
+    fetch(`/api/monitors/${id}?${query}`)
       .then((res) => {
         if (res.status === 404) {
           if (!cancelled) setNotFound(true);
@@ -107,7 +104,7 @@ export default function MonitorDetailPage() {
     return () => {
       cancelled = true;
     };
-  }, [id, rangeDays]);
+  }, [id, query]);
 
   async function handleDelete() {
     if (
@@ -259,20 +256,25 @@ export default function MonitorDetailPage() {
             </CardDescription>
             <CardAction>
               <div
-                className="flex items-center gap-1"
+                className="flex flex-wrap items-center gap-1"
                 role="group"
                 aria-label="Rango del gráfico"
               >
-                {RANGE_OPTIONS.map((option) => (
+                {DAY_PRESETS.map((option) => (
                   <Button
                     key={option.days}
-                    variant={option.days === rangeDays ? "secondary" : "ghost"}
+                    variant={
+                      range.kind === "days" && range.days === option.days
+                        ? "secondary"
+                        : "ghost"
+                    }
                     size="xs"
-                    onClick={() => setRangeDays(option.days)}
+                    onClick={() => setRange({ kind: "days", days: option.days })}
                   >
                     {option.label}
                   </Button>
                 ))}
+                <ChartRangePicker value={range} onChange={setRange} />
               </div>
             </CardAction>
           </CardHeader>
@@ -326,7 +328,7 @@ export default function MonitorDetailPage() {
               </>
             ) : (
               <p className="text-muted-foreground">
-                Aún no hay historial para este monitor.
+                Sin historial en el rango seleccionado.
               </p>
             )}
           </CardContent>

@@ -117,6 +117,101 @@ export type ReplayWindowOptions = {
   now: Date;
 };
 
+export const DEFAULT_HISTORY_DAYS = 90;
+export const MAX_HISTORY_DAYS = 365;
+
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** True for a well-formed YYYY-MM-DD string naming a real calendar day
+ *  (rejects e.g. 2026-02-31, which Date.UTC would silently roll over). */
+function isValidDay(dateStr: string): boolean {
+  if (!DAY_RE.test(dateStr)) return false;
+  const [year, month, day] = dateStr.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return (
+    date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
+  );
+}
+
+function utcMs(dateStr: string): number {
+  const [year, month, day] = dateStr.split("-").map(Number);
+  return Date.UTC(year, month - 1, day);
+}
+
+export type HistoryRangeResult =
+  | { ok: true; from: string; to: string }
+  | { ok: false; error: string; field: string };
+
+/**
+ * Resolve a history window from query params, at day granularity. An explicit
+ * `from`/`to` pair (YYYY-MM-DD, inclusive) takes precedence over `days`; `to`
+ * defaults to today and never extends past it. Absolute spans over
+ * MAX_HISTORY_DAYS are rejected, while `days` keeps its trailing-window
+ * clamp-to-[1, MAX] behavior.
+ */
+export function resolveHistoryRange(
+  query: { days?: string | null; from?: string | null; to?: string | null },
+  now: Date
+): HistoryRangeResult {
+  const today = formatLocalDate(now);
+
+  if (query.from != null || query.to != null) {
+    if (query.from == null) {
+      return {
+        ok: false,
+        error: "'from' is required when 'to' is given",
+        field: "from",
+      };
+    }
+    if (!isValidDay(query.from)) {
+      return {
+        ok: false,
+        error: "Invalid 'from' date, expected YYYY-MM-DD",
+        field: "from",
+      };
+    }
+    if (query.to != null && !isValidDay(query.to)) {
+      return {
+        ok: false,
+        error: "Invalid 'to' date, expected YYYY-MM-DD",
+        field: "to",
+      };
+    }
+    const to = query.to == null || query.to > today ? today : query.to;
+    if (query.from > to) {
+      return {
+        ok: false,
+        error: "'from' must not be after 'to'",
+        field: "from",
+      };
+    }
+    const spanDays = Math.round((utcMs(to) - utcMs(query.from)) / DAY_MS) + 1;
+    if (spanDays > MAX_HISTORY_DAYS) {
+      return {
+        ok: false,
+        error: `Range too large, max ${MAX_HISTORY_DAYS} days`,
+        field: "from",
+      };
+    }
+    return { ok: true, from: query.from, to };
+  }
+
+  let days = DEFAULT_HISTORY_DAYS;
+  if (query.days != null) {
+    const parsed = Number(query.days);
+    if (!Number.isFinite(parsed)) {
+      return { ok: false, error: "Invalid days parameter", field: "days" };
+    }
+    days = Math.min(MAX_HISTORY_DAYS, Math.max(1, Math.trunc(parsed)));
+  }
+  const from = new Date(now);
+  from.setDate(from.getDate() - (days - 1));
+  return { ok: true, from: formatLocalDate(from), to: today };
+}
+
 /** Replay the trailing `days`-day window ending at `now` (inclusive). */
 export function replayWindow(
   def: MonitorDefinition,
