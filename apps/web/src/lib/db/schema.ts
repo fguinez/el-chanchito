@@ -114,6 +114,8 @@ export const products = pgTable(
     ),
     kind: text("kind").$type<ProductKind>().notNull(),
     name: text("name").notNull(),
+    // Create-only, institution-unique identifier; never changes on rename.
+    slug: text("slug").notNull(),
     currency: text("currency").notNull().default("CLP"),
     externalRef: text("external_ref"),
     attributes: jsonb("attributes")
@@ -135,7 +137,10 @@ export const products = pgTable(
       .notNull()
       .defaultNow(),
   },
-  (table) => [index("idx_products_account").on(table.accountId)]
+  (table) => [
+    uniqueIndex("uq_products_account_slug").on(table.accountId, table.slug),
+    index("idx_products_account").on(table.accountId),
+  ]
 );
 
 // Product observation history: one row per metrics change (not one per scrape).

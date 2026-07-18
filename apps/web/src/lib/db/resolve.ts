@@ -7,6 +7,7 @@ import {
   products,
   type ProductKind,
 } from "./schema";
+import { slugify, uniqueSlug } from "./slug";
 
 /**
  * Resolve (or create) the product for an institution slug + kind + currency
@@ -17,6 +18,9 @@ import {
  * (COALESCE(external_ref, '')), which Drizzle can't target in an onConflict —
  * so this keeps the select-then-insert flow. The scraper writer is the only
  * concurrent products writer in practice, and it does upsert atomically.
+ *
+ * `name` and `slug` are only set on the INSERT (create-only), so a user
+ * rename is never overwritten and slugs stay stable.
  */
 export async function resolveProductId(
   institutionSlug: string,
@@ -78,6 +82,15 @@ export async function resolveProductId(
     )
     .limit(1);
   if (!product) {
+    const name = `${institution.name} - ${kind}`;
+    // Slugs are unique per institution (inactive products keep theirs
+    // reserved), so the taken set spans every account of the institution.
+    const takenRows = await db
+      .select({ slug: products.slug })
+      .from(products)
+      .innerJoin(accounts, eq(products.accountId, accounts.id))
+      .where(eq(accounts.institutionId, institution.id));
+    const taken = new Set(takenRows.map((row) => row.slug));
     [product] = await db
       .insert(products)
       .values({
@@ -85,7 +98,8 @@ export async function resolveProductId(
         kind,
         currency,
         externalRef,
-        name: `${institution.name} - ${kind}`,
+        name,
+        slug: uniqueSlug(slugify(name, kind), taken),
       })
       .returning();
   }
