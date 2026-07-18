@@ -401,8 +401,8 @@ function refDescription(ref: RefExpr): string {
 
 /**
  * Check every reference against the catalog: the product must exist and the
- * field must be referencable for its kind (`current_balance` is universal;
- * everything else must be a numeric metric in METRIC_FIELDS[kind]).
+ * field must be referencable for its kind (a numeric metric in
+ * METRIC_FIELDS[kind]).
  */
 export function validateExpression(
   expr: Expr,
@@ -421,10 +421,7 @@ export function validateExpression(
       });
       continue;
     }
-    if (
-      ref.field !== "current_balance" &&
-      !(ref.field in METRIC_FIELDS[product.kind])
-    ) {
+    if (!(ref.field in METRIC_FIELDS[product.kind])) {
       issues.push({
         message: `Field '${ref.field}' is not valid for kind '${product.kind}'`,
         position: ref.position,

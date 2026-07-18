@@ -375,7 +375,7 @@ export function MonitorForm({ monitorId }: { monitorId?: string }) {
   >(null);
   const [pickInst, setPickInst] = useState("");
   const [pickProd, setPickProd] = useState("");
-  const [pickField, setPickField] = useState("current_balance");
+  const [pickField, setPickField] = useState("");
   const [insertTarget, setInsertTarget] = useState<InsertTarget>("expression");
 
   const expressionRef = useRef<HTMLTextAreaElement | null>(null);
@@ -467,13 +467,13 @@ export function MonitorForm({ monitorId }: { monitorId?: string }) {
     selectedInst?.products[0] ??
     null;
   const fieldOptions = selectedProd
-    ? ["current_balance", ...Object.keys(METRIC_FIELDS[selectedProd.kind])]
+    ? Object.keys(METRIC_FIELDS[selectedProd.kind])
     : [];
   const effectiveField = fieldOptions.includes(pickField)
     ? pickField
-    : "current_balance";
+    : (fieldOptions[0] ?? "");
   const pickedReference =
-    selectedInst && selectedProd
+    selectedInst && selectedProd && effectiveField
       ? `${selectedInst.slug}:${selectedProd.slug}:${effectiveField}`
       : null;
 
@@ -898,6 +898,7 @@ export function MonitorForm({ monitorId }: { monitorId?: string }) {
                     className={SELECT_CLASS}
                     value={effectiveField}
                     onChange={(e) => setPickField(e.target.value)}
+                    disabled={fieldOptions.length === 0}
                   >
                     {fieldOptions.map((f) => (
                       <option key={f} value={f}>
@@ -914,6 +915,11 @@ export function MonitorForm({ monitorId }: { monitorId?: string }) {
                     Insertar
                   </Button>
                 </div>
+                {selectedProd && fieldOptions.length === 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    Sin campos disponibles para este producto.
+                  </p>
+                )}
                 {pickedReference && (
                   <p className="font-mono text-xs text-muted-foreground">
                     {pickedReference}

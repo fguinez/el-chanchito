@@ -23,7 +23,6 @@ const products = new Map<string, ProductInfo>([
       kind: "checking",
       currency: "CLP",
       isActive: true,
-      currentBalance: 999999,
       metrics: { kind: "checking", balance: 999999 },
       balanceAsOf: new Date("2026-07-10T12:00:00Z"),
       slug: "cuenta_corriente",
@@ -38,7 +37,6 @@ const products = new Map<string, ProductInfo>([
       kind: "credit_card",
       currency: "CLP",
       isActive: true,
-      currentBalance: 999999,
       metrics: { kind: "credit_card", available: 999999, owed: 999999 },
       balanceAsOf: new Date("2026-07-10T12:00:00Z"),
       slug: "tarjeta",
@@ -54,25 +52,21 @@ const products = new Map<string, ProductInfo>([
 const snapshots: SnapshotRow[] = [
   {
     productId: CHECKING_ID,
-    balance: 2000000,
     metrics: { kind: "checking", balance: 2000000 },
     asOf: new Date("2026-07-01T12:00:00Z"),
   },
   {
     productId: CHECKING_ID,
-    balance: 1500000,
     metrics: { kind: "checking", balance: 1500000 },
     asOf: new Date("2026-07-03T12:00:00Z"),
   },
   {
     productId: CARD_ID,
-    balance: 500000,
     metrics: { kind: "credit_card", available: 500000, owed: 500000 },
     asOf: new Date("2026-07-03T15:00:00Z"),
   },
   {
     productId: CARD_ID,
-    balance: 700000,
     metrics: { kind: "credit_card", available: 300000, owed: 700000 },
     asOf: new Date("2026-07-05T12:00:00Z"),
   },
@@ -80,7 +74,7 @@ const snapshots: SnapshotRow[] = [
 
 const def: MonitorDefinition = {
   currency: "CLP",
-  expression: `@{${CHECKING_ID}:current_balance} - @{${CARD_ID}:owed}`,
+  expression: `@{${CHECKING_ID}:balance} - @{${CARD_ID}:owed}`,
   thresholds: [
     {
       severity: "alert",
@@ -159,20 +153,18 @@ describe("replayHistory", () => {
     const legacy: SnapshotRow[] = [
       {
         productId: CHECKING_ID,
-        balance: 2000000,
         metrics: {},
         asOf: new Date("2026-07-01T12:00:00Z"),
       },
       {
         productId: CARD_ID,
-        balance: 500000,
         metrics: {},
         asOf: new Date("2026-07-01T13:00:00Z"),
       },
     ];
     const points = replayHistory(def, { snapshots: legacy, products, rates });
-    // current_balance comes from the snapshot balance, but the card's owed
-    // lives in metrics, which the legacy row lacks.
+    // Both the checking balance and the card owed live in metrics, which the
+    // legacy row lacks, so the day is no-data (not a crash).
     expect(points).toHaveLength(1);
     expect(points[0].value).toBeNull();
     expect(points[0].status).toBe("no_data");
@@ -190,13 +182,11 @@ describe("replayHistory", () => {
     const septSnapshots: SnapshotRow[] = [
       {
         productId: CHECKING_ID,
-        balance: 2000000,
         metrics: { kind: "checking", balance: 2000000 },
         asOf: new Date("2026-09-04T12:00:00Z"),
       },
       {
         productId: CARD_ID,
-        balance: 500000,
         metrics: { kind: "credit_card", available: 500000, owed: 500000 },
         asOf: new Date("2026-09-04T12:00:00Z"),
       },

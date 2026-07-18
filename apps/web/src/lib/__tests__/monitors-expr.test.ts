@@ -298,11 +298,15 @@ describe("validateExpression", () => {
     ]);
   });
 
-  it("accepts current_balance for every kind", () => {
-    const expr = parseExpression(
-      "banchile:cuenta_corriente:current_balance + banchile:tarjeta_clp:current_balance"
-    );
-    expect(validateExpression(expr, catalog)).toEqual([]);
+  it("rejects current_balance: it is not a valid field for any kind", () => {
+    const expr = parseExpression("banchile:cuenta_corriente:current_balance");
+    expect(validateExpression(expr, catalog)).toEqual([
+      {
+        message:
+          "Field 'current_balance' is not valid for kind 'checking'",
+        position: 0,
+      },
+    ]);
   });
 
   it("accepts valid metric fields", () => {

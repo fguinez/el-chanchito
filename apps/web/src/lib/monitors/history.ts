@@ -19,7 +19,6 @@ import type {
 /** One product_snapshots row, as queried (metrics may be a legacy `{}`). */
 export type SnapshotRow = {
   productId: string;
-  balance: number;
   metrics: ProductMetrics | Record<string, never> | null;
   asOf: Date;
 };
@@ -107,12 +106,11 @@ export function replayHistory(
 
   const carried = new Map<
     string,
-    { balance: number; metrics: ProductMetrics | null; asOf: Date }
+    { metrics: ProductMetrics | null; asOf: Date }
   >();
   const applyDay = (dateStr: string) => {
     for (const row of byDate.get(dateStr) ?? []) {
       carried.set(row.productId, {
-        balance: row.balance,
         metrics: snapshotMetrics(row.metrics),
         asOf: row.asOf,
       });
@@ -134,14 +132,13 @@ export function replayHistory(
     // Each product as it looked on this day: the current row's identity
     // (kind, currency, isActive) with the carried observation overlaid.
     // Products with no observation yet stay absent, so refs to them are
-    // no-data rather than leaking today's balance into the past.
+    // no-data rather than leaking today's metrics into the past.
     const dayProducts = new Map<string, ProductInfo>();
     for (const [productId, obs] of carried) {
       const base = opts.products.get(productId);
       if (!base) continue;
       dayProducts.set(productId, {
         ...base,
-        currentBalance: obs.balance,
         metrics: obs.metrics,
         balanceAsOf: obs.asOf,
       });
