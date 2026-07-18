@@ -74,14 +74,14 @@ describe("validateMonitorInput (create)", () => {
   it("accepts stored (uuid-ref) form input untouched", () => {
     const result = validateMonitorInput(
       createBody({
-        expression: `@{${CARD_ID}:owed} + @{${CHECKING_ID}:current_balance}`,
+        expression: `@{${CARD_ID}:owed} + @{${CHECKING_ID}:balance}`,
       }),
       catalog
     );
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.expression).toBe(
-      `@{${CARD_ID}:owed} + @{${CHECKING_ID}:current_balance}`
+      `@{${CARD_ID}:owed} + @{${CHECKING_ID}:balance}`
     );
   });
 

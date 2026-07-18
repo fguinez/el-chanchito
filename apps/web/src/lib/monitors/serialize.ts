@@ -183,20 +183,14 @@ export function buildReferences(
       };
     }
 
-    const fieldValid =
-      ref.field === "current_balance" ||
-      ref.field in METRIC_FIELDS[product.kind];
+    const fieldValid = ref.field in METRIC_FIELDS[product.kind];
 
     let latestValue: number | null = null;
-    if (fieldValid) {
-      if (ref.field === "current_balance") {
-        latestValue = product.currentBalance;
-      } else if (product.metrics != null) {
-        const raw = (product.metrics as unknown as Record<string, unknown>)[
-          ref.field
-        ];
-        latestValue = typeof raw === "number" ? raw : null;
-      }
+    if (fieldValid && product.metrics != null) {
+      const raw = (product.metrics as unknown as Record<string, unknown>)[
+        ref.field
+      ];
+      latestValue = typeof raw === "number" ? raw : null;
     }
 
     return {

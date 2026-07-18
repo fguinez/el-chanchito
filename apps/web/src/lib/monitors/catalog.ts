@@ -43,7 +43,6 @@ export async function loadProductCatalog(): Promise<LoadedProductCatalog> {
       kind: products.kind,
       currency: products.currency,
       isActive: products.isActive,
-      currentBalance: products.currentBalance,
       metrics: products.metrics,
       balanceAsOf: products.balanceAsOf,
       slug: products.slug,
@@ -62,9 +61,6 @@ export async function loadProductCatalog(): Promise<LoadedProductCatalog> {
       kind: row.kind,
       currency: row.currency,
       isActive: row.isActive,
-      // numeric columns come back as strings from postgres-js
-      currentBalance:
-        row.currentBalance != null ? Number(row.currentBalance) : null,
       metrics: narrowMetrics(row.metrics),
       balanceAsOf: row.balanceAsOf,
       slug: row.slug,
@@ -91,7 +87,6 @@ export async function loadSnapshotsForProducts(
   const rows = await db
     .select({
       productId: productSnapshots.productId,
-      balance: productSnapshots.balance,
       metrics: productSnapshots.metrics,
       asOf: productSnapshots.asOf,
     })
@@ -101,7 +96,6 @@ export async function loadSnapshotsForProducts(
 
   return rows.map((row) => ({
     productId: row.productId,
-    balance: Number(row.balance),
     metrics: row.metrics,
     asOf: row.asOf,
   }));

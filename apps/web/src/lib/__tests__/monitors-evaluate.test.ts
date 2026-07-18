@@ -34,7 +34,6 @@ function productInfo(overrides: Overrides): ProductInfo {
   return {
     currency: "CLP",
     isActive: true,
-    currentBalance: null,
     metrics: null,
     balanceAsOf: null,
     name: overrides.slug,
@@ -50,7 +49,6 @@ function buildProducts(checkingBalance: number): Map<string, ProductInfo> {
       kind: "checking",
       slug: "cuenta_corriente",
       institutionSlug: "banchile",
-      currentBalance: checkingBalance,
       metrics: { kind: "checking", balance: checkingBalance },
       balanceAsOf: new Date("2026-07-15T12:00:00Z"),
     }),
@@ -101,7 +99,6 @@ function buildProducts(checkingBalance: number): Map<string, ProductInfo> {
       slug: "billetera_eur",
       institutionSlug: "banchile",
       currency: "EUR",
-      currentBalance: 100000,
       metrics: { kind: "wallet", balance: 100000 },
     }),
     productInfo({
@@ -169,8 +166,7 @@ describe("evaluateExpression arithmetic", () => {
 });
 
 describe("reference resolution and conversion", () => {
-  it("reads current_balance and metric fields in the monitor currency", () => {
-    expect(value("banchile:cuenta_corriente:current_balance")).toBe(2500000);
+  it("reads metric fields in the monitor currency", () => {
     expect(value("banchile:cuenta_corriente:balance")).toBe(2500000);
     expect(value("banchile:tarjeta_clp:owed")).toBe(300000);
   });
@@ -239,15 +235,15 @@ describe("reference resolution and conversion", () => {
     ).toContain("has no metrics");
   });
 
-  it("null current_balance is no-data", () => {
-    const withNullBalance = buildProducts(2500000);
-    withNullBalance.get(CHECKING_ID)!.currentBalance = null;
+  it("null metrics on the headline field is no-data", () => {
+    const withNullMetrics = buildProducts(2500000);
+    withNullMetrics.get(CHECKING_ID)!.metrics = null;
     expect(
       reason(
-        "banchile:cuenta_corriente:current_balance",
-        ctx({ products: withNullBalance })
+        "banchile:cuenta_corriente:balance",
+        ctx({ products: withNullMetrics })
       )
-    ).toContain("no current balance");
+    ).toContain("has no metrics");
   });
 
   it("a no-data reference poisons the whole expression (never a silent 0)", () => {

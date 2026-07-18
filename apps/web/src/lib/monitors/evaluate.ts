@@ -30,7 +30,6 @@ export type ProductInfo = {
   kind: ProductKind;
   currency: string;
   isActive: boolean;
-  currentBalance: number | null;
   metrics: ProductMetrics | null;
   balanceAsOf: Date | null;
   slug: string;
@@ -98,30 +97,20 @@ function resolveRef(ref: RefExpr, ctx: EvalContext): EvalResult {
     return { ok: false, reason: `Product ${label} is inactive` };
   }
 
-  let amount: number | null;
-  let denomination: MetricDenomination;
-  if (ref.field === "current_balance") {
-    denomination = "currency";
-    amount = product.currentBalance;
-    if (amount == null) {
-      return { ok: false, reason: `Product ${label} has no current balance` };
-    }
-  } else {
-    const fieldInfo = METRIC_FIELDS[product.kind][ref.field];
-    if (!fieldInfo) {
-      return {
-        ok: false,
-        reason: `Field '${ref.field}' is not valid for kind '${product.kind}' (reference ${label})`,
-      };
-    }
-    denomination = fieldInfo.denomination;
-    if (product.metrics == null) {
-      return { ok: false, reason: `Product ${label} has no metrics` };
-    }
-    amount = readMetricField(product.metrics, ref.field);
-    if (amount == null) {
-      return { ok: false, reason: `Field '${ref.field}' is missing for ${label}` };
-    }
+  const fieldInfo = METRIC_FIELDS[product.kind][ref.field];
+  if (!fieldInfo) {
+    return {
+      ok: false,
+      reason: `Field '${ref.field}' is not valid for kind '${product.kind}' (reference ${label})`,
+    };
+  }
+  const denomination: MetricDenomination = fieldInfo.denomination;
+  if (product.metrics == null) {
+    return { ok: false, reason: `Product ${label} has no metrics` };
+  }
+  const amount = readMetricField(product.metrics, ref.field);
+  if (amount == null) {
+    return { ok: false, reason: `Field '${ref.field}' is missing for ${label}` };
   }
 
   // Only currency-denominated values convert; percent/count pass raw.
