@@ -17,6 +17,8 @@ El Chanchito (“the piggy bank”) is a self-hosted personal finance tracker. P
 ## Quickstart
 
 ```bash
+git clone https://github.com/fguinez/el-chanchito.git
+cd el-chanchito
 make install           # Node deps + Python venv + Playwright Chromium
 cp .env.example .env   # then fill in your identifiers (see Configuration)
 make secrets-init      # store scraper secrets in the macOS Keychain
@@ -88,3 +90,7 @@ For full detail, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 - [USAGE.md: full user guide (workflows, scraper setup, API reference)](USAGE.md)
 - [packages/product-model/PRODUCTS.md: generated per-kind product field matrix](packages/product-model/PRODUCTS.md)
+
+## License
+
+Released under the [PolyForm Noncommercial License 1.0.0](LICENSE): you may fork, modify, self-host, and use El Chanchito freely for any noncommercial purpose (personal use, hobby projects, research, nonprofits). Commercial use is not granted by this license; contact the author for commercial terms.

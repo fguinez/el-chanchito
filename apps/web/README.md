@@ -1,36 +1,27 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# @el-chanchito/web
 
-## Getting Started
+The Next.js dashboard for [El Chanchito](../../README.md): a daily budget engine, a spending history, and a net-worth timeline built on top of the scraped product data in PostgreSQL.
 
-First, run the development server:
+## Running
+
+The dashboard is part of the full stack and is normally started from the repo root:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+make dev        # postgres + migrations + scraper control endpoint + this dashboard
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+`make dev` wires the dashboard to the scraper service (via `SCRAPER_CONTROL_URL`) so the "Actualizar todo" button can trigger on-demand scrapes. Running this app alone shows no data and the refresh button fails, so prefer `make dev` unless you are doing web-only work:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+make dev-web    # dashboard only (no scraper service)
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Either way the dashboard serves at [http://localhost:3000](http://localhost:3000).
 
-## Learn More
+## Layout
 
-To learn more about Next.js, take a look at the following resources:
+- App Router pages live in `app/` (**Inicio**, **Planificación**, **Historial**, **Instituciones**).
+- Data access uses Drizzle ORM against the shared PostgreSQL database.
+- Product types consumed here are code-generated from `packages/product-model`; run `make product-model-generate` after editing the registry.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+See the root [README.md](../../README.md) and [ARCHITECTURE.md](../../ARCHITECTURE.md) for the full picture.
