@@ -9,6 +9,7 @@ from uuid import uuid4
 from psycopg.types.json import Jsonb
 
 from db.connection import get_pool
+from db.slug import slugify, unique_slug
 from scrapers.base import ScrapedProduct, ScrapedTransaction
 
 logger = logging.getLogger(__name__)
@@ -124,8 +125,8 @@ def _resolve_product(
     Walks the chain institution -> account -> product, creating missing links.
     Single-user deployment: everything attaches to the oldest user. The product
     step upserts on the identity index so concurrent writers can't race a
-    SELECT-then-INSERT; `name` is only used for the INSERT values (create-only),
-    so a user rename is never overwritten.
+    SELECT-then-INSERT; `name` and `slug` are only used for the INSERT values
+    (create-only), so a user rename is never overwritten and slugs stay stable.
     """
     row = conn.execute(
         "SELECT id, name FROM institutions WHERE slug = %s", (institution_slug,)
@@ -170,10 +171,26 @@ def _resolve_product(
     default_name = f"{institution_name} - {kind}" + (
         f" ({currency})" if currency != "CLP" else ""
     )
+    product_name = name or default_name
+    # Slugs are unique per institution (inactive products keep theirs reserved),
+    # so the taken set spans every account of the institution.
+    taken = {
+        row[0]
+        for row in conn.execute(
+            """
+            SELECT p.slug FROM products p
+            JOIN accounts a ON p.account_id = a.id
+            WHERE a.institution_id = %s
+            """,
+            (institution_id,),
+        ).fetchall()
+    }
+    slug = unique_slug(slugify(product_name, kind), taken)
     product_row = conn.execute(
         """
-        INSERT INTO products (id, account_id, name, kind, currency, external_ref)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        INSERT INTO products (id, account_id, name, slug, kind, currency,
+                              external_ref)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (account_id, kind, currency, COALESCE(external_ref, ''))
         DO UPDATE SET updated_at = now()
         RETURNING id
@@ -181,7 +198,8 @@ def _resolve_product(
         (
             str(uuid4()),
             account_id,
-            name or default_name,
+            product_name,
+            slug,
             kind,
             currency,
             external_ref,
