@@ -248,59 +248,6 @@ export const transactions = pgTable(
 );
 
 // ---------------------------------------------------------------------------
-// Budget
-// ---------------------------------------------------------------------------
-
-// Budget configs (one per month)
-export const budgetConfigs = pgTable("budget_configs", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  month: date("month").notNull().unique(),
-  variableBudget: integer("variable_budget").notNull(),
-  fixedBudget: integer("fixed_budget").notNull(),
-  creditCardLimit: integer("credit_card_limit").notNull(),
-  checkingInitialBalance: integer("checking_initial_balance")
-    .notNull()
-    .default(0),
-  salary: integer("salary").notNull(),
-  sharedExpensesRatio: numeric("shared_expenses_ratio", {
-    precision: 5,
-    scale: 4,
-  })
-    .notNull()
-    .default("0.6900"),
-  dayStart: integer("day_start").notNull().default(1),
-  createdAt: timestamp("created_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
-});
-
-// Budget adjustments (variations)
-export const budgetAdjustments = pgTable(
-  "budget_adjustments",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    budgetConfigId: uuid("budget_config_id")
-      .notNull()
-      .references(() => budgetConfigs.id, { onDelete: "cascade" }),
-    adjustmentDate: date("adjustment_date").notNull(),
-    amount: integer("amount").notNull(),
-    description: text("description"),
-    createdAt: timestamp("created_at", { withTimezone: true })
-      .notNull()
-      .defaultNow(),
-  },
-  (table) => [
-    index("idx_budget_adjustments_config").on(
-      table.budgetConfigId,
-      table.adjustmentDate
-    ),
-  ]
-);
-
-// ---------------------------------------------------------------------------
 // Wealth & recurring items
 // ---------------------------------------------------------------------------
 
@@ -332,19 +279,6 @@ export const fixedExpenses = pgTable("fixed_expenses", {
   sharedRatio: numeric("shared_ratio", { precision: 5, scale: 4 }),
   activeFrom: date("active_from"),
   activeTo: date("active_to"),
-  createdAt: timestamp("created_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
-});
-
-// Income sources
-export const incomeSources = pgTable("income_sources", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  name: text("name").notNull(),
-  monthlyAmount: integer("monthly_amount").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -480,16 +414,3 @@ export const transactionsRelations = relations(transactions, ({ one }) => ({
   }),
 }));
 
-export const budgetConfigsRelations = relations(budgetConfigs, ({ many }) => ({
-  adjustments: many(budgetAdjustments),
-}));
-
-export const budgetAdjustmentsRelations = relations(
-  budgetAdjustments,
-  ({ one }) => ({
-    budgetConfig: one(budgetConfigs, {
-      fields: [budgetAdjustments.budgetConfigId],
-      references: [budgetConfigs.id],
-    }),
-  })
-);

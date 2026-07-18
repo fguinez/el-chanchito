@@ -4,27 +4,23 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   LayoutDashboard,
-  CalendarDays,
   TrendingUp,
   Building2,
   Activity,
   Receipt,
   Landmark,
   ArrowLeftRight,
-  Settings,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const navItems = [
   { href: "/", label: "Inicio", icon: LayoutDashboard },
-  { href: "/planning", label: "Planificacion", icon: CalendarDays },
   { href: "/history", label: "Historial", icon: TrendingUp },
   { href: "/institutions", label: "Instituciones", icon: Building2 },
   { href: "/monitors", label: "Monitores", icon: Activity },
   { href: "/expenses", label: "Gastos", icon: Receipt },
   { href: "/fixed", label: "Gastos Fijos", icon: Landmark },
   { href: "/transfers", label: "Transferencias", icon: ArrowLeftRight },
-  { href: "/settings", label: "Configuracion", icon: Settings },
 ];
 
 export function Sidebar() {
