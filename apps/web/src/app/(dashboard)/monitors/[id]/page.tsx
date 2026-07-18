@@ -16,6 +16,7 @@ import {
 } from "recharts";
 import {
   Card,
+  CardAction,
   CardContent,
   CardDescription,
   CardHeader,
@@ -42,6 +43,13 @@ import {
   type HistoryPoint,
   type MonitorReference,
 } from "@/components/monitors/shared";
+import {
+  ChartRangePicker,
+  DAY_PRESETS,
+  DEFAULT_CHART_RANGE,
+  rangeQuery,
+  type ChartRange,
+} from "@/components/monitors/RangePicker";
 
 interface MonitorDetail extends ApiMonitor {
   history: HistoryPoint[];
@@ -68,20 +76,36 @@ export default function MonitorDetailPage() {
   const [notFound, setNotFound] = useState(false);
   const [error, setError] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [range, setRange] = useState<ChartRange>(DEFAULT_CHART_RANGE);
+  const [historyLoading, setHistoryLoading] = useState(false);
 
+  const query = rangeQuery(range);
   useEffect(() => {
-    fetch(`/api/monitors/${id}`)
+    let cancelled = false;
+    setHistoryLoading(true);
+    setError(false);
+    fetch(`/api/monitors/${id}?${query}`)
       .then((res) => {
         if (res.status === 404) {
-          setNotFound(true);
+          if (!cancelled) setNotFound(true);
           throw new Error("not found");
         }
         if (!res.ok) throw new Error("failed");
         return res.json();
       })
-      .then((data: MonitorDetail) => setMonitor(data))
-      .catch(() => setError(true));
-  }, [id]);
+      .then((data: MonitorDetail) => {
+        if (!cancelled) setMonitor(data);
+      })
+      .catch(() => {
+        if (!cancelled) setError(true);
+      })
+      .finally(() => {
+        if (!cancelled) setHistoryLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id, query]);
 
   async function handleDelete() {
     if (
@@ -231,8 +255,38 @@ export default function MonitorDetailPage() {
             <CardDescription>
               Valor de la expresión frente a sus umbrales, día a día
             </CardDescription>
+            {error && (
+              <p className="text-xs text-destructive">
+                No se pudo actualizar el rango; se muestra el anterior.
+              </p>
+            )}
+            <CardAction>
+              <div
+                className="flex flex-wrap items-center gap-1"
+                role="group"
+                aria-label="Rango del gráfico"
+              >
+                {DAY_PRESETS.map((option) => (
+                  <Button
+                    key={option.days}
+                    variant={
+                      range.kind === "days" && range.days === option.days
+                        ? "secondary"
+                        : "ghost"
+                    }
+                    size="xs"
+                    onClick={() => setRange({ kind: "days", days: option.days })}
+                  >
+                    {option.label}
+                  </Button>
+                ))}
+                <ChartRangePicker value={range} onChange={setRange} />
+              </div>
+            </CardAction>
           </CardHeader>
-          <CardContent>
+          <CardContent
+            className={historyLoading ? "opacity-60 transition-opacity" : ""}
+          >
             {chartData.some((p) => p.Valor != null) ? (
               <>
                 <ResponsiveContainer width="100%" height={350}>
@@ -280,7 +334,7 @@ export default function MonitorDetailPage() {
               </>
             ) : (
               <p className="text-muted-foreground">
-                Aún no hay historial para este monitor.
+                Sin historial en el rango seleccionado.
               </p>
             )}
           </CardContent>
