@@ -1,4 +1,4 @@
-.PHONY: help install dev build db-up db-down db-migrate db-reset db-shell \
+.PHONY: help install dev dev-web build db-up db-down db-migrate db-reset db-shell \
        scrapers-once scrapers-start scrapers-test fintual-login bci-lider-login up down logs clean typecheck lint test \
        product-model-generate
 
@@ -78,7 +78,10 @@ db-dump: ## Dump database to file
 
 # ─── Dashboard ───────────────────────────────────────────────────────────────
 
-dev: ## Start Next.js dev server
+dev: ## Start the full local stack: postgres + scrapers (with on-demand refresh) + dashboard
+	./scripts/dev.sh
+
+dev-web: ## Start only the Next.js dev server (assumes postgres is already up)
 	DATABASE_URL=$${DATABASE_URL:-postgres://finance:finance@localhost:5435/finance} \
 		pnpm --filter @chanchito/web dev
 
@@ -115,10 +118,11 @@ scrapers-once: ## Run all scrapers once and exit
 		SCRAPER_MODE=once \
 		../../.venv/bin/python main.py
 
-scrapers-start: ## Start scrapers on schedule (long-running)
+scrapers-start: ## Start scrapers on schedule (long-running, control endpoint on :8080)
 	@. ./scripts/load-secrets.sh && cd apps/scrapers && \
 		DATABASE_URL=$${DATABASE_URL:-postgres://finance:finance@localhost:5435/finance} \
 		SCRAPER_MODE=scheduled \
+		SCRAPER_CONTROL_PORT=$${SCRAPER_CONTROL_PORT:-8080} \
 		../../.venv/bin/python main.py
 
 fintual-login: ## Sign in to Fintual (prompts for the e-mailed 2FA code) and cache the session
