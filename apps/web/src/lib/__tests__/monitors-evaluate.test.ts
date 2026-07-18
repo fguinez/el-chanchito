@@ -158,6 +158,7 @@ describe("evaluateExpression arithmetic", () => {
     expect(value("(1 + 2) * 3")).toBe(9);
     expect(value("-5 + 2")).toBe(-3);
     expect(value("10 / 4")).toBe(2.5);
+    expect(value("100 / 5 / 2")).toBe(10); // division is left-associative
     expect(value("-(2 - 5)")).toBe(3);
   });
 

@@ -26,7 +26,7 @@ const DEFAULT_HISTORY_DAYS = 90;
 const MAX_HISTORY_DAYS = 365;
 
 /**
- * GET /api/monitors/[id] — one monitor with evaluation, snapshot-replayed
+ * GET /api/monitors/[id]: one monitor with evaluation, snapshot-replayed
  * `history` (default 90 days, `?days=N` clamped to [1, 365]), and a
  * `references` row per distinct product/field the expressions mention.
  */
@@ -85,7 +85,7 @@ export async function GET(request: NextRequest, { params }: Context) {
   }
 }
 
-/** PUT /api/monitors/[id] — partial update; a body that includes thresholds
+/** PUT /api/monitors/[id]: partial update; a body that includes thresholds
  *  must still carry an `alert` one. Bumps updatedAt. */
 export async function PUT(request: NextRequest, { params }: Context) {
   try {
@@ -133,7 +133,7 @@ export async function PUT(request: NextRequest, { params }: Context) {
   }
 }
 
-/** DELETE /api/monitors/[id] — hard delete. */
+/** DELETE /api/monitors/[id]: hard delete. */
 export async function DELETE(request: NextRequest, { params }: Context) {
   try {
     const { id } = await params;

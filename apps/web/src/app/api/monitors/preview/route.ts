@@ -6,7 +6,7 @@ import { validateMonitorInput } from "@/lib/monitors/validate";
 import { enrichMonitor } from "@/lib/monitors/serialize";
 
 /**
- * POST /api/monitors/preview — validate a create body and evaluate it now
+ * POST /api/monitors/preview: validate a create body and evaluate it now
  * WITHOUT persisting anything; the builder's live preview hits this. Returns
  * the same 400 `{ error, field?, position? }` shape as POST /api/monitors,
  * or `{ valid: true, monitor, evaluation }` with an id-less monitor shape.

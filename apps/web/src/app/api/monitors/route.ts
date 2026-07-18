@@ -17,7 +17,7 @@ import {
 } from "@/lib/monitors/serialize";
 
 /**
- * GET /api/monitors — every monitor with its display-form expressions and
+ * GET /api/monitors: every monitor with its display-form expressions and
  * current evaluation; monitors displayed as line charts also get a 30-day
  * `sparkline` replayed from product_snapshots (one combined query across all
  * referenced products). Past days are valued at current rates (see
@@ -67,7 +67,7 @@ export async function GET() {
   }
 }
 
-/** POST /api/monitors — create a monitor. Expressions arrive in display or
+/** POST /api/monitors: create a monitor. Expressions arrive in display or
  *  uuid-ref form and persist normalized to uuid-ref form. */
 export async function POST(request: NextRequest) {
   try {

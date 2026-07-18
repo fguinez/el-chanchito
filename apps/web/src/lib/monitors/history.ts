@@ -53,11 +53,22 @@ function snapshotMetrics(
     : null;
 }
 
-/** Local-midnight Date for a YYYY-MM-DD string (so the date helpers see the
- *  intended calendar day regardless of timezone). */
-function toLocalDate(dateStr: string): Date {
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** UTC-midnight milliseconds for a YYYY-MM-DD string. Day stepping happens in
+ *  UTC because UTC days are always exactly 24h; local-midnight stepping can
+ *  drop or mislabel a day when DST shifts at local midnight (America/Santiago). */
+function toUtcMs(dateStr: string): number {
   const [year, month, day] = dateStr.split("-").map(Number);
-  return new Date(year, month - 1, day);
+  return Date.UTC(year, month - 1, day);
+}
+
+/** Noon-local Date for a YYYY-MM-DD day key: DST jumps happen around midnight,
+ *  never at noon, so the LOCAL parts read by DAY_OF_MONTH/DAYS_IN_MONTH (see
+ *  evaluate.ts) always match the day key used to group snapshots. */
+function toEvalDate(dateStr: string): Date {
+  const [year, month, day] = dateStr.split("-").map(Number);
+  return new Date(year, month - 1, day, 12);
 }
 
 /** YYYY-MM-DD from a Date's local parts (the replay window's day unit). */
@@ -115,13 +126,9 @@ export function replayHistory(
   }
 
   const points: HistoryPoint[] = [];
-  const end = toLocalDate(to);
-  for (
-    let day = toLocalDate(from);
-    day.getTime() <= end.getTime();
-    day.setDate(day.getDate() + 1)
-  ) {
-    const dateStr = formatLocalDate(day);
+  const endMs = toUtcMs(to);
+  for (let dayMs = toUtcMs(from); dayMs <= endMs; dayMs += DAY_MS) {
+    const dateStr = new Date(dayMs).toISOString().slice(0, 10);
     applyDay(dateStr);
 
     // Each product as it looked on this day: the current row's identity
@@ -141,7 +148,7 @@ export function replayHistory(
     }
 
     const evaluation = evaluateMonitor(def, {
-      date: new Date(day.getTime()),
+      date: toEvalDate(dateStr),
       products: dayProducts,
       rates: opts.rates,
       currency: def.currency,

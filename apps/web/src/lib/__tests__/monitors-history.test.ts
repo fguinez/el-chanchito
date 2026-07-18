@@ -181,4 +181,43 @@ describe("replayHistory", () => {
   it("returns an empty series when there is nothing to replay", () => {
     expect(replayHistory(def, { snapshots: [], products, rates })).toEqual([]);
   });
+
+  it("steps day by day across a DST boundary without dropping a day", () => {
+    // Chile's 2026 spring-forward skips local midnight of Sunday 2026-09-06
+    // (clocks jump from Sat 24:00 to Sun 01:00). Day stepping is UTC-based
+    // and evaluation dates are noon-local, so in America/Santiago the series
+    // must still hit every calendar day with that day's own DAY_OF_MONTH.
+    const septSnapshots: SnapshotRow[] = [
+      {
+        productId: CHECKING_ID,
+        balance: 2000000,
+        metrics: { kind: "checking", balance: 2000000 },
+        asOf: new Date("2026-09-04T12:00:00Z"),
+      },
+      {
+        productId: CARD_ID,
+        balance: 500000,
+        metrics: { kind: "credit_card", available: 500000, owed: 500000 },
+        asOf: new Date("2026-09-04T12:00:00Z"),
+      },
+    ];
+    const points = replayHistory(def, {
+      snapshots: septSnapshots,
+      products,
+      rates,
+      from: "2026-09-05",
+      to: "2026-09-07",
+    });
+    expect(points.map((p) => p.date)).toEqual([
+      "2026-09-05",
+      "2026-09-06",
+      "2026-09-07",
+    ]);
+    // Ramp threshold per day: 1000000 - 30000 * (DAY_OF_MONTH() - 1).
+    expect(points.map((p) => p.thresholds[0].value)).toEqual([
+      880000, 850000, 820000,
+    ]);
+    // Carried value everywhere: 2000000 - 500000.
+    expect(points.map((p) => p.value)).toEqual([1500000, 1500000, 1500000]);
+  });
 });

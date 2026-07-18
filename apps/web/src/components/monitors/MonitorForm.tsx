@@ -74,7 +74,8 @@ function compileThreshold(draft: ThresholdDraft): string | null {
       if (draft.ref.trim() === "" || draft.percent.trim() === "") return null;
       const pct = Number(draft.percent);
       if (!Number.isFinite(pct)) return null;
-      return `${draft.ref.trim()} * ${pct / 100}`;
+      // toPrecision trims float artifacts (70.1 -> 0.701, not 0.7010000000000001).
+      return `${draft.ref.trim()} * ${Number((pct / 100).toPrecision(12))}`;
     }
     case "ramp": {
       if (draft.base.trim() === "" || draft.step.trim() === "") return null;

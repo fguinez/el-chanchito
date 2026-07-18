@@ -4,7 +4,7 @@ import importlib.util
 from pathlib import Path
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 
@@ -70,3 +70,13 @@ def test_generator_raises_on_unmarked_numeric_metric():
 
     with pytest.raises(generate.UnsupportedSchemaError):
         generate._metric_denominations(Unmarked)
+
+
+def test_generator_raises_on_invalid_denomination_marker():
+    """A numeric metric field with an unknown denomination value must fail loudly."""
+
+    class Misdenominated(BaseModel):
+        balance: int = Field(json_schema_extra={"denomination": "currncy"})
+
+    with pytest.raises(generate.UnsupportedSchemaError):
+        generate._metric_denominations(Misdenominated)
