@@ -10,6 +10,27 @@ set -eu
 
 cd "$(dirname "$0")/.."
 
+# Next.js needs Node >= 20 (see package.json engines / .nvmrc). If the active
+# node is older, try to switch via nvm before anything runs pnpm.
+ensure_node() {
+  node_major="$(node -v 2>/dev/null | sed -n 's/^v\([0-9]*\).*/\1/p')"
+  if [ -n "$node_major" ] && [ "$node_major" -ge 20 ]; then
+    return
+  fi
+  NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  if [ -s "$NVM_DIR/nvm.sh" ]; then
+    . "$NVM_DIR/nvm.sh" >/dev/null 2>&1 || true
+    nvm use >/dev/null 2>&1 || nvm use 20 >/dev/null 2>&1 || true
+  fi
+  node_major="$(node -v 2>/dev/null | sed -n 's/^v\([0-9]*\).*/\1/p')"
+  if [ -z "$node_major" ] || [ "$node_major" -lt 20 ]; then
+    echo "!!  Node >= 20 required (found: $(node -v 2>/dev/null || echo none))." >&2
+    echo "!!  Install it (e.g. 'nvm install 20') and retry." >&2
+    exit 1
+  fi
+}
+ensure_node
+
 # Secrets come from the macOS Keychain; identifiers come from .env (the
 # scraper service loads it via python-dotenv).
 . ./scripts/load-secrets.sh
