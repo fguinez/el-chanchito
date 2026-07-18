@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Pencil, Trash2 } from "lucide-react";
 import {
   CartesianGrid,
@@ -30,8 +30,10 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { SortableTableHead } from "@/components/ui/sortable-table-head";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useSortableData } from "@/lib/use-sortable-data";
 import { formatAmount } from "@/lib/utils";
 import {
   SEVERITY_LABELS,
@@ -67,6 +69,8 @@ function buildChartData(history: HistoryPoint[]) {
       point.thresholds.find((t) => t.severity === "warning")?.value ?? null,
   }));
 }
+
+type ReferenceSortKey = "referencia" | "producto" | "valor" | "al";
 
 export default function MonitorDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -106,6 +110,32 @@ export default function MonitorDetailPage() {
       cancelled = true;
     };
   }, [id, query]);
+
+  // Client-side sorting for the references table (one table on the page).
+  const getReferenceValue = useCallback(
+    (ref: MonitorReference, key: ReferenceSortKey): string | number | null => {
+      switch (key) {
+        case "referencia":
+          // The mono-rendered slug (institution:product:field).
+          return `${ref.institutionSlug ?? "?"}:${ref.productSlug ?? "?"}:${ref.field}`;
+        case "producto":
+          return ref.name;
+        case "valor":
+          return ref.latestValue;
+        case "al":
+          return ref.balanceAsOf; // ISO strings sort correctly as strings.
+      }
+    },
+    []
+  );
+  const {
+    sorted: sortedReferences,
+    sort: referenceSort,
+    toggleSort: toggleReferenceSort,
+  } = useSortableData(monitor?.references ?? [], getReferenceValue);
+  // Bridge the generic header's string key to our typed key union.
+  const handleReferenceSort = (key: string) =>
+    toggleReferenceSort(key as ReferenceSortKey);
 
   async function handleDelete() {
     if (
@@ -394,15 +424,57 @@ export default function MonitorDetailPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Referencia</TableHead>
-                  <TableHead>Producto</TableHead>
-                  <TableHead className="text-right">Valor actual</TableHead>
-                  <TableHead className="text-right">Al</TableHead>
+                  <SortableTableHead
+                    label="Referencia"
+                    columnKey="referencia"
+                    active={referenceSort?.key === "referencia"}
+                    direction={
+                      referenceSort?.key === "referencia"
+                        ? referenceSort.direction
+                        : undefined
+                    }
+                    onSort={handleReferenceSort}
+                  />
+                  <SortableTableHead
+                    label="Producto"
+                    columnKey="producto"
+                    active={referenceSort?.key === "producto"}
+                    direction={
+                      referenceSort?.key === "producto"
+                        ? referenceSort.direction
+                        : undefined
+                    }
+                    onSort={handleReferenceSort}
+                  />
+                  <SortableTableHead
+                    label="Valor actual"
+                    columnKey="valor"
+                    align="right"
+                    active={referenceSort?.key === "valor"}
+                    direction={
+                      referenceSort?.key === "valor"
+                        ? referenceSort.direction
+                        : undefined
+                    }
+                    onSort={handleReferenceSort}
+                  />
+                  <SortableTableHead
+                    label="Al"
+                    columnKey="al"
+                    align="right"
+                    active={referenceSort?.key === "al"}
+                    direction={
+                      referenceSort?.key === "al"
+                        ? referenceSort.direction
+                        : undefined
+                    }
+                    onSort={handleReferenceSort}
+                  />
                   <TableHead></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {monitor.references.map((ref) => (
+                {sortedReferences.map((ref) => (
                   <TableRow key={`${ref.productId}:${ref.field}`}>
                     <TableCell className="font-mono text-xs">
                       {ref.institutionSlug ?? "?"}:{ref.productSlug ?? "?"}:

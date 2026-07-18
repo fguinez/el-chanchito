@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Card,
   CardContent,
@@ -16,8 +16,10 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { SortableTableHead } from "@/components/ui/sortable-table-head";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { useSortableData } from "@/lib/use-sortable-data";
 import { formatCLP } from "@/lib/utils";
 import { Trash2 } from "lucide-react";
 import {
@@ -46,6 +48,18 @@ interface WealthSnapshot {
   monthsBetween: number | null;
   monthlyRate: number | null;
 }
+
+type SnapshotSortKey =
+  | "fecha"
+  | "patrimonio"
+  | "deuda"
+  | "ahorro"
+  | "fintual"
+  | "mercadopago"
+  | "banchile"
+  | "ahorrado"
+  | "meses"
+  | "tasa";
 
 export default function HistoryPage() {
   const [snapshots, setSnapshots] = useState<WealthSnapshot[]>([]);
@@ -137,6 +151,38 @@ export default function HistoryPage() {
   };
 
   const latest = snapshots[snapshots.length - 1];
+
+  const getValue = useCallback(
+    (s: WealthSnapshot, key: SnapshotSortKey): string | number | null => {
+      switch (key) {
+        case "fecha":
+          return s.snapshotDate; // ISO "YYYY-MM-DD" strings sort lexically.
+        case "patrimonio":
+          return s.patrimonio;
+        case "deuda":
+          return s.deuda;
+        case "ahorro":
+          return s.ahorro;
+        case "fintual":
+          return s.fintualBalance;
+        case "mercadopago":
+          return s.mercadopagoBalance;
+        case "banchile":
+          return s.banchileSavings;
+        case "ahorrado":
+          return s.periodSavings;
+        case "meses":
+          return s.monthsBetween;
+        case "tasa":
+          return s.monthlyRate;
+      }
+    },
+    []
+  );
+
+  const { sorted, sort, toggleSort } = useSortableData(snapshots, getValue);
+  // Bridge the generic header's string key to our typed key union.
+  const handleSort = (key: string) => toggleSort(key as SnapshotSortKey);
 
   return (
     <div className="space-y-6">
@@ -354,21 +400,110 @@ export default function HistoryPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Fecha</TableHead>
-                    <TableHead className="text-right">Patrimonio</TableHead>
-                    <TableHead className="text-right">Deuda</TableHead>
-                    <TableHead className="text-right">Ahorro</TableHead>
-                    <TableHead className="text-right">Fintual</TableHead>
-                    <TableHead className="text-right">MercadoPago</TableHead>
-                    <TableHead className="text-right">BanChile</TableHead>
-                    <TableHead className="text-right">Ahorrado</TableHead>
-                    <TableHead className="text-right">Meses</TableHead>
-                    <TableHead className="text-right">Tasa/mes</TableHead>
+                    <SortableTableHead
+                      label="Fecha"
+                      columnKey="fecha"
+                      active={sort?.key === "fecha"}
+                      direction={
+                        sort?.key === "fecha" ? sort.direction : undefined
+                      }
+                      onSort={handleSort}
+                    />
+                    <SortableTableHead
+                      label="Patrimonio"
+                      columnKey="patrimonio"
+                      align="right"
+                      active={sort?.key === "patrimonio"}
+                      direction={
+                        sort?.key === "patrimonio" ? sort.direction : undefined
+                      }
+                      onSort={handleSort}
+                    />
+                    <SortableTableHead
+                      label="Deuda"
+                      columnKey="deuda"
+                      align="right"
+                      active={sort?.key === "deuda"}
+                      direction={
+                        sort?.key === "deuda" ? sort.direction : undefined
+                      }
+                      onSort={handleSort}
+                    />
+                    <SortableTableHead
+                      label="Ahorro"
+                      columnKey="ahorro"
+                      align="right"
+                      active={sort?.key === "ahorro"}
+                      direction={
+                        sort?.key === "ahorro" ? sort.direction : undefined
+                      }
+                      onSort={handleSort}
+                    />
+                    <SortableTableHead
+                      label="Fintual"
+                      columnKey="fintual"
+                      align="right"
+                      active={sort?.key === "fintual"}
+                      direction={
+                        sort?.key === "fintual" ? sort.direction : undefined
+                      }
+                      onSort={handleSort}
+                    />
+                    <SortableTableHead
+                      label="MercadoPago"
+                      columnKey="mercadopago"
+                      align="right"
+                      active={sort?.key === "mercadopago"}
+                      direction={
+                        sort?.key === "mercadopago" ? sort.direction : undefined
+                      }
+                      onSort={handleSort}
+                    />
+                    <SortableTableHead
+                      label="BanChile"
+                      columnKey="banchile"
+                      align="right"
+                      active={sort?.key === "banchile"}
+                      direction={
+                        sort?.key === "banchile" ? sort.direction : undefined
+                      }
+                      onSort={handleSort}
+                    />
+                    <SortableTableHead
+                      label="Ahorrado"
+                      columnKey="ahorrado"
+                      align="right"
+                      active={sort?.key === "ahorrado"}
+                      direction={
+                        sort?.key === "ahorrado" ? sort.direction : undefined
+                      }
+                      onSort={handleSort}
+                    />
+                    <SortableTableHead
+                      label="Meses"
+                      columnKey="meses"
+                      align="right"
+                      active={sort?.key === "meses"}
+                      direction={
+                        sort?.key === "meses" ? sort.direction : undefined
+                      }
+                      onSort={handleSort}
+                    />
+                    <SortableTableHead
+                      label="Tasa/mes"
+                      columnKey="tasa"
+                      align="right"
+                      active={sort?.key === "tasa"}
+                      direction={
+                        sort?.key === "tasa" ? sort.direction : undefined
+                      }
+                      onSort={handleSort}
+                    />
                     <TableHead className="w-10"></TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {snapshots.map((s) => (
+                  {sorted.map((s) => (
                     <TableRow key={s.id}>
                       <TableCell className="whitespace-nowrap">
                         {new Date(s.snapshotDate).toLocaleDateString("es-CL")}
