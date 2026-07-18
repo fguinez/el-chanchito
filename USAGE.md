@@ -19,17 +19,17 @@ make install
 cp .env.example .env
 # Edit .env with your credentials (see "Configuration" below)
 
-# 3. Start PostgreSQL
-make db-up
-
-# 4. Run database migrations
-make db-migrate
-
-# 5. Start the dashboard
+# 3. Start everything: postgres + scrapers (with on-demand refresh) + dashboard
 make dev
 
 # Open http://localhost:3000
 ```
+
+`make dev` brings up PostgreSQL (Docker), runs migrations, starts the scraper
+service on the host (control endpoint on `:8080`, logs in
+`local/scrapers-dev.log`), and runs the Next.js dev server wired to it. Ctrl+C
+stops the dashboard and the scraper service together. To run only the web dev
+server (e.g. pure UI work), use `make dev-web`.
 
 ## Configuration
 
@@ -226,15 +226,16 @@ instead of spinning forever.
   to it and returns `503` when it's unavailable.
 
 Under Docker Compose this is wired automatically (`scrapers` exposes `8080` on the
-compose network, `web` points at `http://scrapers:8080`). For **host-dev**, run the
-scraper service with the control port set and point the dashboard at it:
+compose network, `web` points at `http://scrapers:8080`). For **host-dev**,
+`make dev` wires it automatically too (scrapers on `:8080`, dashboard pointed at
+it). To run the pieces by hand instead:
 
 ```bash
-# terminal 1 — scrapers on a schedule, control endpoint on :8080
-SCRAPER_CONTROL_PORT=8080 make scrapers-start
+# terminal 1 — scrapers on a schedule, control endpoint on :8080 (the default)
+make scrapers-start
 
-# terminal 2 — dashboard, reaching the scraper control endpoint
-SCRAPER_CONTROL_URL=http://localhost:8080 make dev
+# terminal 2 — dashboard only, reaching the scraper control endpoint
+SCRAPER_CONTROL_URL=http://localhost:8080 make dev-web
 ```
 
 ## CSV Import
