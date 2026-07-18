@@ -16,6 +16,7 @@ import {
 } from "recharts";
 import {
   Card,
+  CardAction,
   CardContent,
   CardDescription,
   CardHeader,
@@ -48,6 +49,17 @@ interface MonitorDetail extends ApiMonitor {
   references: MonitorReference[];
 }
 
+/** Selectable chart windows, passed to the API as `?days=N`. */
+const RANGE_OPTIONS = [
+  { days: 7, label: "7d" },
+  { days: 30, label: "30d" },
+  { days: 90, label: "90d" },
+  { days: 180, label: "180d" },
+  { days: 365, label: "1a" },
+] as const;
+
+const DEFAULT_RANGE_DAYS = 30;
+
 /** Recharts rows: the value plus one column per threshold severity. */
 function buildChartData(history: HistoryPoint[]) {
   return history.map((point) => ({
@@ -68,20 +80,34 @@ export default function MonitorDetailPage() {
   const [notFound, setNotFound] = useState(false);
   const [error, setError] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [rangeDays, setRangeDays] = useState<number>(DEFAULT_RANGE_DAYS);
+  const [historyLoading, setHistoryLoading] = useState(false);
 
   useEffect(() => {
-    fetch(`/api/monitors/${id}`)
+    let cancelled = false;
+    setHistoryLoading(true);
+    fetch(`/api/monitors/${id}?days=${rangeDays}`)
       .then((res) => {
         if (res.status === 404) {
-          setNotFound(true);
+          if (!cancelled) setNotFound(true);
           throw new Error("not found");
         }
         if (!res.ok) throw new Error("failed");
         return res.json();
       })
-      .then((data: MonitorDetail) => setMonitor(data))
-      .catch(() => setError(true));
-  }, [id]);
+      .then((data: MonitorDetail) => {
+        if (!cancelled) setMonitor(data);
+      })
+      .catch(() => {
+        if (!cancelled) setError(true);
+      })
+      .finally(() => {
+        if (!cancelled) setHistoryLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id, rangeDays]);
 
   async function handleDelete() {
     if (
@@ -231,8 +257,28 @@ export default function MonitorDetailPage() {
             <CardDescription>
               Valor de la expresión frente a sus umbrales, día a día
             </CardDescription>
+            <CardAction>
+              <div
+                className="flex items-center gap-1"
+                role="group"
+                aria-label="Rango del gráfico"
+              >
+                {RANGE_OPTIONS.map((option) => (
+                  <Button
+                    key={option.days}
+                    variant={option.days === rangeDays ? "secondary" : "ghost"}
+                    size="xs"
+                    onClick={() => setRangeDays(option.days)}
+                  >
+                    {option.label}
+                  </Button>
+                ))}
+              </div>
+            </CardAction>
           </CardHeader>
-          <CardContent>
+          <CardContent
+            className={historyLoading ? "opacity-60 transition-opacity" : ""}
+          >
             {chartData.some((p) => p.Valor != null) ? (
               <>
                 <ResponsiveContainer width="100%" height={350}>
