@@ -7,7 +7,7 @@ These never hit the network: `_load_session` is stubbed to a cache hit and
 
 import asyncio
 import os
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 os.environ.setdefault("FINTUAL_EMAIL", "test@example.com")
 os.environ.setdefault("FINTUAL_TOKEN", "test_password")
@@ -135,3 +135,89 @@ class TestScrapeProducts:
 
         assert result.products == []
         assert result.warnings == []
+
+
+class _SequencedClient:
+    """Async-context httpx stand-in whose GET returns statuses in order."""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.gets = 0
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def get(self, url, **kwargs):
+        status, payload = self._responses[min(self.gets, len(self._responses) - 1)]
+        self.gets += 1
+        response = MagicMock()
+        response.status_code = status
+        response.json.return_value = payload
+        return response
+
+
+class TestAutoLogin:
+    def test_expired_session_relogs_in_and_retries(self, monkeypatch):
+        """When FINTUAL_EMAIL == EMAIL_IMAP_USER, a 401 triggers a re-login
+        via the e-mailed 2FA code, then the scrape succeeds."""
+        monkeypatch.setenv("FINTUAL_EMAIL", "test@example.com")
+        monkeypatch.setenv("EMAIL_IMAP_USER", "test@example.com")
+        monkeypatch.setattr(FintualScraper, "_load_session", lambda self, client: True)
+        login = AsyncMock()
+        monkeypatch.setattr(FintualScraper, "login", login)
+        monkeypatch.setattr(
+            fintual_mod.httpx,
+            "AsyncClient",
+            lambda **kwargs: _SequencedClient(
+                [
+                    (401, {}),
+                    (200, {"data": [_goal("34567", name="Risky Norris", nav=12345678.33)]}),
+                ]
+            ),
+        )
+
+        result = asyncio.run(FintualScraper().scrape_products())
+
+        login.assert_awaited_once()
+        assert len(result.products) == 1
+        assert result.products[0].external_ref == "34567"
+
+    def test_no_imap_match_keeps_manual_error(self, monkeypatch):
+        """With a different IMAP user, an expired session surfaces the
+        manual-login error instead of attempting an auto sign-in."""
+        monkeypatch.delenv("EMAIL_IMAP_USER", raising=False)
+        monkeypatch.setattr(FintualScraper, "_load_session", lambda self, client: True)
+        monkeypatch.setattr(
+            fintual_mod.httpx,
+            "AsyncClient",
+            lambda **kwargs: _SequencedClient([(401, {})]),
+        )
+
+        try:
+            asyncio.run(FintualScraper().scrape_products())
+        except fintual_mod.FintualSessionError as e:
+            assert "fintual-login" in str(e)
+        else:
+            raise AssertionError("expected FintualSessionError")
+
+    def test_missing_session_with_imap_match_relogs_in(self, monkeypatch):
+        """No cached session + matching IMAP user logs in automatically."""
+        monkeypatch.setenv("FINTUAL_EMAIL", "test@example.com")
+        monkeypatch.setenv("EMAIL_IMAP_USER", "test@example.com")
+        monkeypatch.setattr(FintualScraper, "_load_session", lambda self, client: False)
+        login = AsyncMock()
+        monkeypatch.setattr(FintualScraper, "login", login)
+        monkeypatch.setattr(
+            fintual_mod.httpx,
+            "AsyncClient",
+            lambda **kwargs: _SequencedClient(
+                [(200, {"data": [_goal("34567", name="Risky Norris", nav=1.0)]})]
+            ),
+        )
+
+        asyncio.run(FintualScraper().scrape_products())
+
+        login.assert_awaited_once()
