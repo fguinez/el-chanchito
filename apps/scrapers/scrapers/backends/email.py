@@ -329,3 +329,72 @@ async def fetch_transactions_for_pattern(
         len(transactions),
     )
     return transactions
+
+
+async def fetch_latest_code(
+    sender_contains: list[str],
+    subject_contains: list[str],
+    code_pattern: str = r"\b(\d{6})\b",
+    lookback_days: int = 2,
+) -> Optional[str]:
+    """Return the first code matching `code_pattern` from the newest matching email.
+
+    Searches the inbox for emails whose From matches `sender_contains` and
+    Subject matches `subject_contains`, scans them newest-first, and returns
+    the first regex capture (e.g. a 2FA code) found in the body, or None.
+    """
+    since_date = date.today() - timedelta(days=lookback_days)
+    since_str = since_date.strftime("%d-%b-%Y")
+
+    async with get_session() as mail:
+        pattern = EmailPattern(
+            institution="2fa",
+            product_kind="code",
+            sender_contains=sender_contains,
+            subject_contains=subject_contains,
+            amount_patterns=[],
+            merchant_patterns=[],
+        )
+        for sender_keyword in sender_contains:
+            search_criteria = f'(SINCE {since_str} FROM "{sender_keyword}")'
+
+            status, message_ids = mail.search(None, search_criteria)
+            if status != "OK" or not message_ids[0]:
+                continue
+
+            ids = message_ids[0].split()
+            for msg_id in reversed(ids[-20:]):
+                status, msg_data = mail.fetch(msg_id, "(RFC822)")
+                if status != "OK":
+                    continue
+
+                raw_email = next(
+                    (
+                        part[1]
+                        for part in msg_data
+                        if isinstance(part, tuple)
+                        and len(part) > 1
+                        and isinstance(part[1], (bytes, bytearray))
+                    ),
+                    None,
+                )
+                if raw_email is None:
+                    continue
+                msg = email.message_from_bytes(raw_email)
+
+                from_addr = _decode_header_value(msg.get("From", ""))
+                subject = _decode_header_value(msg.get("Subject", ""))
+                if not _match_pattern(from_addr, subject, pattern):
+                    continue
+
+                body = _get_body(msg)
+                if not body:
+                    continue
+                match = re.search(code_pattern, body)
+                if match:
+                    logger.info(
+                        "Email backend: code found in email from '%s'", from_addr
+                    )
+                    return match.group(1)
+
+    return None

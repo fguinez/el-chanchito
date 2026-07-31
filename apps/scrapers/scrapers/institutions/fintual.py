@@ -9,16 +9,20 @@ alone gets a 401. The working flow mirrors a browser sign-in:
     POST /auth/sessions/finalize_login_web -> {email, password, code}; sets cookies
     GET  /api/goals                      -> old JSON:API shape, `nav` per goal
 
-Because the 2FA code is e-mailed to the account address (not a mailbox we can
-read), sign-in is a manual step: run `make fintual-login`, type the code, and the
-session cookies are cached to disk. Scheduled scrapes reuse the cached session and
-fail with a clear message when it expires so the login can be repeated.
+The 2FA code is e-mailed to the account address. When FINTUAL_EMAIL equals
+EMAIL_IMAP_USER, the scraper reads the code straight from the mailbox and
+re-signs in by itself on a missing/expired session; otherwise sign-in is a
+manual step: run `make fintual-login`, type the code, and the session cookies
+are cached to disk. Scheduled scrapes reuse the cached session and fail with a
+clear message when it expires so the login can be repeated.
 """
 
 import asyncio
+import inspect
 import json
 import logging
 import os
+from collections.abc import Awaitable
 from pathlib import Path
 from typing import Callable
 
@@ -26,6 +30,7 @@ import httpx
 
 from product_model import InvestmentMetrics
 
+from scrapers.backends.email import fetch_latest_code
 from scrapers.base import (
     BaseScraper,
     ProductScrapeResult,
@@ -95,13 +100,35 @@ class FintualScraper(BaseScraper):
             client.cookies.set(name, value, domain="fintual.cl")
         return _SESSION_COOKIE in cookies
 
-    # -- login (manual, interactive) ---------------------------------------
+    # -- login (auto via IMAP, or manual, interactive) ----------------------
 
-    async def login(self, code_provider: Callable[[], str]) -> None:
+    @property
+    def _can_auto_login(self) -> bool:
+        """True when the Fintual account is our IMAP mailbox, so the 2FA code
+        e-mailed to it can be read automatically."""
+        return os.environ.get("EMAIL_IMAP_USER") == self.email
+
+    async def _email_code_provider(self) -> str:
+        """Poll the inbox for the newest Fintual 2FA code."""
+        for _ in range(15):
+            code = await fetch_latest_code(
+                sender_contains=["hola@fintual.com"],
+                subject_contains=["código para entrar"],
+            )
+            if code:
+                logger.info("Fintual: read 2FA code from e-mail.")
+                return code
+            await asyncio.sleep(2)
+        raise FintualSessionError(
+            "Fintual: 2FA code e-mail not found in the IMAP inbox."
+        )
+
+    async def login(self, code_provider: Callable[[], str | Awaitable[str]]) -> None:
         """Sign in and cache the session.
 
         `code_provider` is called (only when 2FA is required) to obtain the
-        6-digit code Fintual e-mails to the account address.
+        6-digit code Fintual e-mails to the account address. It may be sync
+        (interactive prompt) or async (reading the code from the IMAP inbox).
         """
         async with httpx.AsyncClient(
             timeout=30.0, follow_redirects=True, headers=self._base_headers()
@@ -119,7 +146,10 @@ class FintualScraper(BaseScraper):
 
             if resp.status_code == 201:
                 logger.info("Fintual login initiated; e-mail 2FA required.")
-                code = code_provider().strip()
+                result = code_provider()
+                if inspect.isawaitable(result):
+                    result = await result
+                code = result.strip()
                 resp = await client.post(
                     FINALIZE_LOGIN_URL,
                     headers={"Accept": "application/json", "Referer": SIGN_IN_URL},
@@ -134,6 +164,19 @@ class FintualScraper(BaseScraper):
 
             self._save_session(client)
 
+    async def _ensure_session(self, client: httpx.AsyncClient) -> None:
+        """Load a cached session, or auto-login via IMAP when possible."""
+        if self._load_session(client):
+            return
+        if self._can_auto_login:
+            logger.info("Fintual: no cached session; signing in via e-mailed 2FA code.")
+            await self.login(self._email_code_provider)
+            self._load_session(client)
+            return
+        raise FintualSessionError(
+            "No cached Fintual session. Run `make fintual-login` to sign in."
+        )
+
     # -- scraping -----------------------------------------------------------
 
     async def scrape_transactions(self) -> list[ScrapedTransaction]:
@@ -144,16 +187,23 @@ class FintualScraper(BaseScraper):
         async with httpx.AsyncClient(
             timeout=30.0, follow_redirects=True, headers=self._base_headers()
         ) as client:
-            if not self._load_session(client):
-                raise FintualSessionError(
-                    "No cached Fintual session. Run `make fintual-login` to sign in."
-                )
+            await self._ensure_session(client)
 
             resp = await client.get(GOALS_URL, headers={"Accept": "application/json"})
             if resp.status_code == 401:
-                raise FintualSessionError(
-                    "Fintual session expired. Run `make fintual-login` to sign in again."
-                )
+                # Session expired: refresh it once (auto when the account is our
+                # mailbox, otherwise surface the manual-login error).
+                logger.info("Fintual: session expired; refreshing sign-in.")
+                if self._can_auto_login:
+                    await self.login(self._email_code_provider)
+                    self._load_session(client)
+                    resp = await client.get(
+                        GOALS_URL, headers={"Accept": "application/json"}
+                    )
+                else:
+                    raise FintualSessionError(
+                        "Fintual session expired. Run `make fintual-login` to sign in again."
+                    )
             resp.raise_for_status()
 
             # One product per goal: the JSON:API resource id is the stable
@@ -219,7 +269,7 @@ def _login_cli() -> None:
 
     scraper = FintualScraper()
 
-    def prompt_code() -> str:
+    async def prompt_code() -> str:
         return input("Enter the 6-digit code Fintual e-mailed you: ")
 
     asyncio.run(scraper.login(prompt_code))
