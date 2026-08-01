@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { useEffect, useState } from "react";
 import {
   Card,
   CardContent,
@@ -8,225 +9,34 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { SortableTableHead } from "@/components/ui/sortable-table-head";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { useSortableData } from "@/lib/use-sortable-data";
 import { formatCLP, cn } from "@/lib/utils";
 import { AlertTriangle, Building2, ExternalLink, RefreshCw } from "lucide-react";
-import { KIND_INFO } from "@chanchito/product-model";
-import type {
-  ProductAttributes,
-  ProductKind,
-  ProductMetrics,
-} from "@chanchito/product-model";
-
-interface Product {
-  id: string;
-  accountId: string;
-  accountName: string;
-  parentProductId: string | null;
-  kind: ProductKind;
-  name: string;
-  currency: string;
-  currentBalance: number | null;
-  currentBalanceClp: number | null;
-  balanceAsOf: string | null;
-  externalRef: string | null;
-  attributes: ProductAttributes | Record<string, never>;
-  metrics: ProductMetrics | null;
-  isActive: boolean;
-}
-
-interface Subtotals {
-  byCurrency: { currency: string; amount: number }[];
-  clp: number | null;
-  patrimonioClp: number | null;
-  deudaClp: number | null;
-  convertible: boolean;
-}
-
-interface Institution {
-  id: string;
-  slug: string;
-  name: string;
-  kind: string;
-  country: string | null;
-  url: string | null;
-  products: Product[];
-  subtotals: Subtotals;
-}
-
-interface Totals {
-  patrimonioClp: number;
-  deudaClp: number;
-  netClp: number;
-}
-
-interface ApiResponse {
-  institutions: Institution[];
-  totals: Totals;
-}
-
-// Institution kinds (bank/fintech/...) are a page-local vocabulary; product
-// kinds come from the shared registry (KIND_INFO: labels + asset/liability roles).
-const INSTITUTION_KIND_LABELS: Record<string, string> = {
-  bank: "Banco",
-  fintech: "Fintech",
-  exchange: "Exchange",
-  asset_manager: "Gestora",
-  other: "Otro",
-};
-
-/** Slugs with a live scraper the refresh button can trigger. Everything else
- *  (e.g. `bci_lider`, `manual`) gets a disabled button — see build_scrapers(). */
-const SCRAPER_SLUGS = new Set([
-  "fintual",
-  "buda",
-  "banchile",
-  "mach",
-  "mercadopago",
-  "tenpo",
-]);
-
-// Latest scraper run per institution, from GET /api/scrapers (used for polling).
-interface ScraperRun {
-  institution: string;
-  status: string;
-  started_at: string;
-}
-
-const POLL_INTERVAL_MS = 3000;
-const POLL_TIMEOUT_MS = 60000;
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-/** Latest run per institution (slug → status + started_at). `/api/scrapers`
- *  already returns the latest per (method, institution); collapse methods by
- *  keeping the most recent started_at so an institution maps to one entry. */
-async function fetchRunMap(): Promise<Map<string, ScraperRun>> {
-  const map = new Map<string, ScraperRun>();
-  try {
-    const res = await fetch("/api/scrapers");
-    const runs: ScraperRun[] = await res.json();
-    for (const r of runs) {
-      const prev = map.get(r.institution);
-      if (!prev || r.started_at > prev.started_at) map.set(r.institution, r);
-    }
-  } catch {
-    /* treat as no data */
-  }
-  return map;
-}
-
-function timeAgo(dateStr: string): string {
-  const diff = Date.now() - new Date(dateStr).getTime();
-  const minutes = Math.floor(diff / 60000);
-  if (minutes < 1) return "recién";
-  if (minutes < 60) return `hace ${minutes} min`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `hace ${hours}h`;
-  const days = Math.floor(hours / 24);
-  return `hace ${days}d`;
-}
-
-/** Format a balance in its own currency: CLP as pesos, anything else (crypto,
- *  foreign) as a trimmed decimal followed by the currency code. */
-function formatBalance(currency: string, value: number | null): string | null {
-  if (value == null) return null;
-  if (currency === "CLP") return formatCLP(value);
-  const formatted = new Intl.NumberFormat("en-US", {
-    maximumFractionDigits: 8,
-  }).format(value);
-  return `${formatted} ${currency}`;
-}
-
-/**
- * A meaningful label for the Producto column. Scraped products are auto-named
- * "Institution - kind" (e.g. "Buda - crypto (ETH)"), so a raw name carries no
- * more information than the Tipo badge. When that's the case we fall back to
- * the currency for crypto (CLP / ETH / BTC …) and to the friendly kind label
- * otherwise; anything a human named stays untouched.
- */
-function displayProductName(product: Product, institutionName: string): string {
-  const prefix = `${institutionName} - `;
-  const cleaned = (
-    product.name.startsWith(prefix)
-      ? product.name.slice(prefix.length)
-      : product.name
-  ).trim();
-
-  const isGeneric =
-    cleaned === product.kind || cleaned.startsWith(`${product.kind} (`);
-  if (isGeneric || !cleaned) {
-    if (product.kind === "crypto") return product.currency;
-    return KIND_INFO[product.kind].labelEs;
-  }
-  return cleaned;
-}
-
-/** The product's credit limit (cupo) as observed in its latest metrics. */
-function productLimit(product: Product): number | null {
-  const m = product.metrics;
-  if (m && (m.kind === "credit_card" || m.kind === "line_of_credit")) {
-    return m.limit ?? null;
-  }
-  return null;
-}
-
-/** Human-readable detail chips pulled from the product's typed attributes
- *  (snake_case registry keys) + account, plus the reported revolving debt. */
-function productDetailChips(product: Product): string[] {
-  const chips: string[] = [];
-  const a = product.attributes;
-
-  if (product.accountName && product.accountName !== "Personal") {
-    chips.push(product.accountName);
-  }
-  if ("brand" in a && a.brand != null) chips.push(a.brand);
-  if ("last4" in a && a.last4 != null) chips.push(`•••• ${a.last4}`);
-  if ("portfolio" in a && a.portfolio != null) chips.push(a.portfolio);
-  if ("risk_profile" in a && a.risk_profile != null) chips.push(a.risk_profile);
-  if ("statement_day" in a && a.statement_day != null)
-    chips.push(`corte día ${a.statement_day}`);
-  if ("due_day" in a && a.due_day != null)
-    chips.push(`vence día ${a.due_day}`);
-
-  // Reported drawn amount (Utilizado) on a card / línea, in product currency.
-  const m = product.metrics;
-  if (
-    m &&
-    (m.kind === "credit_card" || m.kind === "line_of_credit") &&
-    m.owed != null
-  ) {
-    const owed = formatBalance(product.currency, m.owed);
-    if (owed) chips.push(`Utilizado ${owed}`);
-  }
-
-  return chips;
-}
+import {
+  INSTITUTION_KIND_LABELS,
+  SCRAPER_SLUGS,
+  timeAgo,
+  formatBalance,
+  InstitutionProductsTable,
+  type ApiInstitution,
+  type InstitutionsResponse,
+  type InstitutionTotals,
+} from "@/components/institutions/shared";
+import { useInstitutionRefresh } from "@/components/institutions/use-institution-refresh";
 
 export default function InstitutionsPage() {
-  const [institutions, setInstitutions] = useState<Institution[] | null>(null);
-  const [totals, setTotals] = useState<Totals | null>(null);
+  const [institutions, setInstitutions] = useState<ApiInstitution[] | null>(
+    null
+  );
+  const [totals, setTotals] = useState<InstitutionTotals | null>(null);
   const [error, setError] = useState(false);
-  // Institution slugs with a scrape currently in flight (spinning buttons).
-  const [syncing, setSyncing] = useState<Set<string>>(new Set());
-  // Set when the scraper service is unreachable / not configured (proxy 503).
-  const [serviceError, setServiceError] = useState<string | null>(null);
 
   async function loadInstitutions() {
     try {
       const res = await fetch("/api/institutions");
       if (!res.ok) throw new Error("failed");
-      const data: ApiResponse = await res.json();
+      const data: InstitutionsResponse = await res.json();
       setInstitutions(data.institutions);
       setTotals(data.totals);
     } catch {
@@ -238,83 +48,8 @@ export default function InstitutionsPage() {
     loadInstitutions();
   }, []);
 
-  const markDone = (slug: string) =>
-    setSyncing((prev) => {
-      const next = new Set(prev);
-      next.delete(slug);
-      return next;
-    });
-
-  /**
-   * Poll `/api/scrapers` until each triggered institution's run finishes (a
-   * *new* run appears — started_at past its baseline — and leaves `running`),
-   * reloading balances as each one lands. Caps at POLL_TIMEOUT_MS so a slow or
-   * unconfigured scraper can't spin forever.
-   */
-  async function pollUntilDone(pending: Set<string>, baseline: Map<string, ScraperRun>) {
-    const deadline = Date.now() + POLL_TIMEOUT_MS;
-    while (pending.size > 0 && Date.now() < deadline) {
-      await sleep(POLL_INTERVAL_MS);
-      const runs = await fetchRunMap();
-      let anyDone = false;
-      for (const slug of [...pending]) {
-        const run = runs.get(slug);
-        if (!run) continue;
-        const base = baseline.get(slug);
-        const isNewRun = !base || run.started_at > base.started_at;
-        if (isNewRun && run.status !== "running") {
-          pending.delete(slug);
-          markDone(slug);
-          anyDone = true;
-        }
-      }
-      if (anyDone) await loadInstitutions();
-    }
-    // Timed out with runs still pending: stop spinning and show latest data.
-    if (pending.size > 0) {
-      for (const slug of pending) markDone(slug);
-      await loadInstitutions();
-    }
-  }
-
-  /** Trigger a scrape for one institution (by slug) or all when omitted. */
-  async function refresh(slug?: string) {
-    setServiceError(null);
-    // Snapshot current runs first so polling can tell the new run apart.
-    const baseline = await fetchRunMap();
-
-    let triggered: string[];
-    try {
-      const res = await fetch("/api/institutions/refresh", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(slug ? { institution: slug } : {}),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setServiceError(
-          data.error ??
-            (res.status === 503
-              ? "Servicio de scrapers no disponible."
-              : "No se pudo iniciar la sincronización.")
-        );
-        return;
-      }
-      triggered =
-        Array.isArray(data.triggered) && data.triggered.length > 0
-          ? data.triggered
-          : slug
-            ? [slug]
-            : [];
-    } catch {
-      setServiceError("Servicio de scrapers no disponible.");
-      return;
-    }
-
-    if (triggered.length === 0) return;
-    setSyncing((prev) => new Set([...prev, ...triggered]));
-    void pollUntilDone(new Set(triggered), baseline);
-  }
+  const { syncing, serviceError, refresh } =
+    useInstitutionRefresh(loadInstitutions);
 
   if (error) {
     return (
@@ -427,15 +162,21 @@ export default function InstitutionsPage() {
         </Card>
       ) : (
         institutions.map((inst) => (
-          <Card key={inst.id}>
+          <Card
+            key={inst.id}
+            className="transition-colors hover:border-primary/40"
+          >
             <CardHeader>
               <div className="flex items-start justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <div className="flex h-9 w-9 items-center justify-center rounded-md bg-muted">
+                <Link
+                  href={`/institutions/${inst.slug}`}
+                  className="group flex items-center gap-3"
+                >
+                  <div className="flex h-9 w-9 items-center justify-center rounded-md bg-muted transition-colors group-hover:bg-primary/10">
                     <Building2 className="h-5 w-5 text-muted-foreground" />
                   </div>
                   <div>
-                    <CardTitle className="flex items-center gap-2 text-lg">
+                    <CardTitle className="flex items-center gap-2 text-lg transition-colors group-hover:text-primary">
                       {inst.name}
                       <Badge variant="secondary" className="text-xs">
                         {INSTITUTION_KIND_LABELS[inst.kind] ?? inst.kind}
@@ -447,7 +188,7 @@ export default function InstitutionsPage() {
                       {inst.country ? ` · ${inst.country}` : ""}
                     </CardDescription>
                   </div>
-                </div>
+                </Link>
                 <div className="flex items-center gap-2">
                   {inst.url && (
                     <a
@@ -486,6 +227,7 @@ export default function InstitutionsPage() {
               <InstitutionProductsTable
                 products={inst.products}
                 institutionName={inst.name}
+                institutionSlug={inst.slug}
               />
 
               {/* Per-institution subtotals: holdings by currency + CLP total */}
@@ -508,7 +250,9 @@ export default function InstitutionsPage() {
                     )}
                   </div>
                   <div className="text-right">
-                    <span className="text-muted-foreground">Total en CLP </span>
+                    <span className="text-muted-foreground">
+                      Total en CLP{" "}
+                    </span>
                     <span
                       className={cn(
                         "font-semibold tabular-nums",
@@ -530,150 +274,5 @@ export default function InstitutionsPage() {
         ))
       )}
     </div>
-  );
-}
-
-type ProductSortKey = "producto" | "tipo" | "saldo" | "cupo" | "actualizado";
-
-/** The per-institution products table, with client-side column sorting. Sort
- *  state is local so each institution's table sorts independently; the caller's
- *  subtotals footer stays computed from the full, unsorted set. */
-function InstitutionProductsTable({
-  products,
-  institutionName,
-}: {
-  products: Product[];
-  institutionName: string;
-}) {
-  const getValue = useCallback(
-    (product: Product, key: ProductSortKey): string | number | null => {
-      switch (key) {
-        case "producto":
-          return displayProductName(product, institutionName);
-        case "tipo":
-          return KIND_INFO[product.kind].labelEs;
-        case "saldo":
-          // Sort by the CLP-normalized value so cross-currency rows are
-          // comparable; a product with no conversion (foreign/crypto without a
-          // rate) stays null and sorts last rather than mixing raw amounts in.
-          return product.currentBalanceClp;
-        case "cupo":
-          return productLimit(product);
-        case "actualizado":
-          return product.balanceAsOf; // ISO strings sort correctly as strings.
-      }
-    },
-    [institutionName]
-  );
-
-  const { sorted, sort, toggleSort } = useSortableData(products, getValue);
-  // Bridge the generic header's string key to our typed key union.
-  const handleSort = (key: string) => toggleSort(key as ProductSortKey);
-
-  return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <SortableTableHead
-            label="Producto"
-            columnKey="producto"
-            active={sort?.key === "producto"}
-            direction={sort?.key === "producto" ? sort.direction : undefined}
-            onSort={handleSort}
-          />
-          <SortableTableHead
-            label="Tipo"
-            columnKey="tipo"
-            active={sort?.key === "tipo"}
-            direction={sort?.key === "tipo" ? sort.direction : undefined}
-            onSort={handleSort}
-          />
-          <SortableTableHead
-            label="Saldo"
-            columnKey="saldo"
-            align="right"
-            active={sort?.key === "saldo"}
-            direction={sort?.key === "saldo" ? sort.direction : undefined}
-            onSort={handleSort}
-          />
-          <SortableTableHead
-            label="Cupo"
-            columnKey="cupo"
-            align="right"
-            active={sort?.key === "cupo"}
-            direction={sort?.key === "cupo" ? sort.direction : undefined}
-            onSort={handleSort}
-          />
-          <SortableTableHead
-            label="Actualizado"
-            columnKey="actualizado"
-            align="right"
-            active={sort?.key === "actualizado"}
-            direction={
-              sort?.key === "actualizado" ? sort.direction : undefined
-            }
-            onSort={handleSort}
-          />
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {sorted.map((product) => {
-          const chips = productDetailChips(product);
-          const balance = formatBalance(
-            product.currency,
-            product.currentBalance
-          );
-          const cupo = productLimit(product);
-          const isLiability = KIND_INFO[product.kind].role === "liability";
-          return (
-            <TableRow
-              key={product.id}
-              className={cn(!product.isActive && "opacity-50")}
-            >
-              <TableCell>
-                <div className="font-medium">
-                  {displayProductName(product, institutionName)}
-                </div>
-                {chips.length > 0 && (
-                  <div className="mt-0.5 text-xs text-muted-foreground">
-                    {chips.join(" · ")}
-                  </div>
-                )}
-              </TableCell>
-              <TableCell>
-                <Badge
-                  variant="outline"
-                  className={cn(
-                    "text-xs",
-                    isLiability
-                      ? "border-red-200 text-red-600"
-                      : "border-green-200 text-green-700"
-                  )}
-                >
-                  {KIND_INFO[product.kind].labelEs}
-                </Badge>
-              </TableCell>
-              <TableCell className="text-right font-medium tabular-nums">
-                {balance ?? (
-                  <span className="text-muted-foreground">sin dato</span>
-                )}
-                {product.currency !== "CLP" &&
-                  product.currentBalanceClp != null && (
-                    <div className="text-xs font-normal text-muted-foreground">
-                      ≈ {formatCLP(product.currentBalanceClp)}
-                    </div>
-                  )}
-              </TableCell>
-              <TableCell className="text-right tabular-nums text-muted-foreground">
-                {cupo != null ? formatCLP(cupo) : "—"}
-              </TableCell>
-              <TableCell className="text-right text-sm text-muted-foreground">
-                {product.balanceAsOf ? timeAgo(product.balanceAsOf) : "—"}
-              </TableCell>
-            </TableRow>
-          );
-        })}
-      </TableBody>
-    </Table>
   );
 }
