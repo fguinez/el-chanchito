@@ -34,6 +34,7 @@ Fecha Tienda / Descripción Cuotas Monto
 15/07/2026 SYNTHETIC STORE ONE $35.000
 14/07/2026 SYNTHETIC STORE TWO 03/12 $10.000
 09/07/2026 SYNTHETIC ABONO PAGO -$5.000
+08/07/2026 PAGO $-999.999
 Mostrando Página 12"""
 
 
@@ -116,9 +117,16 @@ class TestMovementsParsing:
         abono = web.movements_from_text(MOVEMENTS_TEXT)[2]
         assert abono["amount"] == 5000
 
+    def test_abono_minus_after_peso_sign(self):
+        """The portal prints a card payment as "$-999.999", not "-$999.999"."""
+        payment = web.movements_from_text(MOVEMENTS_TEXT)[3]
+
+        assert payment["description"] == "PAGO"
+        assert payment["amount"] == 999999
+
     def test_region_excludes_pager_and_header(self):
         """Only real rows parse: the header and 'Mostrando Página' are excluded."""
-        assert len(web.movements_from_text(MOVEMENTS_TEXT)) == 3
+        assert len(web.movements_from_text(MOVEMENTS_TEXT)) == 4
 
     def test_empty(self):
         assert web.movements_from_text("") == []

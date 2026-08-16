@@ -210,13 +210,15 @@ _CARD_NAME_RE = re.compile(r"([^\n]+?)\s*\n\s*Tarjeta\s+N[°º]", re.I)
 _LAST4_RE = re.compile(r"Tarjeta\s+N[°º][^\n]*?(\d{4})\s*(?:\n|$)", re.I)
 
 # One movements row: date, description, an optional "NN/NN" cuotas token, then the
-# CLP amount anchored on "$". A leading "-" marks a credit/abono (rare); charges
-# carry no sign. Anchored to a line so the greedy description can't swallow rows.
+# CLP amount anchored on "$". Charges carry no sign; a credit/abono (e.g. the card
+# payment) is marked with a "-" that the portal prints *after* the "$" ("$-999.999"),
+# so both placements are accepted. Anchored to a line so the greedy description
+# can't swallow rows.
 _MOVEMENT_RE = re.compile(
-    r"^\s*(\d{1,2}/\d{1,2}/\d{4})\s+"          # 1: date
+    r"^\s*(\d{1,2}/\d{1,2}/\d{4})\s+"           # 1: date
     r"(.+?)"                                     # 2: description (lazy)
     r"(?:\s+(\d{1,2}/\d{1,2}))?"                # 3: cuotas (optional)
-    r"\s+(-?)\s*\$\s?([\d.]{1,15})\s*$",        # 4: sign, 5: amount
+    r"\s+(-?\s*\$\s?-?\s?[\d.]{1,15})\s*$",     # 4: monto (sign either side of "$")
     re.M,
 )
 _MOVEMENTS_START_RE = re.compile(r"tienda\s*/\s*descripci[oó]n.*?monto", re.I | re.S)
@@ -363,7 +365,7 @@ def movements_from_text(text: Optional[str]) -> list[dict]:
 
     Each dict is ``{"date": date, "description": str, "cuotas": str|None,
     "amount": int}`` where ``amount`` is negative for a charge (the common case)
-    and positive for a credit/abono (a leading "-" on the Monto). Only the region
+    and positive for a credit/abono (a "-" on the Monto). Only the region
     between the table header and the "Mostrando Página" pager is scanned, so the
     surrounding chrome can't be read as rows. Returns [] when nothing parses.
     """
@@ -377,13 +379,14 @@ def movements_from_text(text: Optional[str]) -> list[dict]:
 
     movements: list[dict] = []
     for match in _MOVEMENT_RE.finditer(region):
-        date_raw, description, cuotas, sign, amount_raw = match.groups()
+        date_raw, description, cuotas, monto_raw = match.groups()
         tx_date = _parse_date_ddmmyyyy(date_raw)
-        pesos = parse_clp(amount_raw)
+        pesos = parse_clp(monto_raw)
         if tx_date is None or pesos is None:
             continue
-        # A charge is an expense (negative); a "-"-prefixed abono is a credit.
-        amount = pesos if sign == "-" else -pesos
+        # The Monto is what the card charged, so flipping its sign gives the
+        # movement: a charge becomes an expense, a "-" abono becomes a credit.
+        amount = -pesos
         movements.append(
             {
                 "date": tx_date,
