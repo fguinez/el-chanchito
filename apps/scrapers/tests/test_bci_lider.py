@@ -154,9 +154,18 @@ class TestMovementConversion:
         assert a.external_id.startswith("bcl_")
 
     def test_different_movements_different_ids(self):
-        a = self.scraper._movement_to_transaction(self._mov(description="STORE A"))
-        b = self.scraper._movement_to_transaction(self._mov(description="STORE B"))
+        a = self.scraper._movement_to_transaction(self._mov(amount=-35000))
+        b = self.scraper._movement_to_transaction(self._mov(amount=-10000))
         assert a.external_id != b.external_id
+
+    def test_id_survives_a_description_rewrite(self):
+        """Billing rewrites the store name, so the id must not depend on it."""
+        por_facturar = self.scraper._movement_to_transaction(self._mov(description="STORE A"))
+        facturado = self.scraper._movement_to_transaction(
+            self._mov(description="STORE A,SANTIAGO")
+        )
+
+        assert por_facturar.external_id == facturado.external_id
 
 
 class TestOneLoginCaching:

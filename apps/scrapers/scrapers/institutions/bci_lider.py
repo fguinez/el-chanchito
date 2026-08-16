@@ -50,22 +50,27 @@ class BciLiderScraper(BaseScraper):
     def _movement_to_transaction(self, movement: dict) -> ScrapedTransaction:
         """Convert a raw backend movement dict to a ScrapedTransaction.
 
-        `external_id` is a stable hash of the movement's identifying fields (the
-        portal exposes no per-movement id in the DOM), so a charge dedups across
-        runs and across the "Por facturar" -> "Último periodo facturado"
-        transition. Charges are already signed negative by the backend.
+        `external_id` is a stable hash of date + amount (the portal exposes no
+        per-movement id in the DOM), so a charge dedups across runs and across the
+        "Por facturar" -> "Último periodo facturado" transition. Charges are
+        already signed negative by the backend.
 
-        Known limitation: two genuinely distinct charges sharing date, description
-        and amount collapse to one row; without a per-movement id this is
-        unavoidable, and it mirrors BanChile's `bch_` scheme. `cuotas` is left out
-        of the hash on purpose: the installment counter can change between cycles,
-        which would otherwise re-import the same charge under a new id.
+        The description is deliberately NOT hashed: the portal rewrites it when a
+        charge is billed (a city suffix appears, a truncated name grows, or the
+        merchant's legal name replaces the storefront one), so hashing it imported
+        the same charge a second time and doubled the month's spend.
+
+        Known limitation: two genuinely distinct charges sharing date and amount
+        collapse to one row; without a per-movement id this is unavoidable, and it
+        mirrors BanChile's `bch_` scheme. `cuotas` is left out of the hash for the
+        same reason as the description: the installment counter changes between
+        cycles.
         """
         tx_date = movement["date"]
         description = movement["description"]
         amount = movement["amount"]
 
-        raw_str = f"{tx_date.isoformat()}|{description}|{amount}|CLP"
+        raw_str = f"{tx_date.isoformat()}|{amount}|CLP"
         external_id = f"bcl_{hashlib.md5(raw_str.encode()).hexdigest()[:16]}"
 
         return ScrapedTransaction(
