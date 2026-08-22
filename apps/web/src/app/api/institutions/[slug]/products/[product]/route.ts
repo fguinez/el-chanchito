@@ -9,6 +9,7 @@ import {
 } from "@/lib/db/schema";
 import { and, eq, desc } from "drizzle-orm";
 import { getClpRates, toClp } from "@/lib/rates";
+import { isRetiredGhost } from "@/lib/retired-products";
 import type { ProductMetrics } from "@/lib/db/schema";
 
 // Next 16: dynamic segment params arrive as a Promise on the context arg.
@@ -78,7 +79,10 @@ export async function GET(_request: Request, { params }: Context) {
     .where(and(eq(institutions.slug, slug), eq(products.slug, product)))
     .limit(1);
 
-  if (!row) {
+  // A retired roll-up ghost is kept in the database but has no data left; the
+  // UI treats it as nonexistent (see lib/retired-products), so its direct URL
+  // gets the same 404 as an unknown slug instead of an empty dashboard.
+  if (!row || isRetiredGhost(row)) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 

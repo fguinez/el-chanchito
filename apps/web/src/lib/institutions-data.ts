@@ -16,6 +16,7 @@ import {
 import { asc, eq, type SQL } from "drizzle-orm";
 import { getClpRates, toClp, type ClpRates } from "@/lib/rates";
 import { assetClp, debtClp } from "@/lib/networth";
+import { isRetiredGhost } from "@/lib/retired-products";
 
 export interface ApiProduct {
   id: string;
@@ -119,6 +120,12 @@ function buildInstitutions(
   const byInstitution = new Map<string, ApiInstitution>();
 
   for (const row of rows) {
+    // Retired roll-up ghosts are kept in the database on purpose but carry no
+    // data; the UI treats them as nonexistent (see lib/retired-products). The
+    // skip happens before the institution entry is created, so an institution
+    // left with only ghosts drops out entirely.
+    if (isRetiredGhost(row)) continue;
+
     let institution = byInstitution.get(row.institutionId);
     if (!institution) {
       institution = {
