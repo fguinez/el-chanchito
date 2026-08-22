@@ -10,10 +10,33 @@ import {
   type SessionPolicy,
 } from "./config";
 
-/** The configured shared secret, or `undefined` when auth is not set up. */
+let warnedAboutSurroundingWhitespace = false;
+
+/**
+ * The configured shared secret, or `undefined` when auth is not set up.
+ *
+ * The value is trimmed: a trailing newline from a Keychain, Docker secret or
+ * `.env` round trip would otherwise become part of the password and make the
+ * login impossible to reproduce by hand. The mismatch is surfaced once (never
+ * the value itself) instead of being trimmed silently.
+ */
 export function dashboardPassword(): string | undefined {
-  const value = process.env.DASHBOARD_PASSWORD;
-  return value && value.length > 0 ? value : undefined;
+  const raw = process.env.DASHBOARD_PASSWORD;
+  if (!raw) return undefined;
+
+  const value = raw.trim();
+  if (value.length === 0) return undefined;
+
+  if (value !== raw && !warnedAboutSurroundingWhitespace) {
+    warnedAboutSurroundingWhitespace = true;
+    console.warn(
+      "[auth] DASHBOARD_PASSWORD had leading or trailing whitespace; it was " +
+        "trimmed. Check how the secret is exported (a trailing newline is the " +
+        "usual cause)."
+    );
+  }
+
+  return value;
 }
 
 export function currentAuthMode(): AuthMode {

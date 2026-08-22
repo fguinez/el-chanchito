@@ -57,6 +57,24 @@ describe("parseSessionMaxAge", () => {
       expect(warning).toBeTruthy();
     }
   });
+
+  it("clamps absurd durations to the unlimited ceiling", () => {
+    // A Max-Age past the browser ceiling is dropped, which would silently mean
+    // "no cookie at all" instead of "a very long session".
+    for (const raw of ["99999999999999999999d", "500d", "9999999999"]) {
+      expect(parseSessionMaxAge(raw).policy, raw).toEqual({
+        kind: "duration",
+        seconds: UNLIMITED_SESSION_SECONDS,
+      });
+    }
+  });
+
+  it("leaves durations under the ceiling untouched", () => {
+    expect(parseSessionMaxAge("399d").policy).toEqual({
+      kind: "duration",
+      seconds: 399 * 24 * 60 * 60,
+    });
+  });
 });
 
 describe("token lifetime and cookie max age", () => {
@@ -101,6 +119,23 @@ describe("decideAuthMode", () => {
       "misconfigured"
     );
   });
+
+  it("counts a whitespace-only password as unset", () => {
+    // Otherwise a botched secret round trip enforces auth with a one-space
+    // password, which is worse than failing closed.
+    for (const password of [" ", "   ", "\n", "\t\n "]) {
+      expect(decideAuthMode({ password, nodeEnv: "production" })).toBe(
+        "misconfigured"
+      );
+      expect(decideAuthMode({ password, nodeEnv: "development" })).toBe("disabled");
+    }
+  });
+
+  it("still enforces a password that merely has surrounding whitespace", () => {
+    expect(
+      decideAuthMode({ password: " changeme-example\n", nodeEnv: "production" })
+    ).toBe("enforced");
+  });
 });
 
 describe("path classification", () => {
@@ -118,9 +153,14 @@ describe("path classification", () => {
     expect(isPublicPath("/favicon.ico")).toBe(true);
 
     expect(isPublicPath("/")).toBe(false);
-    expect(isPublicPath("/api/auth/logout")).toBe(false);
     expect(isPublicPath("/api/balances")).toBe(false);
     expect(isPublicPath("/login/extra")).toBe(false);
+  });
+
+  it("keeps logout public so a stale cookie can always be cleared", () => {
+    // Gating it means an expired token 401s on "Cerrar sesión" and the dead
+    // cookie is stuck in the browser forever.
+    expect(isPublicPath("/api/auth/logout")).toBe(true);
   });
 });
 
@@ -144,6 +184,41 @@ describe("safeNextPath", () => {
       "/bad\nheader",
     ]) {
       expect(safeNextPath(raw)).toBe("/");
+    }
+  });
+
+  // These all stay same-origin, but only because the browser resolves them
+  // against our own origin rather than decoding them into an authority. Pinned
+  // so a future "helpful" decode step cannot quietly open a redirect.
+  it("keeps percent-encoded slashes as an opaque path, never an authority", () => {
+    for (const raw of [
+      "/%2f%2fevil.example",
+      "/%2F%2Fevil.example",
+      "/%5c%5cevil.example",
+      "/%5C%5Cevil.example",
+      "/%09//evil.example",
+      "/%2e%2e//evil.example",
+    ]) {
+      // Returned unchanged: still a single-slash-prefixed relative path.
+      expect(safeNextPath(raw), raw).toBe(raw);
+      expect(new URL(raw, "https://dashboard.example").host).toBe(
+        "dashboard.example"
+      );
+    }
+  });
+
+  it("keeps Unicode look-alikes and dot segments same-origin", () => {
+    for (const raw of [
+      "/\u2028//evil.example", // line separator
+      "/\u00a0//evil.example", // no-break space
+      "/\u2044\u2044evil.example", // fraction slash
+      "/..//evil.example",
+      "/@evil.example",
+    ]) {
+      expect(safeNextPath(raw), raw).toBe(raw);
+      expect(new URL(raw, "https://dashboard.example").host).toBe(
+        "dashboard.example"
+      );
     }
   });
 });

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { SESSION_COOKIE_NAME, tokenLifetimeSeconds } from "@/lib/auth/config";
+import { tokenLifetimeSeconds } from "@/lib/auth/config";
 import {
   currentAuthMode,
   currentSessionPolicy,
@@ -8,15 +8,9 @@ import {
 } from "@/lib/auth/env";
 import { isSecureRequest, sessionCookieOptions } from "@/lib/auth/cookie";
 import { createSessionToken, verifyPassword } from "@/lib/auth/session";
+import { loginThrottle } from "@/lib/auth/throttle";
 
 const NO_STORE = { "cache-control": "no-store" } as const;
-
-/** Fixed delay on failure: no timing signal, no brute-force speed. */
-const FAILURE_DELAY_MS = 500;
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 /** POST /api/auth/login — exchange the shared password for a session cookie */
 export async function POST(request: NextRequest) {
@@ -41,14 +35,32 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     if (typeof body?.password === "string") password = body.password;
   } catch {
+    // A malformed body is indistinguishable from a wrong password below.
     password = "";
   }
 
   const expected = dashboardPassword() as string;
-  const ok = password.length > 0 && (await verifyPassword(password, expected));
 
-  if (!ok) {
-    await sleep(FAILURE_DELAY_MS);
+  // Serialized and rate limited: one attempt at a time, process wide.
+  const outcome = await loginThrottle.run(async () => {
+    const ok = password.length > 0 && (await verifyPassword(password, expected));
+    return { ok, result: ok };
+  });
+
+  if (outcome.status === "locked") {
+    return NextResponse.json(
+      { error: "too_many_attempts" },
+      {
+        status: 429,
+        headers: {
+          ...NO_STORE,
+          "retry-after": String(outcome.retryAfterSeconds),
+        },
+      }
+    );
+  }
+
+  if (!outcome.result) {
     return NextResponse.json(
       { error: "invalid_password" },
       { status: 401, headers: NO_STORE }
@@ -60,7 +72,6 @@ export async function POST(request: NextRequest) {
 
   const response = NextResponse.json({ authenticated: true }, { headers: NO_STORE });
   response.cookies.set({
-    name: SESSION_COOKIE_NAME,
     value: token,
     ...sessionCookieOptions(policy, isSecureRequest(request)),
   });

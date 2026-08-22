@@ -15,6 +15,26 @@ import {
 import { Input } from "@/components/ui/input";
 import { safeNextPath } from "@/lib/auth/config";
 
+/** Spanish message for a failed login, including the rate-limit lockout. */
+function loginErrorMessage(response: Response): string {
+  if (response.status === 401) return "Contraseña incorrecta";
+
+  if (response.status === 429) {
+    const seconds = Number(response.headers.get("retry-after"));
+    if (Number.isFinite(seconds) && seconds > 0) {
+      const minutes = Math.ceil(seconds / 60);
+      const wait =
+        seconds < 60
+          ? `${seconds} segundo${seconds === 1 ? "" : "s"}`
+          : `${minutes} minuto${minutes === 1 ? "" : "s"}`;
+      return `Demasiados intentos fallidos. Espera ${wait} e inténtalo de nuevo.`;
+    }
+    return "Demasiados intentos fallidos. Espera unos minutos e inténtalo de nuevo.";
+  }
+
+  return "No se pudo iniciar sesión";
+}
+
 function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -35,11 +55,7 @@ function LoginForm() {
       });
 
       if (!response.ok) {
-        setError(
-          response.status === 401
-            ? "Contraseña incorrecta"
-            : "No se pudo iniciar sesión"
-        );
+        setError(loginErrorMessage(response));
         setPassword("");
         return;
       }

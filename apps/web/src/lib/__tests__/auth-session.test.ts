@@ -65,6 +65,46 @@ describe("session tokens", () => {
   });
 });
 
+describe("derived key memoization", () => {
+  // The HMAC key is PBKDF2-derived and cached per password so it is not
+  // recomputed on every request. The cache must never outlive its password.
+  it("does not serve a stale key after a password change", async () => {
+    const now = 1_700_000_000_000;
+
+    // Warm the cache for the old password.
+    const oldToken = await createSessionToken(PASSWORD, 3600, now);
+    expect(await verifySessionToken(oldToken, PASSWORD, now)).toBe(true);
+
+    // The password rotates: the old session must die and the new one must work.
+    const newToken = await createSessionToken(OTHER_PASSWORD, 3600, now);
+    expect(await verifySessionToken(oldToken, OTHER_PASSWORD, now)).toBe(false);
+    expect(await verifySessionToken(newToken, OTHER_PASSWORD, now)).toBe(true);
+    expect(await verifySessionToken(newToken, PASSWORD, now)).toBe(false);
+
+    // And going back to the old password still derives the old key correctly.
+    expect(await verifySessionToken(oldToken, PASSWORD, now)).toBe(true);
+  });
+
+  it("keeps signatures stable across repeated derivations", async () => {
+    const now = 1_700_000_000_000;
+    const first = await createSessionToken(PASSWORD, 3600, now);
+    const second = await createSessionToken(PASSWORD, 3600, now);
+    expect(second).toBe(first);
+  });
+
+  it("survives more distinct passwords than the cache holds", async () => {
+    const now = 1_700_000_000_000;
+    const tokens: [string, string][] = [];
+    for (let i = 0; i < 12; i += 1) {
+      const password = `changeme-example-${i}`;
+      tokens.push([password, await createSessionToken(password, 3600, now)]);
+    }
+    for (const [password, token] of tokens) {
+      expect(await verifySessionToken(token, password, now), password).toBe(true);
+    }
+  });
+});
+
 describe("verifyPassword", () => {
   it("accepts the configured password and nothing else", async () => {
     expect(await verifyPassword(PASSWORD, PASSWORD)).toBe(true);

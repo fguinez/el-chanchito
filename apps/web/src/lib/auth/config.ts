@@ -6,8 +6,31 @@
  * ("Dashboard authentication") for the security posture.
  */
 
-/** Cookie carrying the signed session token. */
+/** Cookie carrying the signed session token over plain HTTP. */
 export const SESSION_COOKIE_NAME = "chanchito_session";
+
+/**
+ * Cookie name used whenever the cookie can be set `Secure`. The `__Host-`
+ * prefix makes browsers refuse the cookie unless it is `Secure`, `Path=/` and
+ * carries no `Domain`, which pins it to the exact host: a sibling subdomain can
+ * no longer overwrite our session cookie (cookie tossing).
+ */
+export const SECURE_SESSION_COOKIE_NAME = `__Host-${SESSION_COOKIE_NAME}`;
+
+/** The cookie name to write for a given channel. */
+export function sessionCookieName(secure: boolean): string {
+  return secure ? SECURE_SESSION_COOKIE_NAME : SESSION_COOKIE_NAME;
+}
+
+/**
+ * Reads whichever session cookie is in play. The host-pinned name wins so a
+ * tossed plain cookie cannot shadow the real one.
+ */
+export function readSessionCookie(
+  get: (name: string) => string | undefined
+): string | undefined {
+  return get(SECURE_SESSION_COOKIE_NAME) ?? get(SESSION_COOKIE_NAME);
+}
 
 /** Public paths reachable without a session (login UI plus its endpoints). */
 export const LOGIN_PATH = "/login";
@@ -17,6 +40,10 @@ const PUBLIC_PATHS = new Set([
   LOGIN_PATH,
   "/api/auth/login",
   "/api/auth/session",
+  // Clearing a cookie needs no session: gating it means an expired token can
+  // never be flushed from the browser. The mutating-method CSRF checks in
+  // proxy.ts still cover it.
+  "/api/auth/logout",
   "/favicon.ico",
 ]);
 
@@ -75,7 +102,14 @@ export function parseSessionMaxAge(raw: string | undefined | null): ParsedSessio
     const amount = Number(match[1]);
     const seconds = amount * UNIT_SECONDS[match[2] ?? "s"];
     if (seconds > 0 && Number.isFinite(seconds)) {
-      return { policy: { kind: "duration", seconds } };
+      // Clamp to the unlimited ceiling: a larger Max-Age is silently dropped by
+      // browsers, which would turn "very long" into "no cookie at all".
+      return {
+        policy: {
+          kind: "duration",
+          seconds: Math.min(seconds, UNLIMITED_SESSION_SECONDS),
+        },
+      };
     }
   }
 
@@ -128,9 +162,13 @@ export interface AuthEnv {
 /**
  * The whole security posture in one pure function: a configured password always
  * wins, a missing one is tolerated only outside production.
+ *
+ * A whitespace-only value counts as unset: it almost certainly comes from a
+ * botched secret round trip, and treating it as configured would enforce auth
+ * with a one-space password.
  */
 export function decideAuthMode({ password, nodeEnv }: AuthEnv): AuthMode {
-  if (password && password.length > 0) return "enforced";
+  if (password && password.trim().length > 0) return "enforced";
   return nodeEnv === "production" ? "misconfigured" : "disabled";
 }
 

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { SESSION_COOKIE_NAME } from "@/lib/auth/config";
+import { readSessionCookie } from "@/lib/auth/config";
 import { currentAuthMode, dashboardPassword } from "@/lib/auth/env";
 import { verifySessionToken } from "@/lib/auth/session";
 
@@ -13,15 +13,17 @@ const NO_STORE = { "cache-control": "no-store" } as const;
 export async function GET(request: NextRequest) {
   const mode = currentAuthMode();
 
+  // Only `disabled` can reach this: the proxy answers 503 for every /api/*
+  // route while misconfigured.
   if (mode !== "enforced") {
     return NextResponse.json(
-      { enabled: mode === "misconfigured", authenticated: false },
+      { enabled: false, authenticated: false },
       { headers: NO_STORE }
     );
   }
 
   const authenticated = await verifySessionToken(
-    request.cookies.get(SESSION_COOKIE_NAME)?.value,
+    readSessionCookie((name) => request.cookies.get(name)?.value),
     dashboardPassword() as string
   );
 
