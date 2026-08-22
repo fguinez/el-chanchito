@@ -456,6 +456,49 @@ Browser → web POST /api/institutions/refresh {institution?}
 | `SCRAPER_CONTROL_PORT` | scrapers | Port the control server binds (unset ⇒ disabled) |
 | `SCRAPER_CONTROL_URL` | web | Base URL the refresh proxy calls (e.g. `http://scrapers:8080`) |
 
+## Dashboard authentication
+
+The dashboard is single-user by design, so auth is a **shared secret**, not a
+user system: `DASHBOARD_PASSWORD` plus a signed session cookie. There is no auth
+table, no session table and no third-party dependency.
+
+- **Enforcement point**: `apps/web/src/proxy.ts` (Next 16 renamed the
+  `middleware` convention to `proxy`; it runs on the Node.js runtime). It gates
+  every path except Next's static output, so a new page or API route is
+  protected the moment it exists. Route handlers hold no auth logic of their own.
+- **Session**: `apps/web/src/lib/auth/session.ts` mints
+  `{expiresAtMs}.{HMAC-SHA256}` with Web Crypto. The key is `SHA-256(context ‖
+  DASHBOARD_PASSWORD)`, so there is exactly one secret and rotating the password
+  invalidates every outstanding session. Expiry is absolute, never sliding.
+  Cookie: httpOnly, `SameSite=Lax`, `Secure` when the request is HTTPS
+  (`X-Forwarded-Proto` honored so it works behind a TLS-terminating proxy).
+- **Re-login policy**: `DASHBOARD_SESSION_MAX_AGE` (duration, seconds,
+  `browser`, or `unlimited`; default `12h`), parsed in
+  `apps/web/src/lib/auth/config.ts`. Invalid values fail closed to the default.
+- **Fail-closed posture** (`decideAuthMode`, a pure function so it is unit
+  tested):
+
+  | `DASHBOARD_PASSWORD` | `NODE_ENV` | Behavior |
+  |---|---|---|
+  | set | any | Enforced: pages redirect to `/login`, `/api/*` answers `401` |
+  | unset | production | Misconfigured: pages show a "not configured" notice, `/api/*` answers `503` |
+  | unset | development | Disabled: identical to the pre-auth app, so `make dev` needs no setup |
+
+- **Public surfaces**: `/login`, `POST /api/auth/login`, `GET /api/auth/session`,
+  `/favicon.ico`, `_next/static` and `_next/image`. Nothing else.
+- **CSRF**: on top of `SameSite=Lax`, non-GET `/api/*` requests carrying
+  `Sec-Fetch-Site: cross-site` are rejected with `403` before any handler runs.
+  Redirect-back targets (`?next=`) are validated as same-origin relative paths.
+- The scraper control endpoint stays unauthenticated and internal (above); the
+  dashboard password protects the `/api/institutions/refresh` proxy in front of
+  it, which is what #23 asked for.
+
+**Multi-user: DEFERRED.** Real per-user sessions (Auth.js or Lucia against the
+existing `users` table, hashed credentials, per-user data scoping) are only worth
+their complexity once a second person actually uses an instance. Until then the
+shared secret is the whole model, and the `users` table stays unused by the web
+app.
+
 ## Tech Stack
 
 | Layer | Technology |

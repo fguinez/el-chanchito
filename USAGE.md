@@ -77,6 +77,7 @@ Secrets and their meaning:
 | `chanchito.BUDA_API_KEY` | Buda.com API key |
 | `chanchito.BUDA_API_SECRET` | Buda.com API secret |
 | `chanchito.EMAIL_IMAP_PASSWORD` | Gmail App Password (see below) |
+| `chanchito.DASHBOARD_PASSWORD` | Dashboard login password (see "Deployment"; required in production) |
 
 A scraper is enabled only when all of its credentials are present.
 On non-macOS hosts (e.g. Docker-only deploys), export the secret env vars
@@ -292,8 +293,60 @@ All API routes are under `/api/`:
 | GET | `/api/scrapers` | Scraper run status |
 | GET | `/api/balances` | Latest balance per account |
 | POST | `/api/month-reset` | Create next month's config |
+| POST | `/api/auth/login` | Exchange `DASHBOARD_PASSWORD` for a session cookie |
+| POST | `/api/auth/logout` | Clear the session cookie |
+| GET | `/api/auth/session` | `{ enabled, authenticated }` (public) |
+
+When `DASHBOARD_PASSWORD` is set, every route above except `/api/auth/login` and
+`/api/auth/session` answers `401` without a valid session.
 
 ## Deployment
+
+### Authentication (read this first)
+
+> **Never expose the dashboard publicly without `DASHBOARD_PASSWORD`.** Every
+> page and every `/api/*` route serves your real financial data. In production
+> (`next build` + `next start`, or the Docker image) the app **fails closed** if
+> the variable is unset: pages render a "not configured" notice and the API
+> answers `503`. Nothing is served, but nothing is protected either until you
+> configure it.
+
+The dashboard uses a single shared password (single-user by design; there is no
+user management). Setup:
+
+```bash
+# macOS: store it in the login Keychain alongside the scraper secrets
+make secret-set KEY=DASHBOARD_PASSWORD
+
+# anywhere else: export it (Compose passes it through to the web service)
+export DASHBOARD_PASSWORD='choose-a-long-random-one'
+```
+
+Logging in sets an httpOnly, `SameSite=Lax` cookie holding a signed token
+(HMAC-SHA256). The signing key is derived from the password itself, so **changing
+`DASHBOARD_PASSWORD` immediately logs every session out**. The cookie is marked
+`Secure` whenever the request arrives over HTTPS, including through a
+TLS-terminating reverse proxy (`X-Forwarded-Proto`).
+
+`DASHBOARD_SESSION_MAX_AGE` controls how often the password is asked again:
+
+| Value | Behavior |
+|---|---|
+| unset | Default: re-login 12 hours after logging in |
+| `30m`, `12h`, `7d`, `30d` | Absolute expiry after that duration (not sliding) |
+| `3600` | Same, in seconds |
+| `browser` | Session cookie: re-login on every new browser session (the token still carries a hard 30-day cap) |
+| `unlimited` | 400 days (the browser's cookie ceiling); sessions effectively last until the password changes |
+
+An unparseable value falls back to `12h` and logs one warning at startup.
+
+Auth is skipped only in `next dev` with `DASHBOARD_PASSWORD` unset, so `make dev`
+stays frictionless. Set the variable (it is picked up from the Keychain by
+`make dev`) to exercise the login locally.
+
+Treat the password as one layer, not the whole story: prefer keeping the
+dashboard off the public internet entirely (Tailscale or another VPN), or behind
+a reverse proxy that terminates TLS and adds its own access control.
 
 ### Local (Docker Compose)
 
