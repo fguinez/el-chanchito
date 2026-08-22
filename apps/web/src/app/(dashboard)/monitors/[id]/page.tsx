@@ -9,7 +9,6 @@ import {
   Legend,
   Line,
   LineChart,
-  ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
@@ -38,20 +37,17 @@ import { formatAmount } from "@/lib/utils";
 import {
   SEVERITY_LABELS,
   StatusBadge,
-  formatAxisValue,
   formatDateEs,
-  formatDayEs,
   type ApiMonitor,
   type HistoryPoint,
   type MonitorReference,
 } from "@/components/monitors/shared";
 import {
-  ChartRangePicker,
-  DAY_PRESETS,
-  DEFAULT_CHART_RANGE,
-  rangeQuery,
-  type ChartRange,
-} from "@/components/monitors/RangePicker";
+  InteractiveChart,
+  useTimeSeriesChart,
+} from "@/components/charts/interactive-chart";
+import { TimeRangeControl } from "@/components/charts/time-range-control";
+import { dayStartMs, rangeQuery } from "@/components/charts/x-axis-range";
 
 interface MonitorDetail extends ApiMonitor {
   history: HistoryPoint[];
@@ -61,7 +57,7 @@ interface MonitorDetail extends ApiMonitor {
 /** Recharts rows: the value plus one column per threshold severity. */
 function buildChartData(history: HistoryPoint[]) {
   return history.map((point) => ({
-    date: formatDayEs(point.date),
+    t: dayStartMs(point.date),
     Valor: point.value,
     Alerta:
       point.thresholds.find((t) => t.severity === "alert")?.value ?? null,
@@ -80,11 +76,19 @@ export default function MonitorDetailPage() {
   const [notFound, setNotFound] = useState(false);
   const [error, setError] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [range, setRange] = useState<ChartRange>(DEFAULT_CHART_RANGE);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const chart = useTimeSeriesChart({ kind: "days", days: 30 });
 
-  const query = rangeQuery(range);
+  // Dragged ("custom") windows only re-frame the already-loaded history; the
+  // API is queried again when a preset or exact date range is picked.
+  const query = rangeQuery(chart.x.range);
   useEffect(() => {
+    if (query == null) {
+      // A dragged window re-frames the loaded data; also drop any in-flight
+      // fetch's loading state, since its cleanup cancelled the updates.
+      setHistoryLoading(false);
+      return;
+    }
     let cancelled = false;
     setHistoryLoading(true);
     setError(false);
@@ -291,27 +295,7 @@ export default function MonitorDetailPage() {
               </p>
             )}
             <CardAction>
-              <div
-                className="flex flex-wrap items-center gap-1"
-                role="group"
-                aria-label="Rango del gráfico"
-              >
-                {DAY_PRESETS.map((option) => (
-                  <Button
-                    key={option.days}
-                    variant={
-                      range.kind === "days" && range.days === option.days
-                        ? "secondary"
-                        : "ghost"
-                    }
-                    size="xs"
-                    onClick={() => setRange({ kind: "days", days: option.days })}
-                  >
-                    {option.label}
-                  </Button>
-                ))}
-                <ChartRangePicker value={range} onChange={setRange} />
-              </div>
+              <TimeRangeControl control={chart.x} maxDays={365} />
             </CardAction>
           </CardHeader>
           <CardContent
@@ -319,15 +303,16 @@ export default function MonitorDetailPage() {
           >
             {chartData.some((p) => p.Valor != null) ? (
               <>
-                <ResponsiveContainer width="100%" height={350}>
+                <InteractiveChart {...chart.interactiveProps} height={350}>
                   <LineChart data={chartData}>
                     <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="date" fontSize={12} />
-                    <YAxis tickFormatter={formatAxisValue} fontSize={12} />
+                    <XAxis {...chart.xAxisProps} />
+                    <YAxis {...chart.yAxisProps} />
                     <Tooltip
                       formatter={(value) =>
                         formatAmount(monitor.currency, Number(value))
                       }
+                      labelFormatter={chart.labelFormatter}
                     />
                     <Legend />
                     <Line
@@ -336,6 +321,7 @@ export default function MonitorDetailPage() {
                       stroke="#2563eb"
                       strokeWidth={2}
                       dot={false}
+                      isAnimationActive={false}
                     />
                     <Line
                       type="monotone"
@@ -344,6 +330,7 @@ export default function MonitorDetailPage() {
                       strokeWidth={1.5}
                       strokeDasharray="6 4"
                       dot={false}
+                      isAnimationActive={false}
                     />
                     {hasWarningThreshold && (
                       <Line
@@ -353,10 +340,11 @@ export default function MonitorDetailPage() {
                         strokeWidth={1.5}
                         strokeDasharray="6 4"
                         dot={false}
+                        isAnimationActive={false}
                       />
                     )}
                   </LineChart>
-                </ResponsiveContainer>
+                </InteractiveChart>
                 <p className="mt-2 text-xs text-muted-foreground">
                   Aproximación: los días pasados se convierten con los tipos de
                   cambio actuales.

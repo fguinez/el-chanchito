@@ -1,8 +1,10 @@
 "use client";
 
-// Chart time-range selection for the monitor detail view: quick trailing-day
-// pills plus a Datadog/GCP-style picker for month presets and exact dates.
-// Day granularity only; ranges are inclusive YYYY-MM-DD pairs.
+// Header control for a chart's time window: quick trailing-day pills (plus an
+// optional "Todo" pill) and a Datadog/GCP-style picker for month presets and
+// exact dates. Day granularity only. Operates on the XAxisRange the on-axis
+// drag overlay also writes to, so a dragged window shows up here as its date
+// range.
 
 import { useState } from "react";
 import { Calendar, ChevronDown } from "lucide-react";
@@ -14,12 +16,8 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-
-/** A trailing day-count window or an exact (inclusive) day range. Month
- *  presets are absolute ranges that keep their name for the trigger label. */
-export type ChartRange =
-  | { kind: "days"; days: number }
-  | { kind: "absolute"; from: string; to: string; label?: string };
+import { formatDateTickMs } from "@/lib/utils";
+import { msToDay, type XAxisRange, type XAxisRangeControl } from "./x-axis-range";
 
 export const DAY_PRESETS = [
   { days: 7, label: "7d" },
@@ -28,17 +26,6 @@ export const DAY_PRESETS = [
   { days: 180, label: "180d" },
   { days: 365, label: "1a" },
 ] as const;
-
-export const DEFAULT_CHART_RANGE: ChartRange = { kind: "days", days: 30 };
-
-const MAX_RANGE_DAYS = 365;
-
-/** Query string for the /api/monitors/[id] history params. */
-export function rangeQuery(range: ChartRange): string {
-  return range.kind === "days"
-    ? `days=${range.days}`
-    : `from=${range.from}&to=${range.to}`;
-}
 
 /** YYYY-MM-DD from a Date's local parts. */
 function toDay(date: Date): string {
@@ -57,7 +44,7 @@ function spanDays(from: string, to: string): number {
   return Math.round((ms(to) - ms(from)) / (24 * 60 * 60 * 1000)) + 1;
 }
 
-type AbsoluteRange = Extract<ChartRange, { kind: "absolute" }>;
+type AbsoluteRange = Extract<XAxisRange, { kind: "absolute" }>;
 
 function monthToDate(now = new Date()): AbsoluteRange {
   return {
@@ -88,17 +75,25 @@ function dayLabel(dateStr: string): string {
   return new Date(year, month - 1, day).toLocaleDateString("es-CL", options);
 }
 
-function triggerLabel(range: ChartRange): string {
-  if (range.kind === "days") return "Personalizado";
-  return range.label ?? `${dayLabel(range.from)} a ${dayLabel(range.to)}`;
+function triggerLabel(range: XAxisRange): string {
+  if (range.kind === "absolute") {
+    return range.label ?? `${dayLabel(range.from)} a ${dayLabel(range.to)}`;
+  }
+  if (range.kind === "custom") {
+    return `${formatDateTickMs(range.min)} a ${formatDateTickMs(range.max)}`;
+  }
+  return "Personalizado";
 }
 
 export function ChartRangePicker({
   value,
   onChange,
+  maxDays,
 }: {
-  value: ChartRange;
-  onChange: (range: ChartRange) => void;
+  value: XAxisRange;
+  onChange: (range: XAxisRange) => void;
+  /** Cap on the exact-dates span; set it when an API enforces one. */
+  maxDays?: number;
 }) {
   const [open, setOpen] = useState(false);
   const [fromDraft, setFromDraft] = useState("");
@@ -108,19 +103,28 @@ export function ChartRangePicker({
   const draftsComplete = fromDraft !== "" && toDraft !== "";
   const draftsOrdered = draftsComplete && fromDraft <= toDraft;
   const draftsTooLong =
-    draftsOrdered && spanDays(fromDraft, toDraft) > MAX_RANGE_DAYS;
+    maxDays != null && draftsOrdered && spanDays(fromDraft, toDraft) > maxDays;
 
   const handleOpenChange = (next: boolean) => {
     // Seed the inputs with the active range (or clear leftovers from an
     // abandoned edit) so reopening always reflects the current selection.
     if (next) {
-      setFromDraft(value.kind === "absolute" ? value.from : "");
-      setToDraft(value.kind === "absolute" ? value.to : "");
+      if (value.kind === "absolute") {
+        setFromDraft(value.from);
+        setToDraft(value.to);
+      } else if (value.kind === "custom") {
+        const to = msToDay(value.max);
+        setFromDraft(msToDay(value.min));
+        setToDraft(to > today ? today : to);
+      } else {
+        setFromDraft("");
+        setToDraft("");
+      }
     }
     setOpen(next);
   };
 
-  const select = (range: ChartRange) => {
+  const select = (range: XAxisRange) => {
     onChange(range);
     setOpen(false);
   };
@@ -144,7 +148,11 @@ export function ChartRangePicker({
     <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>
         <Button
-          variant={value.kind === "absolute" ? "secondary" : "ghost"}
+          variant={
+            value.kind === "absolute" || value.kind === "custom"
+              ? "secondary"
+              : "ghost"
+          }
           size="xs"
         >
           <Calendar className="h-3 w-3" />
@@ -194,7 +202,7 @@ export function ChartRangePicker({
           )}
           {draftsTooLong && (
             <p className="text-xs text-destructive">
-              El rango no puede superar 1 año.
+              El rango no puede superar {maxDays} días.
             </p>
           )}
           <Button
@@ -210,5 +218,52 @@ export function ChartRangePicker({
         </div>
       </PopoverContent>
     </Popover>
+  );
+}
+
+/** The full header control: day pills, optional "Todo", and the date picker.
+ *  Wire it to the same `useXAxisRange` control the chart's axis spreads. */
+export function TimeRangeControl({
+  control,
+  allowAll = false,
+  maxDays,
+}: {
+  control: Pick<XAxisRangeControl, "range" | "setRange">;
+  allowAll?: boolean;
+  /** Cap on the exact-dates span; set it when an API enforces one. */
+  maxDays?: number;
+}) {
+  const { range, setRange } = control;
+  return (
+    <div
+      className="flex flex-wrap items-center gap-1"
+      role="group"
+      aria-label="Rango de tiempo del gráfico"
+    >
+      {allowAll && (
+        <Button
+          variant={range.kind === "all" ? "secondary" : "ghost"}
+          size="xs"
+          onClick={() => setRange({ kind: "all" })}
+        >
+          Todo
+        </Button>
+      )}
+      {DAY_PRESETS.map((option) => (
+        <Button
+          key={option.days}
+          variant={
+            range.kind === "days" && range.days === option.days
+              ? "secondary"
+              : "ghost"
+          }
+          size="xs"
+          onClick={() => setRange({ kind: "days", days: option.days })}
+        >
+          {option.label}
+        </Button>
+      ))}
+      <ChartRangePicker value={range} onChange={setRange} maxDays={maxDays} />
+    </div>
   );
 }

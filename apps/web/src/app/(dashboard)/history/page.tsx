@@ -3,11 +3,18 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   Card,
+  CardAction,
   CardContent,
   CardDescription,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  InteractiveChart,
+  useTimeSeriesChart,
+} from "@/components/charts/interactive-chart";
+import { TimeRangeControl } from "@/components/charts/time-range-control";
+import { dayStartMs } from "@/components/charts/x-axis-range";
 import {
   Table,
   TableBody,
@@ -30,7 +37,6 @@ import {
   CartesianGrid,
   Tooltip,
   Legend,
-  ResponsiveContainer,
 } from "recharts";
 
 interface WealthSnapshot {
@@ -73,6 +79,7 @@ export default function HistoryPage() {
     notes: "",
   });
   const [saving, setSaving] = useState(false);
+  const chart = useTimeSeriesChart();
 
   const loadSnapshots = () => {
     fetch("/api/wealth")
@@ -135,20 +142,11 @@ export default function HistoryPage() {
   };
 
   const chartData = snapshots.map((s) => ({
-    date: new Date(s.snapshotDate).toLocaleDateString("es-CL", {
-      month: "short",
-      year: "2-digit",
-    }),
+    t: dayStartMs(s.snapshotDate.slice(0, 10)),
     Patrimonio: s.patrimonio,
     Deuda: s.deuda,
     Ahorro: s.ahorro,
   }));
-
-  const formatAxis = (value: number) => {
-    if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-    if (value >= 1_000) return `${(value / 1_000).toFixed(0)}K`;
-    return value.toString();
-  };
 
   const latest = snapshots[snapshots.length - 1];
 
@@ -236,15 +234,19 @@ export default function HistoryPage() {
             <CardDescription>
               Patrimonio, deuda y ahorro en el tiempo
             </CardDescription>
+            <CardAction>
+              <TimeRangeControl control={chart.x} allowAll />
+            </CardAction>
           </CardHeader>
           <CardContent>
-            <ResponsiveContainer width="100%" height={350}>
+            <InteractiveChart {...chart.interactiveProps} height={350}>
               <LineChart data={chartData}>
                 <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="date" fontSize={12} />
-                <YAxis tickFormatter={formatAxis} fontSize={12} />
+                <XAxis {...chart.xAxisProps} />
+                <YAxis {...chart.yAxisProps} />
                 <Tooltip
                   formatter={(value) => formatCLP(Number(value))}
+                  labelFormatter={chart.labelFormatter}
                 />
                 <Legend />
                 <Line
@@ -253,6 +255,7 @@ export default function HistoryPage() {
                   stroke="#2563eb"
                   strokeWidth={2}
                   dot={{ r: 3 }}
+                  isAnimationActive={false}
                 />
                 <Line
                   type="monotone"
@@ -260,6 +263,7 @@ export default function HistoryPage() {
                   stroke="#dc2626"
                   strokeWidth={2}
                   dot={{ r: 3 }}
+                  isAnimationActive={false}
                 />
                 <Line
                   type="monotone"
@@ -267,9 +271,10 @@ export default function HistoryPage() {
                   stroke="#16a34a"
                   strokeWidth={2}
                   dot={{ r: 3 }}
+                  isAnimationActive={false}
                 />
               </LineChart>
-            </ResponsiveContainer>
+            </InteractiveChart>
           </CardContent>
         </Card>
       )}

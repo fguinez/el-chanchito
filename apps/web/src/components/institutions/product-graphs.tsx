@@ -24,11 +24,18 @@ import {
 } from "recharts";
 import {
   Card,
+  CardAction,
   CardContent,
   CardDescription,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { useYAxisRange } from "@/components/charts/y-axis-range";
+import {
+  InteractiveChart,
+  useTimeSeriesChart,
+} from "@/components/charts/interactive-chart";
+import { TimeRangeControl } from "@/components/charts/time-range-control";
 import {
   formatBalance,
   productLimit,
@@ -89,13 +96,13 @@ function formatMonthEs(key: string): string {
 // ---------------------------------------------------------------------------
 
 function buildCupoHistory(history: ProductHistoryPoint[]) {
-  const rows: { date: string; Disponible: number; Utilizado: number }[] = [];
+  const rows: { t: number; Disponible: number; Utilizado: number }[] = [];
   for (const p of history) {
     const m = p.metrics;
     if (!m || (m.kind !== "credit_card" && m.kind !== "line_of_credit")) continue;
     if (m.available == null || m.owed == null) continue;
     rows.push({
-      date: formatDayEs(p.asOf.slice(0, 10)),
+      t: new Date(p.asOf).getTime(),
       Disponible: m.available,
       Utilizado: m.owed,
     });
@@ -111,6 +118,7 @@ export function CupoUtilizationCard({
   product: InstitutionProduct;
   history: ProductHistoryPoint[];
 }) {
+  const chart = useTimeSeriesChart();
   const m = product.metrics;
   let owed: number | null = null;
   let available: number | null = null;
@@ -133,6 +141,9 @@ export function CupoUtilizationCard({
         <CardDescription>
           Proporción del cupo utilizado y el que queda disponible
         </CardDescription>
+        <CardAction>
+          <TimeRangeControl control={chart.x} allowAll />
+        </CardAction>
       </CardHeader>
       <CardContent>
         <div className="grid items-center gap-6 lg:grid-cols-[minmax(0,280px)_1fr]">
@@ -176,16 +187,17 @@ export function CupoUtilizationCard({
           <div className="min-w-0">
             {historyRows.length >= 2 ? (
               <>
-                <ResponsiveContainer width="100%" height={220}>
+                <InteractiveChart {...chart.interactiveProps} height={220}>
                   <AreaChart data={historyRows}>
                     <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="date" fontSize={12} />
-                    <YAxis tickFormatter={formatAxisValue} fontSize={12} />
+                    <XAxis {...chart.xAxisProps} />
+                    <YAxis {...chart.yAxisProps} />
                     <Tooltip
                       formatter={(value, name) => [
                         formatBalance(product.currency, Number(value)) ?? "—",
                         name,
                       ]}
+                      labelFormatter={chart.labelFormatter}
                     />
                     <Legend />
                     <Area
@@ -196,6 +208,7 @@ export function CupoUtilizationCard({
                       fill={COLORS.income}
                       fillOpacity={0.5}
                       strokeWidth={2}
+                      isAnimationActive={false}
                     />
                     <Area
                       type="monotone"
@@ -205,9 +218,10 @@ export function CupoUtilizationCard({
                       fill={COLORS.expense}
                       fillOpacity={0.5}
                       strokeWidth={2}
+                      isAnimationActive={false}
                     />
                   </AreaChart>
-                </ResponsiveContainer>
+                </InteractiveChart>
                 <p className="mt-2 text-xs text-muted-foreground">
                   Evolución del cupo según cada observación reportada
                 </p>
@@ -375,6 +389,7 @@ export function TransactionWaterfallCard({
   transactions: ProductTransaction[];
   currentBalance: number;
 }) {
+  const yAxis = useYAxisRange();
   const isCredit = CREDIT_KINDS.has(product.kind);
   const balanceLabel = isCredit ? "Cupo disponible" : "Saldo";
   // A card's cupo disponible can never exceed its limit nor go below zero; a
@@ -397,7 +412,7 @@ export function TransactionWaterfallCard({
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <ResponsiveContainer width="100%" height={360}>
+        <InteractiveChart yControl={yAxis} height={360}>
           <ComposedChart data={data}>
             <CartesianGrid strokeDasharray="3 3" />
             <XAxis
@@ -406,7 +421,11 @@ export function TransactionWaterfallCard({
               minTickGap={24}
               tickFormatter={(value: number) => data[value]?.date ?? ""}
             />
-            <YAxis tickFormatter={formatAxisValue} fontSize={12} />
+            <YAxis
+              tickFormatter={formatAxisValue}
+              fontSize={12}
+              {...yAxis.yAxisProps}
+            />
             <Tooltip
               content={
                 <WaterfallTooltip
@@ -443,7 +462,7 @@ export function TransactionWaterfallCard({
               isAnimationActive={false}
             />
           </ComposedChart>
-        </ResponsiveContainer>
+        </InteractiveChart>
         <div className="mt-2 flex flex-wrap items-center gap-x-6 gap-y-1 text-xs text-muted-foreground">
           <span className="flex items-center gap-1.5">
             <span className="h-2.5 w-2.5 rounded-sm bg-red-600" /> Gasto
@@ -496,6 +515,7 @@ export function MonthlyFlowCard({
   product: InstitutionProduct;
   transactions: ProductTransaction[];
 }) {
+  const yAxis = useYAxisRange();
   const data = buildMonthlyFlow(transactions);
   if (data.length < 2) return null;
 
@@ -538,11 +558,15 @@ export function MonthlyFlowCard({
             </span>
           </span>
         </div>
-        <ResponsiveContainer width="100%" height={260}>
+        <InteractiveChart yControl={yAxis} height={260}>
           <ComposedChart data={data}>
             <CartesianGrid strokeDasharray="3 3" />
             <XAxis dataKey="month" fontSize={12} />
-            <YAxis tickFormatter={formatAxisValue} fontSize={12} />
+            <YAxis
+              tickFormatter={formatAxisValue}
+              fontSize={12}
+              {...yAxis.yAxisProps}
+            />
             <Tooltip
               formatter={(value, name) => [
                 formatBalance(product.currency, Number(value)) ?? "—",
@@ -571,7 +595,7 @@ export function MonthlyFlowCard({
               isAnimationActive={false}
             />
           </ComposedChart>
-        </ResponsiveContainer>
+        </InteractiveChart>
       </CardContent>
     </Card>
   );

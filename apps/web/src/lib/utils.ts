@@ -39,10 +39,27 @@ export function formatDayEs(date: string): string {
   });
 }
 
+/** Compact es-CL label for a time-axis tick; the year appears only when it
+ *  isn't the current one. */
+export function formatDateTickMs(ms: number): string {
+  const date = new Date(ms);
+  const options: Intl.DateTimeFormatOptions = { day: "2-digit", month: "short" };
+  if (date.getFullYear() !== new Date().getFullYear()) options.year = "2-digit";
+  return date.toLocaleDateString("es-CL", options);
+}
+
+/** Full es-CL date for tooltips and badges over a numeric time axis. */
+export function formatDateMs(ms: number): string {
+  return new Date(ms).toLocaleDateString("es-CL");
+}
+
 /** Compact axis labels for large amounts (matches history/page.tsx). */
 export function formatAxisValue(value: number): string {
   const abs = Math.abs(value);
   if (abs >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
   if (abs >= 1_000) return `${(value / 1_000).toFixed(0)}K`;
-  return value.toString();
+  if (abs < 1e-6) return "0";
+  // 3 significant digits: keeps small values exact enough while hiding the
+  // float noise interactive domains produce (e.g. 250.0000001).
+  return Number(value.toPrecision(3)).toString();
 }

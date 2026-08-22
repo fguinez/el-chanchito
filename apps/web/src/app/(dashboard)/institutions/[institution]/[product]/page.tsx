@@ -7,18 +7,23 @@ import {
   CartesianGrid,
   Line,
   LineChart,
-  ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
 import {
   Card,
+  CardAction,
   CardContent,
   CardDescription,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  InteractiveChart,
+  useTimeSeriesChart,
+} from "@/components/charts/interactive-chart";
+import { TimeRangeControl } from "@/components/charts/time-range-control";
 import {
   Table,
   TableBody,
@@ -29,7 +34,7 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { cn, formatCLP, formatAxisValue, formatDateEs } from "@/lib/utils";
+import { cn, formatCLP, formatDateEs } from "@/lib/utils";
 import { ArrowLeft } from "lucide-react";
 import { KIND_INFO } from "@chanchito/product-model";
 import {
@@ -62,11 +67,12 @@ interface ProductDetailResponse {
 
 /** Recharts rows from the balance history, own-currency balance. */
 function buildChartData(history: ProductHistoryPoint[]) {
-  return history.map((p) => ({ date: formatDateEs(p.asOf), Saldo: p.balance }));
+  return history.map((p) => ({
+    t: new Date(p.asOf).getTime(),
+    Saldo: p.balance,
+  }));
 }
 
-/** The chart plots at most this many points to stay readable. */
-const CHART_MAX_POINTS = 180;
 const HISTORY_LIST_ROWS = 30;
 
 export default function ProductDetailPage() {
@@ -78,6 +84,7 @@ export default function ProductDetailPage() {
   const [data, setData] = useState<ProductDetailResponse | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [error, setError] = useState(false);
+  const chart = useTimeSeriesChart();
 
   useEffect(() => {
     let cancelled = false;
@@ -141,7 +148,7 @@ export default function ProductDetailPage() {
   const isLiability = KIND_INFO[product.kind].role === "liability";
   const chips = productDetailChips(product);
   const cupo = productLimit(product);
-  const chartData = buildChartData(history.slice(-CHART_MAX_POINTS));
+  const chartData = buildChartData(history);
   const latestHistory = history.slice(-HISTORY_LIST_ROWS).reverse();
   const hasHistory = chartData.some((p) => p.Saldo != null);
 
@@ -274,19 +281,23 @@ export default function ProductDetailPage() {
           <CardDescription>
             Evolución del saldo según cada cambio reportado
           </CardDescription>
+          <CardAction>
+            <TimeRangeControl control={chart.x} allowAll />
+          </CardAction>
         </CardHeader>
         <CardContent>
           {hasHistory ? (
             <>
-              <ResponsiveContainer width="100%" height={300}>
+              <InteractiveChart {...chart.interactiveProps} height={300}>
                 <LineChart data={chartData}>
                   <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="date" fontSize={12} />
-                  <YAxis tickFormatter={formatAxisValue} fontSize={12} />
+                  <XAxis {...chart.xAxisProps} />
+                  <YAxis {...chart.yAxisProps} />
                   <Tooltip
                     formatter={(value) =>
                       formatBalance(product.currency, Number(value)) ?? "—"
                     }
+                    labelFormatter={chart.labelFormatter}
                   />
                   <Line
                     type="monotone"
@@ -294,9 +305,10 @@ export default function ProductDetailPage() {
                     stroke="#2563eb"
                     strokeWidth={2}
                     dot={false}
+                    isAnimationActive={false}
                   />
                 </LineChart>
-              </ResponsiveContainer>
+              </InteractiveChart>
               {product.currency !== "CLP" && (
                 <p className="mt-2 text-xs text-muted-foreground">
                   Aproximación: el saldo en CLP se convierte con los tipos de
