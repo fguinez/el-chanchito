@@ -463,16 +463,29 @@ export default function MonitorDetailPage() {
               </TableHeader>
               <TableBody>
                 {sortedReferences.map((ref) => (
-                  <TableRow key={`${ref.productId}:${ref.field}`}>
+                  <TableRow
+                    key={`${ref.productId}:${ref.field}`}
+                    className="relative hover:bg-muted/40"
+                  >
                     <TableCell className="font-mono text-xs">
                       {ref.institutionSlug ?? "?"}:{ref.productSlug ?? "?"}:
                       {ref.field}
                     </TableCell>
                     <TableCell>
-                      {ref.name ?? (
+                      {ref.name == null ? (
                         <span className="text-muted-foreground">
                           producto eliminado
                         </span>
+                      ) : ref.institutionSlug != null &&
+                        ref.productSlug != null ? (
+                        <Link
+                          href={`/institutions/${ref.institutionSlug}/${ref.productSlug}`}
+                          className="font-medium hover:text-primary after:absolute after:inset-0 after:content-['']"
+                        >
+                          {ref.name}
+                        </Link>
+                      ) : (
+                        ref.name
                       )}
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
