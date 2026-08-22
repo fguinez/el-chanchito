@@ -467,14 +467,29 @@ table, no session table and no third-party dependency.
   every path except Next's static output, so a new page or API route is
   protected the moment it exists. Route handlers hold no auth logic of their own.
 - **Session**: `apps/web/src/lib/auth/session.ts` mints
-  `{expiresAtMs}.{HMAC-SHA256}` with Web Crypto. The key is `SHA-256(context ‖
-  DASHBOARD_PASSWORD)`, so there is exactly one secret and rotating the password
-  invalidates every outstanding session. Expiry is absolute, never sliding.
+  `{expiresAtMs}.{HMAC-SHA256}` with Web Crypto. The key is
+  `PBKDF2-SHA256(context ‖ DASHBOARD_PASSWORD, fixed salt, 210k iterations)`, so
+  there is exactly one secret and rotating the password invalidates every
+  outstanding session. PBKDF2 (rather than a bare digest) is what keeps a leaked
+  cookie from yielding the password offline: the token is known plaintext. The
+  derived key is memoized per password, keyed on the password itself so a
+  rotation can never be served a stale key. Expiry is absolute, never sliding.
   Cookie: httpOnly, `SameSite=Lax`, `Secure` when the request is HTTPS
-  (`X-Forwarded-Proto` honored so it works behind a TLS-terminating proxy).
+  (`X-Forwarded-Proto` honored so it works behind a TLS-terminating proxy), and
+  named `__Host-chanchito_session` whenever it is `Secure` so a sibling subdomain
+  cannot toss a cookie over it. Reads accept either name; logout clears both.
 - **Re-login policy**: `DASHBOARD_SESSION_MAX_AGE` (duration, seconds,
   `browser`, or `unlimited`; default `12h`), parsed in
-  `apps/web/src/lib/auth/config.ts`. Invalid values fail closed to the default.
+  `apps/web/src/lib/auth/config.ts`. Invalid values fail closed to the default,
+  and durations are clamped to the 400-day browser cookie ceiling.
+- **Brute-force protection** (`apps/web/src/lib/auth/throttle.ts`): login
+  attempts are serialized through a process-wide promise mutex, so the 500 ms
+  delay on failure is a real global ceiling (~2 attempts/s) rather than a
+  per-request pause that concurrency erases. After 5 consecutive failures the
+  endpoint answers `429` with `Retry-After`, backing off exponentially from 5 s
+  to a 5 min cap; a successful login clears both counter and lockout. One global
+  counter is the right shape for one shared secret, and it sidesteps the
+  IP-spoofing games a per-client counter invites.
 - **Fail-closed posture** (`decideAuthMode`, a pure function so it is unit
   tested):
 
@@ -485,10 +500,27 @@ table, no session table and no third-party dependency.
   | unset | development | Disabled: identical to the pre-auth app, so `make dev` needs no setup |
 
 - **Public surfaces**: `/login`, `POST /api/auth/login`, `GET /api/auth/session`,
-  `/favicon.ico`, `_next/static` and `_next/image`. Nothing else.
-- **CSRF**: on top of `SameSite=Lax`, non-GET `/api/*` requests carrying
-  `Sec-Fetch-Site: cross-site` are rejected with `403` before any handler runs.
-  Redirect-back targets (`?next=`) are validated as same-origin relative paths.
+  `POST /api/auth/logout`, `/favicon.ico`, `_next/static` and `_next/image`.
+  Nothing else. Logout is public on purpose: it only deletes a cookie, and
+  gating it would leave an expired token permanently stuck in the browser.
+- **CSRF** (`apps/web/src/lib/auth/csrf.ts`): `SameSite=Lax` only stops
+  *cross-site* requests, so a sibling subdomain or any host under a shared public
+  suffix (`*.duckdns.org`, `*.nip.io`, `*.ngrok-free.app`) would otherwise be
+  free to POST to every API. Mutating `/api/*` requests are therefore checked
+  against two allow-lists before any handler runs, `403` on failure:
+  `Sec-Fetch-Site` must be `same-origin`, `none` or absent (case-insensitive; an
+  unknown value is refused), and `Origin`, when present, must match the request's
+  own host. The Origin comparison uses `X-Forwarded-Host`/`Host` rather than
+  `request.nextUrl.origin`, and ignores the scheme: behind a TLS-terminating
+  proxy `nextUrl.origin` is the internal `http://host:port` while the browser
+  sends the external HTTPS origin, so comparing those two would reject every
+  legitimate write. Comparing hosts keeps the protection (an attacker page still
+  sends our host in `Host` and its own in `Origin`).
+- **Caching**: authenticated pages are served `Cache-Control: private, no-store`
+  and the login redirect `no-store`. Protected pages build as static and would
+  otherwise carry a year-long `s-maxage`, which a CDN could hand to an anonymous
+  visitor. Redirect-back targets (`?next=`) are validated as same-origin
+  relative paths.
 - The scraper control endpoint stays unauthenticated and internal (above); the
   dashboard password protects the `/api/institutions/refresh` proxy in front of
   it, which is what #23 asked for.

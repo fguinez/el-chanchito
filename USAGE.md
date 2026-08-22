@@ -77,7 +77,7 @@ Secrets and their meaning:
 | `chanchito.BUDA_API_KEY` | Buda.com API key |
 | `chanchito.BUDA_API_SECRET` | Buda.com API secret |
 | `chanchito.EMAIL_IMAP_PASSWORD` | Gmail App Password (see below) |
-| `chanchito.DASHBOARD_PASSWORD` | Dashboard login password (see "Deployment"; required in production) |
+| `chanchito.DASHBOARD_PASSWORD` | Dashboard login password (see "Deployment"; required in production, not exported to `make dev`) |
 
 A scraper is enabled only when all of its credentials are present.
 On non-macOS hosts (e.g. Docker-only deploys), export the secret env vars
@@ -294,11 +294,13 @@ All API routes are under `/api/`:
 | GET | `/api/balances` | Latest balance per account |
 | POST | `/api/month-reset` | Create next month's config |
 | POST | `/api/auth/login` | Exchange `DASHBOARD_PASSWORD` for a session cookie |
-| POST | `/api/auth/logout` | Clear the session cookie |
+| POST | `/api/auth/logout` | Clear the session cookie (public) |
 | GET | `/api/auth/session` | `{ enabled, authenticated }` (public) |
 
-When `DASHBOARD_PASSWORD` is set, every route above except `/api/auth/login` and
-`/api/auth/session` answers `401` without a valid session.
+When `DASHBOARD_PASSWORD` is set, every route above except the three marked
+public (`/api/auth/login`, `/api/auth/logout`, `/api/auth/session`) answers `401`
+without a valid session. Mutating requests are additionally rejected with `403`
+when they look cross-origin, logout included.
 
 ## Deployment
 
@@ -322,11 +324,21 @@ make secret-set KEY=DASHBOARD_PASSWORD
 export DASHBOARD_PASSWORD='choose-a-long-random-one'
 ```
 
+Surrounding whitespace is trimmed (a trailing newline from a Keychain or
+Docker-secret round trip is the usual culprit) and a warning is logged when that
+happens; a whitespace-only value counts as unset.
+
 Logging in sets an httpOnly, `SameSite=Lax` cookie holding a signed token
-(HMAC-SHA256). The signing key is derived from the password itself, so **changing
+(HMAC-SHA256, key derived from the password with PBKDF2), so **changing
 `DASHBOARD_PASSWORD` immediately logs every session out**. The cookie is marked
 `Secure` whenever the request arrives over HTTPS, including through a
-TLS-terminating reverse proxy (`X-Forwarded-Proto`).
+TLS-terminating reverse proxy (`X-Forwarded-Proto`); in that case it is also
+named `__Host-chanchito_session`, which pins it to the exact host.
+
+Login attempts are serialized process-wide and rate limited: after 5 consecutive
+failures the endpoint answers `429` with `Retry-After`, backing off exponentially
+up to 5 minutes. A successful login clears the counter. If you lock yourself out,
+wait for the window in `Retry-After` or restart the web service.
 
 `DASHBOARD_SESSION_MAX_AGE` controls how often the password is asked again:
 
@@ -341,8 +353,14 @@ TLS-terminating reverse proxy (`X-Forwarded-Proto`).
 An unparseable value falls back to `12h` and logs one warning at startup.
 
 Auth is skipped only in `next dev` with `DASHBOARD_PASSWORD` unset, so `make dev`
-stays frictionless. Set the variable (it is picked up from the Keychain by
-`make dev`) to exercise the login locally.
+stays frictionless. `scripts/load-secrets.sh` deliberately does **not** export
+`DASHBOARD_PASSWORD`, so storing it in the Keychain for deploys never turns the
+login on locally; production reads it from the environment (Compose passes it
+through), never from the Keychain. To exercise the login locally, opt in per run:
+
+```bash
+DASHBOARD_PASSWORD='changeme-example' make dev-web
+```
 
 Treat the password as one layer, not the whole story: prefer keeping the
 dashboard off the public internet entirely (Tailscale or another VPN), or behind
