@@ -1,7 +1,8 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
   LayoutDashboard,
   TrendingUp,
@@ -10,6 +11,7 @@ import {
   Receipt,
   Landmark,
   ArrowLeftRight,
+  LogOut,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -25,6 +27,32 @@ const navItems = [
 
 export function Sidebar() {
   const pathname = usePathname();
+  const router = useRouter();
+  // Only meaningful when DASHBOARD_PASSWORD is configured; the session endpoint
+  // is the single source of truth for that.
+  const [canLogOut, setCanLogOut] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    fetch("/api/auth/session")
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data) => {
+        if (active && data) setCanLogOut(Boolean(data.enabled && data.authenticated));
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  async function handleLogout() {
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } finally {
+      router.replace("/login");
+      router.refresh();
+    }
+  }
 
   return (
     <aside className="flex h-full w-64 flex-col border-r bg-sidebar text-sidebar-foreground">
@@ -53,6 +81,18 @@ export function Sidebar() {
           );
         })}
       </nav>
+      {canLogOut && (
+        <div className="border-t p-2">
+          <button
+            type="button"
+            onClick={handleLogout}
+            className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-sidebar-foreground/70 transition-colors hover:bg-sidebar-accent/50 hover:text-sidebar-accent-foreground"
+          >
+            <LogOut className="h-4 w-4" />
+            Cerrar sesión
+          </button>
+        </div>
+      )}
     </aside>
   );
 }
