@@ -77,6 +77,7 @@ Secrets and their meaning:
 | `chanchito.BUDA_API_KEY` | Buda.com API key |
 | `chanchito.BUDA_API_SECRET` | Buda.com API secret |
 | `chanchito.EMAIL_IMAP_PASSWORD` | Gmail App Password (see below) |
+| `chanchito.DASHBOARD_PASSWORD` | Dashboard login password (see "Deployment"; required in production, not exported to `make dev`) |
 
 A scraper is enabled only when all of its credentials are present.
 On non-macOS hosts (e.g. Docker-only deploys), export the secret env vars
@@ -292,8 +293,128 @@ All API routes are under `/api/`:
 | GET | `/api/scrapers` | Scraper run status |
 | GET | `/api/balances` | Latest balance per account |
 | POST | `/api/month-reset` | Create next month's config |
+| POST | `/api/auth/login` | Exchange `DASHBOARD_PASSWORD` for a session cookie |
+| POST | `/api/auth/logout` | Clear the session cookie (public) |
+| GET | `/api/auth/session` | `{ enabled, authenticated }` (public) |
+
+When `DASHBOARD_PASSWORD` is set, every route above except the three marked
+public (`/api/auth/login`, `/api/auth/logout`, `/api/auth/session`) answers `401`
+without a valid session. Mutating requests are additionally rejected with `403`
+when they look cross-origin, logout included.
 
 ## Deployment
+
+### Authentication (read this first)
+
+> **Never expose the dashboard publicly without `DASHBOARD_PASSWORD`.** Every
+> page and every `/api/*` route serves your real financial data. In production
+> (`next build` + `next start`, or the Docker image) the app **fails closed** if
+> the variable is unset: pages render a "not configured" notice and the API
+> answers `503`. Nothing is served, but nothing is protected either until you
+> configure it.
+
+The dashboard uses a single shared password (single-user by design; there is no
+user management). Setup:
+
+```bash
+# macOS: store it in the login Keychain alongside the scraper secrets
+make secret-set KEY=DASHBOARD_PASSWORD
+
+# anywhere else: export it (Compose passes it through to the web service)
+export DASHBOARD_PASSWORD='choose-a-long-random-one'
+```
+
+Surrounding whitespace is trimmed (a trailing newline from a Keychain or
+Docker-secret round trip is the usual culprit) and a warning is logged when that
+happens; a whitespace-only value counts as unset.
+
+Logging in sets an httpOnly, `SameSite=Lax` cookie holding a signed token
+(HMAC-SHA256, key derived from the password with PBKDF2), so **changing
+`DASHBOARD_PASSWORD` immediately logs every session out**. The cookie is marked
+`Secure` whenever the request arrives over HTTPS; in that case it is also named
+`__Host-chanchito_session`, which pins it to the exact host, and the unprefixed
+name is no longer accepted. To have `X-Forwarded-Proto` count as HTTPS (a
+TLS-terminating reverse proxy), set `DASHBOARD_TRUST_PROXY` (below).
+
+Login attempts are serialized process-wide, so at most one password check runs at
+a time and each failure holds the line for 500 ms: that is a hard global ceiling
+of roughly two guesses per second no matter how many clients pile on, and a flood
+is turned away with `429` instead of queueing ahead of you. On top of that, each
+client address gets its own lockout: after 5 consecutive failures **from that
+client** the endpoint answers `429` with `Retry-After`, backing off exponentially
+up to 5 minutes. A successful login clears that client's counter, an idle
+15-minute window decays it, and a client that has been locked for more than 30
+minutes straight has its password checked again (a correct one gets in, a wrong
+one still gets `429`).
+
+Someone hammering the login therefore locks out the address they are hammering
+from, not you, and cannot keep you out indefinitely even if they manage to look
+like you. If you do lock yourself out, wait for the window in `Retry-After`, log
+in from another network, or restart the web service.
+
+### Behind a reverse proxy: `DASHBOARD_TRUST_PROXY`
+
+`X-Forwarded-Host`, `X-Forwarded-Proto` and `X-Forwarded-For` are just request
+headers: anyone can send them, and there is no untainted signal to check them
+against (the Next server even derives the request URL's own scheme from
+`X-Forwarded-Proto`). They are therefore **ignored by default** and only honored
+when you declare that a proxy is in front:
+
+```bash
+DASHBOARD_TRUST_PROXY=1   # 1, true, yes or on; anything else (or unset) is off
+```
+
+| Setting | Forwarded host (Origin check) | Forwarded proto (`Secure` cookie) | Forwarded client address (lockout scope) |
+|---|---|---|---|
+| unset (default) | ignored, `Host` is used | ignored; the cookie is `Secure` only when the connection itself is HTTPS and nothing forwarded a scheme | the caller's claim, which only ever scopes the caller's own lockout, and the connection's address when it made no claim |
+| `1` | first entry honored | first entry honored | first entry honored |
+
+**Set it whenever a reverse proxy sits in front**, and only then: the proxy must
+overwrite these headers rather than pass a client's through. Without it a proxy
+that rewrites `Host` makes every write look cross-origin (`403`), and a
+TLS-terminating proxy leaves the session cookie without the `Secure` flag,
+because `next start` stamps `X-Forwarded-Proto` on every request and an untrusted
+stamp is worth nothing. Enabling it asks for the password once more, since the
+session then moves to the host-pinned cookie name.
+
+> **Symptom to recognize: a login that loops with no error.** If the app answers
+> `200` to the login, the browser returns to `/login` immediately and nothing is
+> shown, the session cookie is being dropped. That happens when the cookie is
+> marked `Secure` (so it is also `__Host-`) while the browser is talking plain
+> HTTP: browsers discard such a cookie silently. The usual cause is a proxy that
+> stamps `X-Forwarded-Proto: https` unconditionally while still being reachable
+> over `http://` (LAN access, a half-configured tunnel) together with
+> `DASHBOARD_TRUST_PROXY` on. The login page now checks the session before
+> navigating and reports it instead of looping, and the server logs one warning
+> the first time it sets a `Secure` cookie on a forwarded header's word alone.
+> The fix is to serve the dashboard over HTTPS, or to unset
+> `DASHBOARD_TRUST_PROXY`.
+
+`DASHBOARD_SESSION_MAX_AGE` controls how often the password is asked again:
+
+| Value | Behavior |
+|---|---|
+| unset | Default: re-login 12 hours after logging in |
+| `30m`, `12h`, `7d`, `30d` | Absolute expiry after that duration (not sliding) |
+| `3600` | Same, in seconds |
+| `browser` | Session cookie: re-login on every new browser session (the token still carries a hard 30-day cap) |
+| `unlimited` | 400 days (the browser's cookie ceiling); sessions effectively last until the password changes |
+
+An unparseable value falls back to `12h` and logs one warning at startup.
+
+Auth is skipped only in `next dev` with `DASHBOARD_PASSWORD` unset, so `make dev`
+stays frictionless. `scripts/load-secrets.sh` deliberately does **not** export
+`DASHBOARD_PASSWORD`, so storing it in the Keychain for deploys never turns the
+login on locally; production reads it from the environment (Compose passes it
+through), never from the Keychain. To exercise the login locally, opt in per run:
+
+```bash
+DASHBOARD_PASSWORD='changeme-example' make dev-web
+```
+
+Treat the password as one layer, not the whole story: prefer keeping the
+dashboard off the public internet entirely (Tailscale or another VPN), or behind
+a reverse proxy that terminates TLS and adds its own access control.
 
 ### Local (Docker Compose)
 

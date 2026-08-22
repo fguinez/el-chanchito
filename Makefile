@@ -27,7 +27,7 @@ env: ## Create .env from .env.example
 # Secrets live in the login Keychain as generic passwords named "chanchito.<VAR>".
 # Non-secret config (RUT, emails, hosts) stays in .env.
 
-SECRET_KEYS := BANCHILE_PASSWORD LIDER_BCI_PASSWORD FINTUAL_PASSWORD BUDA_API_KEY BUDA_API_SECRET EMAIL_IMAP_PASSWORD
+SECRET_KEYS := BANCHILE_PASSWORD LIDER_BCI_PASSWORD FINTUAL_PASSWORD BUDA_API_KEY BUDA_API_SECRET EMAIL_IMAP_PASSWORD DASHBOARD_PASSWORD
 
 secrets-init: ## Store scraper secrets in macOS Keychain (interactive, skips existing)
 	@for k in $(SECRET_KEYS); do \

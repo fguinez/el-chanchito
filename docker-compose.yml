@@ -25,6 +25,13 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-finance}:${POSTGRES_PASSWORD:-finance}@postgres:5432/${POSTGRES_DB:-finance}
       # Internal-only control endpoint on the scraper service (see below).
       SCRAPER_CONTROL_URL: ${SCRAPER_CONTROL_URL:-http://scrapers:8080}
+      # Dashboard login. Without DASHBOARD_PASSWORD the app fails closed in
+      # production and serves nothing (see USAGE.md > Deployment).
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:-}
+      DASHBOARD_SESSION_MAX_AGE: ${DASHBOARD_SESSION_MAX_AGE:-}
+      # Set to 1 only when a reverse proxy in front rewrites X-Forwarded-*
+      # (see USAGE.md > Behind a reverse proxy); unset means they are ignored.
+      DASHBOARD_TRUST_PROXY: ${DASHBOARD_TRUST_PROXY:-}
     depends_on:
       postgres:
         condition: service_healthy
