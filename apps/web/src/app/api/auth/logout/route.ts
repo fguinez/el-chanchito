@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { clearedSessionCookies, isSecureRequest } from "@/lib/auth/cookie";
+import { trustProxyHeaders } from "@/lib/auth/env";
 
 const NO_STORE = { "cache-control": "no-store" } as const;
 
@@ -12,7 +13,8 @@ const NO_STORE = { "cache-control": "no-store" } as const;
  */
 export async function POST(request: NextRequest) {
   const response = NextResponse.json({ authenticated: false }, { headers: NO_STORE });
-  for (const cookie of clearedSessionCookies(isSecureRequest(request))) {
+  const secure = isSecureRequest(request, trustProxyHeaders());
+  for (const cookie of clearedSessionCookies(secure)) {
     response.cookies.set(cookie);
   }
   return response;

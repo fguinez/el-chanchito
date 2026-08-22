@@ -29,6 +29,9 @@ services:
       # production and serves nothing (see USAGE.md > Deployment).
       DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:-}
       DASHBOARD_SESSION_MAX_AGE: ${DASHBOARD_SESSION_MAX_AGE:-}
+      # Set to 1 only when a reverse proxy in front rewrites X-Forwarded-*
+      # (see USAGE.md > Behind a reverse proxy); unset means they are ignored.
+      DASHBOARD_TRUST_PROXY: ${DASHBOARD_TRUST_PROXY:-}
     depends_on:
       postgres:
         condition: service_healthy

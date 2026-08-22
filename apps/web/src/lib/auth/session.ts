@@ -73,9 +73,11 @@ function deriveKey(password: string): Promise<CryptoKey> {
   const cached = keyCache.get(password);
   if (cached) return cached;
 
-  const pending = derive(password).catch((error) => {
-    // Never cache a failure: the next request must be able to retry.
-    keyCache.delete(password);
+  // The rejection handler deletes only its own entry: by the time a slow
+  // failure lands, a retry may already have stored a good key under the same
+  // password, and evicting that would throw away a working derivation.
+  const pending: Promise<CryptoKey> = derive(password).catch((error) => {
+    if (keyCache.get(password) === pending) keyCache.delete(password);
     throw error;
   });
 

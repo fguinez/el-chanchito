@@ -10,7 +10,15 @@
  * rejected rather than waved through.
  */
 
-/** Methods that cannot change state and therefore skip the checks below. */
+/**
+ * Methods that cannot change state and therefore skip the checks below.
+ *
+ * `OPTIONS` is deliberately absent, and that is load-bearing rather than an
+ * oversight: treating a preflight as mutating is what makes a forged
+ * `X-Forwarded-Host` unusable from a browser. Forging a header forces a
+ * preflight, the preflight is refused here, and the real request never happens.
+ * Moving `OPTIONS` into this set would quietly open that path.
+ */
 const SAFE_METHODS = new Set(["GET", "HEAD"]);
 
 export function isMutatingMethod(method: string): boolean {
@@ -35,12 +43,20 @@ export function isAllowedFetchSite(raw: string | null | undefined): boolean {
  * The host the client believes it is talking to.
  *
  * `X-Forwarded-Host` wins over `Host` so this keeps working behind a reverse
- * proxy that rewrites `Host` to an internal name.
+ * proxy that rewrites `Host` to an internal name, but **only** when
+ * DASHBOARD_TRUST_PROXY says a proxy is actually in front. The header is
+ * otherwise client-writable, and honoring it unconditionally would let any
+ * caller name its own host and so satisfy the Origin check below with a matching
+ * forged pair. With trust off only `Host` counts, which is what the connection
+ * was actually addressed to.
  */
 export function requestHost(
-  headers: Pick<Headers, "get">
+  headers: Pick<Headers, "get">,
+  trustProxy: boolean
 ): string | undefined {
-  const forwarded = headers.get("x-forwarded-host")?.split(",")[0]?.trim();
+  const forwarded = trustProxy
+    ? headers.get("x-forwarded-host")?.split(",")[0]?.trim()
+    : undefined;
   const host = forwarded || headers.get("host")?.trim();
   return host ? host.toLowerCase() : undefined;
 }
@@ -64,7 +80,8 @@ export function requestHost(
  */
 export function isAllowedOrigin(
   origin: string | null | undefined,
-  headers: Pick<Headers, "get">
+  headers: Pick<Headers, "get">,
+  trustProxy: boolean
 ): boolean {
   if (!origin) return true;
 
@@ -76,6 +93,6 @@ export function isAllowedOrigin(
   }
   if (!originHost) return false;
 
-  const host = requestHost(headers);
+  const host = requestHost(headers, trustProxy);
   return host !== undefined && originHost === host;
 }

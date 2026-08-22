@@ -48,7 +48,11 @@ function makeRequest({
   return new NextRequest(url, { method, headers: merged });
 }
 
-async function validSessionCookie(name = SESSION_COOKIE_NAME): Promise<string> {
+// Requests in this suite arrive over HTTPS (see ORIGIN), where a real browser
+// carries the host-pinned name, so that is the default here too.
+async function validSessionCookie(
+  name = SECURE_SESSION_COOKIE_NAME
+): Promise<string> {
   const token = await createSessionToken(PASSWORD, 3600);
   return `${name}=${token}`;
 }
@@ -58,16 +62,25 @@ function enforce(): void {
   process.env.DASHBOARD_PASSWORD = PASSWORD;
 }
 
+/** Declares a reverse proxy in front, so X-Forwarded-* may be believed. */
+function trustProxy(): void {
+  process.env.DASHBOARD_TRUST_PROXY = "1";
+}
+
 const originalPassword = process.env.DASHBOARD_PASSWORD;
+const originalTrustProxy = process.env.DASHBOARD_TRUST_PROXY;
 const originalNodeEnv = process.env.NODE_ENV;
 
 beforeEach(() => {
   delete process.env.DASHBOARD_PASSWORD;
+  delete process.env.DASHBOARD_TRUST_PROXY;
 });
 
 afterEach(() => {
   if (originalPassword === undefined) delete process.env.DASHBOARD_PASSWORD;
   else process.env.DASHBOARD_PASSWORD = originalPassword;
+  if (originalTrustProxy === undefined) delete process.env.DASHBOARD_TRUST_PROXY;
+  else process.env.DASHBOARD_TRUST_PROXY = originalTrustProxy;
   // NODE_ENV is read-only in the Next types but writable at runtime.
   (process.env as Record<string, string | undefined>).NODE_ENV = originalNodeEnv;
 });
@@ -156,7 +169,7 @@ describe("proxy: enforced mode without a session", () => {
     const response = await proxy(
       makeRequest({
         path: "/api/balances",
-        cookie: `${SESSION_COOKIE_NAME}=1799999999999.deadbeef`,
+        cookie: `${SECURE_SESSION_COOKIE_NAME}=1799999999999.deadbeef`,
       })
     );
     expect(response.status).toBe(401);
@@ -175,15 +188,29 @@ describe("proxy: enforced mode with a session", () => {
     expect(response.headers.get("cache-control")).toBe("private, no-store");
   });
 
-  it("accepts the host-pinned cookie name too", async () => {
+  it("accepts the plain cookie name over plain HTTP", async () => {
+    // The only channel where browsers reject the __Host- prefix.
     const response = await proxy(
       makeRequest({
         path: "/history",
-        cookie: await validSessionCookie(SECURE_SESSION_COOKIE_NAME),
+        origin: "http://localhost:3000",
+        cookie: await validSessionCookie(SESSION_COOKIE_NAME),
       })
     );
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("private, no-store");
+  });
+
+  it("refuses the plain cookie name over HTTPS", async () => {
+    // Nuisance only (the name cannot be forged into a valid token), but a
+    // sibling subdomain has no business being read on a secure request.
+    const response = await proxy(
+      makeRequest({
+        path: "/history",
+        cookie: await validSessionCookie(SESSION_COOKIE_NAME),
+      })
+    );
+    expect(response.status).toBe(307);
   });
 
   it("prefers the host-pinned cookie over a tossed plain one", async () => {
@@ -262,7 +289,8 @@ describe("proxy: cross-site write rejection", () => {
     expect((await postWith({ origin: "null" })).status).toBe(403);
   });
 
-  it("does not reject a legitimate request behind a TLS-terminating proxy", async () => {
+  it("does not reject a legitimate request behind a trusted TLS-terminating proxy", async () => {
+    trustProxy();
     // The internal request arrives over plain HTTP on an internal host while the
     // browser sends the external HTTPS origin. Comparing Origin against
     // nextUrl.origin would 403 every write in this very ordinary deployment.
@@ -281,6 +309,7 @@ describe("proxy: cross-site write rejection", () => {
   });
 
   it("still rejects a forged Origin behind that same proxy", async () => {
+    trustProxy();
     const request = new NextRequest(new URL("http://127.0.0.1:3000/api/month-reset"), {
       method: "POST",
       headers: {
@@ -292,6 +321,28 @@ describe("proxy: cross-site write rejection", () => {
       },
     });
     expect((await proxy(request)).status).toBe(403);
+  });
+
+  it("rejects a forged forwarded-host and Origin pair unless a proxy is trusted", async () => {
+    // Both headers are the caller's to write. With DASHBOARD_TRUST_PROXY unset
+    // the Origin check compares against Host, which the forged pair misses.
+    const forged = async () =>
+      new NextRequest(new URL("http://127.0.0.1:3000/api/month-reset"), {
+        method: "POST",
+        headers: {
+          host: "127.0.0.1:3000",
+          "x-forwarded-host": "evil.example",
+          origin: "https://evil.example",
+          cookie: await validSessionCookie(SESSION_COOKIE_NAME),
+        },
+      });
+
+    expect((await proxy(await forged())).status).toBe(403);
+
+    // With a proxy declared the forwarded host is believed again, which is the
+    // whole point of the opt-in: only the operator can turn it on.
+    trustProxy();
+    expect((await proxy(await forged())).status).toBe(200);
   });
 
   it("leaves safe methods alone", async () => {

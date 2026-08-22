@@ -1,7 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { readSessionCookie } from "@/lib/auth/config";
-import { currentAuthMode, dashboardPassword } from "@/lib/auth/env";
+import { isSecureRequest } from "@/lib/auth/cookie";
+import {
+  currentAuthMode,
+  dashboardPassword,
+  trustProxyHeaders,
+} from "@/lib/auth/env";
 import { verifySessionToken } from "@/lib/auth/session";
 
 const NO_STORE = { "cache-control": "no-store" } as const;
@@ -23,7 +28,10 @@ export async function GET(request: NextRequest) {
   }
 
   const authenticated = await verifySessionToken(
-    readSessionCookie((name) => request.cookies.get(name)?.value),
+    readSessionCookie(
+      (name) => request.cookies.get(name)?.value,
+      isSecureRequest(request, trustProxyHeaders())
+    ),
     dashboardPassword() as string
   );
 

@@ -53,39 +53,53 @@ describe("isAllowedFetchSite", () => {
 });
 
 describe("requestHost", () => {
-  it("prefers the forwarded host and lowercases it", () => {
-    expect(requestHost(headers({ host: "internal:3000" }))).toBe("internal:3000");
+  it("prefers the forwarded host and lowercases it when a proxy is trusted", () => {
+    expect(requestHost(headers({ host: "internal:3000" }), true)).toBe(
+      "internal:3000"
+    );
     expect(
       requestHost(
-        headers({ host: "internal:3000", "x-forwarded-host": "Dashboard.Example" })
+        headers({ host: "internal:3000", "x-forwarded-host": "Dashboard.Example" }),
+        true
       )
     ).toBe("dashboard.example");
   });
 
+  it("ignores the forwarded host entirely when no proxy is trusted", () => {
+    // The header is client-writable, so with trust off only Host counts.
+    expect(
+      requestHost(
+        headers({ host: "internal:3000", "x-forwarded-host": "dashboard.example" }),
+        false
+      )
+    ).toBe("internal:3000");
+  });
+
   it("takes the first entry of a forwarded chain", () => {
     expect(
-      requestHost(headers({ "x-forwarded-host": "dashboard.example, internal" }))
+      requestHost(headers({ "x-forwarded-host": "dashboard.example, internal" }), true)
     ).toBe("dashboard.example");
   });
 
   it("is undefined when neither header is present", () => {
-    expect(requestHost(headers({}))).toBeUndefined();
+    expect(requestHost(headers({}), true)).toBeUndefined();
+    expect(requestHost(headers({}), false)).toBeUndefined();
   });
 });
 
 describe("isAllowedOrigin", () => {
   it("allows an absent Origin (non-browser clients never send one)", () => {
-    expect(isAllowedOrigin(null, headers({ host: "dashboard.example" }))).toBe(true);
-    expect(isAllowedOrigin(undefined, headers({ host: "dashboard.example" }))).toBe(
+    expect(isAllowedOrigin(null, headers({ host: "dashboard.example" }), false)).toBe(true);
+    expect(isAllowedOrigin(undefined, headers({ host: "dashboard.example" }), false)).toBe(
       true
     );
   });
 
   it("matches the request's own host", () => {
     const h = headers({ host: "dashboard.example" });
-    expect(isAllowedOrigin("https://dashboard.example", h)).toBe(true);
-    expect(isAllowedOrigin("http://dashboard.example", h)).toBe(true);
-    expect(isAllowedOrigin("https://DASHBOARD.example", h)).toBe(true);
+    expect(isAllowedOrigin("https://dashboard.example", h, false)).toBe(true);
+    expect(isAllowedOrigin("http://dashboard.example", h, false)).toBe(true);
+    expect(isAllowedOrigin("https://DASHBOARD.example", h, false)).toBe(true);
   });
 
   it("rejects any other host, sibling subdomains included", () => {
@@ -96,14 +110,14 @@ describe("isAllowedOrigin", () => {
       "https://dashboard.example.evil.test",
       "https://dashboard.example:8443",
     ]) {
-      expect(isAllowedOrigin(origin, h), origin).toBe(false);
+      expect(isAllowedOrigin(origin, h, false), origin).toBe(false);
     }
   });
 
   it("rejects an opaque or unparseable Origin", () => {
     const h = headers({ host: "dashboard.example" });
     for (const origin of ["null", "not a url", "://", "https://"]) {
-      expect(isAllowedOrigin(origin, h), origin).toBe(false);
+      expect(isAllowedOrigin(origin, h, false), origin).toBe(false);
     }
   });
 
@@ -115,13 +129,24 @@ describe("isAllowedOrigin", () => {
       "x-forwarded-host": "dashboard.example",
       "x-forwarded-proto": "https",
     });
-    expect(isAllowedOrigin("https://dashboard.example", h)).toBe(true);
-    expect(isAllowedOrigin("https://evil.example", h)).toBe(false);
+    expect(isAllowedOrigin("https://dashboard.example", h, true)).toBe(true);
+    expect(isAllowedOrigin("https://evil.example", h, true)).toBe(false);
     // The internal host is no longer accepted once a forwarded host is declared.
-    expect(isAllowedOrigin("http://127.0.0.1:3000", h)).toBe(false);
+    expect(isAllowedOrigin("http://127.0.0.1:3000", h, true)).toBe(false);
+  });
+
+  it("rejects a forged forwarded-host and Origin pair when no proxy is trusted", () => {
+    // Both headers are the client's to write, so a matching pair proves nothing:
+    // with trust off the comparison falls back to Host, which does not match.
+    const h = headers({
+      host: "dashboard.example",
+      "x-forwarded-host": "evil.example",
+    });
+    expect(isAllowedOrigin("https://evil.example", h, false)).toBe(false);
+    expect(isAllowedOrigin("https://evil.example", h, true)).toBe(true);
   });
 
   it("rejects everything when no host header is available to compare against", () => {
-    expect(isAllowedOrigin("https://dashboard.example", headers({}))).toBe(false);
+    expect(isAllowedOrigin("https://dashboard.example", headers({}), false)).toBe(false);
   });
 });

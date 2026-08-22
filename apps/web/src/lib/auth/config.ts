@@ -25,11 +25,34 @@ export function sessionCookieName(secure: boolean): string {
 /**
  * Reads whichever session cookie is in play. The host-pinned name wins so a
  * tossed plain cookie cannot shadow the real one.
+ *
+ * On a secure request the plain name is refused outright: it is the only name a
+ * sibling subdomain can write, and over HTTPS our own logins never use it. The
+ * unprefixed name stays accepted on plain-HTTP requests, which is the only
+ * channel where browsers reject the `__Host-` prefix (LAN access, `next start`
+ * on localhost, a proxy whose forwarded proto we are not configured to trust).
  */
 export function readSessionCookie(
-  get: (name: string) => string | undefined
+  get: (name: string) => string | undefined,
+  secure = false
 ): string | undefined {
-  return get(SECURE_SESSION_COOKIE_NAME) ?? get(SESSION_COOKIE_NAME);
+  const pinned = get(SECURE_SESSION_COOKIE_NAME);
+  if (pinned !== undefined) return pinned;
+  return secure ? undefined : get(SESSION_COOKIE_NAME);
+}
+
+/**
+ * Whether `X-Forwarded-*` headers may be believed, from DASHBOARD_TRUST_PROXY.
+ *
+ * Default: **no**. Those headers are client-writable unless a reverse proxy
+ * overwrites them, and `next start` fills the ones it can from the connection
+ * itself, so honoring them without a proxy in front lets any caller pick its own
+ * host, scheme and client address.
+ */
+export function parseTrustProxy(raw: string | undefined | null): boolean {
+  const value = raw?.trim().toLowerCase();
+  if (!value) return false;
+  return value === "1" || value === "true" || value === "yes" || value === "on";
 }
 
 /** Public paths reachable without a session (login UI plus its endpoints). */

@@ -6,6 +6,7 @@
 import {
   decideAuthMode,
   parseSessionMaxAge,
+  parseTrustProxy,
   type AuthMode,
   type SessionPolicy,
 } from "./config";
@@ -44,6 +45,14 @@ export function currentAuthMode(): AuthMode {
     password: process.env.DASHBOARD_PASSWORD,
     nodeEnv: process.env.NODE_ENV,
   });
+}
+
+/**
+ * Whether this deployment sits behind a reverse proxy whose `X-Forwarded-*`
+ * headers can be believed. Off unless DASHBOARD_TRUST_PROXY says otherwise.
+ */
+export function trustProxyHeaders(): boolean {
+  return parseTrustProxy(process.env.DASHBOARD_TRUST_PROXY);
 }
 
 /** Reads the session policy, logging at most one warning per invalid value. */

@@ -35,6 +35,26 @@ function loginErrorMessage(response: Response): string {
   return "No se pudo iniciar sesión";
 }
 
+/**
+ * Whether the browser actually kept the session cookie the login just set.
+ *
+ * A `Secure` cookie handed to a browser on a plain-HTTP leg is dropped without a
+ * word, and navigating anyway would bounce straight back to `/login` with no
+ * message at all (see USAGE.md > Authentication). Asking the session endpoint
+ * turns that silent loop into a real error. A failure to ask is treated as "it
+ * stuck", so a transient hiccup never blocks a good login.
+ */
+async function sessionCookieStuck(): Promise<boolean> {
+  try {
+    const response = await fetch("/api/auth/session", { cache: "no-store" });
+    if (!response.ok) return true;
+    const body = await response.json();
+    return body?.authenticated !== false;
+  } catch {
+    return true;
+  }
+}
+
 function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -56,6 +76,16 @@ function LoginForm() {
 
       if (!response.ok) {
         setError(loginErrorMessage(response));
+        setPassword("");
+        return;
+      }
+
+      if (!(await sessionCookieStuck())) {
+        setError(
+          "La contraseña es correcta, pero el navegador descartó la cookie de " +
+            "sesión. Suele pasar al entrar por http:// cuando el servidor la " +
+            "marca como Secure: abre el panel por HTTPS."
+        );
         setPassword("");
         return;
       }

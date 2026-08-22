@@ -13,7 +13,12 @@ import {
   isAllowedOrigin,
   isMutatingMethod,
 } from "@/lib/auth/csrf";
-import { currentAuthMode, dashboardPassword } from "@/lib/auth/env";
+import { isSecureRequest } from "@/lib/auth/cookie";
+import {
+  currentAuthMode,
+  dashboardPassword,
+  trustProxyHeaders,
+} from "@/lib/auth/env";
 import { verifySessionToken } from "@/lib/auth/session";
 
 /**
@@ -50,6 +55,9 @@ export async function proxy(request: NextRequest) {
   if (mode === "disabled") return NextResponse.next();
 
   const api = isApiPath(pathname);
+  // Forwarded headers are believed only where a proxy is declared to exist; see
+  // lib/auth/config.ts (parseTrustProxy).
+  const trustProxy = trustProxyHeaders();
 
   if (mode === "misconfigured") {
     if (api) {
@@ -67,14 +75,17 @@ export async function proxy(request: NextRequest) {
   if (api && isMutatingMethod(request.method)) {
     if (
       !isAllowedFetchSite(request.headers.get("sec-fetch-site")) ||
-      !isAllowedOrigin(request.headers.get("origin"), request.headers)
+      !isAllowedOrigin(request.headers.get("origin"), request.headers, trustProxy)
     ) {
       return jsonError("Cross-site request rejected", 403);
     }
   }
 
   const authenticated = await verifySessionToken(
-    readSessionCookie((name) => request.cookies.get(name)?.value),
+    readSessionCookie(
+      (name) => request.cookies.get(name)?.value,
+      isSecureRequest(request, trustProxy)
+    ),
     dashboardPassword() as string
   );
 

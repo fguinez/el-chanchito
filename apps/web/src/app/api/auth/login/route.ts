@@ -5,10 +5,15 @@ import {
   currentAuthMode,
   currentSessionPolicy,
   dashboardPassword,
+  trustProxyHeaders,
 } from "@/lib/auth/env";
-import { isSecureRequest, sessionCookieOptions } from "@/lib/auth/cookie";
+import {
+  isSecureRequest,
+  sessionCookieOptions,
+  warnOnForwardedProtoMismatch,
+} from "@/lib/auth/cookie";
 import { createSessionToken, verifyPassword } from "@/lib/auth/session";
-import { loginThrottle } from "@/lib/auth/throttle";
+import { loginClientKey, loginThrottle } from "@/lib/auth/throttle";
 
 const NO_STORE = { "cache-control": "no-store" } as const;
 
@@ -40,12 +45,19 @@ export async function POST(request: NextRequest) {
   }
 
   const expected = dashboardPassword() as string;
+  const trustProxy = trustProxyHeaders();
 
-  // Serialized and rate limited: one attempt at a time, process wide.
-  const outcome = await loginThrottle.run(async () => {
-    const ok = password.length > 0 && (await verifyPassword(password, expected));
-    return { ok, result: ok };
-  });
+  // Serialized process wide (one attempt at a time, so the failure delay is a
+  // real global ceiling) and locked out per client, so no remote party can lock
+  // the owner out of the only account.
+  const outcome = await loginThrottle.run(
+    loginClientKey(request.headers, trustProxy),
+    async () => {
+      const ok =
+        password.length > 0 && (await verifyPassword(password, expected));
+      return { ok, result: ok };
+    }
+  );
 
   if (outcome.status === "locked") {
     return NextResponse.json(
@@ -70,10 +82,14 @@ export async function POST(request: NextRequest) {
   const policy = currentSessionPolicy();
   const token = await createSessionToken(expected, tokenLifetimeSeconds(policy));
 
+  // Says out loud when the Secure flag rests on a forwarded header alone, which
+  // is the shape that used to loop the login silently.
+  warnOnForwardedProtoMismatch(request, trustProxy);
+
   const response = NextResponse.json({ authenticated: true }, { headers: NO_STORE });
   response.cookies.set({
     value: token,
-    ...sessionCookieOptions(policy, isSecureRequest(request)),
+    ...sessionCookieOptions(policy, isSecureRequest(request, trustProxy)),
   });
   return response;
 }
