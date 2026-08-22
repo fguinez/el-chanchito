@@ -193,6 +193,11 @@ def _make_control_handler(scheduler: AsyncIOScheduler, scraper_keys: set[str]):
         def do_GET(self) -> None:  # noqa: N802
             if self.path == "/health":
                 self._send(200, {"status": "ok"})
+            elif self.path == "/scrapers":
+                # Which scrapers exist is decided at startup by env vars
+                # (build_scrapers()), so expose the list for the dashboard
+                # instead of letting it hardcode a stale copy.
+                self._send(200, {"scrapers": sorted(scraper_keys)})
             else:
                 self._send(404, {"error": "not found"})
 
@@ -235,7 +240,10 @@ def _start_control_server(
         target=server.serve_forever, name="scraper-control", daemon=True
     )
     thread.start()
-    logger.info("Control server listening on :%s (POST /refresh[/{slug}])", port)
+    logger.info(
+        "Control server listening on :%s (POST /refresh[/{slug}], GET /scrapers)",
+        port,
+    )
     return server
 
 

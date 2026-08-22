@@ -1,4 +1,4 @@
-"""Tests for the internal scraper control server (POST /refresh)."""
+"""Tests for the internal scraper control server (/refresh, /scrapers)."""
 
 import json
 import urllib.error
@@ -55,6 +55,12 @@ class TestControlServer:
         status, body = _request(f"{base}/health", "GET")
         assert status == 200
         assert body == {"status": "ok"}
+
+    def test_scrapers_lists_enabled_slugs_sorted(self, server):
+        _, base = server
+        status, body = _request(f"{base}/scrapers", "GET")
+        assert status == 200
+        assert body == {"scrapers": ["buda", "fintual"]}
 
     def test_refresh_all_triggers_every_configured_scraper(self, server):
         scheduler, base = server

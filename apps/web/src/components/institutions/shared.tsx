@@ -83,17 +83,6 @@ export const INSTITUTION_KIND_LABELS: Record<string, string> = {
   other: "Otro",
 };
 
-/** Slugs with a live scraper the refresh button can trigger. Everything else
- *  (e.g. `bci_lider`, `manual`) gets a disabled button — see build_scrapers(). */
-export const SCRAPER_SLUGS = new Set([
-  "fintual",
-  "buda",
-  "banchile",
-  "mach",
-  "mercadopago",
-  "tenpo",
-]);
-
 // Latest scraper run per institution, from GET /api/scrapers (used for polling).
 export interface ScraperRun {
   institution: string;

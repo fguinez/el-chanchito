@@ -13,7 +13,6 @@ import { formatCLP, cn } from "@/lib/utils";
 import { AlertTriangle, ArrowLeft, Building2, ExternalLink, RefreshCw } from "lucide-react";
 import {
   INSTITUTION_KIND_LABELS,
-  SCRAPER_SLUGS,
   formatBalance,
   InstitutionProductsTable,
   type ApiInstitution,
@@ -49,7 +48,8 @@ export default function InstitutionDetailPage() {
     loadInstitution();
   }, [loadInstitution]);
 
-  const { syncing, serviceError, refresh } = useInstitutionRefresh(loadInstitution);
+  const { syncing, scrapers, serviceError, refresh } =
+    useInstitutionRefresh(loadInstitution);
 
   if (notFound) {
     return (
@@ -127,9 +127,9 @@ export default function InstitutionDetailPage() {
             variant="outline"
             size="sm"
             onClick={() => refresh(institution.slug)}
-            disabled={!SCRAPER_SLUGS.has(institution.slug) || syncing.has(institution.slug)}
+            disabled={!scrapers.has(institution.slug) || syncing.has(institution.slug)}
             title={
-              SCRAPER_SLUGS.has(institution.slug)
+              scrapers.has(institution.slug)
                 ? "Actualizar"
                 : "Sin scraper disponible"
             }

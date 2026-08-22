@@ -3,9 +3,11 @@
 // Refresh + polling for the Instituciones pages: trigger a scrape for one
 // institution (or all) via POST /api/institutions/refresh, then poll
 // GET /api/scrapers until each triggered run finishes, calling the page's
-// `reload` as each one lands.
+// `reload` as each one lands. Also fetches which institutions have a live
+// scraper (GET /api/scrapers/available) so the pages can disable the
+// per-institution buttons for everything else.
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   fetchRunMap,
   POLL_INTERVAL_MS,
@@ -17,6 +19,10 @@ import {
 export interface UseInstitutionRefresh {
   /** Slugs with a scrape currently in flight (spinning buttons). */
   syncing: Set<string>;
+  /** Slugs with a live scraper the per-institution buttons can trigger. Empty
+   *  while loading and when the scraper service is unknown/unreachable, which
+   *  disables the buttons: a refresh would fail anyway. */
+  scrapers: Set<string>;
   /** Set when the scraper service is unreachable / not configured (proxy 503). */
   serviceError: string | null;
   /** Trigger a scrape for one institution (by slug) or all when omitted. */
@@ -65,8 +71,30 @@ export function useInstitutionRefresh(
 ): UseInstitutionRefresh {
   // Institution slugs with a scrape currently in flight (spinning buttons).
   const [syncing, setSyncing] = useState<Set<string>>(new Set());
+  // Slugs with a live scraper (empty until loaded / when the service is down).
+  const [scrapers, setScrapers] = useState<Set<string>>(new Set());
   // Set when the scraper service is unreachable / not configured (proxy 503).
   const [serviceError, setServiceError] = useState<string | null>(null);
+
+  // Which scrapers exist is decided by the backend's env at startup
+  // (build_scrapers()), so ask it once instead of hardcoding the list. The
+  // proxy already degrades to an empty list on any failure.
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/scrapers/available")
+      .then((res) => res.json())
+      .then((data) => {
+        if (!cancelled && Array.isArray(data?.scrapers)) {
+          setScrapers(new Set<string>(data.scrapers));
+        }
+      })
+      .catch(() => {
+        /* keep the empty set */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const markDone = useCallback((slug: string) => {
     setSyncing((prev) => {
@@ -123,5 +151,5 @@ export function useInstitutionRefresh(
     [markDone, reload]
   );
 
-  return { syncing, serviceError, refresh };
+  return { syncing, scrapers, serviceError, refresh };
 }

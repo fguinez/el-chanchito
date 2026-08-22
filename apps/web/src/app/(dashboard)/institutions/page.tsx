@@ -15,7 +15,6 @@ import { formatCLP, cn } from "@/lib/utils";
 import { AlertTriangle, Building2, ExternalLink, RefreshCw } from "lucide-react";
 import {
   INSTITUTION_KIND_LABELS,
-  SCRAPER_SLUGS,
   timeAgo,
   formatBalance,
   InstitutionProductsTable,
@@ -48,7 +47,7 @@ export default function InstitutionsPage() {
     loadInstitutions();
   }, []);
 
-  const { syncing, serviceError, refresh } =
+  const { syncing, scrapers, serviceError, refresh } =
     useInstitutionRefresh(loadInstitutions);
 
   if (error) {
@@ -205,10 +204,10 @@ export default function InstitutionsPage() {
                     size="icon-sm"
                     onClick={() => refresh(inst.slug)}
                     disabled={
-                      !SCRAPER_SLUGS.has(inst.slug) || syncing.has(inst.slug)
+                      !scrapers.has(inst.slug) || syncing.has(inst.slug)
                     }
                     title={
-                      SCRAPER_SLUGS.has(inst.slug)
+                      scrapers.has(inst.slug)
                         ? "Actualizar"
                         : "Sin scraper disponible"
                     }
