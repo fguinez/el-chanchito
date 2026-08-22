@@ -440,7 +440,8 @@ Browser → web POST /api/institutions/refresh {institution?}
 ```
 
 - Endpoints: `POST /refresh` (all), `POST /refresh/{slug}` (one, `404` if not a
-  configured scraper), `GET /health`.
+  configured scraper), `GET /scrapers` (the enabled scraper slugs; the dashboard
+  uses it to decide which refresh buttons to enable), `GET /health`.
 - Triggering just moves a job's next run time to now, so it reuses each job's
   `coalesce=True` / `max_instances=1` guards — a manual trigger can't overlap a
   scheduled or in-flight run of the same institution. The HTTP call returns `202`

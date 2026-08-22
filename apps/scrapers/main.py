@@ -196,8 +196,12 @@ def _make_control_handler(scheduler: AsyncIOScheduler, scraper_keys: set[str]):
             elif self.path == "/scrapers":
                 # Which scrapers exist is decided at startup by env vars
                 # (build_scrapers()), so expose the list for the dashboard
-                # instead of letting it hardcode a stale copy.
-                self._send(200, {"scrapers": sorted(scraper_keys)})
+                # instead of letting it hardcode a stale copy. Advertise only
+                # slugs with a scheduler job: POST /refresh/{slug} 404s on the
+                # rest (no _SCHEDULES entry ⇒ never registered), and the two
+                # endpoints must agree on the set.
+                enabled = sorted(s for s in scraper_keys if scheduler.get_job(s))
+                self._send(200, {"scrapers": enabled})
             else:
                 self._send(404, {"error": "not found"})
 

@@ -208,8 +208,11 @@ The home page shows scraper status with:
 The **Instituciones** page has an **"Actualizar todo"** button plus a per-institution
 refresh icon. Clicking one triggers an immediate scrape instead of waiting for the
 next scheduled run; the button spins ("Sincronizando…") and the page reloads the
-balances once the run finishes. Institutions without a live scraper
-(`manual`) have the button disabled.
+balances once the run finishes. The dashboard asks the scraper service which
+scrapers are enabled (`GET /api/scrapers/available`, proxying the control
+endpoint's `GET /scrapers`) and disables the button for institutions not in
+that list; the same rule keeps buttons disabled while the list is loading and
+when the service isn't configured.
 
 This works only while the scraper service is running with its **internal control
 endpoint** enabled. The endpoint is an unauthenticated trigger, so it must stay on
@@ -220,6 +223,8 @@ instead of spinning forever.
 - **Scraper service** — set `SCRAPER_CONTROL_PORT` (a small HTTP server binds to it):
   - `POST /refresh` — trigger every configured scraper
   - `POST /refresh/{slug}` — trigger one (`404` if the slug isn't configured)
+  - `GET /scrapers`: the enabled scraper slugs (drives which refresh buttons
+    are enabled)
   - `GET /health` — liveness check
 - **Dashboard** — set `SCRAPER_CONTROL_URL` to reach that server; the web route
   `POST /api/institutions/refresh` (optional body `{"institution":"<slug>"}`) proxies

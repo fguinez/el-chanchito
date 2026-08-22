@@ -31,8 +31,21 @@ class FakeScheduler:
 
 @pytest.fixture
 def server():
+    scheduler = FakeScheduler(["buda", "fintual", "tenpo"])
+    handler = _make_control_handler(scheduler, {"buda", "fintual", "tenpo"})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    Thread(target=httpd.serve_forever, daemon=True).start()
+    port = httpd.server_address[1]
+    yield scheduler, f"http://127.0.0.1:{port}"
+    httpd.shutdown()
+
+
+@pytest.fixture
+def server_with_jobless_key():
+    """Like `server`, but "mach" is a scraper key with no scheduler job
+    (as happens in main_scheduled() when a slug has no _SCHEDULES entry)."""
     scheduler = FakeScheduler(["buda", "fintual"])
-    handler = _make_control_handler(scheduler, {"buda", "fintual"})
+    handler = _make_control_handler(scheduler, {"buda", "fintual", "mach"})
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     Thread(target=httpd.serve_forever, daemon=True).start()
     port = httpd.server_address[1]
@@ -60,13 +73,23 @@ class TestControlServer:
         _, base = server
         status, body = _request(f"{base}/scrapers", "GET")
         assert status == 200
+        assert body == {"scrapers": ["buda", "fintual", "tenpo"]}
+
+    def test_scrapers_excludes_keys_without_a_scheduler_job(
+        self, server_with_jobless_key
+    ):
+        # /scrapers must never advertise a slug POST /refresh/{slug} would
+        # 404 on, so a key without a scheduler job stays out of the list.
+        _, base = server_with_jobless_key
+        status, body = _request(f"{base}/scrapers", "GET")
+        assert status == 200
         assert body == {"scrapers": ["buda", "fintual"]}
 
     def test_refresh_all_triggers_every_configured_scraper(self, server):
         scheduler, base = server
         status, body = _request(f"{base}/refresh", "POST")
         assert status == 202
-        assert sorted(body["triggered"]) == ["buda", "fintual"]
+        assert sorted(body["triggered"]) == ["buda", "fintual", "tenpo"]
         assert scheduler.jobs["buda"].modified_with is not None
         assert "next_run_time" in scheduler.jobs["buda"].modified_with
 
