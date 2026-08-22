@@ -475,21 +475,61 @@ table, no session table and no third-party dependency.
   derived key is memoized per password, keyed on the password itself so a
   rotation can never be served a stale key. Expiry is absolute, never sliding.
   Cookie: httpOnly, `SameSite=Lax`, `Secure` when the request is HTTPS
-  (`X-Forwarded-Proto` honored so it works behind a TLS-terminating proxy), and
+  (`X-Forwarded-Proto` counts only with `DASHBOARD_TRUST_PROXY`, below), and
   named `__Host-chanchito_session` whenever it is `Secure` so a sibling subdomain
-  cannot toss a cookie over it. Reads accept either name; logout clears both.
+  cannot toss a cookie over it. On a secure request only the pinned name is read,
+  so a tossed plain cookie is not even looked at; plain HTTP, the one channel
+  where browsers reject the prefix, still accepts the unprefixed name. Logout
+  clears both.
 - **Re-login policy**: `DASHBOARD_SESSION_MAX_AGE` (duration, seconds,
   `browser`, or `unlimited`; default `12h`), parsed in
   `apps/web/src/lib/auth/config.ts`. Invalid values fail closed to the default,
   and durations are clamped to the 400-day browser cookie ceiling.
-- **Brute-force protection** (`apps/web/src/lib/auth/throttle.ts`): login
-  attempts are serialized through a process-wide promise mutex, so the 500 ms
-  delay on failure is a real global ceiling (~2 attempts/s) rather than a
-  per-request pause that concurrency erases. After 5 consecutive failures the
-  endpoint answers `429` with `Retry-After`, backing off exponentially from 5 s
-  to a 5 min cap; a successful login clears both counter and lockout. One global
-  counter is the right shape for one shared secret, and it sidesteps the
-  IP-spoofing games a per-client counter invites.
+- **Brute-force protection** (`apps/web/src/lib/auth/throttle.ts`): three layers,
+  ordered by how much a remote party can influence them. There is exactly one
+  account and one way in, so availability is part of the threat model: no remote
+  party may be able to keep the owner from logging in.
+  1. A **global** promise mutex serializing every attempt, so the 500 ms delay on
+     failure is a real ceiling (~2 attempts/s) rather than a per-request pause
+     that concurrency erases. Nothing can be spoofed to escape it and it covers
+     distributed attacks, which is why it, and not a global lockout, is the
+     backstop.
+  2. A **global** queue bound (8 attempts): past that, callers get `429`
+     immediately instead of parking the owner's request behind a long chain of
+     500 ms failures, and memory stays bounded.
+  3. A **per-client** progressive lockout: after 5 consecutive failures from one
+     client, `429` with `Retry-After`, backing off exponentially from 5 s to a
+     5 min cap. Scoped per client so a lockout an attacker triggers lands on the
+     identity it used. A successful login clears that client's state, 15 idle
+     minutes decay the counter (so the backoff cannot ratchet up forever), and
+     after 30 continuous minutes of lockout the password is checked again for
+     that client (a correct one gets in, a wrong one still gets `429`), which
+     bounds a targeted denial of service.
+
+  Client identity comes from `X-Forwarded-For`: its first entry when
+  `DASHBOARD_TRUST_PROXY` is set, otherwise the header as a whole, which
+  `next start` fills from the connection's remote address when the caller sent
+  none (`NextRequest.ip` is gone since Next 15). A forged value only buys the
+  forger its own bucket, which is exactly why the un-spoofable ceiling is layer 1
+  and the lockout is layer 3. There is deliberately no global lockout: any global
+  counter can be driven by an unauthenticated attacker, and a single failure needs
+  no knowledge of the password (an empty body counts).
+- **Trusting a proxy** (`DASHBOARD_TRUST_PROXY`, parsed in
+  `lib/auth/config.ts`): `X-Forwarded-Host`, `X-Forwarded-Proto` and
+  `X-Forwarded-For` are client-writable, and `next start` stamps the first two
+  from the connection when absent, so they are ignored unless this one flag says
+  a reverse proxy is in front. Off: the Origin check compares `Host`, and
+  `Secure` needs an HTTPS connection with no forwarded scheme in play at all
+  (`request.url`'s scheme is itself built from `X-Forwarded-Proto`, so a present
+  but untrusted header means "not secure" rather than "ask the URL"). On: the
+  first entry of each is honored. The flag exists because trusting the
+  forwarded host let any caller send a matching forged host/`Origin` pair, and
+  trusting the forwarded proto let a phantom `https` produce a `Secure`
+  `__Host-` cookie that the browser silently drops (the login loop documented in
+  USAGE.md). The login route logs one warning when `Secure` rests on the
+  forwarded header alone while the connection is plain HTTP, and the login page
+  re-checks `/api/auth/session` before navigating so a dropped cookie surfaces as
+  an error instead of a loop.
 - **Fail-closed posture** (`decideAuthMode`, a pure function so it is unit
   tested):
 
@@ -510,12 +550,15 @@ table, no session table and no third-party dependency.
   against two allow-lists before any handler runs, `403` on failure:
   `Sec-Fetch-Site` must be `same-origin`, `none` or absent (case-insensitive; an
   unknown value is refused), and `Origin`, when present, must match the request's
-  own host. The Origin comparison uses `X-Forwarded-Host`/`Host` rather than
+  own host. The Origin comparison uses `Host` (or
+  `X-Forwarded-Host` with `DASHBOARD_TRUST_PROXY` on) rather than
   `request.nextUrl.origin`, and ignores the scheme: behind a TLS-terminating
   proxy `nextUrl.origin` is the internal `http://host:port` while the browser
   sends the external HTTPS origin, so comparing those two would reject every
   legitimate write. Comparing hosts keeps the protection (an attacker page still
-  sends our host in `Host` and its own in `Origin`).
+  sends our host in `Host` and its own in `Origin`). `OPTIONS` counting as
+  mutating is load-bearing rather than an oversight: it is what refuses the
+  preflight that forging a header forces, so no browser-reachable path survives.
 - **Caching**: authenticated pages are served `Cache-Control: private, no-store`
   and the login redirect `no-store`. Protected pages build as static and would
   otherwise carry a year-long `s-maxage`, which a CDN could hand to an anonymous

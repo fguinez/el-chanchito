@@ -331,14 +331,64 @@ happens; a whitespace-only value counts as unset.
 Logging in sets an httpOnly, `SameSite=Lax` cookie holding a signed token
 (HMAC-SHA256, key derived from the password with PBKDF2), so **changing
 `DASHBOARD_PASSWORD` immediately logs every session out**. The cookie is marked
-`Secure` whenever the request arrives over HTTPS, including through a
-TLS-terminating reverse proxy (`X-Forwarded-Proto`); in that case it is also
-named `__Host-chanchito_session`, which pins it to the exact host.
+`Secure` whenever the request arrives over HTTPS; in that case it is also named
+`__Host-chanchito_session`, which pins it to the exact host, and the unprefixed
+name is no longer accepted. To have `X-Forwarded-Proto` count as HTTPS (a
+TLS-terminating reverse proxy), set `DASHBOARD_TRUST_PROXY` (below).
 
-Login attempts are serialized process-wide and rate limited: after 5 consecutive
-failures the endpoint answers `429` with `Retry-After`, backing off exponentially
-up to 5 minutes. A successful login clears the counter. If you lock yourself out,
-wait for the window in `Retry-After` or restart the web service.
+Login attempts are serialized process-wide, so at most one password check runs at
+a time and each failure holds the line for 500 ms: that is a hard global ceiling
+of roughly two guesses per second no matter how many clients pile on, and a flood
+is turned away with `429` instead of queueing ahead of you. On top of that, each
+client address gets its own lockout: after 5 consecutive failures **from that
+client** the endpoint answers `429` with `Retry-After`, backing off exponentially
+up to 5 minutes. A successful login clears that client's counter, an idle
+15-minute window decays it, and a client that has been locked for more than 30
+minutes straight has its password checked again (a correct one gets in, a wrong
+one still gets `429`).
+
+Someone hammering the login therefore locks out the address they are hammering
+from, not you, and cannot keep you out indefinitely even if they manage to look
+like you. If you do lock yourself out, wait for the window in `Retry-After`, log
+in from another network, or restart the web service.
+
+### Behind a reverse proxy: `DASHBOARD_TRUST_PROXY`
+
+`X-Forwarded-Host`, `X-Forwarded-Proto` and `X-Forwarded-For` are just request
+headers: anyone can send them, and there is no untainted signal to check them
+against (the Next server even derives the request URL's own scheme from
+`X-Forwarded-Proto`). They are therefore **ignored by default** and only honored
+when you declare that a proxy is in front:
+
+```bash
+DASHBOARD_TRUST_PROXY=1   # 1, true, yes or on; anything else (or unset) is off
+```
+
+| Setting | Forwarded host (Origin check) | Forwarded proto (`Secure` cookie) | Forwarded client address (lockout scope) |
+|---|---|---|---|
+| unset (default) | ignored, `Host` is used | ignored; the cookie is `Secure` only when the connection itself is HTTPS and nothing forwarded a scheme | the caller's claim, which only ever scopes the caller's own lockout, and the connection's address when it made no claim |
+| `1` | first entry honored | first entry honored | first entry honored |
+
+**Set it whenever a reverse proxy sits in front**, and only then: the proxy must
+overwrite these headers rather than pass a client's through. Without it a proxy
+that rewrites `Host` makes every write look cross-origin (`403`), and a
+TLS-terminating proxy leaves the session cookie without the `Secure` flag,
+because `next start` stamps `X-Forwarded-Proto` on every request and an untrusted
+stamp is worth nothing. Enabling it asks for the password once more, since the
+session then moves to the host-pinned cookie name.
+
+> **Symptom to recognize: a login that loops with no error.** If the app answers
+> `200` to the login, the browser returns to `/login` immediately and nothing is
+> shown, the session cookie is being dropped. That happens when the cookie is
+> marked `Secure` (so it is also `__Host-`) while the browser is talking plain
+> HTTP: browsers discard such a cookie silently. The usual cause is a proxy that
+> stamps `X-Forwarded-Proto: https` unconditionally while still being reachable
+> over `http://` (LAN access, a half-configured tunnel) together with
+> `DASHBOARD_TRUST_PROXY` on. The login page now checks the session before
+> navigating and reports it instead of looping, and the server logs one warning
+> the first time it sets a `Secure` cookie on a forwarded header's word alone.
+> The fix is to serve the dashboard over HTTPS, or to unset
+> `DASHBOARD_TRUST_PROXY`.
 
 `DASHBOARD_SESSION_MAX_AGE` controls how often the password is asked again:
 
