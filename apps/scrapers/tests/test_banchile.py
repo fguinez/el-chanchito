@@ -96,6 +96,102 @@ class TestMovementConversion:
         txn = self.scraper._movement_to_transaction(mov)
         assert txn.product_kind == "checking"
 
+    def _scrape(self, monkeypatch, movements):
+        """Run scrape_transactions() over a canned fintself movement list."""
+        async def fake_scraper(bank_key, user, password):
+            return movements
+
+        monkeypatch.setattr(banchile_mod, "run_fintself_scraper", fake_scraper)
+        return asyncio.run(self.scraper.scrape_transactions())
+
+    def test_identical_same_day_movements_get_distinct_ids(self, monkeypatch):
+        """Five genuinely distinct transfers that look alike must not collapse.
+
+        Same date, description, amount and account: before the occurrence
+        index they hashed to one id and the writer's ON CONFLICT DO NOTHING
+        kept only the first.
+        """
+        movements = [
+            _make_movement(description="TRANSFERENCIA DE TERCERO", amount=1000000)
+            for _ in range(5)
+        ]
+
+        txns = self._scrape(monkeypatch, movements)
+
+        assert len(txns) == 5
+        assert len({t.external_id for t in txns}) == 5
+
+    def test_first_occurrence_keeps_legacy_id(self, monkeypatch):
+        """Backwards compatible: rows already imported keep matching."""
+        lone = self.scraper._movement_to_transaction(
+            _make_movement(description="TRANSFERENCIA DE TERCERO", amount=1000000)
+        )
+        movements = [
+            _make_movement(description="TRANSFERENCIA DE TERCERO", amount=1000000)
+            for _ in range(5)
+        ]
+
+        txns = self._scrape(monkeypatch, movements)
+
+        assert txns[0].external_id == lone.external_id
+
+    def test_distinct_movements_stay_distinct_across_scrapes(self, monkeypatch):
+        """Different movements keep different ids; a repeat-free scrape is stable."""
+        movements = [
+            _make_movement(description="COMPRA A", amount=-999999),
+            _make_movement(description="COMPRA B", amount=-999999),
+            _make_movement(description="COMPRA A", amount=-2500000),
+        ]
+
+        first_run = self._scrape(monkeypatch, movements)
+        second_run = self._scrape(monkeypatch, movements)
+
+        assert len({t.external_id for t in first_run}) == 3
+        assert [t.external_id for t in first_run] == [t.external_id for t in second_run]
+
+    def test_interleaved_movements_dont_shift_duplicate_ids(self, monkeypatch):
+        """The counter is per identity key, not per position in the list."""
+        def duplicate():
+            return _make_movement(description="TRANSFERENCIA DE TERCERO", amount=1000000)
+
+        contiguous = [duplicate(), duplicate(), duplicate()]
+        interleaved = [
+            duplicate(),
+            _make_movement(description="COMPRA A", amount=-999999),
+            duplicate(),
+            _make_movement(description="COMPRA B", amount=-2500000),
+            duplicate(),
+        ]
+
+        contiguous_ids = [t.external_id for t in self._scrape(monkeypatch, contiguous)]
+        interleaved_txns = self._scrape(monkeypatch, interleaved)
+
+        dup_ids = [
+            t.external_id
+            for t in interleaved_txns
+            if t.description == "TRANSFERENCIA DE TERCERO"
+        ]
+        assert dup_ids == contiguous_ids
+
+    def test_unconvertible_movement_doesnt_consume_an_occurrence(self, monkeypatch):
+        """A skipped movement must not shift the surviving repeats' indices."""
+        broken = _make_movement(description="TRANSFERENCIA DE TERCERO", amount=1000000)
+        broken.amount = "no convertible"
+        movements = [
+            _make_movement(description="TRANSFERENCIA DE TERCERO", amount=1000000),
+            broken,
+            _make_movement(description="TRANSFERENCIA DE TERCERO", amount=1000000),
+        ]
+        healthy = [
+            _make_movement(description="TRANSFERENCIA DE TERCERO", amount=1000000)
+            for _ in range(2)
+        ]
+
+        txns = self._scrape(monkeypatch, movements)
+        expected = [t.external_id for t in self._scrape(monkeypatch, healthy)]
+
+        assert [t.external_id for t in txns] == expected
+
 
 class TestScrapeProducts:
     """scrape_products() delegates to the banchile_web backend and shields the
