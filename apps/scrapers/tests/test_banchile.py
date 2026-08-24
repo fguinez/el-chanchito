@@ -122,10 +122,13 @@ class TestMovementConversion:
         assert len({t.external_id for t in txns}) == 5
 
     def test_first_occurrence_keeps_legacy_id(self, monkeypatch):
-        """Backwards compatible: rows already imported keep matching."""
-        lone = self.scraper._movement_to_transaction(
-            _make_movement(description="TRANSFERENCIA DE TERCERO", amount=1000000)
-        )
+        """Backwards compatible: rows already imported keep matching.
+
+        The literal is the id the pre-fix scheme emitted for this synthetic
+        movement, md5 of `2026-04-10|TRANSFERENCIA DE TERCERO|1000000|1234`.
+        If it ever changes, every BdC row already stored needs a migration or
+        the next scrape re-imports the whole history as duplicates.
+        """
         movements = [
             _make_movement(description="TRANSFERENCIA DE TERCERO", amount=1000000)
             for _ in range(5)
@@ -133,7 +136,7 @@ class TestMovementConversion:
 
         txns = self._scrape(monkeypatch, movements)
 
-        assert txns[0].external_id == lone.external_id
+        assert txns[0].external_id == "bch_f8d33350bb56255e"
 
     def test_distinct_movements_stay_distinct_across_scrapes(self, monkeypatch):
         """Different movements keep different ids; a repeat-free scrape is stable."""
@@ -175,8 +178,11 @@ class TestMovementConversion:
 
     def test_unconvertible_movement_doesnt_consume_an_occurrence(self, monkeypatch):
         """A skipped movement must not shift the surviving repeats' indices."""
+        # It must fail *after* its key is computed, so the test can tell
+        # whether the counter is bumped before or after a successful convert:
+        # a non-str category_hint is rejected by the ScrapedTransaction envelope.
         broken = _make_movement(description="TRANSFERENCIA DE TERCERO", amount=1000000)
-        broken.amount = "no convertible"
+        broken.transaction_type = object()
         movements = [
             _make_movement(description="TRANSFERENCIA DE TERCERO", amount=1000000),
             broken,
