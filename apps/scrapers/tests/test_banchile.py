@@ -176,9 +176,9 @@ class TestCheckingMapping:
     def test_same_second_siblings_get_their_own_ids(self):
         """The #55 case: batch credits sharing everything the list exposes.
 
-        The bank's composite `id` collides for them (37 distinct values for 42
-        movements in the observed window) but the operation id does not, and
-        `saldo` separates them when there is no operation id.
+        The bank's composite `id` collides for them (it repeats across the
+        observed window) but the operation id does not, and `saldo` separates
+        them when there is no operation id.
         """
         rows = [_cartola_row(saldo=f"{n}.500.000") for n in range(1, 6)]
         ids = [self._convert(row).external_id for row in rows]
