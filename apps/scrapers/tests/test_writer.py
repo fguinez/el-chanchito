@@ -586,25 +586,50 @@ class _FakeTxConn:
                     return _FakeCursor((row["id"],))
             return _FakeCursor(None)
         if "SELECT id, external_id FROM transactions" in q:
-            product_id, tx_date, amount, source = p
+            # (product_id, amount, source, LIKE pattern, occurrence date,
+            #  accounting date, the date the ordering prefers)
+            product_id, amount, source, like, occurred, accounted, preferred = p
+            prefix = like.replace("\\", "").rstrip("%")
             hits = [
                 row
                 for row in self.rows
                 if row["product_id"] == product_id
-                and row["transaction_date"] == tx_date
                 and row["amount"] == amount
                 and row["source"] == source
+                and (row["external_id"] or "").startswith(prefix)
+                and row["transaction_date"] in (occurred, accounted)
             ]
-            hits.sort(key=lambda row: (row["created_at"], row["id"]))
+            hits.sort(
+                key=lambda row: (
+                    row["transaction_date"] != preferred,
+                    row["created_at"],
+                    row["id"],
+                )
+            )
             return _FakeCursor([(row["id"], row["external_id"]) for row in hits])
         if "UPDATE transactions SET external_id" in q:
-            external_id, row_id = p
+            external_id, tx_date, accounting_date, month, row_id = p
             for row in self.rows:
                 if row["id"] == row_id:
-                    row["external_id"] = external_id
+                    row.update(
+                        external_id=external_id,
+                        transaction_date=tx_date,
+                        accounting_date=accounting_date,
+                        scheduled_month=month,
+                    )
             return _FakeCursor(rowcount=1)
         if "INSERT INTO transactions" in q:
-            row_id, product_id, description, amount, tx_date, _month, source, ext = p
+            (
+                row_id,
+                product_id,
+                description,
+                amount,
+                tx_date,
+                accounting_date,
+                month,
+                source,
+                ext,
+            ) = p
             self._clock += 1
             self.rows.append(
                 {
@@ -614,6 +639,8 @@ class _FakeTxConn:
                     "description": description,
                     "amount": amount,
                     "transaction_date": tx_date,
+                    "accounting_date": accounting_date,
+                    "scheduled_month": month,
                     "source": source,
                     "created_at": self._clock,
                 }
@@ -622,27 +649,51 @@ class _FakeTxConn:
         return _FakeCursor()
 
 
-def _legacy_row(row_id, external_id, created_at, amount=-999999, description="COMPRA"):
+def _legacy_row(
+    row_id,
+    external_id,
+    created_at,
+    amount=-999999,
+    description="COMPRA",
+    tx_date=date(2026, 8, 20),
+):
+    """A stored row as the pre-#57 scraper wrote it.
+
+    fintself dated every BanChile row by the portal's `fechaContable` column,
+    so a legacy row holds the POSTING date in `transaction_date` and has no
+    `accounting_date` at all.
+    """
     return {
         "id": row_id,
         "product_id": "prod-1",
         "external_id": external_id,
         "description": description,
         "amount": amount,
-        "transaction_date": date(2026, 8, 20),
+        "transaction_date": tx_date,
+        "accounting_date": None,
+        "scheduled_month": date(tx_date.year, tx_date.month, 1),
         "source": "scraper_banchile",
         "created_at": created_at,
     }
 
 
-def _txn(external_id, amount=-999999, description="COMPRA", kind="checking"):
+def _txn(
+    external_id,
+    amount=-999999,
+    description="COMPRA",
+    kind="checking",
+    tx_date=date(2026, 8, 20),
+    accounting_date=None,
+):
     return ScrapedTransaction(
         institution="banchile",
         product_kind=kind,
         description=description,
         amount=amount,
-        transaction_date=date(2026, 8, 20),
+        transaction_date=tx_date,
+        accounting_date=accounting_date,
         external_id=external_id,
+        scheduled_month=date(tx_date.year, tx_date.month, 1),
     )
 
 
@@ -781,3 +832,118 @@ class TestUpsertTransactionsAdoption:
 
         assert inserted == 1
         assert len(conn.rows) == 2
+
+
+class TestAdoptionAcrossTheDateShift:
+    """Issue #57 moved BanChile's `transaction_date` to the occurrence date.
+
+    Every stored row was written from the POSTING date (fintself read the
+    portal's `fechaContable` column), so an incoming movement usually no longer
+    matches its own row on the date. The lookup is tolerant of exactly that, and
+    adoption corrects the row instead of leaving it on the wrong day.
+    """
+
+    def _incoming(self, external_id="bch_op_12345678901"):
+        """A movement that happened on the 21st and posted on the 24th."""
+        return _txn(
+            external_id,
+            tx_date=date(2026, 8, 21),
+            accounting_date=date(2026, 8, 24),
+        )
+
+    def test_a_row_stored_under_its_posting_date_is_adopted(self, monkeypatch):
+        conn = _FakeTxConn(
+            [_legacy_row("row-1", "bch_a1b2c3d4e5f60718", 1, tx_date=date(2026, 8, 24))]
+        )
+        _use_tx_conn(monkeypatch, conn)
+
+        inserted = upsert_transactions([self._incoming()])
+
+        assert (inserted, len(conn.rows)) == (0, 1)
+        assert conn.rows[0]["external_id"] == "bch_op_12345678901"
+
+    def test_adoption_corrects_both_dates_and_the_scheduled_month(self, monkeypatch):
+        conn = _FakeTxConn(
+            [_legacy_row("row-1", "bch_a1b2c3d4e5f60718", 1, tx_date=date(2026, 8, 24))]
+        )
+        _use_tx_conn(monkeypatch, conn)
+
+        upsert_transactions([self._incoming()])
+
+        row = conn.rows[0]
+        assert row["transaction_date"] == date(2026, 8, 21)
+        assert row["accounting_date"] == date(2026, 8, 24)
+        assert row["scheduled_month"] == date(2026, 8, 1)
+
+    def test_an_exact_occurrence_match_is_preferred(self, monkeypatch):
+        """Two candidates: the one already on the occurrence date wins.
+
+        Otherwise two movements a few days apart for the same amount could
+        claim each other's rows.
+        """
+        conn = _FakeTxConn(
+            [
+                _legacy_row("row-posted", "bch_aaaaaaaaaaaaaaaa", 1, tx_date=date(2026, 8, 24)),
+                _legacy_row("row-exact", "bch_bbbbbbbbbbbbbbbb", 2, tx_date=date(2026, 8, 21)),
+            ]
+        )
+        _use_tx_conn(monkeypatch, conn)
+
+        upsert_transactions([self._incoming()])
+
+        by_id = {row["id"]: row for row in conn.rows}
+        assert by_id["row-exact"]["external_id"] == "bch_op_12345678901"
+        assert by_id["row-posted"]["external_id"] == "bch_aaaaaaaaaaaaaaaa"
+
+    def test_a_row_on_neither_date_is_never_claimed(self, monkeypatch):
+        """The tolerance is two dates wide, not a range."""
+        conn = _FakeTxConn(
+            [_legacy_row("row-1", "bch_aaaaaaaaaaaaaaaa", 1, tx_date=date(2026, 8, 19))]
+        )
+        _use_tx_conn(monkeypatch, conn)
+
+        inserted = upsert_transactions([self._incoming()])
+
+        assert (inserted, len(conn.rows)) == (1, 2)
+        assert conn.rows[0]["external_id"] == "bch_aaaaaaaaaaaaaaaa"
+
+    def test_a_foreign_external_id_on_the_same_day_is_never_claimed(self, monkeypatch):
+        """The query itself restricts candidates to the `bch_` namespace."""
+        conn = _FakeTxConn(
+            [
+                dict(
+                    _legacy_row("row-1", "csv_import_1", 1, tx_date=date(2026, 8, 24)),
+                    source="scraper_banchile",
+                )
+            ]
+        )
+        _use_tx_conn(monkeypatch, conn)
+
+        inserted = upsert_transactions([self._incoming()])
+
+        assert (inserted, len(conn.rows)) == (1, 2)
+        assert conn.rows[0]["external_id"] == "csv_import_1"
+
+    def test_a_new_row_carries_both_dates(self, monkeypatch):
+        conn = _FakeTxConn([])
+        _use_tx_conn(monkeypatch, conn)
+
+        upsert_transactions([self._incoming()])
+
+        assert conn.rows[0]["transaction_date"] == date(2026, 8, 21)
+        assert conn.rows[0]["accounting_date"] == date(2026, 8, 24)
+
+    def test_a_null_accounting_date_still_matches_on_the_one_date(self, monkeypatch):
+        """The card legs report no posting date; the lookup must still work."""
+        conn = _FakeTxConn(
+            [_legacy_row("row-1", "bch_a1b2c3d4e5f60718", 1, tx_date=date(2026, 8, 20))]
+        )
+        _use_tx_conn(monkeypatch, conn)
+
+        inserted = upsert_transactions(
+            [_txn("bch_ref_200812345678", kind="credit_card")]
+        )
+
+        assert (inserted, len(conn.rows)) == (0, 1)
+        assert conn.rows[0]["external_id"] == "bch_ref_200812345678"
+        assert conn.rows[0]["accounting_date"] is None

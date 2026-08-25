@@ -293,6 +293,9 @@ def _write_decision(
 # hex digits). A row already carrying an operation-id key is *final*: the bank
 # identified it, so it is never claimed away by another movement.
 _ADOPTING_PREFIX = "bch_"
+# The same prefix as a LIKE pattern: "_" is a LIKE wildcard, so it is escaped
+# (Postgres's default escape character is the backslash, as in V017).
+_ADOPTING_LIKE = "bch\\_%"
 _FINAL_ID_PREFIXES = ("bch_op_", "bch_ref_")
 
 
@@ -324,10 +327,15 @@ def _claim_decision(
       charge crosses from the unbilled leg (a fingerprint key) to the billed one
       (its `numReferencia`).
     - ``("keep", row_id)``: every candidate is finally identified and this
-      movement is not, which is what a transient failure to fetch the operation
-      id looks like (the portal's own 503). Leave the row alone and insert
-      nothing: re-keying it would throw the bank's id away and it would flap on
-      the next run.
+      movement is not, which is what a failure to fetch the operation id looks
+      like. Leave the row alone and insert nothing: re-keying it would throw the
+      bank's id away and it would flap on the next run. This is the one branch
+      that drops an incoming movement, so the caller logs it at WARNING. It is
+      self-correcting for the portal's transient 503 (the id comes back next
+      run and matches directly), but NOT for a movement the bank simply has no
+      glosa for: that one keeps arriving under its fingerprint key and keeps
+      being folded onto the same stored row, which is the intended reading as
+      long as the row really is that movement.
     - ``("insert", None)``: a genuinely new movement.
 
     Claiming is one-to-one and deterministic (oldest first, each row claimed at
@@ -356,21 +364,41 @@ def _claim_decision(
 
 
 def _sibling_rows(conn, product_id: str, txn: ScrapedTransaction, source: str) -> list[tuple]:
-    """Stored rows that could be `txn` under a superseded key, oldest first.
+    """Stored rows that could be `txn` under a superseded key, best first.
 
-    Scoped as tightly as the identity allows: same product, same date, same
-    amount, same scraper source. That is narrow enough that an unrelated row
-    (a manual entry, another institution, another product of the same
-    institution) can never be claimed.
+    Scoped as tightly as the identity allows: same product, same amount, same
+    scraper source, and an `external_id` that belongs to the re-keying
+    institution's own namespace. That is narrow enough that an unrelated row (a
+    manual entry, another institution, another product of the same institution)
+    can never be claimed.
+
+    The date match is the one deliberate loosening. A BanChile movement carries
+    two dates now, and which one a stored row holds depends on when it was
+    written: rows imported before issue #57 hold the *posting* date (fintself
+    read the portal's `fechaContable` column), while an incoming movement is
+    dated by when it *occurred*. So a candidate matches on either of the
+    incoming dates, and exact occurrence-date matches are ordered first, so two
+    movements a few days apart for the same amount cannot cross over. Adoption
+    then corrects the row's dates (see `upsert_transactions`).
     """
+    accounting_date = txn.accounting_date or txn.transaction_date
     return conn.execute(
         """
         SELECT id, external_id FROM transactions
-        WHERE product_id = %s AND transaction_date = %s AND amount = %s
-          AND source = %s AND external_id IS NOT NULL
-        ORDER BY created_at, id
+        WHERE product_id = %s AND amount = %s AND source = %s
+          AND external_id IS NOT NULL AND external_id LIKE %s
+          AND transaction_date IN (%s, %s)
+        ORDER BY (transaction_date = %s) DESC, created_at, id
         """,
-        (product_id, txn.transaction_date, txn.amount, source),
+        (
+            product_id,
+            txn.amount,
+            source,
+            _ADOPTING_LIKE,
+            txn.transaction_date,
+            accounting_date,
+            txn.transaction_date,
+        ),
     ).fetchall()
 
 
@@ -380,8 +408,15 @@ def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
     For institutions that re-key their stored rows (see `_adopts_stored_rows`),
     a movement whose key matches nothing is first offered the stored rows it
     could be under an older key, and adopts one instead of inserting a duplicate
-    (issue #57). Everything else keeps the plain
+    (issue #57): the row's `external_id`, both dates and `scheduled_month` are
+    rewritten in place. Everything else keeps the plain
     `ON CONFLICT (product_id, external_id) DO NOTHING` insert.
+
+    A row that never gets adopted, because its movement fell out of the bank's
+    window before the first post-#57 scrape, keeps the date it was imported with
+    (BanChile's legacy rows hold the *posting* date) and a NULL
+    `accounting_date`. Neither is derivable from anything stored, so nothing
+    backfills them.
     """
     if not transactions:
         return 0
@@ -402,15 +437,22 @@ def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
 
         # Every key this scrape carries, per product: a stored row already
         # holding one of them belongs to that movement and is never adopted.
+        # Resolution failures are logged and skipped here exactly as they are
+        # below, so one unresolvable transaction can't abort the batch.
         incoming: dict[str, set[str]] = {}
         for txn in transactions:
-            incoming.setdefault(product_of(txn), set()).add(txn.external_id)
+            try:
+                incoming.setdefault(product_of(txn), set()).add(txn.external_id)
+            except Exception:
+                logger.exception(
+                    "Failed to resolve the product for: %s", txn.external_id
+                )
 
         claimed: set = set()
         for txn in transactions:
-            product_id = product_of(txn)
-            source = f"scraper_{txn.institution}"
             try:
+                product_id = product_of(txn)
+                source = f"scraper_{txn.institution}"
                 row = conn.execute(
                     "SELECT id FROM transactions "
                     "WHERE product_id = %s AND external_id = %s",
@@ -425,15 +467,27 @@ def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
                         txn.external_id,
                         _sibling_rows(conn, product_id, txn, source),
                         claimed,
-                        incoming[product_id],
+                        incoming.get(product_id, set()),
                     )
                     if action != "insert":
                         claimed.add(row_id)
                     if action == "rekey":
+                        # The dates move with the key: a legacy row is sitting
+                        # under its posting date, and leaving it there would
+                        # show the movement on the wrong day and force the same
+                        # decision again on every later run.
                         conn.execute(
                             "UPDATE transactions SET external_id = %s, "
-                            "updated_at = now() WHERE id = %s",
-                            (txn.external_id, row_id),
+                            "transaction_date = %s, accounting_date = %s, "
+                            "scheduled_month = %s, updated_at = now() "
+                            "WHERE id = %s",
+                            (
+                                txn.external_id,
+                                txn.transaction_date,
+                                txn.accounting_date,
+                                txn.scheduled_month,
+                                row_id,
+                            ),
                         )
                         logger.info(
                             "Adopted stored transaction %s onto %s",
@@ -442,10 +496,14 @@ def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
                         )
                         continue
                     if action == "keep":
-                        logger.info(
-                            "Transaction %s already stored under a bank id; "
-                            "left as it is",
+                        logger.warning(
+                            "Transaction %s (%s, %s) has no bank id this run and "
+                            "matches stored row %s, which has one; left as it is "
+                            "and not imported",
                             txn.external_id,
+                            txn.transaction_date,
+                            txn.amount,
+                            row_id,
                         )
                         continue
 
@@ -453,8 +511,8 @@ def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
                     """
                     INSERT INTO transactions
                         (id, product_id, description, amount, transaction_date,
-                         scheduled_month, source, external_id)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                         accounting_date, scheduled_month, source, external_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (product_id, external_id) DO NOTHING
                     """,
                     (
@@ -463,6 +521,7 @@ def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
                         txn.description,
                         txn.amount,
                         txn.transaction_date,
+                        txn.accounting_date,
                         txn.scheduled_month,
                         source,
                         txn.external_id,
