@@ -86,6 +86,15 @@ class ScrapedTransaction(BaseModel):
     transaction_date: datetime.date = Field(
         description="Date the transaction occurred."
     )
+    accounting_date: datetime.date | None = Field(
+        None,
+        description=(
+            "Date the institution posted the transaction, when it reports one "
+            "separately from the date it occurred. Nullable: most sources "
+            "report a single date, and a NULL simply means 'not reported'. "
+            "Never part of a dedup key."
+        ),
+    )
     external_id: str = Field(description="Unique identifier for dedup.")
     currency: str = Field("CLP", description="ISO currency code (default 'CLP').")
     category_hint: str | None = Field(

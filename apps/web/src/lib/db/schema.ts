@@ -216,6 +216,10 @@ export const transactions = pgTable(
     description: text("description").notNull(),
     amount: integer("amount").notNull(),
     transactionDate: date("transaction_date").notNull(),
+    // When the institution posted the movement, where it reports that apart
+    // from when the movement occurred (V019). Nullable: most sources report a
+    // single date. Never part of a dedup key.
+    accountingDate: date("accounting_date"),
     categoryId: uuid("category_id").references(() => categories.id),
     scheduledMonth: date("scheduled_month"),
     source: text("source").notNull().default("manual"),

@@ -1284,6 +1284,20 @@
       "additionalProperties": false,
       "description": "A transaction extracted by a scraper.",
       "properties": {
+        "accounting_date": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Date the institution posted the transaction, when it reports one separately from the date it occurred. Nullable: most sources report a single date, and a NULL simply means 'not reported'. Never part of a dedup key.",
+          "title": "Accounting Date"
+        },
         "amount": {
           "description": "Amount in CLP; negative=expense, positive=income.",
           "title": "Amount",

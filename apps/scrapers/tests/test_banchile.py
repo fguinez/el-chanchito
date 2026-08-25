@@ -71,7 +71,12 @@ def _billed_payload(rows):
     return {"seccionOperaciones": {"transaccionesTarjetas": rows}}
 
 
-def _billed_row(referencia="2008 12345678", monto=999999, descripcion="COMERCIO SINTETICO"):
+def _billed_row(
+    referencia="2008 12345678",
+    monto=999999,
+    descripcion="COMERCIO SINTETICO",
+    grupo="avancesCompras",
+):
     return {
         "numReferencia": referencia,
         "nombreTarjeta": f"VISA ****{CARD_LAST4}",
@@ -79,7 +84,7 @@ def _billed_row(referencia="2008 12345678", monto=999999, descripcion="COMERCIO 
         "montoTransaccion": monto,
         "descripcion": descripcion,
         "totales": False,
-        "grupo": "avancesCompras",
+        "grupo": grupo,
     }
 
 
@@ -118,6 +123,30 @@ class TestCheckingMapping:
 
         # Punctuation is dropped so a cosmetic drift can't re-key the movement.
         assert txn.external_id == "bch_op_TEFIPE00000001"
+
+    def test_both_dates_reach_the_transaction(self):
+        """`transaction_date` is when it happened, `accounting_date` when posted.
+
+        `scheduled_month` follows the occurrence date, which is intended: the
+        month a movement belongs to is the month it happened in.
+        """
+        row = _cartola_row(fecha="20260821 15:48:28")
+        row["fechaContable"] = "24/08/2026"
+
+        txn = self._convert(row, "12345678901")
+
+        assert txn.transaction_date == date(2026, 8, 21)
+        assert txn.accounting_date == date(2026, 8, 24)
+        assert txn.scheduled_month == date(2026, 8, 1)
+
+    def test_the_dates_never_reach_the_key(self):
+        """Keying on a date is the pre-#57 scheme this replaced."""
+        row = _cartola_row(fecha="20260821 15:48:28")
+        row["fechaContable"] = "24/08/2026"
+        reposted = _cartola_row(fecha="20260821 15:48:28")
+        reposted["fechaContable"] = "25/08/2026"
+
+        assert self._convert(row).external_id == self._convert(reposted).external_id
 
     def test_cargo_is_an_expense(self):
         txn = self._convert(_cartola_row(tipo="cargo", monto="999.999"), "12345678902")
@@ -189,6 +218,17 @@ class TestCardMapping:
         movements = parse_billed_movements(_billed_payload([_billed_row(**kwargs)]))
         return self.scraper._movement_to_transaction(movements[0])
 
+    def test_the_card_legs_report_no_posting_date(self):
+        """Both legs date a charge by when it happened; nothing posts it."""
+        assert self._unbilled().accounting_date is None
+        assert self._billed().accounting_date is None
+        assert self._billed().transaction_date == date(2026, 8, 20)
+
+    def test_a_billed_payment_is_income(self):
+        """`montoTransaccion` is unsigned on this leg; `grupo` is the direction."""
+        txn = self._billed(monto=2500000, grupo="pagos", referencia="2008 00000000")
+        assert txn.amount == 2500000
+
     def test_unbilled_charge_is_negative_and_fingerprinted(self):
         txn = self._unbilled()
         assert txn.product_kind == "credit_card"
@@ -221,8 +261,8 @@ class TestCardMapping:
         assert len(parse_billed_movements(_billed_payload(rows))) == 1
 
     def test_all_zero_reference_falls_back_to_a_fingerprint(self):
-        """Every payment row shares "…00000000"; keying on it would merge them."""
-        txn = self._billed(referencia="2008 00000000", monto=-2500000)
+        """Every payment row shares "...00000000"; keying on it would merge them."""
+        txn = self._billed(referencia="2008 00000000", monto=-2500000, grupo="pagos")
         assert txn.external_id.startswith("bch_fp_")
         assert txn.amount == 2500000
 

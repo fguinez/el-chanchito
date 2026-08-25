@@ -73,9 +73,9 @@ def external_id_for(movement: BanChileMovement) -> str:
         The description-free fallback for everything else, hashing the leg's
         identity fields (`BanChileMovement.fingerprint`):
 
-        * checking without an operation id, roughly 7 percent of the observed
-          window (one transient 503, and two movements whose inline glosa
-          carried no id line): the bank's composite `id` plus `saldo`. Both are
+        * checking without an operation id, a small minority of the observed
+          window (a transient 503, and movements whose inline glosa carried no
+          id line): the bank's composite `id` plus `saldo`. Both are
           byte-stable across logins; the composite `id` alone is not unique
           (same-second batch credits collide) and `saldo` is a true running
           ledger balance, so together they are. Such a movement is *adopted*
@@ -114,8 +114,12 @@ class BanChileScraper(BaseScraper):
         """Convert a backend movement into our ScrapedTransaction.
 
         `external_id` is `external_id_for`'s (see it for the whole scheme).
-        `scheduled_month` keeps the pre-#57 convention: the first of the
-        movement's own month.
+
+        `transaction_date` is when the movement HAPPENED and `accounting_date`
+        is when the bank posted it, NULL where the leg reports no posting date
+        (both card legs). `scheduled_month` keeps the pre-#57 convention, the
+        first of the movement's own month, and so now follows the occurrence
+        date. Neither date is part of any key.
         """
         tx_date = movement.transaction_date
         return ScrapedTransaction(
@@ -124,6 +128,7 @@ class BanChileScraper(BaseScraper):
             description=movement.description,
             amount=movement.amount,
             transaction_date=tx_date,
+            accounting_date=movement.accounting_date,
             external_id=external_id_for(movement),
             scheduled_month=date(tx_date.year, tx_date.month, 1),
         )

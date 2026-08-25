@@ -244,3 +244,25 @@ def test_scraped_transaction_mirrors_the_scraper_dataclass():
     assert txn.currency == "CLP"
     assert txn.category_hint is None
     assert txn.scheduled_month is None
+    # Most sources report a single date; a NULL posting date is unremarkable.
+    assert txn.accounting_date is None
+
+
+def test_transaction_keeps_a_separate_posting_date():
+    """A source that reports both dates records both (BanChile, V019).
+
+    `transaction_date` is when the movement occurred; `accounting_date` is when
+    the institution posted it. Neither is ever part of a dedup key.
+    """
+    txn = ScrapedTransaction(
+        institution="banchile",
+        product_kind="checking",
+        description="TRANSFERENCIA DE TERCERO",
+        amount=1_000_000,
+        transaction_date=date(2026, 8, 21),
+        accounting_date=date(2026, 8, 24),
+        external_id="bch_op_12345678901",
+    )
+
+    assert txn.transaction_date == date(2026, 8, 21)
+    assert txn.accounting_date == date(2026, 8, 24)
