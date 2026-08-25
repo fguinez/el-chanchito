@@ -1163,6 +1163,25 @@ def _launch_browser(playwright, headless: bool):
         return playwright.chromium.launch(headless=headless)
 
 
+def _new_context(browser):
+    """Build the anti-detection browser context both BdC sessions use.
+
+    Extracted so the shared products + movements session
+    (`backends/banchile_movements.py::_session_sync`, issue #57) opens exactly
+    the same context this module's balance-only session does.
+    """
+    context = browser.new_context(
+        user_agent=USER_AGENT,
+        viewport=VIEWPORT,
+        locale=LOCALE,
+        timezone_id=TIMEZONE_ID,
+    )
+    context.add_init_script(
+        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+    )
+    return context
+
+
 def _login(page, rut: str, password: str) -> None:
     """Log into Banco de Chile with RUT + password."""
     # "domcontentloaded", not the default "load": the public site pulls heavy
@@ -1352,15 +1371,19 @@ def _budget(values: tuple[int, ...], index: int) -> int:
     return values[min(index, len(values) - 1)]
 
 
-def _read_surface_with_retries(page, surface: str, read: Callable) -> list[ScrapedProduct]:
+def _read_surface_with_retries(page, surface: str, read: Callable) -> list:
     """Run one surface's reader with bounded retries and escalating budgets.
 
-    An attempt succeeds iff it parses ≥1 product — every surface on this
+    An attempt succeeds iff it parses ≥1 item — every product surface on this
     account always has one, so a rendered-but-empty parse is portal slowness
     worth retrying (issue #35). Between attempts: a pause (through the page
     clock, which keeps the tests' MagicMock seam), then a recovery to the
     portal home. Exceptions never escape a surface; a mid-attempt crash just
     consumes that attempt.
+
+    Generic in what a surface yields: `backends/banchile_movements.py` drives
+    its movement surfaces through the same machinery (issue #57), so the
+    return type is whatever `read` builds.
     """
     for attempt in range(_SURFACE_ATTEMPTS):
         if attempt:
@@ -1636,15 +1659,7 @@ def _scrape_sync(rut: str, password: str, headless: bool) -> BalanceFetchResult:
     with sync_playwright() as playwright:
         browser = _launch_browser(playwright, headless)
         try:
-            context = browser.new_context(
-                user_agent=USER_AGENT,
-                viewport=VIEWPORT,
-                locale=LOCALE,
-                timezone_id=TIMEZONE_ID,
-            )
-            context.add_init_script(
-                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-            )
+            context = _new_context(browser)
             page = context.new_page()
             page.set_default_timeout(DEFAULT_TIMEOUT)
 
