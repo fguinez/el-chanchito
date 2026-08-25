@@ -278,8 +278,111 @@ def _write_decision(
     return "write"
 
 
+# --- Adopting a stored row onto a new external_id (issue #57) -----------------
+#
+# A scraper that changes how it keys a movement would otherwise re-import its
+# whole window: `ON CONFLICT (product_id, external_id) DO NOTHING` sees a new id
+# and inserts a second row. Unlike V017's re-key, BanChile's new ids are the
+# bank's own operation ids and cannot be computed in SQL from anything stored,
+# so the migration cannot do it: the stored rows are re-keyed *here*, the first
+# time a scrape brings a movement's new id along.
+#
+# Only BanChile takes this path. Every id it has ever emitted starts with
+# `bch_`, and the legacy ones are `bch_` + md5 hex, which can never collide with
+# the new `bch_op_` / `bch_ref_` / `bch_fp_` prefixes ("p", "r" and "_" are not
+# hex digits). A row already carrying an operation-id key is *final*: the bank
+# identified it, so it is never claimed away by another movement.
+_ADOPTING_PREFIX = "bch_"
+_FINAL_ID_PREFIXES = ("bch_op_", "bch_ref_")
+
+
+def _adopts_stored_rows(external_id: str | None) -> bool:
+    """True when this key's institution re-keys its stored rows in place."""
+    return bool(external_id) and external_id.startswith(_ADOPTING_PREFIX)
+
+
+def _is_final_id(external_id: str | None) -> bool:
+    """True when a key is derived from an operation id the bank assigned."""
+    return bool(external_id) and external_id.startswith(_FINAL_ID_PREFIXES)
+
+
+def _claim_decision(
+    external_id: str,
+    siblings: list[tuple],
+    claimed: set,
+    incoming_ids: set[str],
+) -> tuple[str, object]:
+    """What to do with a movement whose key matches no stored row.
+
+    `siblings` are the rows of the same product with the same date and amount
+    from the same scraper, oldest `created_at` first: candidates for being the
+    same movement under its old key. Returns one of
+
+    - ``("rekey", row_id)``: the oldest unclaimed sibling that is not already
+      finally identified is this movement under a superseded key. Rewriting it
+      is what migrates the stored history, and what closes issue #56 when a card
+      charge crosses from the unbilled leg (a fingerprint key) to the billed one
+      (its `numReferencia`).
+    - ``("keep", row_id)``: every candidate is finally identified and this
+      movement is not, which is what a transient failure to fetch the operation
+      id looks like (the portal's own 503). Leave the row alone and insert
+      nothing: re-keying it would throw the bank's id away and it would flap on
+      the next run.
+    - ``("insert", None)``: a genuinely new movement.
+
+    Claiming is one-to-one and deterministic (oldest first, each row claimed at
+    most once per call), so N identical movements map onto N stored rows instead
+    of collapsing. A row whose id is one of this scrape's own keys is never
+    claimed: it belongs to the movement carrying that key.
+
+    Residual, and deliberate: two identical movements on the same day for the
+    same amount where one is genuinely new *and* the other's operation id failed
+    to load would be read as one movement ("keep"). It self-heals on the next
+    run, when both ids load and the new one inserts.
+    """
+    incoming_is_final = _is_final_id(external_id)
+    fallback = None
+    for row_id, row_external_id in siblings:
+        if row_id in claimed or row_external_id in incoming_ids:
+            continue
+        if _is_final_id(row_external_id):
+            if not incoming_is_final and fallback is None:
+                fallback = row_id
+            continue
+        return "rekey", row_id
+    if fallback is not None:
+        return "keep", fallback
+    return "insert", None
+
+
+def _sibling_rows(conn, product_id: str, txn: ScrapedTransaction, source: str) -> list[tuple]:
+    """Stored rows that could be `txn` under a superseded key, oldest first.
+
+    Scoped as tightly as the identity allows: same product, same date, same
+    amount, same scraper source. That is narrow enough that an unrelated row
+    (a manual entry, another institution, another product of the same
+    institution) can never be claimed.
+    """
+    return conn.execute(
+        """
+        SELECT id, external_id FROM transactions
+        WHERE product_id = %s AND transaction_date = %s AND amount = %s
+          AND source = %s AND external_id IS NOT NULL
+        ORDER BY created_at, id
+        """,
+        (product_id, txn.transaction_date, txn.amount, source),
+    ).fetchall()
+
+
 def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
-    """Insert transactions, skipping duplicates. Returns count of new rows."""
+    """Insert transactions, skipping duplicates. Returns count of new rows.
+
+    For institutions that re-key their stored rows (see `_adopts_stored_rows`),
+    a movement whose key matches nothing is first offered the stored rows it
+    could be under an older key, and adopts one instead of inserting a duplicate
+    (issue #57). Everything else keeps the plain
+    `ON CONFLICT (product_id, external_id) DO NOTHING` insert.
+    """
     if not transactions:
         return 0
 
@@ -287,11 +390,65 @@ def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
     inserted = 0
 
     with pool.connection() as conn:
+        products: dict[tuple, str] = {}
+
+        def product_of(txn: ScrapedTransaction) -> str:
+            key = (txn.institution, txn.product_kind, txn.currency)
+            if key not in products:
+                products[key] = _resolve_product(
+                    conn, txn.institution, txn.product_kind, txn.currency
+                )
+            return products[key]
+
+        # Every key this scrape carries, per product: a stored row already
+        # holding one of them belongs to that movement and is never adopted.
+        incoming: dict[str, set[str]] = {}
         for txn in transactions:
-            product_id = _resolve_product(
-                conn, txn.institution, txn.product_kind, txn.currency
-            )
+            incoming.setdefault(product_of(txn), set()).add(txn.external_id)
+
+        claimed: set = set()
+        for txn in transactions:
+            product_id = product_of(txn)
+            source = f"scraper_{txn.institution}"
             try:
+                row = conn.execute(
+                    "SELECT id FROM transactions "
+                    "WHERE product_id = %s AND external_id = %s",
+                    (product_id, txn.external_id),
+                ).fetchone()
+                if row:
+                    claimed.add(row[0])
+                    continue
+
+                if _adopts_stored_rows(txn.external_id):
+                    action, row_id = _claim_decision(
+                        txn.external_id,
+                        _sibling_rows(conn, product_id, txn, source),
+                        claimed,
+                        incoming[product_id],
+                    )
+                    if action != "insert":
+                        claimed.add(row_id)
+                    if action == "rekey":
+                        conn.execute(
+                            "UPDATE transactions SET external_id = %s, "
+                            "updated_at = now() WHERE id = %s",
+                            (txn.external_id, row_id),
+                        )
+                        logger.info(
+                            "Adopted stored transaction %s onto %s",
+                            row_id,
+                            txn.external_id,
+                        )
+                        continue
+                    if action == "keep":
+                        logger.info(
+                            "Transaction %s already stored under a bank id; "
+                            "left as it is",
+                            txn.external_id,
+                        )
+                        continue
+
                 cur = conn.execute(
                     """
                     INSERT INTO transactions
@@ -307,7 +464,7 @@ def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
                         txn.amount,
                         txn.transaction_date,
                         txn.scheduled_month,
-                        f"scraper_{txn.institution}",
+                        source,
                         txn.external_id,
                     ),
                 )
