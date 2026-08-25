@@ -10,21 +10,22 @@ them is in the movements list itself:
   * checking (`movimientos/getCartola`): each movement carries a composite `id`
     the bank builds from producto + cuenta + fecha + monto + tipo. It is stable
     across logins but NOT unique (batch credits posted in the same second for
-    the same amount collide: 37 distinct values for 42 movements), and an opaque
-    `infoDataGlosaAdicional` token that is session-scoped (zero overlap between
-    two logins), so neither can be an identity on its own. The operation id (the
-    UI's "ID Transacción", behind the "+" expander) is either inline in
-    `detalleGlosa` as an "Id transaccion: ..." line, or one extra POST away
-    (`movimientos/cartola/detalle-glosa` -> `transaccionId`). Measured over a
-    42-movement window: coverage 39/42, all 39 distinct, identical across two
-    separate logins, and every same-second collision resolved into distinct ids.
+    the same amount collide), and an opaque `infoDataGlosaAdicional` token that
+    is session-scoped (zero overlap between two logins), so neither can be an
+    identity on its own. The operation id (the UI's "ID Transacción", behind the
+    "+" expander) is either inline in `detalleGlosa` as an "Id transaccion: ..."
+    line, or one extra POST away (`movimientos/cartola/detalle-glosa` ->
+    `transaccionId`). Over the observed window it covered all but a small
+    minority of movements, every value was distinct, the values were identical
+    across two separate logins, and every same-second collision resolved into
+    distinct ids.
   * card, unbilled (`tarjeta-credito-digital/movimientos-no-facturados`): no id
     at all, and its `detalle-glosa` sibling answered 501 "Glosa aun no
-    implementada" for all 44 rows, so there is nothing deeper to fetch. A
+    implementada" for every row tried, so there is nothing deeper to fetch. A
     description-free fingerprint is all this leg offers.
   * card, billed (`tarjetas/estadocuenta/nacional/resumen-por-fecha`): every row
-    carries `numReferencia` ("DDMM NNNNNNNN"), unique across the 65 real rows of
-    a statement and byte-identical across two logins. Rows flagged
+    carries `numReferencia` ("DDMM NNNNNNNN"), unique across a statement's real
+    rows and byte-identical across two logins. Rows flagged
     `totales: true` are summary lines and are dropped before anything else, and
     an all-zero 8-digit suffix means "no reference", not a value.
 
@@ -107,9 +108,21 @@ class BanChileMovement:
     built on top of the two lives in `institutions/banchile.py`, which owns the
     key format; this module only decides *which* fields are identity.
 
-    `source` is for logging only. It is deliberately NOT part of any key: a
-    charge crossing from the unbilled to the billed leg must not re-key itself,
-    which is exactly the bug issue #56 tracks.
+    `transaction_date` is when the movement HAPPENED and `accounting_date` is
+    when the bank posted it, which for this portal are different dates for most
+    of the observed window. The occurrence date is the one transactions are
+    dated by (it is what the column means, and what every chart is built on);
+    the posting date rides along as recorded data. When only the posting date is
+    known, both carry it: a movement is never dated by a value invented from
+    nothing. `accounting_date` is NULL where the leg reports no posting date.
+
+    Neither date is identity. Neither may enter an `external_id`, a fingerprint
+    or `dedupe_movements`: dates are exactly what the pre-#57 scheme keyed on,
+    and re-keying on one again would restart the bug this module exists to end.
+
+    `source` is for logging only. It is deliberately NOT part of any key either:
+    a charge crossing from the unbilled to the billed leg must not re-key
+    itself, which is exactly the bug issue #56 tracks.
     """
 
     source: str
@@ -117,6 +130,7 @@ class BanChileMovement:
     description: str
     amount: int
     transaction_date: datetime.date
+    accounting_date: Optional[datetime.date] = None
     operation_id: Optional[str] = None
     fingerprint: tuple[str, ...] = ()
 
@@ -150,8 +164,11 @@ _CARTOLA_FECHA_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})")
 
 # A billed reference is "DDMM NNNNNNNN": four digits of posting day/month, a
 # space, then eight digits. An all-zero suffix is the bank's "no reference"
-# (observed on a `grupo: "pagos"` row), not a value.
+# (observed on a `grupo: "pagos"` row), not a value. The same guard applies to
+# an operation id: a placeholder of nothing but zeros would collapse every
+# movement carrying it onto one key.
 _ALL_ZEROS_RE = re.compile(r"^0+$")
+_ID_NOISE_RE = re.compile(r"[^0-9A-Za-z]")
 
 
 def _text(value) -> str:
@@ -179,11 +196,28 @@ def _fingerprint_value(value) -> str:
     return _text(value)
 
 
+def _operation_id_or_none(raw) -> Optional[str]:
+    """An operation id, unless it is blank or an all-zero placeholder.
+
+    Mirrors `billed_reference`'s guard on the other leg: an id of nothing but
+    zeros is the bank saying it has none, and keying on it would merge every
+    such movement into one row.
+    """
+    value = _text(raw)
+    if not value:
+        return None
+    compact = _ID_NOISE_RE.sub("", value)
+    if not compact or _ALL_ZEROS_RE.match(compact):
+        return None
+    return value
+
+
 def operation_id_from_glosa(detalle_glosa) -> Optional[str]:
     """The "Id transaccion: ..." value from a movement's inline glosa.
 
-    Returns None when the glosa is absent, empty, or carries no id line (two of
-    the 42 movements observed were exactly that: a non-empty glosa with no id).
+    Returns None when the glosa is absent, empty, or carries no id line: a
+    non-empty glosa with no id in it is a real, recurring shape, not an
+    anomaly.
     """
     if not isinstance(detalle_glosa, (list, tuple)):
         return None
@@ -192,8 +226,8 @@ def operation_id_from_glosa(detalle_glosa) -> Optional[str]:
             continue
         match = _GLOSA_ID_RE.match(line)
         if match:
-            value = match.group(1).strip()
-            if value:
+            value = _operation_id_or_none(match.group(1))
+            if value is not None:
                 return value
     return None
 
@@ -208,8 +242,7 @@ def operation_id_from_detail(payload) -> Optional[str]:
     """
     if not isinstance(payload, dict):
         return None
-    value = _text(payload.get("transaccionId"))
-    return value or None
+    return _operation_id_or_none(payload.get("transaccionId"))
 
 
 def needs_detail_glosa(raw) -> bool:
@@ -217,9 +250,9 @@ def needs_detail_glosa(raw) -> bool:
 
     Movements whose `detalleGlosa` is non-empty already carry the id inline and
     answer 501 to the endpoint, so asking for them is a wasted round trip (it
-    skipped roughly 26 of 42 calls in the observed window). The token and the
-    account number are the request body, so a movement missing either can't be
-    asked at all.
+    skipped most of the calls in the observed window). The token and the account
+    number are the request body, so a movement missing either can't be asked at
+    all.
     """
     if not isinstance(raw, dict):
         return False
@@ -253,16 +286,39 @@ def cartola_has_more_pages(payload) -> bool:
     return isinstance(first, dict) and bool(first.get("masPaginas"))
 
 
-def _cartola_date(raw) -> Optional[datetime.date]:
-    """The movement's date: `fecha`'s date half, else `fechaContable`."""
+def _cartola_dates(raw) -> tuple[Optional[datetime.date], Optional[datetime.date]]:
+    """(occurred, posted) for one cartola row, from `fecha` and `fechaContable`.
+
+    The bank reports both and they differ for most of the observed window: a
+    charge stamped late one evening is posted a couple of days later, and it is
+    the POSTING date the portal's movements table displays. We date the
+    transaction by when it OCCURRED, because that is what `transaction_date`
+    means and what the dashboard's charts and tables should be built on, and
+    keep the posting date alongside it as recorded data.
+
+    Two consequences worth knowing, both handled elsewhere:
+      * the rows already in the database were written by fintself from the
+        posting column, so an incoming movement often will not match its own
+        stored row on the date. `db/writer.py`'s adoption lookup is tolerant of
+        exactly that: it matches a stored row on either of the two dates, and
+        corrects its dates when it adopts it.
+      * `scheduled_month` follows the occurrence date, which is intended.
+
+    `fecha` also carries the time to the second. It is deliberately not kept:
+    a third column would have to be threaded through the envelope, the DB, the
+    codegen and the writer for a value nothing reads, and the second is already
+    what makes the bank's composite `id` nearly unique inside the fingerprint.
+    """
+    posted = _parse_date_ddmmyyyy(_text(raw.get("fechaContable")))
+    occurred = None
     match = _CARTOLA_FECHA_RE.match(_text(raw.get("fecha")))
     if match:
         year, month, day = (int(part) for part in match.groups())
         try:
-            return datetime.date(year, month, day)
+            occurred = datetime.date(year, month, day)
         except ValueError:
-            pass
-    return _parse_date_ddmmyyyy(_text(raw.get("fechaContable")))
+            occurred = None
+    return occurred, posted
 
 
 def parse_cartola_movement(raw, operation_id: Optional[str] = None):
@@ -271,8 +327,9 @@ def parse_cartola_movement(raw, operation_id: Optional[str] = None):
     `monto` is unsigned and `tipo` carries the direction, so an unrecognised
     `tipo` is skipped rather than guessed: importing a credit as a charge is
     worse than importing nothing. The fallback identity is the bank's composite
-    `id` plus `saldo` (the running ledger balance, verified unique and stable
-    across logins: 41 of 41 consecutive deltas equalled the signed `monto`).
+    `id` plus `saldo` (the running ledger balance: every consecutive delta in
+    the observed window equalled the signed `monto`, every value was distinct,
+    and the values were identical across logins).
     """
     if not isinstance(raw, dict):
         return None
@@ -288,7 +345,11 @@ def parse_cartola_movement(raw, operation_id: Optional[str] = None):
         logger.warning("BanChile: skipping cartola movement with tipo %r", tipo)
         return None
 
-    tx_date = _cartola_date(raw)
+    # A movement with no occurrence date is dated by its posting date (the
+    # only date the bank gave), never the other way round: an occurrence date
+    # must not be invented from nothing.
+    occurred, posted = _cartola_dates(raw)
+    tx_date = occurred if occurred is not None else posted
     if tx_date is None:
         return None
 
@@ -305,6 +366,7 @@ def parse_cartola_movement(raw, operation_id: Optional[str] = None):
         description=_text(raw.get("descripcion")) or "Movimiento",
         amount=int(amount),
         transaction_date=tx_date,
+        accounting_date=posted,
         operation_id=operation_id,
         fingerprint=(bank_id, saldo),
     )
@@ -315,9 +377,17 @@ def parse_unbilled_movement(raw):
 
     This leg has no id of any kind, so the key is the description-free
     fingerprint below: posting date, authorisation date and time, amount, the
-    card's last four and the Transbank merchant code. `montoCompra` is positive
+    card's last four and the Transbank merchant code.
+
+    Unlike the billed leg, this one SIGNS its amounts: `montoCompra` is positive
     for a charge (spending, so a negative amount for us) and negative for a
-    payment or refund, which the SPA renders as a `montoPago`.
+    payment or refund, which the SPA renders as a `montoPago`. So the sign is
+    simply flipped here, while `parse_billed_movement` has to read `grupo`.
+
+    The date is `fechaTransaccion`, when the charge happened, read from the
+    portal's own rendering of it (`fechaTransaccionString`) rather than from the
+    epoch-millisecond twin, so no timezone conversion can shift it by a day.
+    This leg reports no posting date at all, so `accounting_date` stays NULL.
     """
     if not isinstance(raw, dict):
         return None
@@ -392,11 +462,26 @@ def parse_billed_movement(raw, fecha_facturacion: str = ""):
 
     `totales: true` rows are the section summary lines the SPA prints under
     each group and are dropped by `parse_billed_movements` before this is even
-    called. Signs mirror the unbilled leg: a positive `montoTransaccion` is
-    spending. The fallback identity (for a row whose reference is absent or
-    all zeros) is date + amount + card + statement date; the merchant and the
-    `grupo` section name are deliberately excluded, since keying on either is
-    the issue #56 bug.
+    called.
+
+    Signs work differently on the two card legs, which is worth stating twice:
+    the UNBILLED leg signs its amounts (a negative `montoCompra` is a payment or
+    refund, which the SPA renders as a `montoPago`), while the BILLED leg does
+    NOT. `montoTransaccion` was an unsigned magnitude on every row observed,
+    the statement's own payment included, and `grupo` carries the direction. So
+    a `grupo: "pagos"` row becomes income here; negating it would import the
+    monthly card payment, typically the largest line on the statement, as a
+    charge and roughly double the month's apparent spend.
+
+    The date is `fechaTransaccion`, when the charge happened, read from the
+    portal's own rendering of it (`fechaTransaccionString`). The statement's own
+    `fechaFacturacion` is a billing-period boundary rather than a posting date
+    for the row, and `numReferencia`'s "DDMM" prefix carries no year, so nothing
+    here is a trustworthy posting date and `accounting_date` stays NULL.
+
+    The fallback identity (for a row whose reference is absent or all zeros) is
+    date + amount + card + statement date; the merchant and the `grupo` section
+    name are deliberately excluded, since keying on either is the issue #56 bug.
     """
     if not isinstance(raw, dict):
         return None
@@ -407,6 +492,11 @@ def parse_billed_movement(raw, fecha_facturacion: str = ""):
     if tx_date is None:
         return None
 
+    if _text(raw.get("grupo")).lower() == "pagos":
+        amount = int(round(abs(monto)))
+    else:
+        amount = -int(round(monto))
+
     description = (
         _text(raw.get("descripcion")) or _text(raw.get("comercio")) or "Movimiento"
     )
@@ -414,7 +504,7 @@ def parse_billed_movement(raw, fecha_facturacion: str = ""):
         source="card_billed",
         product_kind="credit_card",
         description=description,
-        amount=-int(round(monto)),
+        amount=amount,
         transaction_date=tx_date,
         operation_id=billed_reference(raw.get("numReferencia")),
         fingerprint=(
@@ -467,6 +557,65 @@ def statement_dates(payload, limit: int) -> list[str]:
     return dates[:limit]
 
 
+def drop_unbilled_duplicates(
+    movements: list[BanChileMovement],
+) -> list[BanChileMovement]:
+    """Drop an unbilled charge this same scrape also saw on the billed leg.
+
+    A charge billed between two runs is briefly visible on both legs at once,
+    and the two legs key differently by construction (a fingerprint while
+    unbilled, its `numReferencia` once billed), so `dedupe_movements` cannot
+    see them as one: the scrape would carry two movements for one charge and
+    the writer would insert two rows, the second of which never gets revisited.
+    The billed row carries the bank's own reference, so it is the one to keep.
+
+    Matching is on product kind, date and amount, one-to-one: N unbilled
+    charges are dropped only against N billed ones, so a genuinely repeated
+    same-day charge that is still unbilled survives.
+    """
+    billed: dict[tuple, int] = {}
+    for movement in movements:
+        if movement.source == "card_billed":
+            key = (movement.product_kind, movement.transaction_date, movement.amount)
+            billed[key] = billed.get(key, 0) + 1
+    if not billed:
+        return movements
+
+    kept: list[BanChileMovement] = []
+    dropped = 0
+    for movement in movements:
+        key = (movement.product_kind, movement.transaction_date, movement.amount)
+        if movement.source == "card_unbilled" and billed.get(key):
+            billed[key] -= 1
+            dropped += 1
+            continue
+        kept.append(movement)
+    if dropped:
+        logger.info(
+            "BanChile: %d unbilled charge(s) dropped; already read as billed",
+            dropped,
+        )
+    return kept
+
+
+def cartola_account_number(payload) -> str:
+    """Which account a `getCartola` payload belongs to ("" when it says nothing).
+
+    Read off the movements themselves (every row carries `numeroCuenta`), so
+    the account loop can tell a genuine second account from the dialog handing
+    back the same one. The value is only ever compared, never logged or stored.
+    """
+    movimientos = payload.get("movimientos") if isinstance(payload, dict) else None
+    if not isinstance(movimientos, list):
+        return ""
+    for raw in movimientos:
+        if isinstance(raw, dict):
+            number = _text(raw.get("numeroCuenta"))
+            if number:
+                return number
+    return ""
+
+
 def dedupe_movements(movements: list[BanChileMovement]) -> list[BanChileMovement]:
     """Drop movements repeated within one read, keeping the first of each.
 
@@ -515,8 +664,9 @@ _CLP_OPTION_RE = re.compile(r"\bCLP\b", re.I)
 # dialog round trip), so they reuse banchile_web's escalating render budgets.
 _DIALOG_SETTLE_MS = 600
 # The per-movement id call is one extra request each. Space them so a scrape
-# never looks like a burst, and bound the total: the observed window needed ~16
-# of them, and a run that wanted far more is a signal, not a licence to hammer.
+# never looks like a burst, and bound the total: only movements with no inline
+# glosa need one, and a run that wants far more than that is a signal, not a
+# licence to hammer.
 _GLOSA_PAUSE_MS = 300
 _MAX_GLOSA_CALLS = 80
 # One radio per account of the chosen currency. The dialog has to be re-driven
@@ -771,19 +921,23 @@ def _movements_from_cartola(
     return movements, remaining
 
 
-def _read_checking_movements(page, attempt: int) -> list[BanChileMovement]:
+def _read_checking_movements(page, attempt: int) -> Optional[list[BanChileMovement]]:
     """Read every CLP checking account's cartola (one attempt).
 
     The dialog lists one radio per account of the chosen currency, and this
     account also holds a USD one, so the currency is picked explicitly first.
     Accounts are read one dialog drive each: the SPA offers no observed way to
     switch accounts without re-opening the selector, so the route is re-driven
-    per index and the results deduped. A re-drive that yields nothing ends the
-    loop with whatever was already read, which keeps a single-account setup
-    (the common case) to exactly one drive.
+    per index and the results deduped. A re-drive that lands back on an account
+    already read is reported and stops the loop: silently deduping it away would
+    hide the fact that the other account's movements were never read.
+
+    Returns None when the first drive never produced a cartola (the surface
+    failed and is worth retrying); a list, possibly empty, once one did.
     """
     budget = _budget(_RENDER_TIMEOUTS_MS, attempt)
     collected: list[BanChileMovement] = []
+    seen_accounts: set[str] = set()
     glosa_calls_left = _MAX_GLOSA_CALLS
     accounts = 1
     index = 0
@@ -792,7 +946,20 @@ def _read_checking_movements(page, attempt: int) -> list[BanChileMovement]:
         if count:
             accounts = count
         if payload is None:
+            if index == 0:
+                return None
             break
+        account = cartola_account_number(payload)
+        if account and account in seen_accounts:
+            logger.warning(
+                "BanChile: the account dialog re-opened an account already read "
+                "at radio %d of %d; stopping (the remaining accounts' movements "
+                "were not read)",
+                index + 1,
+                accounts,
+            )
+            break
+        seen_accounts.add(account)
         movements, glosa_calls_left = _movements_from_cartola(
             page, payload, glosa_calls_left
         )
@@ -825,21 +992,25 @@ def _open_card_area(page, attempt: int) -> bool:
     return True
 
 
-def _read_card_unbilled(page, attempt: int) -> list[BanChileMovement]:
+def _read_card_unbilled(page, attempt: int) -> Optional[list[BanChileMovement]]:
     """Capture the unbilled movements the card page loads (one attempt).
 
     Nothing is composed here: opening the card page makes the SPA fetch
     `movimientos-no-facturados` itself, and its sibling `detalle-glosa` answered
     501 for every row observed, so there is no per-row call worth making.
+
+    Returns None when the page never loaded (worth retrying) and a list once it
+    did: a card with no unbilled charges, right after the statement is paid, is
+    a legitimate empty reading, not a failure.
     """
     budget = _budget(_RENDER_TIMEOUTS_MS, attempt)
     with _JsonCapture(page, _UNBILLED_FRAGMENT) as capture:
         if not _open_card_area(page, attempt):
-            return []
+            return None
         payload = _wait_for_payload(page, capture, budget)
     if payload is None:
         logger.info("BanChile: unbilled card movements did not load (attempt %d)", attempt + 1)
-        return []
+        return None
     movements = parse_unbilled_movements(payload)
     logger.info("BanChile: %d unbilled card movements", len(movements))
     return movements
@@ -858,7 +1029,7 @@ def _replay_statement(page, request: dict, fecha: str) -> Optional[dict]:
     return payload
 
 
-def _read_card_billed(page, attempt: int) -> list[BanChileMovement]:
+def _read_card_billed(page, attempt: int) -> Optional[list[BanChileMovement]]:
     """Read the newest statements' billed movements (one attempt).
 
     The SPA loads the most recent statement itself when the facturados tab
@@ -867,26 +1038,30 @@ def _read_card_billed(page, attempt: int) -> list[BanChileMovement]:
     national (CLP) statement is read: our transaction envelope carries whole
     CLP amounts, so the international one has nowhere to go (it returned zero
     rows in every session observed anyway).
+
+    Returns None when the statement never loaded (worth retrying) and a list
+    once it did, which may legitimately be empty for a period with no national
+    statement.
     """
     budget = _budget(_RENDER_TIMEOUTS_MS, attempt)
     with _JsonCapture(page, _FECHAS_FACTURACION_FRAGMENT) as fechas_capture:
         with _JsonCapture(page, _BILLED_FRAGMENT) as billed_capture:
             if not _open_card_area(page, attempt):
-                return []
+                return None
             try:
                 page.evaluate(
                     "route => { window.location.hash = route; }", _BILLED_ROUTE
                 )
             except Exception:
                 logger.debug("BanChile: could not route to the billed tab", exc_info=True)
-                return []
+                return None
             payload = _wait_for_payload(page, billed_capture, budget)
             if payload is None:
                 logger.info(
                     "BanChile: billed card movements did not load (attempt %d)",
                     attempt + 1,
                 )
-                return []
+                return None
             requests = list(billed_capture.requests)
             fechas_payloads = list(fechas_capture.payloads)
 
@@ -922,18 +1097,22 @@ def read_movement_surfaces(page) -> tuple[list[BanChileMovement], tuple[str, ...
 
     This is the seam the tests drive with a fake page. Each surface goes through
     banchile_web's bounded-retry machinery and is non-fatal: one that never
-    yields a movement is reported, not raised, so a drift in the card markup
-    cannot cost the checking movements.
+    loaded is reported, not raised, so a drift in the card markup cannot cost
+    the checking movements. A surface that loaded and held nothing is NOT a
+    failure (`allow_empty`), so a quiet card can't leave every run `partial`.
+
+    A charge the scrape saw on both card legs at once is collapsed onto its
+    billed row before returning (`drop_unbilled_duplicates`).
     """
     movements: list[BanChileMovement] = []
     failed: list[str] = []
     for surface, read in _MOVEMENT_READERS:
-        found = _read_surface_with_retries(page, surface, read)
-        if found:
-            movements.extend(found)
-        else:
+        found = _read_surface_with_retries(page, surface, read, allow_empty=True)
+        if found is None:
             failed.append(surface)
-    return dedupe_movements(movements), tuple(failed)
+        else:
+            movements.extend(found)
+    return drop_unbilled_duplicates(dedupe_movements(movements)), tuple(failed)
 
 
 # --- The shared session -------------------------------------------------------

@@ -14,8 +14,10 @@ from scrapers.backends.banchile_movements import (
     BanChileMovement,
     _read_card_unbilled,
     billed_reference,
+    cartola_account_number,
     cartola_has_more_pages,
     dedupe_movements,
+    drop_unbilled_duplicates,
     detail_glosa_body,
     needs_detail_glosa,
     operation_id_from_detail,
@@ -53,7 +55,7 @@ def _cartola_row(
         "canal": "INTERNET",
         "tipo": tipo,
         "fecha": fecha,
-        "fechaContable": "20/08/2026",
+        "fechaContable": "20/08/2026",  # same day as `fecha` in this fixture
         "id": f"CTD{ACCOUNT}:{fecha}:{monto.replace('.', '')}:{tipo}:1",
         "numeroDocumento": "",
         "fechaContableMovimiento": 1755000000000,
@@ -152,7 +154,7 @@ class TestOperationIdFromGlosa:
         assert operation_id_from_glosa(["Fija", "Cargo mensual del plan"]) is None
 
     def test_glosa_without_an_id_line(self):
-        """Two of the 42 movements observed had a glosa but no id in it."""
+        """A non-empty glosa with no id line is a real, recurring shape."""
         assert operation_id_from_glosa(["Banco: BANCO SINTETICO"]) is None
 
     def test_empty_and_missing(self):
@@ -186,7 +188,7 @@ class TestNeedsDetailGlosa:
         assert needs_detail_glosa(_cartola_row()) is True
 
     def test_inline_glosa_does_not(self):
-        """Those answer 501; asking skipped ~26 of 42 calls in the live window."""
+        """Those answer 501; asking skipped most of the calls in the window."""
         row = _cartola_row(detalle_glosa=["Id transaccion: 12345678901"])
         assert needs_detail_glosa(row) is False
 
@@ -480,9 +482,199 @@ class TestUnbilledSurface:
 
         assert [m.amount for m in found] == [-999999, -2500000]
 
-    def test_a_page_that_never_loads_yields_nothing(self, monkeypatch):
-        """A surface that stays empty is reported by the caller, never raised."""
+    def test_a_page_that_never_loads_is_a_failure(self, monkeypatch):
+        """None, so the caller retries and then reports the surface."""
         monkeypatch.setattr(movements_mod, "_RENDER_TIMEOUTS_MS", (0,))
         page = _FakeCardPage({"listaMovNoFactur": []}, url_fragment="otra-cosa")
 
+        assert _read_card_unbilled(page, attempt=0) is None
+
+    def test_a_card_with_no_unbilled_charges_is_not_a_failure(self):
+        """Right after the statement is paid the list is legitimately empty."""
+        page = _FakeCardPage({"listaMovNoFactur": []})
+
         assert _read_card_unbilled(page, attempt=0) == []
+
+
+class TestCartolaDates:
+    """`transaction_date` is when it happened; `accounting_date` when it posted."""
+
+    def test_both_dates_are_kept(self):
+        """The bank reports two and they usually differ; neither is discarded."""
+        row = _cartola_row(fecha="20260821 15:48:28")
+        row["fechaContable"] = "24/08/2026"
+
+        movement = parse_cartola_movement(row)
+
+        assert movement.transaction_date == datetime.date(2026, 8, 21)
+        assert movement.accounting_date == datetime.date(2026, 8, 24)
+
+    def test_a_missing_posting_date_leaves_it_null(self):
+        row = _cartola_row(fecha="20260821 15:48:28")
+        row["fechaContable"] = ""
+
+        movement = parse_cartola_movement(row)
+
+        assert movement.transaction_date == datetime.date(2026, 8, 21)
+        assert movement.accounting_date is None
+
+    def test_only_a_posting_date_fills_both(self):
+        """An occurrence date is never invented; the known date fills in."""
+        row = _cartola_row(fecha="")
+        row["fechaContable"] = "24/08/2026"
+
+        movement = parse_cartola_movement(row)
+
+        assert movement.transaction_date == datetime.date(2026, 8, 24)
+        assert movement.accounting_date == datetime.date(2026, 8, 24)
+
+    def test_no_date_at_all_is_dropped(self):
+        row = _cartola_row(fecha="")
+        row["fechaContable"] = ""
+
+        assert parse_cartola_movement(row) is None
+
+    def test_the_card_legs_report_no_posting_date(self):
+        """`fechaTransaccion` is when the charge happened; nothing posts it."""
+        unbilled = parse_unbilled_movement(_unbilled_row())
+        billed = parse_billed_movements(_billed_payload([_billed_row()]), "2026-08-25")[0]
+
+        assert unbilled.transaction_date == datetime.date(2026, 8, 20)
+        assert unbilled.accounting_date is None
+        assert billed.transaction_date == datetime.date(2026, 8, 20)
+        assert billed.accounting_date is None
+
+    def test_neither_date_reaches_an_identity(self):
+        """Dates are recorded data: keying on one is the bug #57 removed."""
+        row = _cartola_row(fecha="20260821 15:48:28")
+        row["fechaContable"] = "24/08/2026"
+        shifted = _cartola_row(fecha="20260821 15:48:28")
+        shifted["fechaContable"] = "25/08/2026"
+
+        assert parse_cartola_movement(row).fingerprint == (
+            parse_cartola_movement(shifted).fingerprint
+        )
+        assert len(dedupe_movements(
+            [parse_cartola_movement(row), parse_cartola_movement(shifted)]
+        )) == 1
+
+
+class TestAllZeroOperationId:
+    """A placeholder id must never become a key every movement shares."""
+
+    def test_all_zero_inline_id_is_absent(self):
+        assert operation_id_from_glosa(["Id transaccion: 00000000000"]) is None
+
+    def test_all_zero_detail_id_is_absent(self):
+        assert operation_id_from_detail({"transaccionId": "00000000000"}) is None
+
+    def test_a_real_id_containing_zeros_survives(self):
+        assert operation_id_from_detail({"transaccionId": "TEF_IPE00000001"}) == (
+            "TEF_IPE00000001"
+        )
+
+
+class TestBilledSigns:
+    """The billed leg does not sign its amounts; `grupo` carries the direction."""
+
+    def _amount(self, **kwargs):
+        rows = [_billed_row(**kwargs)]
+        return parse_billed_movements(_billed_payload(rows))[0].amount
+
+    def test_a_purchase_is_an_expense(self):
+        assert self._amount(monto=999999, grupo="avancesCompras") == -999999
+
+    def test_a_positive_pagos_row_is_income(self):
+        """The statement's payment is an unsigned magnitude like every row.
+
+        Negating it would import the month's card payment, typically the
+        largest line on the statement, as a charge.
+        """
+        assert self._amount(monto=2500000, grupo="pagos", referencia="2008 00000000") == (
+            2500000
+        )
+
+    def test_a_negative_pagos_row_is_still_income(self):
+        assert self._amount(monto=-2500000, grupo="pagos") == 2500000
+
+    def test_the_unbilled_leg_still_signs_its_own_amounts(self):
+        """`montoCompra` genuinely carries negatives, so the sign is flipped."""
+        assert parse_unbilled_movement(_unbilled_row(monto=999999)).amount == -999999
+        assert parse_unbilled_movement(_unbilled_row(monto=-2500000)).amount == 2500000
+
+
+class TestDropUnbilledDuplicates:
+    """A charge visible on both card legs in one scrape must yield one row."""
+
+    def _card(self, source, amount=-999999, operation_id=None, fingerprint=("a",)):
+        return BanChileMovement(
+            source=source,
+            product_kind="credit_card",
+            description="COMERCIO SINTETICO",
+            amount=amount,
+            transaction_date=datetime.date(2026, 8, 20),
+            operation_id=operation_id,
+            fingerprint=fingerprint,
+        )
+
+    def test_the_billed_row_wins(self):
+        """It carries the bank's reference; the unbilled one has no id at all."""
+        movements = [
+            self._card("card_unbilled", fingerprint=("fp",)),
+            self._card("card_billed", operation_id="2008 12345678"),
+        ]
+
+        kept = drop_unbilled_duplicates(movements)
+
+        assert [m.source for m in kept] == ["card_billed"]
+
+    def test_matching_is_one_to_one(self):
+        """Two identical unbilled charges, one billed: one survives unbilled."""
+        movements = [
+            self._card("card_unbilled", fingerprint=("fp-1",)),
+            self._card("card_unbilled", fingerprint=("fp-2",)),
+            self._card("card_billed", operation_id="2008 12345678"),
+        ]
+
+        kept = drop_unbilled_duplicates(movements)
+
+        assert [m.source for m in kept] == ["card_unbilled", "card_billed"]
+
+    def test_a_different_amount_is_a_different_charge(self):
+        movements = [
+            self._card("card_unbilled", amount=-2500000, fingerprint=("fp",)),
+            self._card("card_billed", operation_id="2008 12345678"),
+        ]
+
+        assert len(drop_unbilled_duplicates(movements)) == 2
+
+    def test_checking_movements_are_never_touched(self):
+        movements = [
+            BanChileMovement(
+                source="checking",
+                product_kind="checking",
+                description="TRANSFERENCIA DE TERCERO",
+                amount=-999999,
+                transaction_date=datetime.date(2026, 8, 20),
+                fingerprint=("a", "b"),
+            ),
+            self._card("card_billed", operation_id="2008 12345678"),
+        ]
+
+        assert len(drop_unbilled_duplicates(movements)) == 2
+
+    def test_without_a_billed_leg_nothing_is_dropped(self):
+        movements = [self._card("card_unbilled", fingerprint=("fp",))]
+        assert drop_unbilled_duplicates(movements) == movements
+
+
+class TestCartolaAccountNumber:
+    """What the account loop compares so it can't silently re-read an account."""
+
+    def test_reads_it_off_the_movements(self):
+        payload = {"movimientos": [_cartola_row()]}
+        assert cartola_account_number(payload) == ACCOUNT
+
+    def test_empty_payloads(self):
+        assert cartola_account_number({"movimientos": []}) == ""
+        assert cartola_account_number(None) == ""

@@ -1371,26 +1371,36 @@ def _budget(values: tuple[int, ...], index: int) -> int:
     return values[min(index, len(values) - 1)]
 
 
-def _read_surface_with_retries(page, surface: str, read: Callable) -> list:
+def _read_surface_with_retries(
+    page, surface: str, read: Callable, allow_empty: bool = False
+):
     """Run one surface's reader with bounded retries and escalating budgets.
 
-    An attempt succeeds iff it parses ≥1 item — every product surface on this
-    account always has one, so a rendered-but-empty parse is portal slowness
-    worth retrying (issue #35). Between attempts: a pause (through the page
-    clock, which keeps the tests' MagicMock seam), then a recovery to the
-    portal home. Exceptions never escape a surface; a mid-attempt crash just
-    consumes that attempt.
+    Between attempts: a pause (through the page clock, which keeps the tests'
+    MagicMock seam), then a recovery to the portal home. Exceptions never escape
+    a surface; a mid-attempt crash just consumes that attempt.
 
     Generic in what a surface yields: `backends/banchile_movements.py` drives
-    its movement surfaces through the same machinery (issue #57), so the
-    return type is whatever `read` builds.
+    its movement surfaces through the same machinery (issue #57), so the return
+    type is whatever `read` builds. The two families differ in what "empty"
+    means, which is what `allow_empty` selects:
+
+    - Products (``allow_empty=False``, the default): an attempt succeeds iff it
+      parses ≥1 product, because every product surface on this account always
+      has one, so a rendered-but-empty parse is portal slowness worth retrying
+      (issue #35). Exhaustion returns ``[]``.
+    - Movements (``allow_empty=True``): zero rows is a legitimate reading (a
+      card with no unbilled charges just after the statement is paid, a period
+      with no national statement), so a reader signals failure by returning
+      None and success with a possibly empty list. Exhaustion returns None, so
+      the caller can tell "nothing happened this month" from "never loaded".
     """
     for attempt in range(_SURFACE_ATTEMPTS):
         if attempt:
             page.wait_for_timeout(_budget(_RETRY_PAUSES_MS, attempt - 1))
             _recover_to_home(page)
         try:
-            products = read(page, attempt)
+            items = read(page, attempt)
         except Exception:
             logger.exception(
                 "BanChile: %s surface read failed (attempt %d/%d)",
@@ -1399,12 +1409,14 @@ def _read_surface_with_retries(page, surface: str, read: Callable) -> list:
                 _SURFACE_ATTEMPTS,
             )
             continue
-        if products:
-            return products
+        if items is None:
+            continue
+        if items or allow_empty:
+            return items
     logger.warning(
         "BanChile: %s surface failed after %d attempts", surface, _SURFACE_ATTEMPTS
     )
-    return []
+    return None if allow_empty else []
 
 
 def _read_dashboard(page, attempt: int) -> list[ScrapedProduct]:
