@@ -45,7 +45,7 @@ A scraper is enabled only when all of its credentials are present. See [USAGE.md
 | Variable | Required | Description |
 |---|---|---|
 | `DATABASE_URL` | yes | PostgreSQL connection string; the `.env.example` default works with `make db-up` |
-| `BANCHILE_RUT` | no | Banco de Chile RUT; enables the BanChile scraper (fintself + Playwright) |
+| `BANCHILE_RUT` | no | Banco de Chile RUT; enables the BanChile scraper (Playwright) |
 | `FINTUAL_EMAIL` | no | Fintual account e-mail; enables the Fintual scraper (run `make fintual-login` once) |
 | `EMAIL_IMAP_HOST` / `EMAIL_IMAP_USER` | no | Gmail IMAP identifiers; enable the e-mail parsers (MACH, MercadoPago, Tenpo) |
 | `chanchito.*` | scrapers only | Secrets (bank passwords, Buda API keys, Gmail App Password) live in the macOS Keychain: `make secrets-init` / `make secrets-status`. On non-macOS hosts, export them as env vars instead |

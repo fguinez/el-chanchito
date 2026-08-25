@@ -1,0 +1,43 @@
+-- V018: Prepare the Banco de Chile transactions for their operation-id keys.
+--
+-- The scraper hashed date + description + amount + account into `external_id`
+-- because `fintself`, which read the movements leg, never exposed an operation
+-- id. Every failure mode of that hash was a data-integrity bug: movements that
+-- shared those four fields collapsed into one row (worked around in #55 with an
+-- occurrence counter that shifted whenever the bank's window moved), and a
+-- reworded description or a charge crossing from the card's unbilled section to
+-- its billed one re-keyed the movement and imported it twice (#56, the same
+-- class of bug V017 fixed for BCI Lider). The scraper now reads the movements
+-- itself and keys them on the bank's own ids: `bch_op_<transaccionId>` for
+-- checking, `bch_ref_<numReferencia>` for a billed card row, and a
+-- description-free `bch_fp_` fingerprint for the rest (issue #57).
+--
+-- Unlike V017 this migration CANNOT compute the new ids. An operation id is not
+-- derivable from anything we stored: it lives only in the portal, behind a
+-- per-movement request. So the re-keying happens on the next scrape instead,
+-- in `apps/scrapers/db/writer.py::upsert_transactions`, which offers a movement
+-- whose new key matches nothing the stored rows it could be under its old key
+-- (same product, date, amount and scraper source, oldest `created_at` first,
+-- each claimed at most once) and rewrites one in place rather than inserting a
+-- duplicate. That is also what closes #56: the card's two legs share no
+-- identity field, so no mapping rule could bridge them.
+--
+-- Nothing is deleted here on purpose. Collapsing "duplicates" by product + date
+-- + amount is exactly what V017 could afford and this table cannot: several
+-- genuinely distinct BanChile movements legitimately share those three fields
+-- (that is the bug #55 fixed), so a collapse would delete real movements. The
+-- duplicate pairs #56 predicts do not exist yet either: its investigation found
+-- zero BanChile credit_card rows sharing date + description + amount. Any that
+-- appear later are adopted, not duplicated, by the writer above.
+--
+-- So this migration only adds the index that adoption's lookup wants. Safe on a
+-- fresh database, and idempotent.
+--
+-- After the first post-migration run, verify by comparing the BanChile
+-- transaction count per product before and after: it must grow only by
+-- genuinely new movements, and a second run back to back must insert none.
+
+-- The adoption lookup is (product_id, transaction_date, amount); the existing
+-- idx_transactions_product_date covers only the first two.
+CREATE INDEX IF NOT EXISTS idx_transactions_product_date_amount
+    ON transactions (product_id, transaction_date, amount);

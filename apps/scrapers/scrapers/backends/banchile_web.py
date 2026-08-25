@@ -1,20 +1,20 @@
 """Self-contained Banco de Chile web session (login + balance read).
 
-Banco de Chile exposes no public/open-banking API for individuals, and the
-`fintself` library we use for *transactions* only returns `MovementModel`s —
-never an account balance (fintself#… — see issue #27). So to give `banchile`
-real, refreshable balances we log in ourselves with Playwright and read the
-figures off the post-login "Mis Productos" dashboard — CLP/USD checking and the
+Banco de Chile exposes no public/open-banking API for individuals, so to give
+`banchile` real, refreshable balances we log in ourselves with Playwright and
+read the figures off the post-login "Mis Productos" dashboard — CLP/USD checking and the
 credit-card cupo — plus the card total cupo/límite/utilizado (and masked last4),
 the línea de crédito, and one product per depósito a plazo / fondo mutuo read
 off their listing pages and detail asides (issue #36; see the scope note before
 `_PRODUCT_ROWS` for what's covered and how).
 
-This module deliberately does **not** import `fintself`; it only borrows its
-login flow / page routes as a reference. The one gotcha worth repeating: Banco
-de Chile serves a *degraded* post-login page to Playwright's default headless
-shell (no "Mis Productos" menu — fintself#28), so we launch Chromium via the
-``channel="chromium"`` full binary, which behaves like a headed session.
+The login flow and page routes were originally borrowed from the `fintself`
+library, which used to read the transactions leg before issue #57 moved that
+here too (`banchile_movements.py`, which shares this module's session). The one
+gotcha worth repeating: Banco de Chile serves a *degraded* post-login page to
+Playwright's default headless shell (no "Mis Productos" menu — fintself#28), so
+we launch Chromium via the ``channel="chromium"`` full binary, which behaves
+like a headed session.
 
 Design note (why DOM scraping, not XHR interception): issue #27 recommends
 intercepting the SPA's balance JSON endpoint as the more robust option. That
@@ -1154,13 +1154,32 @@ def _launch_browser(playwright, headless: bool):
     """Launch Chromium via the full-binary "chromium" channel (see module doc).
 
     Falls back to the default launch on Playwright builds without channel
-    support (<1.49), matching backends/fintself.py::_force_new_headless.
+    support (<1.49).
     """
     try:
         return playwright.chromium.launch(headless=headless, channel="chromium")
     except Exception:
         logger.warning("chromium channel unavailable; using default headless shell")
         return playwright.chromium.launch(headless=headless)
+
+
+def _new_context(browser):
+    """Build the anti-detection browser context both BdC sessions use.
+
+    Extracted so the shared products + movements session
+    (`backends/banchile_movements.py::_session_sync`, issue #57) opens exactly
+    the same context this module's balance-only session does.
+    """
+    context = browser.new_context(
+        user_agent=USER_AGENT,
+        viewport=VIEWPORT,
+        locale=LOCALE,
+        timezone_id=TIMEZONE_ID,
+    )
+    context.add_init_script(
+        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+    )
+    return context
 
 
 def _login(page, rut: str, password: str) -> None:
@@ -1352,22 +1371,36 @@ def _budget(values: tuple[int, ...], index: int) -> int:
     return values[min(index, len(values) - 1)]
 
 
-def _read_surface_with_retries(page, surface: str, read: Callable) -> list[ScrapedProduct]:
+def _read_surface_with_retries(
+    page, surface: str, read: Callable, allow_empty: bool = False
+):
     """Run one surface's reader with bounded retries and escalating budgets.
 
-    An attempt succeeds iff it parses ≥1 product — every surface on this
-    account always has one, so a rendered-but-empty parse is portal slowness
-    worth retrying (issue #35). Between attempts: a pause (through the page
-    clock, which keeps the tests' MagicMock seam), then a recovery to the
-    portal home. Exceptions never escape a surface; a mid-attempt crash just
-    consumes that attempt.
+    Between attempts: a pause (through the page clock, which keeps the tests'
+    MagicMock seam), then a recovery to the portal home. Exceptions never escape
+    a surface; a mid-attempt crash just consumes that attempt.
+
+    Generic in what a surface yields: `backends/banchile_movements.py` drives
+    its movement surfaces through the same machinery (issue #57), so the return
+    type is whatever `read` builds. The two families differ in what "empty"
+    means, which is what `allow_empty` selects:
+
+    - Products (``allow_empty=False``, the default): an attempt succeeds iff it
+      parses ≥1 product, because every product surface on this account always
+      has one, so a rendered-but-empty parse is portal slowness worth retrying
+      (issue #35). Exhaustion returns ``[]``.
+    - Movements (``allow_empty=True``): zero rows is a legitimate reading (a
+      card with no unbilled charges just after the statement is paid, a period
+      with no national statement), so a reader signals failure by returning
+      None and success with a possibly empty list. Exhaustion returns None, so
+      the caller can tell "nothing happened this month" from "never loaded".
     """
     for attempt in range(_SURFACE_ATTEMPTS):
         if attempt:
             page.wait_for_timeout(_budget(_RETRY_PAUSES_MS, attempt - 1))
             _recover_to_home(page)
         try:
-            products = read(page, attempt)
+            items = read(page, attempt)
         except Exception:
             logger.exception(
                 "BanChile: %s surface read failed (attempt %d/%d)",
@@ -1376,12 +1409,14 @@ def _read_surface_with_retries(page, surface: str, read: Callable) -> list[Scrap
                 _SURFACE_ATTEMPTS,
             )
             continue
-        if products:
-            return products
+        if items is None:
+            continue
+        if items or allow_empty:
+            return items
     logger.warning(
         "BanChile: %s surface failed after %d attempts", surface, _SURFACE_ATTEMPTS
     )
-    return []
+    return None if allow_empty else []
 
 
 def _read_dashboard(page, attempt: int) -> list[ScrapedProduct]:
@@ -1636,15 +1671,7 @@ def _scrape_sync(rut: str, password: str, headless: bool) -> BalanceFetchResult:
     with sync_playwright() as playwright:
         browser = _launch_browser(playwright, headless)
         try:
-            context = browser.new_context(
-                user_agent=USER_AGENT,
-                viewport=VIEWPORT,
-                locale=LOCALE,
-                timezone_id=TIMEZONE_ID,
-            )
-            context.add_init_script(
-                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-            )
+            context = _new_context(browser)
             page = context.new_page()
             page.set_default_timeout(DEFAULT_TIMEOUT)
 
@@ -1664,8 +1691,11 @@ async def fetch_balances(
     línea, and one product per depósito a plazo / fondo mutuo read from the
     inversiones listing pages; surfaces that never yielded a product are reported
     in the result's `failed_surfaces`. Runs the synchronous Playwright flow in a
-    thread executor so it doesn't block the scheduler's event loop, mirroring
-    backends/fintself.py.
+    thread executor so it doesn't block the scheduler's event loop.
+
+    Since issue #57 the scheduled path uses `banchile_movements.fetch_session`
+    instead, which reads products and movements from one login; this stays the
+    balance-only entry point the products leg falls back to.
     """
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _scrape_sync, rut, password, headless)

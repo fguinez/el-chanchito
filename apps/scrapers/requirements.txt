@@ -3,11 +3,10 @@ psycopg-pool>=3.1,<4
 python-dotenv>=1.0,<2
 apscheduler>=3.10,<4
 httpx>=0.27,<1
-# Banco de Chile: fintself scrapes transactions, banchile_web scrapes balances.
-# Both drive Chromium through Playwright, so it's a first-class runtime dep (the
-# Dockerfile/`make install` also run `playwright install chromium`). The
-# "chromium" full-binary channel banchile_web relies on needs Playwright >= 1.49.
-fintself>=1.5,<2
+# Banco de Chile, Tarjeta Lider Bci and MercadoPago all drive Chromium through
+# Playwright, so it's a first-class runtime dep (the Dockerfile/`make install`
+# also run `playwright install chromium`). The "chromium" full-binary channel
+# banchile_web relies on needs Playwright >= 1.49.
 playwright>=1.49,<2
 pydantic>=2.7,<3
 # Shared per-kind product payloads + ingest envelopes. Editable so scraper

@@ -9,22 +9,31 @@ both counting toward net worth; the fake connection below exercises the SQL
 side-effects `upsert_product` issues for them. `_FakeResolveConn` drives the
 real `_resolve_product` to check a new product's INSERT carries an
 institution-unique slug (the slug helpers themselves live in test_slug.py).
+`_claim_decision` and `_FakeTxConn` cover issue #57's adoption path: a stored
+BanChile row is re-keyed in place when its movement comes back under the bank's
+operation id, instead of being imported a second time.
 """
 
+from datetime import date
 from decimal import Decimal
 
 import pytest
 
 from db import writer
 from db.writer import (
+    _adopts_stored_rows,
     _canonical_metrics,
+    _claim_decision,
     _headline_decimal,
+    _is_final_id,
     _write_decision,
     upsert_product,
+    upsert_transactions,
 )
 from product_model import (
     InvestmentMetrics,
     ScrapedProduct,
+    ScrapedTransaction,
     TermDepositMetrics,
 )
 
@@ -451,3 +460,490 @@ class TestResolveProductSlug:
 
         _, p = self._product_insert(conn)
         assert p[3] == "cuenta-corriente"
+
+
+class TestClaimDecision:
+    """The pure half of the issue #57 adoption path.
+
+    `siblings` are (row_id, external_id) pairs, oldest `created_at` first: the
+    stored rows of the same product, date, amount and scraper source that a
+    movement whose key matches nothing could be under an older key.
+    """
+
+    def test_a_legacy_row_is_adopted(self):
+        siblings = [("row-1", "bch_a1b2c3d4e5f60718")]
+        assert _claim_decision("bch_op_12345678901", siblings, set(), set()) == (
+            "rekey",
+            "row-1",
+        )
+
+    def test_a_fingerprint_row_is_adopted_by_its_reference(self):
+        """Issue #56: an unbilled charge picks up its numReferencia when billed."""
+        siblings = [("row-1", "bch_fp_a1b2c3d4e5f60718")]
+        assert _claim_decision("bch_ref_200812345678", siblings, set(), set()) == (
+            "rekey",
+            "row-1",
+        )
+
+    def test_claiming_is_oldest_first_and_one_to_one(self):
+        """N identical movements must map onto the N stored rows, not one."""
+        siblings = [("row-1", "bch_aaa"), ("row-2", "bch_bbb"), ("row-3", "bch_ccc")]
+        claimed = set()
+        picked = []
+        for external_id in ("bch_op_1", "bch_op_2", "bch_op_3"):
+            action, row_id = _claim_decision(external_id, siblings, claimed, set())
+            assert action == "rekey"
+            claimed.add(row_id)
+            picked.append(row_id)
+
+        assert picked == ["row-1", "row-2", "row-3"]
+
+    def test_a_fourth_movement_inserts(self):
+        siblings = [("row-1", "bch_aaa")]
+        assert _claim_decision("bch_op_2", siblings, {"row-1"}, set()) == (
+            "insert",
+            None,
+        )
+
+    def test_a_row_holding_one_of_this_scrapes_keys_is_never_stolen(self):
+        """It belongs to the movement carrying that key."""
+        siblings = [("row-1", "bch_op_12345678901")]
+        assert _claim_decision(
+            "bch_op_12345678902", siblings, set(), {"bch_op_12345678901"}
+        ) == ("insert", None)
+
+    def test_two_bank_ids_on_the_same_day_are_distinct_movements(self):
+        """A row already identified by the bank is never re-keyed onto another."""
+        siblings = [("row-1", "bch_op_12345678901")]
+        assert _claim_decision("bch_op_12345678902", siblings, set(), set()) == (
+            "insert",
+            None,
+        )
+
+    def test_a_lost_operation_id_keeps_the_stored_row(self):
+        """The transient 503 case: don't throw the bank's id away, don't insert."""
+        siblings = [("row-1", "bch_op_12345678901")]
+        assert _claim_decision("bch_fp_a1b2c3d4e5f60718", siblings, set(), set()) == (
+            "keep",
+            "row-1",
+        )
+
+    def test_a_legacy_row_wins_over_a_final_one(self):
+        """Adoption prefers the row that still needs re-keying."""
+        siblings = [("row-1", "bch_op_12345678901"), ("row-2", "bch_aaa")]
+        assert _claim_decision("bch_fp_deadbeefdeadbeef", siblings, set(), set()) == (
+            "rekey",
+            "row-2",
+        )
+
+    def test_no_siblings_inserts(self):
+        assert _claim_decision("bch_op_1", [], set(), set()) == ("insert", None)
+
+
+class TestAdoptsStoredRows:
+    def test_only_banchile_keys_adopt(self):
+        assert _adopts_stored_rows("bch_op_12345678901") is True
+        assert _adopts_stored_rows("bch_a1b2c3d4e5f60718") is True
+        assert _adopts_stored_rows("bcl_a1b2c3d4e5f60718") is False
+        assert _adopts_stored_rows("buda_1234") is False
+        assert _adopts_stored_rows(None) is False
+
+    def test_a_legacy_hash_can_never_look_final(self):
+        """`bch_` + md5 hex: "p", "r" and "_" are not hex digits."""
+        assert _is_final_id("bch_0123456789abcdef") is False
+        assert _is_final_id("bch_op_12345678901") is True
+        assert _is_final_id("bch_ref_200812345678") is True
+        assert _is_final_id("bch_fp_0123456789abcdef") is False
+
+
+class _FakeTxConn:
+    """A transactions table stand-in for `upsert_transactions`.
+
+    Rows are dicts; `created_at` is the insertion order, which is what the real
+    query orders by. `_resolve_product` is monkeypatched, so only the
+    transaction queries reach here.
+    """
+
+    def __init__(self, rows=None):
+        self.rows = list(rows or [])
+        self.executed = []
+        self._clock = 100
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        q = " ".join(sql.split())
+        self.executed.append((q, params))
+        p = params or ()
+        if "SELECT id FROM transactions" in q:
+            product_id, external_id = p
+            for row in self.rows:
+                if row["product_id"] == product_id and row["external_id"] == external_id:
+                    return _FakeCursor((row["id"],))
+            return _FakeCursor(None)
+        if "SELECT id, external_id FROM transactions" in q:
+            # (product_id, amount, source, LIKE pattern, occurrence date,
+            #  accounting date, the date the ordering prefers)
+            product_id, amount, source, like, occurred, accounted, preferred = p
+            prefix = like.replace("\\", "").rstrip("%")
+            hits = [
+                row
+                for row in self.rows
+                if row["product_id"] == product_id
+                and row["amount"] == amount
+                and row["source"] == source
+                and (row["external_id"] or "").startswith(prefix)
+                and row["transaction_date"] in (occurred, accounted)
+            ]
+            hits.sort(
+                key=lambda row: (
+                    row["transaction_date"] != preferred,
+                    row["created_at"],
+                    row["id"],
+                )
+            )
+            return _FakeCursor([(row["id"], row["external_id"]) for row in hits])
+        if "UPDATE transactions SET external_id" in q:
+            external_id, tx_date, accounting_date, month, row_id = p
+            for row in self.rows:
+                if row["id"] == row_id:
+                    row.update(
+                        external_id=external_id,
+                        transaction_date=tx_date,
+                        accounting_date=accounting_date,
+                        scheduled_month=month,
+                    )
+            return _FakeCursor(rowcount=1)
+        if "INSERT INTO transactions" in q:
+            (
+                row_id,
+                product_id,
+                description,
+                amount,
+                tx_date,
+                accounting_date,
+                month,
+                source,
+                ext,
+            ) = p
+            self._clock += 1
+            self.rows.append(
+                {
+                    "id": row_id,
+                    "product_id": product_id,
+                    "external_id": ext,
+                    "description": description,
+                    "amount": amount,
+                    "transaction_date": tx_date,
+                    "accounting_date": accounting_date,
+                    "scheduled_month": month,
+                    "source": source,
+                    "created_at": self._clock,
+                }
+            )
+            return _FakeCursor(rowcount=1)
+        return _FakeCursor()
+
+
+def _legacy_row(
+    row_id,
+    external_id,
+    created_at,
+    amount=-999999,
+    description="COMPRA",
+    tx_date=date(2026, 8, 20),
+):
+    """A stored row as the pre-#57 scraper wrote it.
+
+    fintself dated every BanChile row by the portal's `fechaContable` column,
+    so a legacy row holds the POSTING date in `transaction_date` and has no
+    `accounting_date` at all.
+    """
+    return {
+        "id": row_id,
+        "product_id": "prod-1",
+        "external_id": external_id,
+        "description": description,
+        "amount": amount,
+        "transaction_date": tx_date,
+        "accounting_date": None,
+        "scheduled_month": date(tx_date.year, tx_date.month, 1),
+        "source": "scraper_banchile",
+        "created_at": created_at,
+    }
+
+
+def _txn(
+    external_id,
+    amount=-999999,
+    description="COMPRA",
+    kind="checking",
+    tx_date=date(2026, 8, 20),
+    accounting_date=None,
+):
+    return ScrapedTransaction(
+        institution="banchile",
+        product_kind=kind,
+        description=description,
+        amount=amount,
+        transaction_date=tx_date,
+        accounting_date=accounting_date,
+        external_id=external_id,
+        scheduled_month=date(tx_date.year, tx_date.month, 1),
+    )
+
+
+def _use_tx_conn(monkeypatch, conn):
+    monkeypatch.setattr(writer, "get_pool", lambda: _FakePool(conn))
+    monkeypatch.setattr(
+        writer,
+        "_resolve_product",
+        lambda conn, institution, kind, currency="CLP", external_ref=None, name=None: "prod-1",
+    )
+
+
+class TestUpsertTransactionsAdoption:
+    """Issue #57: a re-keyed movement is rewritten in place, never duplicated."""
+
+    def test_a_legacy_row_is_re_keyed_not_duplicated(self, monkeypatch):
+        conn = _FakeTxConn([_legacy_row("row-1", "bch_a1b2c3d4e5f60718", 1)])
+        _use_tx_conn(monkeypatch, conn)
+
+        inserted = upsert_transactions([_txn("bch_op_12345678901")])
+
+        assert inserted == 0
+        assert len(conn.rows) == 1
+        assert conn.rows[0]["external_id"] == "bch_op_12345678901"
+
+    def test_n_identical_movements_map_one_to_one(self, monkeypatch):
+        """Three stored rows, three incoming ids, three rewrites and no inserts."""
+        conn = _FakeTxConn(
+            [
+                _legacy_row("row-1", "bch_aaaaaaaaaaaaaaaa", 1),
+                _legacy_row("row-2", "bch_bbbbbbbbbbbbbbbb", 2),
+                _legacy_row("row-3", "bch_cccccccccccccccc", 3),
+            ]
+        )
+        _use_tx_conn(monkeypatch, conn)
+
+        inserted = upsert_transactions(
+            [_txn(f"bch_op_1234567890{n}") for n in range(3)]
+        )
+
+        assert inserted == 0
+        assert sorted(row["external_id"] for row in conn.rows) == [
+            "bch_op_12345678900",
+            "bch_op_12345678901",
+            "bch_op_12345678902",
+        ]
+
+    def test_a_fourth_movement_inserts(self, monkeypatch):
+        conn = _FakeTxConn([_legacy_row("row-1", "bch_aaaaaaaaaaaaaaaa", 1)])
+        _use_tx_conn(monkeypatch, conn)
+
+        inserted = upsert_transactions(
+            [_txn("bch_op_12345678901"), _txn("bch_op_12345678902")]
+        )
+
+        assert inserted == 1
+        assert len(conn.rows) == 2
+
+    def test_running_twice_inserts_nothing_the_second_time(self, monkeypatch):
+        conn = _FakeTxConn([_legacy_row("row-1", "bch_a1b2c3d4e5f60718", 1)])
+        _use_tx_conn(monkeypatch, conn)
+        batch = [_txn("bch_op_12345678901"), _txn("bch_op_12345678902")]
+
+        first = upsert_transactions(batch)
+        second = upsert_transactions(batch)
+
+        assert (first, second) == (1, 0)
+        assert len(conn.rows) == 2
+
+    def test_a_billed_charge_adopts_its_unbilled_row(self, monkeypatch):
+        """Issue #56: the two card legs share no identity field."""
+        conn = _FakeTxConn([_legacy_row("row-1", "bch_fp_a1b2c3d4e5f60718", 1)])
+        _use_tx_conn(monkeypatch, conn)
+
+        inserted = upsert_transactions(
+            [_txn("bch_ref_200812345678", kind="credit_card")]
+        )
+
+        assert inserted == 0
+        assert conn.rows[0]["external_id"] == "bch_ref_200812345678"
+
+    def test_an_unrelated_row_is_never_claimed(self, monkeypatch):
+        """A different amount, date or source is a different movement."""
+        conn = _FakeTxConn(
+            [
+                _legacy_row("row-1", "bch_aaaaaaaaaaaaaaaa", 1, amount=-2500000),
+                dict(_legacy_row("row-2", "manual-1", 2), source="manual"),
+            ]
+        )
+        _use_tx_conn(monkeypatch, conn)
+
+        inserted = upsert_transactions([_txn("bch_op_12345678901")])
+
+        assert inserted == 1
+        assert conn.rows[0]["external_id"] == "bch_aaaaaaaaaaaaaaaa"
+        assert conn.rows[1]["external_id"] == "manual-1"
+
+    def test_a_description_change_alone_re_keys_nothing(self, monkeypatch):
+        """The key is description-free, so the row matches directly."""
+        conn = _FakeTxConn([_legacy_row("row-1", "bch_op_12345678901", 1)])
+        _use_tx_conn(monkeypatch, conn)
+
+        inserted = upsert_transactions(
+            [_txn("bch_op_12345678901", description="COMERCIO SINTETICO S.A.")]
+        )
+
+        assert (inserted, len(conn.rows)) == (0, 1)
+        assert conn.executed[-1][0].startswith("SELECT id FROM transactions")
+
+    def test_a_lost_operation_id_does_not_duplicate(self, monkeypatch):
+        """A transient 503 falls back to a fingerprint key; keep the stored row."""
+        conn = _FakeTxConn([_legacy_row("row-1", "bch_op_12345678901", 1)])
+        _use_tx_conn(monkeypatch, conn)
+
+        inserted = upsert_transactions([_txn("bch_fp_a1b2c3d4e5f60718")])
+
+        assert (inserted, len(conn.rows)) == (0, 1)
+        assert conn.rows[0]["external_id"] == "bch_op_12345678901"
+
+    def test_other_institutions_keep_the_plain_insert(self, monkeypatch):
+        """Only BanChile re-keys; a bcl_ movement must never adopt a row."""
+        conn = _FakeTxConn(
+            [dict(_legacy_row("row-1", "bcl_a1b2c3d4e5f60718", 1), source="scraper_bci_lider")]
+        )
+        _use_tx_conn(monkeypatch, conn)
+        txn = ScrapedTransaction(
+            institution="bci_lider",
+            product_kind="credit_card",
+            description="COMPRA",
+            amount=-999999,
+            transaction_date=date(2026, 8, 20),
+            external_id="bcl_ffffffffffffffff",
+        )
+
+        inserted = upsert_transactions([txn])
+
+        assert inserted == 1
+        assert len(conn.rows) == 2
+
+
+class TestAdoptionAcrossTheDateShift:
+    """Issue #57 moved BanChile's `transaction_date` to the occurrence date.
+
+    Every stored row was written from the POSTING date (fintself read the
+    portal's `fechaContable` column), so an incoming movement usually no longer
+    matches its own row on the date. The lookup is tolerant of exactly that, and
+    adoption corrects the row instead of leaving it on the wrong day.
+    """
+
+    def _incoming(self, external_id="bch_op_12345678901"):
+        """A movement that happened on the 21st and posted on the 24th."""
+        return _txn(
+            external_id,
+            tx_date=date(2026, 8, 21),
+            accounting_date=date(2026, 8, 24),
+        )
+
+    def test_a_row_stored_under_its_posting_date_is_adopted(self, monkeypatch):
+        conn = _FakeTxConn(
+            [_legacy_row("row-1", "bch_a1b2c3d4e5f60718", 1, tx_date=date(2026, 8, 24))]
+        )
+        _use_tx_conn(monkeypatch, conn)
+
+        inserted = upsert_transactions([self._incoming()])
+
+        assert (inserted, len(conn.rows)) == (0, 1)
+        assert conn.rows[0]["external_id"] == "bch_op_12345678901"
+
+    def test_adoption_corrects_both_dates_and_the_scheduled_month(self, monkeypatch):
+        conn = _FakeTxConn(
+            [_legacy_row("row-1", "bch_a1b2c3d4e5f60718", 1, tx_date=date(2026, 8, 24))]
+        )
+        _use_tx_conn(monkeypatch, conn)
+
+        upsert_transactions([self._incoming()])
+
+        row = conn.rows[0]
+        assert row["transaction_date"] == date(2026, 8, 21)
+        assert row["accounting_date"] == date(2026, 8, 24)
+        assert row["scheduled_month"] == date(2026, 8, 1)
+
+    def test_an_exact_occurrence_match_is_preferred(self, monkeypatch):
+        """Two candidates: the one already on the occurrence date wins.
+
+        Otherwise two movements a few days apart for the same amount could
+        claim each other's rows.
+        """
+        conn = _FakeTxConn(
+            [
+                _legacy_row("row-posted", "bch_aaaaaaaaaaaaaaaa", 1, tx_date=date(2026, 8, 24)),
+                _legacy_row("row-exact", "bch_bbbbbbbbbbbbbbbb", 2, tx_date=date(2026, 8, 21)),
+            ]
+        )
+        _use_tx_conn(monkeypatch, conn)
+
+        upsert_transactions([self._incoming()])
+
+        by_id = {row["id"]: row for row in conn.rows}
+        assert by_id["row-exact"]["external_id"] == "bch_op_12345678901"
+        assert by_id["row-posted"]["external_id"] == "bch_aaaaaaaaaaaaaaaa"
+
+    def test_a_row_on_neither_date_is_never_claimed(self, monkeypatch):
+        """The tolerance is two dates wide, not a range."""
+        conn = _FakeTxConn(
+            [_legacy_row("row-1", "bch_aaaaaaaaaaaaaaaa", 1, tx_date=date(2026, 8, 19))]
+        )
+        _use_tx_conn(monkeypatch, conn)
+
+        inserted = upsert_transactions([self._incoming()])
+
+        assert (inserted, len(conn.rows)) == (1, 2)
+        assert conn.rows[0]["external_id"] == "bch_aaaaaaaaaaaaaaaa"
+
+    def test_a_foreign_external_id_on_the_same_day_is_never_claimed(self, monkeypatch):
+        """The query itself restricts candidates to the `bch_` namespace."""
+        conn = _FakeTxConn(
+            [
+                dict(
+                    _legacy_row("row-1", "csv_import_1", 1, tx_date=date(2026, 8, 24)),
+                    source="scraper_banchile",
+                )
+            ]
+        )
+        _use_tx_conn(monkeypatch, conn)
+
+        inserted = upsert_transactions([self._incoming()])
+
+        assert (inserted, len(conn.rows)) == (1, 2)
+        assert conn.rows[0]["external_id"] == "csv_import_1"
+
+    def test_a_new_row_carries_both_dates(self, monkeypatch):
+        conn = _FakeTxConn([])
+        _use_tx_conn(monkeypatch, conn)
+
+        upsert_transactions([self._incoming()])
+
+        assert conn.rows[0]["transaction_date"] == date(2026, 8, 21)
+        assert conn.rows[0]["accounting_date"] == date(2026, 8, 24)
+
+    def test_a_null_accounting_date_still_matches_on_the_one_date(self, monkeypatch):
+        """The card legs report no posting date; the lookup must still work."""
+        conn = _FakeTxConn(
+            [_legacy_row("row-1", "bch_a1b2c3d4e5f60718", 1, tx_date=date(2026, 8, 20))]
+        )
+        _use_tx_conn(monkeypatch, conn)
+
+        inserted = upsert_transactions(
+            [_txn("bch_ref_200812345678", kind="credit_card")]
+        )
+
+        assert (inserted, len(conn.rows)) == (0, 1)
+        assert conn.rows[0]["external_id"] == "bch_ref_200812345678"
+        assert conn.rows[0]["accounting_date"] is None
