@@ -1,20 +1,20 @@
 """Self-contained Banco de Chile web session (login + balance read).
 
-Banco de Chile exposes no public/open-banking API for individuals, and the
-`fintself` library we use for *transactions* only returns `MovementModel`s —
-never an account balance (fintself#… — see issue #27). So to give `banchile`
-real, refreshable balances we log in ourselves with Playwright and read the
-figures off the post-login "Mis Productos" dashboard — CLP/USD checking and the
+Banco de Chile exposes no public/open-banking API for individuals, so to give
+`banchile` real, refreshable balances we log in ourselves with Playwright and
+read the figures off the post-login "Mis Productos" dashboard — CLP/USD checking and the
 credit-card cupo — plus the card total cupo/límite/utilizado (and masked last4),
 the línea de crédito, and one product per depósito a plazo / fondo mutuo read
 off their listing pages and detail asides (issue #36; see the scope note before
 `_PRODUCT_ROWS` for what's covered and how).
 
-This module deliberately does **not** import `fintself`; it only borrows its
-login flow / page routes as a reference. The one gotcha worth repeating: Banco
-de Chile serves a *degraded* post-login page to Playwright's default headless
-shell (no "Mis Productos" menu — fintself#28), so we launch Chromium via the
-``channel="chromium"`` full binary, which behaves like a headed session.
+The login flow and page routes were originally borrowed from the `fintself`
+library, which used to read the transactions leg before issue #57 moved that
+here too (`banchile_movements.py`, which shares this module's session). The one
+gotcha worth repeating: Banco de Chile serves a *degraded* post-login page to
+Playwright's default headless shell (no "Mis Productos" menu — fintself#28), so
+we launch Chromium via the ``channel="chromium"`` full binary, which behaves
+like a headed session.
 
 Design note (why DOM scraping, not XHR interception): issue #27 recommends
 intercepting the SPA's balance JSON endpoint as the more robust option. That
@@ -1154,7 +1154,7 @@ def _launch_browser(playwright, headless: bool):
     """Launch Chromium via the full-binary "chromium" channel (see module doc).
 
     Falls back to the default launch on Playwright builds without channel
-    support (<1.49), matching backends/fintself.py::_force_new_headless.
+    support (<1.49).
     """
     try:
         return playwright.chromium.launch(headless=headless, channel="chromium")
@@ -1679,8 +1679,11 @@ async def fetch_balances(
     línea, and one product per depósito a plazo / fondo mutuo read from the
     inversiones listing pages; surfaces that never yielded a product are reported
     in the result's `failed_surfaces`. Runs the synchronous Playwright flow in a
-    thread executor so it doesn't block the scheduler's event loop, mirroring
-    backends/fintself.py.
+    thread executor so it doesn't block the scheduler's event loop.
+
+    Since issue #57 the scheduled path uses `banchile_movements.fetch_session`
+    instead, which reads products and movements from one login; this stays the
+    balance-only entry point the products leg falls back to.
     """
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _scrape_sync, rut, password, headless)

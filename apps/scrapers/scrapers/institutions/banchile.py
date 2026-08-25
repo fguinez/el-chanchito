@@ -1,159 +1,190 @@
-"""Banco de Chile scraper: consumes the fintself backend."""
+"""Banco de Chile scraper: one Playwright session for balances and movements.
+
+Since issue #57 this scraper owns both legs. Transactions used to come from
+`fintself`, which parses the rendered movements table and therefore never sees
+an operation id, so every `external_id` was a hash of date + description +
+amount + account: colliding movements were silently dropped (#55) and a
+reworded or re-sectioned one was imported twice (#56). We now read the
+movements ourselves (`backends/banchile_movements.py`) and key them on the
+bank's own ids, which also removes the second heavy login per run (#28): the
+transactions leg opens the session, reads products *and* movements, and the
+products leg serves its half from that cache.
+"""
 
 import hashlib
 import logging
 import os
-from collections import Counter
-from datetime import date, datetime
+import re
+from datetime import date
 
+from scrapers.backends.banchile_movements import (
+    BanChileMovement,
+    BanChileSessionResult,
+    fetch_session,
+)
 from scrapers.backends.banchile_web import _SURFACE_ATTEMPTS, fetch_balances
-from scrapers.backends.fintself import run_fintself_scraper
 from scrapers.base import BaseScraper, ProductScrapeResult, ScrapedTransaction
 
 logger = logging.getLogger(__name__)
 
+# An operation id is opaque, so it is normalised rather than interpreted: a
+# cosmetic change (padding, a separator, lower case) must not re-key a movement,
+# but the id stays readable in the DB instead of being hashed away.
+_ID_NOISE_RE = re.compile(r"[^0-9A-Z]")
+
+
+def _normalized_id(raw: str | None) -> str | None:
+    """An opaque bank id, uppercased with punctuation and spacing dropped.
+
+    None when nothing is left, so a blank id can never become a key that every
+    idless movement would share.
+    """
+    if not raw:
+        return None
+    normalized = _ID_NOISE_RE.sub("", raw.strip().upper())
+    return normalized or None
+
+
+def external_id_for(movement: BanChileMovement) -> str:
+    """The `external_id` of one BanChile movement.
+
+    Three forms, each greppable by its prefix, and none of them derived from the
+    description, the section, or the movement's position or multiplicity within
+    a scrape:
+
+    ``bch_op_<TRANSACCIONID>``
+        A checking movement the bank gave an operation id for: the "ID
+        Transacción" of the UI's "+" expander, read inline from `detalleGlosa`
+        or from the `cartola/detalle-glosa` response. Normalised (uppercased,
+        punctuation dropped) so a cosmetic drift cannot re-key it, but kept
+        readable: an opaque-but-legible id is far easier to debug than a hash.
+        The observed shapes are all opaque and treated strictly as strings: an
+        11-digit number, ``TEF_IPE…``, ``TEFMBCO…``, a letter plus digits, and a
+        ``WORD_X`` plus digits form.
+
+    ``bch_ref_<NUMREFERENCIA>``
+        A billed card row's `numReferencia` ("DDMM NNNNNNNN"), unique across a
+        statement and byte-identical across two separate logins. An all-zero
+        suffix means the bank has no reference for that row (observed on a
+        payment) and is treated as absent by `billed_reference`, never as a
+        value.
+
+    ``bch_fp_<md5(fingerprint)[:16]>``
+        The description-free fallback for everything else, hashing the leg's
+        identity fields (`BanChileMovement.fingerprint`):
+
+        * checking without an operation id, roughly 7 percent of the observed
+          window (one transient 503, and two movements whose inline glosa
+          carried no id line): the bank's composite `id` plus `saldo`. Both are
+          byte-stable across logins; the composite `id` alone is not unique
+          (same-second batch credits collide) and `saldo` is a true running
+          ledger balance, so together they are. Such a movement is *adopted*
+          onto its ``bch_op_`` key by `db/writer.py` the first time the bank
+          answers with one, instead of being imported a second time.
+        * card, unbilled: posting date, authorisation date and time, amount,
+          card last four and the Transbank merchant code. This leg has no id of
+          any kind and its detail endpoint is unimplemented, so a charge re-keys
+          itself when it is billed; the writer's adoption path is what closes
+          issue #56, since the two card legs share no identity field and no
+          mapping rule can bridge them.
+        * card, billed without a usable reference: date, amount, card and the
+          statement date.
+    """
+    operation_id = _normalized_id(movement.operation_id)
+    if operation_id is not None:
+        prefix = "bch_ref_" if movement.source == "card_billed" else "bch_op_"
+        return f"{prefix}{operation_id}"
+    raw = "|".join(movement.fingerprint)
+    return f"bch_fp_{hashlib.md5(raw.encode()).hexdigest()[:16]}"
+
 
 class BanChileScraper(BaseScraper):
-    method = "fintself"
+    method = "web"
     institution = "banchile"
 
     def __init__(self) -> None:
         self.rut = os.environ["BANCHILE_RUT"]
         self.password = os.environ["BANCHILE_PASSWORD"]
+        # One session feeds both legs (issue #28). `run_scraper` calls
+        # transactions first: that call opens the session and stashes the
+        # products half here for `scrape_products` to serve.
+        self._session: BanChileSessionResult | None = None
 
-    def _movement_key(self, movement) -> str:
-        """The identity fields fintself exposes for a movement.
+    def _movement_to_transaction(self, movement: BanChileMovement) -> ScrapedTransaction:
+        """Convert a backend movement into our ScrapedTransaction.
 
-        `MovementModel` carries no operation id from the bank, so date +
-        description + amount + account is everything we can key on. Movements
-        that share all four are indistinguishable to us (see
-        `_movement_to_transaction` for how repeats are told apart).
+        `external_id` is `external_id_for`'s (see it for the whole scheme).
+        `scheduled_month` keeps the pre-#57 convention: the first of the
+        movement's own month.
         """
-        amount_clp = int(movement.amount)
-        tx_date = movement.date.date() if isinstance(movement.date, datetime) else movement.date
-        return f"{tx_date.isoformat()}|{movement.description}|{amount_clp}|{movement.account_id or ''}"
-
-    def _movement_to_transaction(self, movement, occurrence: int = 0) -> ScrapedTransaction:
-        """Convert a fintself MovementModel to our ScrapedTransaction.
-
-        `external_id` hashes the identity fields (`_movement_key`) plus, from
-        the second repeat onwards, the movement's occurrence index within the
-        scrape. Without that index several genuinely distinct movements sharing
-        date, description, amount and account (say a handful of same-day
-        transfers from the same payer for the same amount) collapse into one id,
-        and `db/writer.py`'s `ON CONFLICT (product_id, external_id) DO NOTHING`
-        silently drops all but the first: the dashboard shows one movement
-        instead of N.
-
-        Indexing by occurrence is stable because movements sharing every
-        identity field are interchangeable: which of them gets index 2 versus 3
-        doesn't matter, only that there are as many ids as movements. The first
-        occurrence keeps the legacy hash on purpose, so rows imported before
-        this fix still match and no re-keying migration is needed.
-
-        Residual limitation: a movement that drops out of the bank's movements
-        window and later comes back would shift the indices among its identical
-        siblings. The real fix is keying on the bank's own operation id, which
-        fintself 1.5 doesn't surface (`raw_data`'s `page_number`/`row_index` are
-        positional and shift as new movements arrive, so they can't stand in).
-        Trusting repetition also means a spurious repeat (fintself re-reading a
-        movements page, say) now creates an extra row where the old collapsing
-        hash swallowed it; that tradeoff is accepted, since silently dropping
-        genuine movements is the worse failure.
-        """
-        amount_clp = int(movement.amount)
-        tx_date = movement.date.date() if isinstance(movement.date, datetime) else movement.date
-
-        # account_type is a plain Literal str in fintself >= 1.5 (it was an
-        # enum before); getattr keeps both shapes working.
-        account_type = getattr(movement.account_type, "value", movement.account_type)
-        kind = "credit_card" if account_type == "credito" else "checking"
-
-        raw_str = self._movement_key(movement)
-        if occurrence > 0:
-            raw_str += f"|#{occurrence + 1}"
-        external_id = f"bch_{hashlib.md5(raw_str.encode()).hexdigest()[:16]}"
-
-        scheduled = date(tx_date.year, tx_date.month, 1)
-
+        tx_date = movement.transaction_date
         return ScrapedTransaction(
-            institution="banchile",
-            product_kind=kind,
+            institution=self.institution,
+            product_kind=movement.product_kind,
             description=movement.description,
-            amount=amount_clp,
+            amount=movement.amount,
             transaction_date=tx_date,
-            external_id=external_id,
-            scheduled_month=scheduled,
-            category_hint=movement.transaction_type,
+            external_id=external_id_for(movement),
+            scheduled_month=date(tx_date.year, tx_date.month, 1),
         )
 
     async def scrape_transactions(self) -> list[ScrapedTransaction]:
+        """Open the shared session and convert its movements.
+
+        A crash here is raised so the run is recorded as `error`, and the cache
+        is left empty on purpose: the products leg then opens its own
+        balance-only session rather than inheriting this failure, which keeps
+        the two legs independent the way `run_scraper` expects.
+        """
+        self._session = None
         try:
-            movements = await run_fintself_scraper(
-                bank_key="cl_banco_chile",
-                user=self.rut,
-                password=self.password,
-            )
-        except ImportError:
-            # A missing runtime dep is a broken deployment, not a clean run:
-            # raise so the run is recorded as `error` (and shows on the
-            # dashboard) instead of silently succeeding with 0 transactions.
-            logger.exception("fintself not installed. Run: pip install -r requirements.txt")
-            raise
+            session = await fetch_session(self.rut, self.password)
         except Exception:
-            logger.exception("BancoDeChile scrape failed")
+            logger.exception("BanChile scrape failed")
             raise
+        self._session = session
 
         transactions: list[ScrapedTransaction] = []
-        # How many movements with the same identity fields we've already
-        # converted in this scrape; it disambiguates repeats (see
-        # `_movement_to_transaction`). A movement that fails to convert doesn't
-        # consume a slot, so the surviving repeats keep consecutive indices.
-        seen: Counter[str] = Counter()
-        for mov in movements:
+        for movement in session.movements:
             try:
-                key = self._movement_key(mov)
-                transactions.append(self._movement_to_transaction(mov, occurrence=seen[key]))
-                seen[key] += 1
+                transactions.append(self._movement_to_transaction(movement))
             except Exception:
-                logger.exception("Failed to convert movement: %s", getattr(mov, "description", "?"))
+                logger.exception("Failed to convert a %s movement", movement.source)
 
-        checking = [t for t in transactions if t.product_kind == "checking"]
-        credit = [t for t in transactions if t.product_kind == "credit_card"]
+        checking = sum(1 for t in transactions if t.product_kind == "checking")
         logger.info(
-            "BancoDeChile: %d checking, %d credit card transactions",
-            len(checking),
-            len(credit),
+            "BanChile: %d checking, %d credit card transactions",
+            checking,
+            len(transactions) - checking,
         )
         return transactions
 
     async def scrape_products(self) -> ProductScrapeResult:
-        """Scrape BdC products via our own web session (see `banchile_web.py`).
+        """Serve the products the shared session already read.
 
-        `fintself` (used for transactions) never exposes a balance, so this
-        runs a *second*, self-contained Playwright login. It reads CLP/USD
-        checking off the "Mis Productos" dashboard, plus the card total
-        cupo/límite, the línea de crédito, and the depósitos a plazo
-        (`term_deposit`) / fondos mutuos (`investment`) — each from their own
-        detail page (see `banchile_web.py`). USD figures convert to CLP via
-        lib/rates' multi-currency FX.
+        Since #57 the session is opened by the transactions leg, so the common
+        path costs no extra login. If that leg never ran or crashed, this falls
+        back to a balance-only session (`banchile_web.fetch_balances`), so a
+        movements failure can't cost the balances the dashboard shows.
 
-        It's a heavy login; a failure here is logged and reported as a warning
-        rather than raised, so a flaky balance scrape can't fail the whole run
-        or lose the transactions that were already imported. Surfaces that
-        stayed empty after all their retries become warnings too, so the run
-        records `partial` coverage instead of silently losing figures.
-        APScheduler's `max_instances=1`/`coalesce` already stop back-to-back
-        manual refreshes (#26) from overlapping; a cookie-session cache would
-        be the next step if BdC rate-limits us (#28).
+        Either way a failure here is a warning, not a raise: a flaky login must
+        not fail the whole run or lose transactions already imported. Surfaces
+        that stayed empty after all their retries (product *and* movement ones,
+        since one session read both) become warnings too, so the run records
+        `partial` coverage instead of silently losing figures.
         """
-        try:
-            result = await fetch_balances(self.rut, self.password)
-        except Exception as e:
-            logger.exception("BanChile balance scrape failed")
-            return ProductScrapeResult([], [f"BanChile: product scrape crashed: {e}"])
+        session, self._session = self._session, None
+        if session is None:
+            try:
+                result = await fetch_balances(self.rut, self.password)
+            except Exception as e:
+                logger.exception("BanChile balance scrape failed")
+                return ProductScrapeResult([], [f"BanChile: product scrape crashed: {e}"])
+            products, failed = result.products, result.failed_surfaces
+        else:
+            products, failed = session.products, session.failed_surfaces
         warnings = [
             f"BanChile: {surface} surface failed after {_SURFACE_ATTEMPTS} attempts"
-            for surface in result.failed_surfaces
+            for surface in failed
         ]
-        return ProductScrapeResult(result.products, warnings)
+        return ProductScrapeResult(products, warnings)

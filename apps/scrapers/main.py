@@ -47,9 +47,10 @@ async def run_scraper(scraper: BaseScraper) -> None:
     """Run a single scraper with logging and DB tracking.
 
     Transactions and products are scraped as independent legs: a failure in one
-    must not stop the other. BanChile in particular scrapes transactions via the
-    (flaky) fintself browser login and products via its own login, so a fintself
-    timeout must still leave the balances refreshable — and vice versa.
+    must not stop the other. BanChile in particular reads both from one browser
+    session (the transactions leg opens it and caches the products half), so a
+    session that crashes must still leave the balances refreshable: its products
+    leg falls back to a balance-only login of its own.
 
     The products leg can also report non-fatal warnings (e.g. a BanChile
     surface that failed all its retries): a run with warnings but no errors is
