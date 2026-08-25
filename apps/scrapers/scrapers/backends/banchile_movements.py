@@ -708,14 +708,17 @@ def _open_cartola(page, index: int, timeout_ms: int) -> tuple[Optional[dict], in
         return _wait_for_payload(page, capture, timeout_ms), count
 
 
-def _operation_ids_for(page, raw_movements: list, budget: int) -> list[Optional[str]]:
+def _operation_ids_for(
+    page, raw_movements: list, budget: int
+) -> tuple[list[Optional[str]], int]:
     """The operation id of each raw movement: inline first, then the XHR.
 
     The extra call only fires for movements whose `detalleGlosa` is empty (the
     others answer 501), the calls are spaced, and the total is bounded. A 501, a
     503 or an unparseable body all mean "no id this run": the movement falls
     back to its fingerprint key and is adopted onto its operation id by the
-    writer once one appears.
+    writer once one appears. Returns the ids alongside what is left of the
+    budget, so reading a second account cannot restart it.
     """
     ids: list[Optional[str]] = []
     remaining = budget
@@ -738,20 +741,22 @@ def _operation_ids_for(page, raw_movements: list, budget: int) -> list[Optional[
             page.wait_for_timeout(_GLOSA_PAUSE_MS)
         except Exception:
             pass
-    return ids
+    return ids, remaining
 
 
-def _movements_from_cartola(page, payload: dict, budget: int) -> list[BanChileMovement]:
+def _movements_from_cartola(
+    page, payload: dict, budget: int
+) -> tuple[list[BanChileMovement], int]:
     """Shape one `getCartola` payload into movements, ids fetched as needed."""
     raw_movements = payload.get("movimientos")
     if not isinstance(raw_movements, list) or not raw_movements:
-        return []
+        return [], budget
     if cartola_has_more_pages(payload):
         logger.warning(
             "BanChile: the cartola reports more pages than we can read "
             "(getCartola paging is not implemented; issue #57)"
         )
-    ids = _operation_ids_for(page, raw_movements, budget)
+    ids, remaining = _operation_ids_for(page, raw_movements, budget)
     movements = []
     for raw, operation_id in zip(raw_movements, ids):
         movement = parse_cartola_movement(raw, operation_id)
@@ -763,7 +768,7 @@ def _movements_from_cartola(page, payload: dict, budget: int) -> list[BanChileMo
         len(movements),
         with_id,
     )
-    return movements
+    return movements, remaining
 
 
 def _read_checking_movements(page, attempt: int) -> list[BanChileMovement]:
@@ -779,6 +784,7 @@ def _read_checking_movements(page, attempt: int) -> list[BanChileMovement]:
     """
     budget = _budget(_RENDER_TIMEOUTS_MS, attempt)
     collected: list[BanChileMovement] = []
+    glosa_calls_left = _MAX_GLOSA_CALLS
     accounts = 1
     index = 0
     while index < min(accounts, _MAX_CHECKING_ACCOUNTS):
@@ -787,8 +793,10 @@ def _read_checking_movements(page, attempt: int) -> list[BanChileMovement]:
             accounts = count
         if payload is None:
             break
-        remaining = max(0, _MAX_GLOSA_CALLS - sum(1 for m in collected if m.operation_id))
-        collected.extend(_movements_from_cartola(page, payload, remaining))
+        movements, glosa_calls_left = _movements_from_cartola(
+            page, payload, glosa_calls_left
+        )
+        collected.extend(movements)
         index += 1
     return dedupe_movements(collected)
 
