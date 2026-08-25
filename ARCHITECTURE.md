@@ -321,6 +321,13 @@ fall back to a single summed roll-up per kind (the listing header total),
 shaped like the products issue #36 retired; the DB writer keeps the roll-up
 and per-holding representations mutually exclusive so neither double-counts.
 
+BanChile is also the only source that reports two dates per movement, so
+`transactions` carries both (V019): `transaction_date` is when the movement
+occurred (`fecha`, and what every chart is built on) and the nullable
+`accounting_date` is when the bank posted it (`fechaContable`). They differ for
+most of a typical window. A movement with only a posting date carries it in
+both; an occurrence date is never invented. Neither is ever part of a dedup key.
+
 Three more surfaces feed its transactions (`banchile_movements.py`, issue #57):
 the checking cartola, reached by driving the account-selection dialog that
 defaults to the USD account; the card's unbilled movements, which the SPA loads
@@ -329,9 +336,14 @@ read by replaying the SPA's own statement request with a different
 `fechaFacturacion`. Only calls whose body is fully known are composed (the
 per-movement `cartola/detalle-glosa` that carries the operation id, spaced and
 bounded); everything else is captured from the portal's own traffic, because the
-card endpoints take a descriptor whose derivation was never observed. All
-interpretation lives in pure helpers over raw payload dicts, and the movement
-surfaces use the same bounded-retry, non-fatal machinery as the product ones.
+card endpoints take a descriptor whose derivation was never observed. For the
+same reason `getCartola` paging is not implemented: a second page cannot be
+composed, so a window the bank reports as truncated (`pagina[0].masPaginas`) is
+logged as a warning rather than passing unnoticed. All interpretation lives in
+pure helpers over raw payload dicts, and the movement surfaces use the same
+bounded-retry, non-fatal machinery as the product ones, except that an empty
+reading counts as success there: a card with no unbilled charges is not a
+failed surface.
 
 BCI Lider (Tarjeta Lider Bci, the retailcard.cl card co-branded by BCI) has no
 open-banking API for individuals and isn't covered by `fintself`, and its login
@@ -438,25 +450,31 @@ Transactions are deduplicated via `UNIQUE(product_id, external_id)`:
 - Buda: `buda_{deposit/withdrawal_id}`
 - BanChile: the bank's own operation id where the portal exposes one, else a
   description-free fingerprint (issue #57). Three forms, each greppable:
-  - `bch_op_{transaccionId}` — a checking movement's "ID Transacción", read
+  - `bch_op_{transaccionId}`: a checking movement's "ID Transacción", read
     inline from `detalleGlosa` or from the `cartola/detalle-glosa` response
-    (~93% of the movements observed); normalised (uppercased, punctuation
-    dropped) so a cosmetic drift can't re-key it, but not hashed, so it stays
-    debuggable.
-  - `bch_ref_{numReferencia}` — a billed card row's reference ("DDMM
+    (all but a small minority of the movements observed); normalised
+    (uppercased, punctuation dropped) so a cosmetic drift can't re-key it, but
+    not hashed, so it stays debuggable. An all-zero id is a placeholder, not a
+    value.
+  - `bch_ref_{numReferencia}`: a billed card row's reference ("DDMM
     NNNNNNNN"); an all-zero suffix means the bank has none, not a value.
-  - `bch_fp_{md5(fingerprint)[:16]}` — the fallback: checking uses the bank's
+  - `bch_fp_{md5(fingerprint)[:16]}`: the fallback: checking uses the bank's
     composite `id` plus the running `saldo` (unique and stable together, where
     the composite `id` alone collides for same-second batch credits); the
     card's unbilled leg, which has no id at all, uses posting date +
     authorisation date/time + amount + card last4 + Transbank merchant code.
-  None of the forms includes the description, the section, or the movement's
-  order or multiplicity within a scrape. Because a movement can *change* form
+  None of the forms includes a date, the description, the section, or the
+  movement's order or multiplicity within a scrape. Because a movement can
+  *change* form
   (a checking one acquiring its operation id on a later run, a card charge
   moving from the unbilled leg to the billed one), `upsert_transactions` adopts:
   a key that matches nothing re-keys the stored row it could be under an older
-  key (same product, date, amount and source, oldest `created_at` first, one
-  claim each) instead of inserting a duplicate. See V018.
+  key instead of inserting a duplicate, correcting its dates at the same time.
+  Candidates are scoped to the same product, amount and source, an `external_id`
+  in the `bch_` namespace, and a `transaction_date` equal to either of the
+  incoming dates (the stored rows hold the posting date, incoming movements the
+  occurrence date: see the two-dates note below); claiming is oldest-first and
+  one-to-one, preferring an exact occurrence-date match. See V018 and V019.
 - BCI Lider: `bcl_{md5(date|description|amount|CLP)[:16]}` (no per-movement id in the DOM)
 - Email: `email_{institution}_{hash(message_id)}`
 - CSV: `csv_{base64url(date|description|amount)[:24]}`
