@@ -421,7 +421,10 @@ Transactions are deduplicated via `UNIQUE(product_id, external_id)`:
 
 - Fintual: no transactions (balance-only)
 - Buda: `buda_{deposit/withdrawal_id}`
-- BanChile: `bch_{md5(date|description|amount|account_id)[:16]}` (fintself's account_id)
+- BanChile: `bch_{md5(date|description|amount|account_id)[:16]}` (fintself's
+  account_id); repeats of those same fields inside one scrape append
+  `|#N` (2nd onwards) so several identical same-day movements don't
+  collapse into one row (fintself exposes no operation id)
 - BCI Lider: `bcl_{md5(date|description|amount|CLP)[:16]}` (no per-movement id in the DOM)
 - Email: `email_{institution}_{hash(message_id)}`
 - CSV: `csv_{base64url(date|description|amount)[:24]}`

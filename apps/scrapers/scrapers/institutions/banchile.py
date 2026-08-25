@@ -3,6 +3,7 @@
 import hashlib
 import logging
 import os
+from collections import Counter
 from datetime import date, datetime
 
 from scrapers.backends.banchile_web import _SURFACE_ATTEMPTS, fetch_balances
@@ -20,8 +21,46 @@ class BanChileScraper(BaseScraper):
         self.rut = os.environ["BANCHILE_RUT"]
         self.password = os.environ["BANCHILE_PASSWORD"]
 
-    def _movement_to_transaction(self, movement) -> ScrapedTransaction:
-        """Convert a fintself MovementModel to our ScrapedTransaction."""
+    def _movement_key(self, movement) -> str:
+        """The identity fields fintself exposes for a movement.
+
+        `MovementModel` carries no operation id from the bank, so date +
+        description + amount + account is everything we can key on. Movements
+        that share all four are indistinguishable to us (see
+        `_movement_to_transaction` for how repeats are told apart).
+        """
+        amount_clp = int(movement.amount)
+        tx_date = movement.date.date() if isinstance(movement.date, datetime) else movement.date
+        return f"{tx_date.isoformat()}|{movement.description}|{amount_clp}|{movement.account_id or ''}"
+
+    def _movement_to_transaction(self, movement, occurrence: int = 0) -> ScrapedTransaction:
+        """Convert a fintself MovementModel to our ScrapedTransaction.
+
+        `external_id` hashes the identity fields (`_movement_key`) plus, from
+        the second repeat onwards, the movement's occurrence index within the
+        scrape. Without that index several genuinely distinct movements sharing
+        date, description, amount and account (say a handful of same-day
+        transfers from the same payer for the same amount) collapse into one id,
+        and `db/writer.py`'s `ON CONFLICT (product_id, external_id) DO NOTHING`
+        silently drops all but the first: the dashboard shows one movement
+        instead of N.
+
+        Indexing by occurrence is stable because movements sharing every
+        identity field are interchangeable: which of them gets index 2 versus 3
+        doesn't matter, only that there are as many ids as movements. The first
+        occurrence keeps the legacy hash on purpose, so rows imported before
+        this fix still match and no re-keying migration is needed.
+
+        Residual limitation: a movement that drops out of the bank's movements
+        window and later comes back would shift the indices among its identical
+        siblings. The real fix is keying on the bank's own operation id, which
+        fintself 1.5 doesn't surface (`raw_data`'s `page_number`/`row_index` are
+        positional and shift as new movements arrive, so they can't stand in).
+        Trusting repetition also means a spurious repeat (fintself re-reading a
+        movements page, say) now creates an extra row where the old collapsing
+        hash swallowed it; that tradeoff is accepted, since silently dropping
+        genuine movements is the worse failure.
+        """
         amount_clp = int(movement.amount)
         tx_date = movement.date.date() if isinstance(movement.date, datetime) else movement.date
 
@@ -30,7 +69,9 @@ class BanChileScraper(BaseScraper):
         account_type = getattr(movement.account_type, "value", movement.account_type)
         kind = "credit_card" if account_type == "credito" else "checking"
 
-        raw_str = f"{tx_date.isoformat()}|{movement.description}|{amount_clp}|{movement.account_id or ''}"
+        raw_str = self._movement_key(movement)
+        if occurrence > 0:
+            raw_str += f"|#{occurrence + 1}"
         external_id = f"bch_{hashlib.md5(raw_str.encode()).hexdigest()[:16]}"
 
         scheduled = date(tx_date.year, tx_date.month, 1)
@@ -64,9 +105,16 @@ class BanChileScraper(BaseScraper):
             raise
 
         transactions: list[ScrapedTransaction] = []
+        # How many movements with the same identity fields we've already
+        # converted in this scrape; it disambiguates repeats (see
+        # `_movement_to_transaction`). A movement that fails to convert doesn't
+        # consume a slot, so the surviving repeats keep consecutive indices.
+        seen: Counter[str] = Counter()
         for mov in movements:
             try:
-                transactions.append(self._movement_to_transaction(mov))
+                key = self._movement_key(mov)
+                transactions.append(self._movement_to_transaction(mov, occurrence=seen[key]))
+                seen[key] += 1
             except Exception:
                 logger.exception("Failed to convert movement: %s", getattr(mov, "description", "?"))
 
