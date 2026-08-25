@@ -76,7 +76,7 @@
               ┌────────────┼────────────┐
               ▼            ▼            ▼
         ┌──────────┐ ┌─────────┐ ┌──────────┐
-        │ Fintual  │ │  Buda   │ │ fintself │
+        │ Fintual  │ │  Buda   │ │ BanChile │
         │   API    │ │  API    │ │(browser) │
         └────┬─────┘ └────┬────┘ └────┬─────┘
              │             │           │
@@ -278,25 +278,28 @@ apps/scrapers/scrapers/
   backends/
     email.py               # ImapSession (shared login + NOOP keepalive),
                            # EmailPattern, fetch_transactions_for_pattern
-    fintself.py            # run_fintself_scraper(bank_key, user, password)
     banchile_web.py        # own BdC Playwright login -> fetch_balances()
+    banchile_movements.py  # BdC movements + the shared session -> fetch_session()
     bci_lider_web.py       # real Chrome over CDP -> scrape_card() / save_login_session()
   institutions/
     mach.py  mercadopago.py  tenpo.py       -> consume backends/email
-    banchile.py                              -> fintself (tx) + banchile_web (balances)
+    banchile.py                              -> banchile_movements (one login: tx + balances)
     bci_lider.py                             -> bci_lider_web (one CDP drive: tx + balances)
     buda.py  fintual.py                      -> self-contained (HTTP APIs)
 ```
 
-BanChile is a hybrid: transactions come from `fintself`, but `fintself` never
-exposes a balance, so `scrape_products()` runs a **second, self-contained
-Playwright login** (`backends/banchile_web.py`) and reads the "Mis Productos"
-dashboard plus three detail routes. It replicates fintself's
+BanChile drives **one self-contained Playwright login per run** (issue #57,
+which folded in #28). `scrape_transactions()` opens it, reads the balances
+(`backends/banchile_web.py`: the "Mis Productos" dashboard plus four detail
+routes) and the movements (`backends/banchile_movements.py`: the checking
+cartola behind its account dialog, and the card's unbilled and billed legs),
+and caches the products half for `scrape_products()` to serve. It uses the
 `channel="chromium"` new-headless workaround (BdC serves a degraded page to the
-default headless shell) and polls for the balance widget (it loads via a later
-XHR). Because transactions and products are independent legs in `run_scraper`,
-a fintself timeout never blocks the products leg (and a product-scrape crash
-is swallowed into a run warning, never raised).
+default headless shell) and polls for each widget, since they load via later
+XHRs. Because transactions and products are independent legs in `run_scraper`,
+a session that crashes still leaves the products leg able to open a
+balance-only login of its own (and a product-scrape crash is swallowed into a
+run warning, never raised).
 
 Five surfaces feed BanChile's typed products: the dashboard (CLP + USD
 `checking` — the card row there is a static placeholder, so it's skipped), the
@@ -317,6 +320,18 @@ parsing stays unusable on the final attempt, the depósitos/fondos surfaces
 fall back to a single summed roll-up per kind (the listing header total),
 shaped like the products issue #36 retired; the DB writer keeps the roll-up
 and per-holding representations mutually exclusive so neither double-counts.
+
+Three more surfaces feed its transactions (`banchile_movements.py`, issue #57):
+the checking cartola, reached by driving the account-selection dialog that
+defaults to the USD account; the card's unbilled movements, which the SPA loads
+when the card page opens; and the card's billed statements, the newest two,
+read by replaying the SPA's own statement request with a different
+`fechaFacturacion`. Only calls whose body is fully known are composed (the
+per-movement `cartola/detalle-glosa` that carries the operation id, spaced and
+bounded); everything else is captured from the portal's own traffic, because the
+card endpoints take a descriptor whose derivation was never observed. All
+interpretation lives in pure helpers over raw payload dicts, and the movement
+surfaces use the same bounded-retry, non-fatal machinery as the product ones.
 
 BCI Lider (Tarjeta Lider Bci, the retailcard.cl card co-branded by BCI) has no
 open-banking API for individuals and isn't covered by `fintself`, and its login
@@ -389,7 +404,7 @@ shallow-merges `attributes`, always refreshes
 |---|---|---|---|---|
 | `fintual` | `http_api` | REST API (`/api/goals`) | Web session + e-mail 2FA (cached; `make fintual-login`) | 6h |
 | `buda` | `http_api` | REST API | HMAC-SHA384 signed requests | 1h |
-| `banchile` | `fintself` | Browser (fintself/Playwright) | RUT + password | 24h |
+| `banchile` | `web` | Browser (Playwright: `banchile_web` + `banchile_movements`) | RUT + password | 24h |
 | `mach` | `email` | IMAP (Gmail) | Shared IMAP session | 30m |
 | `mercadopago` | `email` | IMAP (Gmail) | Shared IMAP session | 30m |
 | `tenpo` | `email` | IMAP (Gmail) | Shared IMAP session | 30m |
@@ -421,10 +436,27 @@ Transactions are deduplicated via `UNIQUE(product_id, external_id)`:
 
 - Fintual: no transactions (balance-only)
 - Buda: `buda_{deposit/withdrawal_id}`
-- BanChile: `bch_{md5(date|description|amount|account_id)[:16]}` (fintself's
-  account_id); repeats of those same fields inside one scrape append
-  `|#N` (2nd onwards) so several identical same-day movements don't
-  collapse into one row (fintself exposes no operation id)
+- BanChile: the bank's own operation id where the portal exposes one, else a
+  description-free fingerprint (issue #57). Three forms, each greppable:
+  - `bch_op_{transaccionId}` — a checking movement's "ID Transacción", read
+    inline from `detalleGlosa` or from the `cartola/detalle-glosa` response
+    (~93% of the movements observed); normalised (uppercased, punctuation
+    dropped) so a cosmetic drift can't re-key it, but not hashed, so it stays
+    debuggable.
+  - `bch_ref_{numReferencia}` — a billed card row's reference ("DDMM
+    NNNNNNNN"); an all-zero suffix means the bank has none, not a value.
+  - `bch_fp_{md5(fingerprint)[:16]}` — the fallback: checking uses the bank's
+    composite `id` plus the running `saldo` (unique and stable together, where
+    the composite `id` alone collides for same-second batch credits); the
+    card's unbilled leg, which has no id at all, uses posting date +
+    authorisation date/time + amount + card last4 + Transbank merchant code.
+  None of the forms includes the description, the section, or the movement's
+  order or multiplicity within a scrape. Because a movement can *change* form
+  (a checking one acquiring its operation id on a later run, a card charge
+  moving from the unbilled leg to the billed one), `upsert_transactions` adopts:
+  a key that matches nothing re-keys the stored row it could be under an older
+  key (same product, date, amount and source, oldest `created_at` first, one
+  claim each) instead of inserting a duplicate. See V018.
 - BCI Lider: `bcl_{md5(date|description|amount|CLP)[:16]}` (no per-movement id in the DOM)
 - Email: `email_{institution}_{hash(message_id)}`
 - CSV: `csv_{base64url(date|description|amount)[:24]}`
@@ -585,7 +617,7 @@ app.
 | UI | Tailwind CSS 4 + shadcn/ui (New York) + Recharts |
 | ORM | Drizzle ORM |
 | Database | PostgreSQL 16 (Alpine) |
-| Scrapers | Python 3.12 + httpx + fintself + Playwright + APScheduler |
+| Scrapers | Python 3.12 + httpx + Playwright + APScheduler |
 | DB Driver (Python) | psycopg3 + psycopg-pool |
 | Containerization | Docker + Docker Compose |
 | Package Manager | pnpm (workspaces) |

@@ -50,7 +50,7 @@ POSTGRES_DB=finance
 DATABASE_URL=postgres://finance:finance@localhost:5435/finance
 
 # Scraper identifiers (enable only the ones you need)
-BANCHILE_RUT=12345678-9          # Banco de Chile (via fintself)
+BANCHILE_RUT=12345678-9          # Banco de Chile (via Playwright)
 LIDER_BCI_RUT=12345678-9         # Tarjeta Lider Bci (real Chrome over CDP)
 LIDER_BCI_CDP_URL=http://localhost:9222  # Tarjeta Lider Bci: the make bci-lider-login Chrome
 FINTUAL_EMAIL=your@email.com     # Fintual (web session; run `make fintual-login` once)
