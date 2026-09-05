@@ -19,6 +19,18 @@ export const PRODUCT_KINDS = [
 
 export type ProductKind = (typeof PRODUCT_KINDS)[number];
 
+export const PRODUCT_FAMILIES = [
+  "cash",
+  "term_deposit",
+  "revolving_credit",
+  "installment_loan",
+  "investment",
+  "crypto",
+  "other",
+] as const;
+
+export type ProductFamily = (typeof PRODUCT_FAMILIES)[number];
+
 /** Identity fields for a checking account (cuenta corriente). */
 export interface CheckingAttributes {
   /** Payload discriminator; always "checking". */
@@ -365,22 +377,23 @@ export const KIND_INFO: Record<
     role: "asset" | "liability" | "none";
     balanceConvention: "value" | "available" | "owed" | "units" | "none";
     labelEs: string;
+    family: ProductFamily;
   }
 > = {
-  checking: { role: "asset", balanceConvention: "value", labelEs: "Cuenta corriente" },
-  savings: { role: "asset", balanceConvention: "value", labelEs: "Ahorro" },
-  vista: { role: "asset", balanceConvention: "value", labelEs: "Cuenta vista" },
-  wallet: { role: "asset", balanceConvention: "value", labelEs: "Billetera" },
-  term_deposit: { role: "asset", balanceConvention: "value", labelEs: "Depósito a plazo" },
-  credit_card: { role: "liability", balanceConvention: "available", labelEs: "Tarjeta de crédito" },
-  debit_card: { role: "none", balanceConvention: "none", labelEs: "Tarjeta de débito" },
-  prepaid_card: { role: "asset", balanceConvention: "value", labelEs: "Tarjeta prepago" },
-  line_of_credit: { role: "liability", balanceConvention: "available", labelEs: "Línea de crédito" },
-  loan: { role: "liability", balanceConvention: "owed", labelEs: "Préstamo" },
-  mortgage: { role: "liability", balanceConvention: "owed", labelEs: "Hipotecario" },
-  investment: { role: "asset", balanceConvention: "value", labelEs: "Inversión" },
-  crypto: { role: "asset", balanceConvention: "units", labelEs: "Cripto" },
-  other: { role: "none", balanceConvention: "none", labelEs: "Otro" },
+  checking: { role: "asset", balanceConvention: "value", labelEs: "Cuenta corriente", family: "cash" },
+  savings: { role: "asset", balanceConvention: "value", labelEs: "Ahorro", family: "cash" },
+  vista: { role: "asset", balanceConvention: "value", labelEs: "Cuenta vista", family: "cash" },
+  wallet: { role: "asset", balanceConvention: "value", labelEs: "Billetera", family: "cash" },
+  term_deposit: { role: "asset", balanceConvention: "value", labelEs: "Depósito a plazo", family: "term_deposit" },
+  credit_card: { role: "liability", balanceConvention: "available", labelEs: "Tarjeta de crédito", family: "revolving_credit" },
+  debit_card: { role: "none", balanceConvention: "none", labelEs: "Tarjeta de débito", family: "other" },
+  prepaid_card: { role: "asset", balanceConvention: "value", labelEs: "Tarjeta prepago", family: "cash" },
+  line_of_credit: { role: "liability", balanceConvention: "available", labelEs: "Línea de crédito", family: "revolving_credit" },
+  loan: { role: "liability", balanceConvention: "owed", labelEs: "Préstamo", family: "installment_loan" },
+  mortgage: { role: "liability", balanceConvention: "owed", labelEs: "Hipotecario", family: "installment_loan" },
+  investment: { role: "asset", balanceConvention: "value", labelEs: "Inversión", family: "investment" },
+  crypto: { role: "asset", balanceConvention: "units", labelEs: "Cripto", family: "crypto" },
+  other: { role: "none", balanceConvention: "none", labelEs: "Otro", family: "other" },
 };
 
 export type MetricDenomination = "currency" | "percent" | "count";
@@ -446,6 +459,99 @@ export const METRIC_FIELDS: Record<
   },
   other: {
     balance: { denomination: "currency" },
+  },
+};
+
+export type ColumnSource = "headline" | "clp_value" | "metric" | "attribute" | "installments";
+
+export type ColumnFormat = "currency" | "percent" | "count" | "date" | "text";
+
+/** One column of a family's products table, resolved from the registry. */
+export interface ColumnSpec {
+  /** Stable id; doubles as the table's sort key. */
+  key: string;
+  labelEs: string;
+  source: ColumnSource;
+  /** metrics/attributes field for "metric"/"attribute" sources; null otherwise. */
+  field: string | null;
+  format: ColumnFormat;
+  align: "left" | "right";
+  /** Hidden when no row in the table has a value. */
+  optional: boolean;
+  /** Render with an explicit sign and a positive/negative tone. */
+  signed: boolean;
+}
+
+export const FAMILY_INFO: Record<
+  ProductFamily,
+  {
+    labelEs: string;
+    kinds: readonly ProductKind[];
+    columns: readonly ColumnSpec[];
+  }
+> = {
+  cash: {
+    labelEs: "Cuentas y efectivo",
+    kinds: ["checking", "savings", "vista", "wallet", "prepaid_card"],
+    columns: [
+      { key: "saldo", labelEs: "Saldo", source: "headline", field: null, format: "currency", align: "right", optional: false, signed: false },
+      { key: "saldo_contable", labelEs: "Saldo contable", source: "metric", field: "accounting_balance", format: "currency", align: "right", optional: true, signed: false },
+    ],
+  },
+  term_deposit: {
+    labelEs: "Depósitos a plazo",
+    kinds: ["term_deposit"],
+    columns: [
+      { key: "valor", labelEs: "Valor", source: "headline", field: null, format: "currency", align: "right", optional: false, signed: false },
+      { key: "vencimiento", labelEs: "Vencimiento", source: "attribute", field: "maturity_date", format: "date", align: "left", optional: true, signed: false },
+      { key: "tasa", labelEs: "Tasa", source: "attribute", field: "interest_rate_pct", format: "percent", align: "right", optional: true, signed: false },
+    ],
+  },
+  revolving_credit: {
+    labelEs: "Tarjetas y líneas de crédito",
+    kinds: ["credit_card", "line_of_credit"],
+    columns: [
+      { key: "disponible", labelEs: "Disponible", source: "headline", field: null, format: "currency", align: "right", optional: false, signed: false },
+      { key: "cupo", labelEs: "Cupo", source: "metric", field: "limit", format: "currency", align: "right", optional: false, signed: false },
+      { key: "utilizado", labelEs: "Utilizado", source: "metric", field: "owed", format: "currency", align: "right", optional: false, signed: false },
+    ],
+  },
+  installment_loan: {
+    labelEs: "Deuda en cuotas",
+    kinds: ["loan", "mortgage"],
+    columns: [
+      { key: "deuda", labelEs: "Deuda", source: "headline", field: null, format: "currency", align: "right", optional: false, signed: false },
+      { key: "proxima_cuota", labelEs: "Próxima cuota", source: "metric", field: "next_payment_amount", format: "currency", align: "right", optional: true, signed: false },
+      { key: "cuotas", labelEs: "Cuotas", source: "installments", field: null, format: "count", align: "right", optional: true, signed: false },
+      { key: "tasa", labelEs: "Tasa", source: "attribute", field: "interest_rate_pct", format: "percent", align: "right", optional: true, signed: false },
+    ],
+  },
+  investment: {
+    labelEs: "Inversiones",
+    kinds: ["investment"],
+    columns: [
+      { key: "valor", labelEs: "Valor", source: "headline", field: null, format: "currency", align: "right", optional: false, signed: false },
+      { key: "aportado", labelEs: "Aportado", source: "metric", field: "deposited", format: "currency", align: "right", optional: false, signed: false },
+      { key: "ganancia", labelEs: "Ganancia", source: "metric", field: "profit", format: "currency", align: "right", optional: false, signed: true },
+      { key: "var_30d", labelEs: "Var 30d", source: "metric", field: "var_30d_pct", format: "percent", align: "right", optional: false, signed: true },
+      { key: "var_anual", labelEs: "Var año", source: "metric", field: "var_ytd_pct", format: "percent", align: "right", optional: true, signed: true },
+    ],
+  },
+  crypto: {
+    labelEs: "Cripto",
+    kinds: ["crypto"],
+    columns: [
+      { key: "unidades", labelEs: "Unidades", source: "metric", field: "units", format: "currency", align: "right", optional: false, signed: false },
+      { key: "congelado", labelEs: "Congelado", source: "metric", field: "frozen", format: "currency", align: "right", optional: true, signed: false },
+      { key: "clp", labelEs: "≈ CLP", source: "clp_value", field: null, format: "currency", align: "right", optional: false, signed: false },
+    ],
+  },
+  other: {
+    labelEs: "Otros",
+    kinds: ["debit_card", "other"],
+    columns: [
+      { key: "saldo", labelEs: "Saldo", source: "headline", field: null, format: "currency", align: "right", optional: true, signed: false },
+    ],
   },
 };
 
