@@ -1,4 +1,4 @@
-"""Single source of truth for per-kind product payloads and ingest envelopes."""
+"""Source of truth for per-kind payloads, display families and ingest envelopes."""
 
 from .attributes import (
     BankAccountAttributes,
@@ -21,8 +21,27 @@ from .attributes import (
     VistaAttributes,
     WalletAttributes,
 )
+from .display import (
+    FAMILIES,
+    ColumnFormat,
+    ColumnSource,
+    ColumnSpec,
+    DisplaySpecError,
+    FamilySpec,
+    ResolvedColumn,
+    family_kinds,
+    resolve_columns,
+    validate_display_specs,
+)
 from .envelopes import ScrapedProduct, ScrapedTransaction
-from .kinds import PRODUCT_KINDS, BalanceConvention, NetWorthRole, ProductKind
+from .kinds import (
+    PRODUCT_FAMILIES,
+    PRODUCT_KINDS,
+    BalanceConvention,
+    NetWorthRole,
+    ProductFamily,
+    ProductKind,
+)
 from .metrics import (
     BankAccountMetrics,
     BaseMetrics,
@@ -48,6 +67,8 @@ from .registry import REGISTRY, KindSpec, ProductAttributes, ProductMetrics
 __all__ = [
     "PRODUCT_KINDS",
     "ProductKind",
+    "PRODUCT_FAMILIES",
+    "ProductFamily",
     "NetWorthRole",
     "BalanceConvention",
     "BaseAttributes",
@@ -91,6 +112,16 @@ __all__ = [
     "REGISTRY",
     "ProductAttributes",
     "ProductMetrics",
+    "ColumnSource",
+    "ColumnFormat",
+    "ColumnSpec",
+    "FamilySpec",
+    "ResolvedColumn",
+    "FAMILIES",
+    "DisplaySpecError",
+    "family_kinds",
+    "resolve_columns",
+    "validate_display_specs",
     "ScrapedProduct",
     "ScrapedTransaction",
 ]

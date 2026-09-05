@@ -1,4 +1,4 @@
-"""Product kinds and the classification enums the registry hangs off them."""
+"""Product kinds, display families and the enums the registry hangs off them."""
 
 from enum import StrEnum
 from typing import Literal
@@ -32,6 +32,26 @@ ProductKind = Literal[
     "line_of_credit",
     "loan",
     "mortgage",
+    "investment",
+    "crypto",
+    "other",
+]
+
+PRODUCT_FAMILIES: tuple[str, ...] = (
+    "cash",
+    "term_deposit",
+    "revolving_credit",
+    "installment_loan",
+    "investment",
+    "crypto",
+    "other",
+)
+
+ProductFamily = Literal[
+    "cash",
+    "term_deposit",
+    "revolving_credit",
+    "installment_loan",
     "investment",
     "crypto",
     "other",
