@@ -429,10 +429,15 @@ each acquire and only re-logs-in when the mailbox has been dropped.
 
 `packages/product-model` is the single source of truth for product kinds: a
 pydantic v2 registry declaring, per kind, the attribute/metric classes plus
-`role`, `balance_convention` and `label_es`. `make product-model-generate`
+`role`, `balance_convention`, `label_es` and a display `family`. `display.py`
+holds one column spec per family (source, field, format, flags), with
+formats derived from the payload classes, so the dashboard never keeps a
+parallel per-kind column map. `make product-model-generate`
 emits the derived artifacts — `generated/index.ts` (per-kind TS types,
 `KIND_INFO`, `ASSET_KINDS`/`LIABILITY_KINDS`, consumed by `db/schema.ts`,
-`networth.ts` and the institutions page), `generated/product-model.schema.json`
+`networth.ts` and the institutions page, plus `PRODUCT_FAMILIES` and
+`FAMILY_INFO`, which `components/institutions/shared.tsx` renders as one
+products table per family), `generated/product-model.schema.json`
 (the JSON Schema wire contract) and `PRODUCTS.md` (the per-kind field matrix
 with placement rationale). A codegen drift test under `make test-py`
 regenerates to a temp dir and diffs against the committed output, so the
