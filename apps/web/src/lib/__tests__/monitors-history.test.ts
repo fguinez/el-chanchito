@@ -210,4 +210,50 @@ describe("replayHistory", () => {
     // Carried value everywhere: 2000000 - 500000.
     expect(points.map((p) => p.value)).toEqual([1500000, 1500000, 1500000]);
   });
+
+  it("groups an evening snapshot under its local day, not the UTC date", () => {
+    // Local-time constructors keep this timezone-independent: 23:00 local on
+    // day D is D+1 in UTC for any zone west of Greenwich, which is exactly the
+    // "scrape after 20:00 local shows yesterday's value" symptom. The window
+    // ends at D (local today), so D must show the evening observation and D-1
+    // must not.
+    const eveningSnapshots: SnapshotRow[] = [
+      {
+        productId: CHECKING_ID,
+        metrics: { kind: "checking", balance: 2000000 },
+        asOf: new Date(2026, 6, 9, 10, 0), // D-1 morning
+      },
+      {
+        productId: CARD_ID,
+        metrics: { kind: "credit_card", available: 500000, owed: 500000 },
+        asOf: new Date(2026, 6, 9, 10, 0), // D-1 morning
+      },
+      {
+        productId: CHECKING_ID,
+        metrics: { kind: "checking", balance: 1200000 },
+        asOf: new Date(2026, 6, 10, 23, 0), // D, 23:00 local
+      },
+    ];
+    const points = replayHistory(def, {
+      snapshots: eveningSnapshots,
+      products,
+      rates,
+      from: "2026-07-09",
+      to: "2026-07-10",
+    });
+    expect(points.map((p) => p.date)).toEqual(["2026-07-09", "2026-07-10"]);
+    // D-1: 2000000 - 500000; the evening row must not leak backwards.
+    expect(points[0].value).toBe(1500000);
+    // D: 1200000 - 500000; the evening row must not fall outside the window.
+    expect(points[1].value).toBe(700000);
+
+    // The default range must end on the local day too.
+    const defaulted = replayHistory(def, {
+      snapshots: eveningSnapshots,
+      products,
+      rates,
+    });
+    expect(defaulted.map((p) => p.date)).toEqual(["2026-07-09", "2026-07-10"]);
+    expect(defaulted[1].value).toBe(700000);
+  });
 });

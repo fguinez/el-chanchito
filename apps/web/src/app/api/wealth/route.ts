@@ -13,6 +13,7 @@ import { eq, asc } from "drizzle-orm";
 import { calcWealthMetrics } from "@/lib/budget-engine";
 import { getClpRates } from "@/lib/rates";
 import { assetClp, debtClp } from "@/lib/networth";
+import { formatLocalDate } from "@/lib/monitors/history";
 
 interface WealthPoint {
   id: string;
@@ -77,11 +78,13 @@ export async function GET() {
   const lastLegacyDate =
     legacy.length > 0 ? legacy[legacy.length - 1].snapshotDate : "";
 
-  // Group history rows per calendar date, then walk chronologically carrying
-  // the latest balance per product.
+  // Group history rows per local calendar day (the unit of the legacy
+  // snapshot_date column; an evening scrape belongs to today, not to
+  // tomorrow's UTC date), then walk chronologically carrying the latest
+  // balance per product.
   const byDate = new Map<string, typeof balanceRows>();
   for (const row of balanceRows) {
-    const dateStr = row.asOf.toISOString().slice(0, 10);
+    const dateStr = formatLocalDate(row.asOf);
     if (!byDate.has(dateStr)) byDate.set(dateStr, []);
     byDate.get(dateStr)!.push(row);
   }

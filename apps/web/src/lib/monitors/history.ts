@@ -1,8 +1,10 @@
 // Monitor history replayed from product snapshots, mirroring the
-// carry-forward pattern of /api/wealth: group snapshots per calendar date,
-// walk the range chronologically carrying each product's latest observation
-// forward, and evaluate the monitor (left side + thresholds) on every day
-// with that day's date, so DAY_OF_MONTH ramps reset month by month.
+// carry-forward pattern of /api/wealth: group snapshots per LOCAL calendar
+// day (the same unit as the replay window and toEvalDate; an evening scrape
+// lands in today, not in tomorrow's UTC date), walk the range chronologically
+// carrying each product's latest observation forward, and evaluate the
+// monitor (left side + thresholds) on every day with that day's date, so
+// DAY_OF_MONTH ramps reset month by month.
 //
 // Known v1 approximation (same as /api/wealth): only current rates are
 // available, so past days convert at today's prices.
@@ -87,14 +89,14 @@ export function replayHistory(
   def: MonitorDefinition,
   opts: ReplayOptions
 ): HistoryPoint[] {
-  // Group per calendar date, keeping rows in asOf order so "latest per
-  // product within a day" wins.
+  // Group per local calendar day (matching from/to and toEvalDate), keeping
+  // rows in asOf order so "latest per product within a day" wins.
   const sorted = [...opts.snapshots].sort(
     (a, b) => a.asOf.getTime() - b.asOf.getTime()
   );
   const byDate = new Map<string, SnapshotRow[]>();
   for (const row of sorted) {
-    const dateStr = row.asOf.toISOString().slice(0, 10);
+    const dateStr = formatLocalDate(row.asOf);
     if (!byDate.has(dateStr)) byDate.set(dateStr, []);
     byDate.get(dateStr)!.push(row);
   }
@@ -126,6 +128,7 @@ export function replayHistory(
   const points: HistoryPoint[] = [];
   const endMs = toUtcMs(to);
   for (let dayMs = toUtcMs(from); dayMs <= endMs; dayMs += DAY_MS) {
+    // UTC stepping only generates the YYYY-MM-DD key; it is a local day key.
     const dateStr = new Date(dayMs).toISOString().slice(0, 10);
     applyDay(dateStr);
 
