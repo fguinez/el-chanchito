@@ -27,9 +27,93 @@ Optional fields are marked `?`. Every numeric metric field declares a
 denomination: `currency` (amount in the product's `currency` column,
 convertible), `percent` (raw percent number), or `count` (raw unit count).
 
+Kinds are also grouped into **display families**; each family declares the
+column spec (source, field, format, flags) that drives the institutions tables
+in the dashboard, one table per family, so no kind is shown a column that does
+not apply to it.
+
+## Display families
+
+Sources: `headline` is the universal `current_balance` in the product's
+currency; `clp_value` is that balance converted to CLP; `metric` and
+`attribute` read the named payload field; `installments` derives "paid / total"
+from `metrics.installments_paid` and `attributes.installments_total`. Optional
+columns are hidden when no row in the table has a value; signed columns render
+an explicit sign.
+
+### Cuentas y efectivo (`cash`)
+
+Kinds: `checking`, `savings`, `vista`, `wallet`, `prepaid_card`
+
+| Column | Label | Source | Field | Format | Flags |
+| --- | --- | --- | --- | --- | --- |
+| `saldo` | Saldo | headline |  | currency |  |
+| `saldo_contable` | Saldo contable | metric | `accounting_balance` | currency | optional |
+
+### Depósitos a plazo (`term_deposit`)
+
+Kinds: `term_deposit`
+
+| Column | Label | Source | Field | Format | Flags |
+| --- | --- | --- | --- | --- | --- |
+| `valor` | Valor | headline |  | currency |  |
+| `vencimiento` | Vencimiento | attribute | `maturity_date` | date | optional |
+| `tasa` | Tasa | attribute | `interest_rate_pct` | percent | optional |
+
+### Tarjetas y líneas de crédito (`revolving_credit`)
+
+Kinds: `credit_card`, `line_of_credit`
+
+| Column | Label | Source | Field | Format | Flags |
+| --- | --- | --- | --- | --- | --- |
+| `disponible` | Disponible | headline |  | currency |  |
+| `cupo` | Cupo | metric | `limit` | currency |  |
+| `utilizado` | Utilizado | metric | `owed` | currency |  |
+
+### Deuda en cuotas (`installment_loan`)
+
+Kinds: `loan`, `mortgage`
+
+| Column | Label | Source | Field | Format | Flags |
+| --- | --- | --- | --- | --- | --- |
+| `deuda` | Deuda | headline |  | currency |  |
+| `proxima_cuota` | Próxima cuota | metric | `next_payment_amount` | currency | optional |
+| `cuotas` | Cuotas | installments |  | count | optional |
+| `tasa` | Tasa | attribute | `interest_rate_pct` | percent | optional |
+
+### Inversiones (`investment`)
+
+Kinds: `investment`
+
+| Column | Label | Source | Field | Format | Flags |
+| --- | --- | --- | --- | --- | --- |
+| `valor` | Valor | headline |  | currency |  |
+| `aportado` | Aportado | metric | `deposited` | currency |  |
+| `ganancia` | Ganancia | metric | `profit` | currency | signed |
+| `var_30d` | Var 30d | metric | `var_30d_pct` | percent | signed |
+| `var_anual` | Var año | metric | `var_ytd_pct` | percent | optional, signed |
+
+### Cripto (`crypto`)
+
+Kinds: `crypto`
+
+| Column | Label | Source | Field | Format | Flags |
+| --- | --- | --- | --- | --- | --- |
+| `unidades` | Unidades | metric | `units` | currency |  |
+| `congelado` | Congelado | metric | `frozen` | currency | optional |
+| `clp` | ≈ CLP | clp_value |  | currency |  |
+
+### Otros (`other`)
+
+Kinds: `debit_card`, `other`
+
+| Column | Label | Source | Field | Format | Flags |
+| --- | --- | --- | --- | --- | --- |
+| `saldo` | Saldo | headline |  | currency | optional |
+
 ## Cuenta corriente (`checking`)
 
-Net-worth role: **asset** · balance convention: **value**
+Net-worth role: **asset** · balance convention: **value** · family: **cash**
 
 ### Attributes
 
@@ -49,7 +133,7 @@ Net-worth role: **asset** · balance convention: **value**
 
 ## Ahorro (`savings`)
 
-Net-worth role: **asset** · balance convention: **value**
+Net-worth role: **asset** · balance convention: **value** · family: **cash**
 
 ### Attributes
 
@@ -69,7 +153,7 @@ Net-worth role: **asset** · balance convention: **value**
 
 ## Cuenta vista (`vista`)
 
-Net-worth role: **asset** · balance convention: **value**
+Net-worth role: **asset** · balance convention: **value** · family: **cash**
 
 ### Attributes
 
@@ -89,7 +173,7 @@ Net-worth role: **asset** · balance convention: **value**
 
 ## Billetera (`wallet`)
 
-Net-worth role: **asset** · balance convention: **value**
+Net-worth role: **asset** · balance convention: **value** · family: **cash**
 
 ### Attributes
 
@@ -106,7 +190,7 @@ Net-worth role: **asset** · balance convention: **value**
 
 ## Depósito a plazo (`term_deposit`)
 
-Net-worth role: **asset** · balance convention: **value**
+Net-worth role: **asset** · balance convention: **value** · family: **term_deposit**
 
 ### Attributes
 
@@ -130,7 +214,7 @@ Net-worth role: **asset** · balance convention: **value**
 
 ## Tarjeta de crédito (`credit_card`)
 
-Net-worth role: **liability** · balance convention: **available**
+Net-worth role: **liability** · balance convention: **available** · family: **revolving_credit**
 
 ### Attributes
 
@@ -154,7 +238,7 @@ Net-worth role: **liability** · balance convention: **available**
 
 ## Tarjeta de débito (`debit_card`)
 
-Net-worth role: **none** · balance convention: **none**
+Net-worth role: **none** · balance convention: **none** · family: **other**
 
 ### Attributes
 
@@ -172,7 +256,7 @@ Net-worth role: **none** · balance convention: **none**
 
 ## Tarjeta prepago (`prepaid_card`)
 
-Net-worth role: **asset** · balance convention: **value**
+Net-worth role: **asset** · balance convention: **value** · family: **cash**
 
 ### Attributes
 
@@ -191,7 +275,7 @@ Net-worth role: **asset** · balance convention: **value**
 
 ## Línea de crédito (`line_of_credit`)
 
-Net-worth role: **liability** · balance convention: **available**
+Net-worth role: **liability** · balance convention: **available** · family: **revolving_credit**
 
 ### Attributes
 
@@ -211,7 +295,7 @@ Net-worth role: **liability** · balance convention: **available**
 
 ## Préstamo (`loan`)
 
-Net-worth role: **liability** · balance convention: **owed**
+Net-worth role: **liability** · balance convention: **owed** · family: **installment_loan**
 
 ### Attributes
 
@@ -236,7 +320,7 @@ Net-worth role: **liability** · balance convention: **owed**
 
 ## Hipotecario (`mortgage`)
 
-Net-worth role: **liability** · balance convention: **owed**
+Net-worth role: **liability** · balance convention: **owed** · family: **installment_loan**
 
 ### Attributes
 
@@ -261,7 +345,7 @@ Net-worth role: **liability** · balance convention: **owed**
 
 ## Inversión (`investment`)
 
-Net-worth role: **asset** · balance convention: **value**
+Net-worth role: **asset** · balance convention: **value** · family: **investment**
 
 ### Attributes
 
@@ -286,7 +370,7 @@ Net-worth role: **asset** · balance convention: **value**
 
 ## Cripto (`crypto`)
 
-Net-worth role: **asset** · balance convention: **units**
+Net-worth role: **asset** · balance convention: **units** · family: **crypto**
 
 ### Attributes
 
@@ -305,7 +389,7 @@ Net-worth role: **asset** · balance convention: **units**
 
 ## Otro (`other`)
 
-Net-worth role: **none** · balance convention: **none**
+Net-worth role: **none** · balance convention: **none** · family: **other**
 
 ### Attributes
 

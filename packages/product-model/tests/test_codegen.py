@@ -80,3 +80,27 @@ def test_generator_raises_on_invalid_denomination_marker():
 
     with pytest.raises(generate.UnsupportedSchemaError):
         generate._metric_denominations(Misdenominated)
+
+
+def test_generated_ts_exports_display_families():
+    """PRODUCT_FAMILIES, KIND_INFO.family and FAMILY_INFO come from the registry."""
+    index_ts = (PACKAGE_ROOT / "generated" / "index.ts").read_text(encoding="utf-8")
+
+    assert "export const PRODUCT_FAMILIES = [" in index_ts
+    assert "export type ProductFamily = (typeof PRODUCT_FAMILIES)[number];" in index_ts
+    assert 'labelEs: "Cuenta corriente", family: "cash" },' in index_ts
+    assert "export const FAMILY_INFO: Record<" in index_ts
+    assert (
+        '      { key: "utilizado", labelEs: "Utilizado", source: "metric", '
+        'field: "owed", format: "currency", align: "right", optional: false, '
+        "signed: false },"
+    ) in index_ts
+
+
+def test_products_md_documents_display_families():
+    """PRODUCTS.md carries the display families section and per-kind family."""
+    products_md = (PACKAGE_ROOT / "PRODUCTS.md").read_text(encoding="utf-8")
+
+    assert "## Display families" in products_md
+    assert "### Tarjetas y líneas de crédito (`revolving_credit`)" in products_md
+    assert "family: **revolving_credit**" in products_md

@@ -22,6 +22,6 @@ Either way the dashboard serves at [http://localhost:3000](http://localhost:3000
 
 - App Router pages live in `app/` (**Inicio**, **Planificación**, **Historial**, **Instituciones**).
 - Data access uses Drizzle ORM against the shared PostgreSQL database.
-- Product types consumed here are code-generated from `packages/product-model`; run `make product-model-generate` after editing the registry.
+- Product types and the per-family column specs behind the Instituciones tables are code-generated from `packages/product-model`; run `make product-model-generate` after editing the registry.
 
 See the root [README.md](../../README.md) and [ARCHITECTURE.md](../../ARCHITECTURE.md) for the full picture.

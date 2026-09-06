@@ -6,6 +6,7 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from product_model import (
+    PRODUCT_FAMILIES,
     PRODUCT_KINDS,
     REGISTRY,
     CreditCardAttributes,
@@ -95,6 +96,7 @@ def test_registry_covers_kind(kind):
 
     assert spec.kind == kind
     assert spec.label_es
+    assert spec.family in PRODUCT_FAMILIES
     assert spec.attributes_cls.model_fields["kind"].default == kind
     assert spec.metrics_cls.model_fields["kind"].default == kind
 

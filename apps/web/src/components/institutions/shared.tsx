@@ -2,11 +2,11 @@
 
 // Shared pieces of the Instituciones pages: typed mirrors of the
 // /api/institutions response shapes plus the label/format helpers and the
-// products table used by the list, institution detail, and product detail
-// views.
+// per-family products tables used by the list, institution detail, and
+// product detail views.
 
 import Link from "next/link";
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
 import {
   Table,
   TableBody,
@@ -18,9 +18,18 @@ import { SortableTableHead } from "@/components/ui/sortable-table-head";
 import { Badge } from "@/components/ui/badge";
 import { useSortableData } from "@/lib/use-sortable-data";
 import { formatCLP, cn } from "@/lib/utils";
-import { KIND_INFO } from "@chanchito/product-model";
+import {
+  groupProductsByFamily,
+  resolveColumnCell,
+  showKindColumn,
+  visibleColumns,
+  type ColumnCell,
+} from "@/lib/product-columns";
+import { FAMILY_INFO, KIND_INFO } from "@chanchito/product-model";
 import type {
+  ColumnSpec,
   ProductAttributes,
+  ProductFamily,
   ProductKind,
   ProductMetrics,
 } from "@chanchito/product-model";
@@ -171,9 +180,9 @@ export function productLimit(product: InstitutionProduct): number | null {
   return null;
 }
 
-/** Human-readable detail chips pulled from the product's typed attributes
- *  (snake_case registry keys) + account, plus the reported revolving debt. */
-export function productDetailChips(product: InstitutionProduct): string[] {
+/** Identity chips from the product's typed attributes (snake_case registry
+ *  keys) plus its account: which product this is, never how much it holds. */
+export function productIdentityChips(product: InstitutionProduct): string[] {
   const chips: string[] = [];
   const a = product.attributes;
 
@@ -189,7 +198,15 @@ export function productDetailChips(product: InstitutionProduct): string[] {
   if ("due_day" in a && a.due_day != null)
     chips.push(`vence día ${a.due_day}`);
 
-  // Reported drawn amount (Utilizado) on a card / línea, in product currency.
+  return chips;
+}
+
+/** Identity chips plus the reported revolving debt (Utilizado) on a card /
+ *  línea, in product currency: what the product detail page shows. The
+ *  family tables use `productIdentityChips` since Utilizado is a column there. */
+export function productDetailChips(product: InstitutionProduct): string[] {
+  const chips = productIdentityChips(product);
+
   const m = product.metrics;
   if (
     m &&
@@ -203,13 +220,11 @@ export function productDetailChips(product: InstitutionProduct): string[] {
   return chips;
 }
 
-type ProductSortKey = "producto" | "tipo" | "saldo" | "cupo" | "actualizado";
-
-/** The per-institution products table, with client-side column sorting. Sort
- *  state is local so each institution's table sorts independently; the caller's
- *  subtotals footer stays computed from the full, unsorted set. Each product
- *  row links to its detail page under `/institutions/{institutionSlug}/{slug}`.
- */
+/** The per-institution products view: one table per display family present,
+ *  in registry order, each with the family's own columns and its own
+ *  client-side sorting. The caller's subtotals footer stays computed from the
+ *  full, unsorted set. Each product row links to its detail page under
+ *  `/institutions/{institutionSlug}/{slug}`. */
 export function InstitutionProductsTable({
   products,
   institutionName,
@@ -219,85 +234,111 @@ export function InstitutionProductsTable({
   institutionName: string;
   institutionSlug: string;
 }) {
+  const groups = useMemo(() => groupProductsByFamily(products), [products]);
+
+  if (groups.length === 0) {
+    return <p className="text-sm text-muted-foreground">Sin productos.</p>;
+  }
+
+  return (
+    <div className="space-y-5">
+      {groups.map(({ family, products: familyProducts }) => (
+        <div key={family}>
+          <h3 className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            {FAMILY_INFO[family].labelEs}
+          </h3>
+          <FamilyProductsTable
+            family={family}
+            products={familyProducts}
+            institutionName={institutionName}
+            institutionSlug={institutionSlug}
+          />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Universal sort keys framing every family table. The registry reserves these
+// three ids so no family column key can collide with them.
+const PRODUCT_KEY = "producto";
+const KIND_KEY = "tipo";
+const UPDATED_KEY = "actualizado";
+
+/** One family's table: Producto, an optional Tipo badge (only when the rows
+ *  span more than one kind), the family's spec-driven columns, Actualizado. */
+function FamilyProductsTable({
+  family,
+  products,
+  institutionName,
+  institutionSlug,
+}: {
+  family: ProductFamily;
+  products: InstitutionProduct[];
+  institutionName: string;
+  institutionSlug: string;
+}) {
+  const columns = useMemo(
+    () => visibleColumns(family, products),
+    [family, products]
+  );
+  const showKind = showKindColumn(products);
+
   const getValue = useCallback(
-    (product: InstitutionProduct, key: ProductSortKey): string | number | null => {
+    (product: InstitutionProduct, key: string): string | number | null => {
       switch (key) {
-        case "producto":
+        case PRODUCT_KEY:
           return displayProductName(product, institutionName);
-        case "tipo":
+        case KIND_KEY:
           return KIND_INFO[product.kind].labelEs;
-        case "saldo":
-          // Sort by the CLP-normalized value so cross-currency rows are
-          // comparable; a product with no conversion (foreign/crypto without a
-          // rate) stays null and sorts last rather than mixing raw amounts in.
-          return product.currentBalanceClp;
-        case "cupo":
-          return productLimit(product);
-        case "actualizado":
+        case UPDATED_KEY:
           return product.balanceAsOf; // ISO strings sort correctly as strings.
+        default: {
+          const column = columns.find((c) => c.key === key);
+          return column ? resolveColumnCell(product, column).sortValue : null;
+        }
       }
     },
-    [institutionName]
+    [institutionName, columns]
   );
 
   const { sorted, sort, toggleSort } = useSortableData(products, getValue);
-  // Bridge the generic header's string key to our typed key union.
-  const handleSort = (key: string) => toggleSort(key as ProductSortKey);
+  const sortProps = (key: string) => {
+    const active = sort?.key === key;
+    return {
+      columnKey: key,
+      active,
+      direction: active ? sort?.direction : undefined,
+      onSort: toggleSort,
+    };
+  };
 
   return (
     <Table>
       <TableHeader>
         <TableRow>
-          <SortableTableHead
-            label="Producto"
-            columnKey="producto"
-            active={sort?.key === "producto"}
-            direction={sort?.key === "producto" ? sort.direction : undefined}
-            onSort={handleSort}
-          />
-          <SortableTableHead
-            label="Tipo"
-            columnKey="tipo"
-            active={sort?.key === "tipo"}
-            direction={sort?.key === "tipo" ? sort.direction : undefined}
-            onSort={handleSort}
-          />
-          <SortableTableHead
-            label="Saldo"
-            columnKey="saldo"
-            align="right"
-            active={sort?.key === "saldo"}
-            direction={sort?.key === "saldo" ? sort.direction : undefined}
-            onSort={handleSort}
-          />
-          <SortableTableHead
-            label="Cupo"
-            columnKey="cupo"
-            align="right"
-            active={sort?.key === "cupo"}
-            direction={sort?.key === "cupo" ? sort.direction : undefined}
-            onSort={handleSort}
-          />
+          <SortableTableHead label="Producto" {...sortProps(PRODUCT_KEY)} />
+          {showKind && (
+            <SortableTableHead label="Tipo" {...sortProps(KIND_KEY)} />
+          )}
+          {columns.map((column) => (
+            <SortableTableHead
+              key={column.key}
+              label={column.labelEs}
+              align={column.align}
+              {...sortProps(column.key)}
+            />
+          ))}
           <SortableTableHead
             label="Actualizado"
-            columnKey="actualizado"
             align="right"
-            active={sort?.key === "actualizado"}
-            direction={
-              sort?.key === "actualizado" ? sort.direction : undefined
-            }
-            onSort={handleSort}
+            {...sortProps(UPDATED_KEY)}
           />
         </TableRow>
       </TableHeader>
       <TableBody>
         {sorted.map((product) => {
-          const chips = productDetailChips(product);
-          const balance = formatBalance(
-            product.currency,
-            product.currentBalance
-          );
-          const cupo = productLimit(product);
+          const chips = productIdentityChips(product);
           const isLiability = KIND_INFO[product.kind].role === "liability";
           return (
             <TableRow
@@ -321,33 +362,28 @@ export function InstitutionProductsTable({
                   </div>
                 )}
               </TableCell>
-              <TableCell>
-                <Badge
-                  variant="outline"
-                  className={cn(
-                    "text-xs",
-                    isLiability
-                      ? "border-red-200 text-red-600"
-                      : "border-green-200 text-green-700"
-                  )}
-                >
-                  {KIND_INFO[product.kind].labelEs}
-                </Badge>
-              </TableCell>
-              <TableCell className="text-right font-medium tabular-nums">
-                {balance ?? (
-                  <span className="text-muted-foreground">sin dato</span>
-                )}
-                {product.currency !== "CLP" &&
-                  product.currentBalanceClp != null && (
-                    <div className="text-xs font-normal text-muted-foreground">
-                      ≈ {formatCLP(product.currentBalanceClp)}
-                    </div>
-                  )}
-              </TableCell>
-              <TableCell className="text-right tabular-nums text-muted-foreground">
-                {cupo != null ? formatCLP(cupo) : "—"}
-              </TableCell>
+              {showKind && (
+                <TableCell>
+                  <Badge
+                    variant="outline"
+                    className={cn(
+                      "text-xs",
+                      isLiability
+                        ? "border-red-200 text-red-600"
+                        : "border-green-200 text-green-700"
+                    )}
+                  >
+                    {KIND_INFO[product.kind].labelEs}
+                  </Badge>
+                </TableCell>
+              )}
+              {columns.map((column) => (
+                <ProductColumnCell
+                  key={column.key}
+                  column={column}
+                  cell={resolveColumnCell(product, column)}
+                />
+              ))}
               <TableCell className="text-right text-sm text-muted-foreground">
                 {product.balanceAsOf ? timeAgo(product.balanceAsOf) : "—"}
               </TableCell>
@@ -356,5 +392,39 @@ export function InstitutionProductsTable({
         })}
       </TableBody>
     </Table>
+  );
+}
+
+/** One spec-driven cell: a muted placeholder when empty ("sin dato" for the
+ *  headline, a dash otherwise), the "≈ CLP" sub-line under non-CLP headline
+ *  values, and a positive/negative tone on signed columns. */
+function ProductColumnCell({
+  column,
+  cell,
+}: {
+  column: ColumnSpec;
+  cell: ColumnCell;
+}) {
+  const isHeadline = column.source === "headline";
+  return (
+    <TableCell
+      className={cn(
+        column.align === "right" && "text-right tabular-nums",
+        isHeadline && "font-medium",
+        cell.tone === "positive" && "text-green-700",
+        cell.tone === "negative" && "text-red-600"
+      )}
+    >
+      {cell.text ?? (
+        <span className="text-muted-foreground">
+          {isHeadline ? "sin dato" : "—"}
+        </span>
+      )}
+      {cell.clp != null && (
+        <div className="text-xs font-normal text-muted-foreground">
+          ≈ {formatCLP(cell.clp)}
+        </div>
+      )}
+    </TableCell>
   );
 }

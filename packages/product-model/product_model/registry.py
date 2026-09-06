@@ -22,7 +22,7 @@ from .attributes import (
     VistaAttributes,
     WalletAttributes,
 )
-from .kinds import BalanceConvention, NetWorthRole, ProductKind
+from .kinds import BalanceConvention, NetWorthRole, ProductFamily, ProductKind
 from .metrics import (
     BaseMetrics,
     CheckingMetrics,
@@ -48,6 +48,7 @@ class KindSpec:
 
     kind: ProductKind
     label_es: str
+    family: ProductFamily
     role: NetWorthRole
     balance_convention: BalanceConvention
     attributes_cls: type[BaseAttributes]
@@ -58,6 +59,7 @@ _SPECS: tuple[KindSpec, ...] = (
     KindSpec(
         kind="checking",
         label_es="Cuenta corriente",
+        family="cash",
         role=NetWorthRole.ASSET,
         balance_convention=BalanceConvention.VALUE,
         attributes_cls=CheckingAttributes,
@@ -66,6 +68,7 @@ _SPECS: tuple[KindSpec, ...] = (
     KindSpec(
         kind="savings",
         label_es="Ahorro",
+        family="cash",
         role=NetWorthRole.ASSET,
         balance_convention=BalanceConvention.VALUE,
         attributes_cls=SavingsAttributes,
@@ -74,6 +77,7 @@ _SPECS: tuple[KindSpec, ...] = (
     KindSpec(
         kind="vista",
         label_es="Cuenta vista",
+        family="cash",
         role=NetWorthRole.ASSET,
         balance_convention=BalanceConvention.VALUE,
         attributes_cls=VistaAttributes,
@@ -82,6 +86,7 @@ _SPECS: tuple[KindSpec, ...] = (
     KindSpec(
         kind="wallet",
         label_es="Billetera",
+        family="cash",
         role=NetWorthRole.ASSET,
         balance_convention=BalanceConvention.VALUE,
         attributes_cls=WalletAttributes,
@@ -90,6 +95,7 @@ _SPECS: tuple[KindSpec, ...] = (
     KindSpec(
         kind="term_deposit",
         label_es="Depósito a plazo",
+        family="term_deposit",
         role=NetWorthRole.ASSET,
         balance_convention=BalanceConvention.VALUE,
         attributes_cls=TermDepositAttributes,
@@ -98,6 +104,7 @@ _SPECS: tuple[KindSpec, ...] = (
     KindSpec(
         kind="credit_card",
         label_es="Tarjeta de crédito",
+        family="revolving_credit",
         role=NetWorthRole.LIABILITY,
         balance_convention=BalanceConvention.AVAILABLE,
         attributes_cls=CreditCardAttributes,
@@ -106,6 +113,7 @@ _SPECS: tuple[KindSpec, ...] = (
     KindSpec(
         kind="debit_card",
         label_es="Tarjeta de débito",
+        family="other",
         role=NetWorthRole.NONE,
         balance_convention=BalanceConvention.NONE,
         attributes_cls=DebitCardAttributes,
@@ -114,6 +122,7 @@ _SPECS: tuple[KindSpec, ...] = (
     KindSpec(
         kind="prepaid_card",
         label_es="Tarjeta prepago",
+        family="cash",
         role=NetWorthRole.ASSET,
         balance_convention=BalanceConvention.VALUE,
         attributes_cls=PrepaidCardAttributes,
@@ -122,6 +131,7 @@ _SPECS: tuple[KindSpec, ...] = (
     KindSpec(
         kind="line_of_credit",
         label_es="Línea de crédito",
+        family="revolving_credit",
         role=NetWorthRole.LIABILITY,
         balance_convention=BalanceConvention.AVAILABLE,
         attributes_cls=LineOfCreditAttributes,
@@ -130,6 +140,7 @@ _SPECS: tuple[KindSpec, ...] = (
     KindSpec(
         kind="loan",
         label_es="Préstamo",
+        family="installment_loan",
         role=NetWorthRole.LIABILITY,
         balance_convention=BalanceConvention.OWED,
         attributes_cls=LoanAttributes,
@@ -138,6 +149,7 @@ _SPECS: tuple[KindSpec, ...] = (
     KindSpec(
         kind="mortgage",
         label_es="Hipotecario",
+        family="installment_loan",
         role=NetWorthRole.LIABILITY,
         balance_convention=BalanceConvention.OWED,
         attributes_cls=MortgageAttributes,
@@ -146,6 +158,7 @@ _SPECS: tuple[KindSpec, ...] = (
     KindSpec(
         kind="investment",
         label_es="Inversión",
+        family="investment",
         role=NetWorthRole.ASSET,
         balance_convention=BalanceConvention.VALUE,
         attributes_cls=InvestmentAttributes,
@@ -154,6 +167,7 @@ _SPECS: tuple[KindSpec, ...] = (
     KindSpec(
         kind="crypto",
         label_es="Cripto",
+        family="crypto",
         role=NetWorthRole.ASSET,
         balance_convention=BalanceConvention.UNITS,
         attributes_cls=CryptoAttributes,
@@ -162,6 +176,7 @@ _SPECS: tuple[KindSpec, ...] = (
     KindSpec(
         kind="other",
         label_es="Otro",
+        family="other",
         role=NetWorthRole.NONE,
         balance_convention=BalanceConvention.NONE,
         attributes_cls=OtherAttributes,

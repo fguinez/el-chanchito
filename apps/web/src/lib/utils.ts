@@ -39,6 +39,27 @@ export function formatDayEs(date: string): string {
   });
 }
 
+/** Full es-CL date (day-month-year) for a plain YYYY-MM-DD date; parsed as
+ *  local time like `formatDayEs` so the label never shifts a day. */
+export function formatPlainDateEs(date: string): string {
+  const [year, month, day] = date.split("-").map(Number);
+  return new Date(year, month - 1, day).toLocaleDateString("es-CL");
+}
+
+/** es-CL label for a raw percent number (4.2 -> "4,2%"), one to two
+ *  decimals; `signed` adds an explicit "+" to positive values (+2,1%). */
+export function formatPercent(
+  value: number,
+  { signed = false }: { signed?: boolean } = {}
+): string {
+  const formatted = new Intl.NumberFormat("es-CL", {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 2,
+    signDisplay: signed ? "exceptZero" : "auto",
+  }).format(value);
+  return `${formatted}%`;
+}
+
 /** Compact es-CL label for a time-axis tick; the year appears only when it
  *  isn't the current one. */
 export function formatDateTickMs(ms: number): string {
