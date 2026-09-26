@@ -57,7 +57,11 @@ describe("detectColumns", () => {
   it.each<[string, string[], ColumnMapping]>([
     ["Spanish headers", ["Fecha", "Glosa", "Monto"], dateDescAmount],
     ["any case", ["DATE", "Description", "AMOUNT"], dateDescAmount],
-    ["the first match", ["Dia", "Detalle", "Cargo", "Abono"], dateDescAmount],
+    [
+      "the leftmost matching header",
+      ["Dia", "Detalle", "Abono", "Cargo"],
+      dateDescAmount,
+    ],
     [
       "fallbacks for missing fields only",
       ["Nota", "Otro", "Fecha", "Valor"],

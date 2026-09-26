@@ -18,13 +18,14 @@ export interface ColumnMapping {
 }
 
 /** Positional mapping used when a header is not recognized. */
-export const DEFAULT_MAPPING: ColumnMapping = {
+export const DEFAULT_MAPPING: Readonly<ColumnMapping> = {
   description: 0,
   amount: 1,
   date: 2,
 };
 
-// Lowercased header names recognized per field; the first match wins.
+// Lowercased header names recognized per field; the leftmost matching header
+// wins.
 const HEADER_KEYWORDS: Record<keyof ColumnMapping, string[]> = {
   description: ["descripcion", "description", "detalle", "glosa", "concepto"],
   amount: ["monto", "amount", "valor", "cargo", "abono"],
@@ -34,7 +35,7 @@ const HEADER_KEYWORDS: Record<keyof ColumnMapping, string[]> = {
 /**
  * Splits CSV text into trimmed, non-blank rows of cells, header included.
  * The separator is `;` when the first line contains one, else `,`; each cell
- * loses one surrounding pair of double quotes and is trimmed.
+ * loses a leading and/or trailing double quote, then is trimmed.
  */
 export function splitCsvRows(text: string): string[][] {
   const lines = text
