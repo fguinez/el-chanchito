@@ -87,7 +87,13 @@ async def _get_json(client: httpx.AsyncClient, path: str, what: str) -> dict:
         )
     if not resp.is_success:
         raise RuntimeError(f"MercadoPago {what} request failed (HTTP {resp.status_code})")
-    return resp.json()
+    try:
+        body = resp.json()
+    except ValueError as e:
+        raise ValueError(f"MercadoPago {what} response is not JSON") from e
+    if not isinstance(body, dict):
+        raise ValueError(f"MercadoPago {what} response is not a JSON object")
+    return body
 
 
 async def fetch_wallet_balance(

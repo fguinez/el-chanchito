@@ -171,6 +171,20 @@ class TestFetchWalletBalance:
         assert message == "MercadoPago balance request failed (ConnectError)"
         assert str(USER_ID) not in message
 
+    @pytest.mark.parametrize(
+        ("response", "expected"),
+        [
+            (httpx.Response(200, text="<html>mantenimiento</html>"), "is not JSON"),
+            (httpx.Response(200, json=[2500000]), "is not a JSON object"),
+        ],
+    )
+    def test_unreadable_body_raises_readable_error(self, response, expected):
+        """A 2xx body that isn't a JSON object names the call instead of a parser error."""
+        transport = httpx.MockTransport(lambda request: response)
+
+        with pytest.raises(ValueError, match=f"MercadoPago user response {expected}"):
+            _fetch(transport)
+
     def test_missing_user_id_raises(self):
         """A /users/me payload without an id stops before the balance call."""
         seen: list[httpx.Request] = []
