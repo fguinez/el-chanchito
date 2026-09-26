@@ -195,10 +195,10 @@ seed-category-rules: ## Seed default category assignment rules
 	TRANSPORT=$$(echo $$CATS | python3 -c "import json,sys;print(next(c['id'] for c in json.load(sys.stdin) if c['name']=='Transporte'))") && \
 	FOOD=$$(echo $$CATS | python3 -c "import json,sys;print(next(c['id'] for c in json.load(sys.stdin) if c['name']=='Restaurantes'))") && \
 	SUPER=$$(echo $$CATS | python3 -c "import json,sys;print(next(c['id'] for c in json.load(sys.stdin) if c['name']=='Supermercado'))") && \
-	curl -s -X POST http://localhost:3000/api/categories -H "Content-Type: application/json" -d "{\"keyword\":\"uber\",\"categoryId\":\"$$TRANSPORT\",\"priority\":10}" > /dev/null && \
-	curl -s -X POST http://localhost:3000/api/categories -H "Content-Type: application/json" -d "{\"keyword\":\"rappi\",\"categoryId\":\"$$FOOD\",\"priority\":10}" > /dev/null && \
-	curl -s -X POST http://localhost:3000/api/categories -H "Content-Type: application/json" -d "{\"keyword\":\"supermercado\",\"categoryId\":\"$$SUPER\",\"priority\":10}" > /dev/null && \
-	curl -s -X POST http://localhost:3000/api/categories -H "Content-Type: application/json" -d "{\"keyword\":\"lider\",\"categoryId\":\"$$SUPER\",\"priority\":10}" > /dev/null && \
+	curl -s -X POST http://localhost:3000/api/categories/rules -H "Content-Type: application/json" -d "{\"keyword\":\"uber\",\"categoryId\":\"$$TRANSPORT\",\"priority\":10}" > /dev/null && \
+	curl -s -X POST http://localhost:3000/api/categories/rules -H "Content-Type: application/json" -d "{\"keyword\":\"rappi\",\"categoryId\":\"$$FOOD\",\"priority\":10}" > /dev/null && \
+	curl -s -X POST http://localhost:3000/api/categories/rules -H "Content-Type: application/json" -d "{\"keyword\":\"supermercado\",\"categoryId\":\"$$SUPER\",\"priority\":10}" > /dev/null && \
+	curl -s -X POST http://localhost:3000/api/categories/rules -H "Content-Type: application/json" -d "{\"keyword\":\"lider\",\"categoryId\":\"$$SUPER\",\"priority\":10}" > /dev/null && \
 	echo "Done: 4 rules seeded"
 
 seed-all: seed-history seed-category-rules ## Seed all default data

@@ -107,6 +107,7 @@ For the email parser, you need a Gmail App Password (not your regular password):
 | **Monitores** | `/monitors` | Formula alerts over product values; each monitor's page has its history chart and its monthly variaciones |
 | **Historial** | `/history` | Wealth timeline chart + snapshot table (patrimonio, deuda, ahorro) |
 | **Gastos** | `/expenses` | Transaction list, manual entry form, CSV import |
+| **Categorías** | `/categories` | Categories and keyword rules for automatic categorization |
 | **Gastos Fijos** | `/fixed` | Monthly fixed expenses with shared ratio (69%) |
 | **Transferencias** | `/transfers` | Internal money movements (pending/resolved) |
 
@@ -288,20 +289,37 @@ Supported date formats: `DD/MM/YYYY`, `DD-MM-YYYY`, `YYYY-MM-DD`
 
 Amounts: handles `1.234` (Chilean thousands separator) and `-1.234,56`
 
-## Category Auto-Assignment
+## Categories
 
-1. Categories are pre-seeded: Supermercado, Transporte, Restaurantes, etc.
-2. Add keyword rules via the API:
-   ```bash
-   # Example: UBER -> Transporte
-   curl -X POST http://localhost:3000/api/categories \
-     -H "Content-Type: application/json" \
-     -d '{"keyword":"uber","categoryId":"<transport-category-id>"}'
-   ```
-3. Run auto-assignment:
-   ```bash
-   curl -X PUT http://localhost:3000/api/categories
-   ```
+Transactions are categorized automatically from keyword rules, which you manage
+on the **Categorías** page (`/categories`).
+
+- **Categories**: eight come pre-seeded (Supermercado, Transporte, Restaurantes,
+  etc.). Add new ones with a name, color, and icon, and edit them inline.
+  Deleting a category that is in use is allowed; the page first tells you how
+  many transactions and rules it has. Its transactions become uncategorized
+  (so the rules can pick them up again) and its rules are deleted.
+- **Rules**: a rule matches when the transaction description contains its
+  keyword, ignoring upper and lower case (a plain substring: `%` and `_` have no
+  special meaning). When several rules match, the highest priority wins; on
+  equal priority the older rule wins, so a more specific keyword added later
+  (say `uber eats` after `uber`) needs a higher priority.
+- **Probar** previews a keyword, before or after you save the rule: how many
+  transactions contain it, how many are still waiting for a category, and the
+  20 most recent matches with their current category.
+
+When categories are assigned:
+
+- **On import**: every new transaction is categorized as it is inserted, whatever
+  its source (scrapers, CSV import, manual entry). This happens in the database
+  (see [ARCHITECTURE.md](ARCHITECTURE.md#database-schema-er-diagram)), so there
+  is nothing to run.
+- **Categorizar ahora**: applies new or changed rules to the transactions that
+  are still uncategorized and reports how many it categorized.
+
+Rules only fill in missing categories: they never overwrite a category that is
+already set (including one chosen by hand), and editing or deleting a rule does
+not undo the categories it already assigned.
 
 ## API Reference
 
@@ -319,7 +337,11 @@ All API routes are under `/api/`:
 | GET/POST/PUT/DELETE | `/api/fixed-expenses` | Fixed expenses CRUD |
 | GET/POST/DELETE | `/api/wealth` | Wealth snapshots |
 | GET/POST/PUT/DELETE | `/api/transfers` | Internal transfers |
-| GET/POST/PUT | `/api/categories` | Categories + auto-assign rules |
+| GET/POST/PUT | `/api/categories` | Categories with their rules and transaction counts; create a category; apply the rules to uncategorized transactions (PUT) |
+| PATCH/DELETE | `/api/categories/[id]` | Update or delete a category (its transactions become uncategorized, its rules are deleted) |
+| POST | `/api/categories/rules` | Create a keyword rule |
+| PATCH/DELETE | `/api/categories/rules/[id]` | Update or delete a rule |
+| GET | `/api/categories/rules/preview` | Transactions a keyword would match (`?keyword=`) |
 | GET | `/api/institutions` | Institutions + nested products + CLP subtotals |
 | POST | `/api/institutions/refresh` | Trigger a scrape (all, or `{institution}`) |
 | GET | `/api/scrapers` | Scraper run status |
