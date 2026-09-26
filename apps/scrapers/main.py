@@ -19,7 +19,7 @@ load_dotenv()
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
-from db.connection import close_pool, is_transient_db_error
+from db.connection import close_pool, database_url, is_transient_db_error
 from db.writer import (
     finish_scraper_run,
     start_scraper_run,
@@ -336,8 +336,18 @@ def _start_control_server(
     return server
 
 
+def _require_database_url() -> None:
+    """Exit before scheduling or scraping anything when DATABASE_URL is unset."""
+    try:
+        database_url()
+    except RuntimeError as e:
+        logger.error("%s", e)
+        sys.exit(1)
+
+
 def main_scheduled() -> None:
     """Run scrapers on a schedule using APScheduler."""
+    _require_database_url()
     scrapers = build_scrapers()
 
     if not scrapers:
@@ -440,6 +450,7 @@ def main_scheduled() -> None:
 
 def main_once() -> None:
     """Run all scrapers once and exit (for cron-based scheduling)."""
+    _require_database_url()
     scrapers = build_scrapers()
     try:
         asyncio.run(run_all_once(scrapers))

@@ -23,17 +23,25 @@ DB_ATTEMPTS = 3
 _pool: ConnectionPool | None = None
 
 
+def database_url() -> str:
+    """Return DATABASE_URL; no fallback, as a guess could hit the wrong Postgres."""
+    dsn = os.environ.get("DATABASE_URL", "").strip()
+    if not dsn:
+        raise RuntimeError(
+            "DATABASE_URL is not set. Run through `make` (scrapers-once, "
+            "scrapers-start, dev), copy .env.example to .env, or export it, "
+            "e.g. postgres://finance:finance@localhost:5435/finance"
+        )
+    return dsn
+
+
 def get_pool() -> ConnectionPool:
     global _pool
     if _pool is None:
-        dsn = os.environ.get(
-            "DATABASE_URL",
-            "postgres://finance:finance@localhost:5432/finance",
-        )
         # `check` pings each connection before handing it out, so the ones a
         # Postgres restart killed are replaced instead of failing a write.
         _pool = ConnectionPool(
-            dsn,
+            database_url(),
             min_size=1,
             max_size=3,
             open=True,

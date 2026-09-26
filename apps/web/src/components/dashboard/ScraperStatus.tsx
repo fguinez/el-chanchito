@@ -9,6 +9,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { scraperRunLabel } from "@/lib/scraper-run-label";
 import { cn } from "@/lib/utils";
 import {
   hasRunDetails,
@@ -20,6 +21,7 @@ import { AlertTriangle } from "lucide-react";
 interface ScraperRun {
   method: string;
   institution: string;
+  institution_name: string | null;
   started_at: string;
   finished_at: string | null;
   status: string;
@@ -27,20 +29,8 @@ interface ScraperRun {
   error_message: string | null;
 }
 
-const INSTITUTION_LABELS: Record<string, string> = {
-  fintual: "Fintual",
-  buda: "Buda",
-  banchile: "Banco de Chile",
-  mach: "MACH",
-  mercadopago: "MercadoPago",
-  tenpo: "Tenpo",
-  bci_lider: "BCI Lider",
-  _legacy_composite: "Email (legacy)",
-};
-
 const runKey = (r: ScraperRun) => `${r.method}_${r.institution}`;
-const runLabel = (r: ScraperRun) =>
-  INSTITUTION_LABELS[r.institution] ?? r.institution;
+const runLabel = (r: ScraperRun) => scraperRunLabel(r);
 
 function timeAgo(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();

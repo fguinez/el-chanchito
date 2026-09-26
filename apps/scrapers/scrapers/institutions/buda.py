@@ -3,6 +3,11 @@
 Auth: HMAC-SHA384 signing.
   Signature string: "{METHOD} {path} {base64_body} {nonce}"
   Headers: X-SBTC-APIKEY, X-SBTC-NONCE, X-SBTC-SIGNATURE
+
+Balances cover every wallet, one `crypto` product per currency. Transactions
+cover CLP deposits and withdrawals only: `transactions.amount` is integer CLP,
+and a crypto movement has no CLP amount without a price at its date, so crypto
+value history comes from the balance snapshots instead (issue #3).
 """
 
 import base64
@@ -11,7 +16,9 @@ import hmac
 import logging
 import os
 import time
+from collections.abc import AsyncIterator
 from datetime import date, datetime
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 import httpx
 
@@ -28,6 +35,83 @@ from scrapers.retry import send_with_retry
 logger = logging.getLogger(__name__)
 
 BUDA_BASE = "https://www.buda.com"
+
+# Both legs file under this kind, so a CLP movement lands on the same product
+# as the CLP balance (the writer resolves products by kind and currency).
+PRODUCT_KIND = "crypto"
+TRANSACTION_CURRENCY = "CLP"
+PAGE_SIZE = 50
+# 1000 movements per direction; past that the rest are left out, with a warning.
+MAX_PAGES = 20
+# Movements that never moved money. Both spellings of "annulled" are listed
+# because Buda's own (thought to be "anulled") is not verified live.
+FAILED_STATES = frozenset({"anulled", "annulled", "rejected", "cancelled", "canceled"})
+
+
+def _parse_movement(item: dict, tx_type: str) -> ScrapedTransaction | None:
+    """One Buda deposit or withdrawal as a CLP transaction, or None to skip it.
+
+    A movement in any currency other than CLP is skipped with a warning rather
+    than truncated to whole units and filed under the CLP product. An amount
+    with no currency marker is read as CLP, the currency of the endpoint it
+    came from. Annulled or rejected movements are skipped too.
+    """
+    direction = tx_type.removesuffix("s")
+    item_id = item.get("id")
+    if not item_id:
+        logger.warning("Buda %s missing id, skipping", direction)
+        return None
+    state = str(item.get("state") or "").lower()
+    if state in FAILED_STATES:
+        logger.info("Buda %s %s is %s, skipping", direction, item_id, state)
+        return None
+
+    amount = item.get("amount")
+    if not isinstance(amount, list) or not amount:
+        logger.warning("Buda %s %s has no amount, skipping", direction, item_id)
+        return None
+    currency = str(
+        amount[1] if len(amount) > 1 else item.get("currency") or TRANSACTION_CURRENCY
+    ).upper()
+    if currency != TRANSACTION_CURRENCY:
+        logger.warning(
+            "Buda %s %s is in %s, not CLP; skipping", direction, item_id, currency
+        )
+        return None
+
+    try:
+        value = Decimal(str(amount[0]))
+    except InvalidOperation:
+        value = None
+    if value is None or not value.is_finite():
+        logger.warning(
+            "Buda %s %s has an unreadable amount, skipping", direction, item_id
+        )
+        return None
+    pesos = abs(int(value.to_integral_value(rounding=ROUND_HALF_UP)))
+    if pesos == 0:
+        return None
+    if tx_type == "withdrawals":
+        pesos = -pesos
+
+    created = item.get("created_at", "")
+    tx_date = date.today()
+    if created:
+        try:
+            tx_date = datetime.fromisoformat(created.replace("Z", "+00:00")).date()
+        except ValueError:
+            pass
+
+    return ScrapedTransaction(
+        institution="buda",
+        product_kind=PRODUCT_KIND,
+        currency=TRANSACTION_CURRENCY,
+        description=f"Buda {direction} {TRANSACTION_CURRENCY}",
+        amount=pesos,
+        transaction_date=tx_date,
+        external_id=f"buda_{item_id}",
+        scheduled_month=date(tx_date.year, tx_date.month, 1),
+    )
 
 
 class BudaScraper(BaseScraper):
@@ -72,65 +156,61 @@ class BudaScraper(BaseScraper):
             label=f"Buda GET {path}",
         )
 
+    async def _pages(
+        self, client: httpx.AsyncClient, tx_type: str
+    ) -> AsyncIterator[list[dict]]:
+        """Yield each page of CLP deposits or withdrawals, in Buda's order.
+
+        Follows `meta.total_pages` when Buda reports it, else stops at the
+        first short page. Pages already yielded survive a later page failing.
+        Each page is fetched with bounded retries; every attempt is re-signed,
+        since Buda rejects a nonce it has already seen.
+        """
+        currency = TRANSACTION_CURRENCY.lower()
+        for page in range(1, MAX_PAGES + 1):
+            path = (
+                f"/api/v2/currencies/{currency}/{tx_type}.json"
+                f"?per={PAGE_SIZE}&page={page}"
+            )
+            resp = await send_with_retry(
+                lambda p=path: client.get(
+                    f"{BUDA_BASE}{p}", headers=self._sign("GET", p)
+                ),
+                label=f"Buda GET {path}",
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            items = data.get(tx_type) or []
+            yield items
+
+            total_pages = (data.get("meta") or {}).get("total_pages")
+            if isinstance(total_pages, int):
+                if page >= total_pages:
+                    return
+            elif len(items) < PAGE_SIZE:
+                return
+        logger.warning(
+            "Buda %s: stopped after %d pages; the rest were not fetched",
+            tx_type,
+            MAX_PAGES,
+        )
+
     async def scrape_transactions(self) -> list[ScrapedTransaction]:
-        """Fetch recent CLP/BTC deposits and withdrawals."""
+        """Fetch CLP deposits and withdrawals, up to MAX_PAGES pages each."""
         transactions: list[ScrapedTransaction] = []
 
         async with httpx.AsyncClient(timeout=30.0) as client:
-            for currency in ["clp", "btc"]:
-                for tx_type in ["deposits", "withdrawals"]:
-                    path = f"/api/v2/currencies/{currency}/{tx_type}.json?per=50"
-
-                    try:
-                        resp = await self._get(client, path)
-                        resp.raise_for_status()
-                        data = resp.json()
-
-                        items = data.get(tx_type, [])
+            for tx_type in ("deposits", "withdrawals"):
+                try:
+                    async for items in self._pages(client, tx_type):
                         for item in items:
-                            amount_arr = item.get("amount", ["0", "CLP"])
-                            amount_val = int(float(amount_arr[0]))
-                            item_currency = amount_arr[1] if len(amount_arr) > 1 else currency.upper()
-
-                            if amount_val == 0:
-                                continue
-
-                            if tx_type == "withdrawals":
-                                amount_val = -abs(amount_val)
-
-                            created = item.get("created_at", "")
-                            tx_date = date.today()
-                            if created:
-                                try:
-                                    tx_date = datetime.fromisoformat(
-                                        created.replace("Z", "+00:00")
-                                    ).date()
-                                except ValueError:
-                                    pass
-
-                            item_id = item.get("id")
-                            if not item_id:
-                                logger.warning("Buda %s missing id, skipping", tx_type)
-                                continue
-
-                            transactions.append(
-                                ScrapedTransaction(
-                                    institution="buda",
-                                    product_kind="crypto",
-                                    description=f"Buda {tx_type[:-1]} {item_currency}",
-                                    amount=amount_val,
-                                    transaction_date=tx_date,
-                                    external_id=f"buda_{item_id}",
-                                    scheduled_month=date(
-                                        tx_date.year, tx_date.month, 1
-                                    ),
-                                )
-                            )
-
-                    except httpx.HTTPStatusError as e:
-                        logger.warning("Buda %s/%s failed: %s", currency, tx_type, e)
-                    except Exception:
-                        logger.exception("Buda %s/%s error", currency, tx_type)
+                            txn = _parse_movement(item, tx_type)
+                            if txn is not None:
+                                transactions.append(txn)
+                except httpx.HTTPStatusError as e:
+                    logger.warning("Buda %s failed: %s", tx_type, e)
+                except Exception:
+                    logger.exception("Buda %s error", tx_type)
 
         return transactions
 
@@ -152,7 +232,7 @@ class BudaScraper(BaseScraper):
                     products.append(
                         ScrapedProduct(
                             institution="buda",
-                            kind="crypto",
+                            kind=PRODUCT_KIND,
                             # One product per currency (BTC, CLP, ...)
                             currency=currency_id.upper() or "CLP",
                             metrics=CryptoMetrics(units=amount),

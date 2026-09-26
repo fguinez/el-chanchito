@@ -1,0 +1,21 @@
+From: Tenpo <notificaciones@tenpo.cl>
+To: Usuario Sintetico <usuario@example.com>
+Subject: =?UTF-8?Q?Transacci=C3=B3n_aprobada?=
+Date: Sun, 20 Sep 2026 20:10:00 -0300
+Message-ID: <synthetic-tenpo-purchase@example.com>
+X-Fixture: synthetic
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="synthetic-boundary"
+
+--synthetic-boundary
+Content-Type: text/html; charset="utf-8"
+
+<html><body><p>Realizaste una compra por &#36; 999.999 en COMERCIO SINTETICO.</p></body></html>
+
+--synthetic-boundary
+Content-Type: text/plain; charset="utf-8"
+
+Realizaste una compra por $ 999.999 en COMERCIO SINTETICO.
+Recibiras cashback por esta compra.
+
+--synthetic-boundary--

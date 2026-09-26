@@ -13,21 +13,21 @@
 │                    Dashboard (Next.js 16)                        │
 │                                                                 │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────┐   │
-│  │  Inicio  │  │Planning  │  │ History  │  │   Settings   │   │
-│  │  (Home)  │  │ (Table)  │  │ (Chart)  │  │  (Config)    │   │
+│  │  Inicio  │  │ Monitors │  │ History  │  │ Institutions │   │
+│  │  (Home)  │  │ (Alerts) │  │ (Chart)  │  │  (Products)  │   │
 │  └────┬─────┘  └────┬─────┘  └────┬─────┘  └──────┬───────┘   │
 │       │              │              │               │           │
 │       ▼              ▼              ▼               ▼           │
 │  ┌─────────────────────────────────────────────────────────┐   │
 │  │                   API Routes (/api/*)                    │   │
-│  │  budget | planning | transactions | wealth | scrapers   │   │
-│  │  fixed-expenses | income-sources | transfers | import   │   │
-│  │  categories | balances | month-reset | institutions     │   │
+│  │  monitors (+ adjustments) | transactions | wealth       │   │
+│  │  scrapers | fixed-expenses | transfers | import         │   │
+│  │  categories | balances | institutions                   │   │
 │  │  institutions/refresh (→ scraper control endpoint)      │   │
 │  └────────────────────────┬────────────────────────────────┘   │
 │                           │                                     │
 │  ┌────────────────────────┴────────────────────────────────┐   │
-│  │              Drizzle ORM + budget-engine.ts              │   │
+│  │         Drizzle ORM + lib/monitors + budget-engine.ts    │   │
 │  └────────────────────────┬────────────────────────────────┘   │
 └───────────────────────────┼─────────────────────────────────────┘
                             │
@@ -38,8 +38,8 @@
 │                                                                 │
 │  users | institutions | accounts | products                     │
 │  product_snapshots | transactions | categories | category_rules │
-│  budget_configs | budget_adjustments | wealth_snapshots          │
-│  fixed_expenses | income_sources | internal_transfers           │
+│  monitors | monitor_adjustments | wealth_snapshots               │
+│  fixed_expenses | internal_transfers                            │
 │  scraper_runs                                                   │
 └───────────────────────────▲─────────────────────────────────────┘
                             │
@@ -105,9 +105,9 @@
                        ▼
         ┌────────────────────────────────────┐
         │  Dashboard API (Next.js)           │
-        │  - planning: reads budget_configs  │
-        │    + transactions + balances       │
-        │    -> computes expected vs real    │
+        │  - monitors: equations over        │
+        │    products + adjustments          │
+        │    -> status, margin, history      │
         │  - wealth: reads product_snapshots │
         │    -> computes derived metrics     │
         └──────────────┬─────────────────────┘
@@ -115,34 +115,40 @@
                        ▼
         ┌────────────────────────────────────┐
         │          Browser (React)           │
-        │  - TodayStatus widget              │
-        │  - Planning table                  │
+        │  - Monitor cards + detail          │
+        │  - Variaciones (adjustments)       │
         │  - Wealth chart (Recharts)         │
         └────────────────────────────────────┘
 ```
 
-## Budget Engine
+## Monitors and variaciones
 
-The core formula behind the "Planificacion" table:
+Monitors (`apps/web/src/lib/monitors`, table `monitors`, V015) replaced the
+old budget engine and its Planificacion and Configuracion pages, retired in
+V016. A monitor is one equation: a left expression over product values
+compared against one or more thresholds, each of which may vary by day
+(`DAY_OF_MONTH()`, `DAYS_IN_MONTH()`). Nothing is precomputed: the API
+evaluates monitors on read and replays their history from `product_snapshots`.
 
-```
-presup_diario = variable_budget / days_in_month
-cupo_tc_mes = credit_card_limit - future_debts
-
-expected_balance(day) =
-    cupo_tc_mes
-  - presup_diario * day
-  + checking_initial_balance
-  + sum(adjustments[1..day])
-
-drift = real_balance - expected_balance
-```
+The old sheet's "Variaciones" (a reimbursement, a one-off gift budget) live on
+as **monitor adjustments** (`monitor_adjustments`, V022). An adjustment dated
+day N adds its amount, in the monitor's currency, to every threshold of its
+monitor from day N to the end of that calendar month. Same-day adjustments add
+up, and each month starts with none:
 
 ```
-drift > 0  =>  under budget (good)
-drift < 0  =>  over budget (overspending)
-drift = 0  =>  exactly on track
+threshold(day) =
+    threshold_expression(day)
+  + sum(adjustments dated in day's month, on or before day)
+
+margin = value - threshold   (for < and <=; threshold - value for > and >=)
 ```
+
+`adjustmentOnDate` in `evaluate.ts` applies them inside `evaluateMonitor`, so
+the current evaluation, the history replay, the list sparklines and the edit
+preview all include them. Days are local calendar days, the same unit as
+`DAY_OF_MONTH()`. The monitor detail page manages them ("Variaciones" card)
+through `/api/monitors/[id]/adjustments`.
 
 ## Database Schema (ER Diagram)
 
@@ -206,16 +212,14 @@ transactions ──────────┐
   is_manually_categorized
 
 
-budget_configs                budget_adjustments
-  id PK                         id PK
-  month (unique) ─────────────< budget_config_id FK
-  variable_budget               adjustment_date
-  fixed_budget                  amount
-  credit_card_limit             description
-  checking_initial_balance
-  salary
-  shared_expenses_ratio
-  day_start
+monitors                      monitor_adjustments
+  id PK ──────────────────────< monitor_id FK (cascade)
+  name, description             id PK
+  currency                      adjustment_date
+  expression (uuid refs)        amount NUMERIC(20,8), <> 0
+  thresholds JSONB              description
+  display JSONB                 -- added to every threshold
+  is_active                     --   from its day to month end
 
 
 wealth_snapshots (legacy)     fixed_expenses
@@ -231,10 +235,10 @@ wealth_snapshots (legacy)     fixed_expenses
   -- from product_snapshots
 
 
-income_sources                internal_transfers
-  id PK                         id PK
-  name                          description
-  monthly_amount                amount
+                              internal_transfers
+                                id PK
+                                description
+                                amount
                                 from_product_id FK
                                 to_product_id FK
 scraper_runs                    transfer_date
@@ -265,6 +269,7 @@ scraper_runs                    transfer_date
 | `V011__typed_product_attributes_and_snapshots.sql` | products gain attributes/metrics JSONB (details + credit_limit dropped, revolving metrics seeded); uq_products_identity; product_balances -> product_snapshots (adds metrics) |
 | `V012__retire_fintual_aggregate_product.sql` | deactivates the summed Fintual product + drops its snapshots (replaced by per-goal products) |
 | `V013__retire_banchile_summed_inversiones_products.sql` | deactivates the summed BanChile term_deposit + investment products + drops their snapshots (replaced by per-holding products) |
+| `V022__monitor_adjustments.sql` | monitor_adjustments: dated variaciones that shift a monitor's thresholds until month end |
 
 ## Scraper Architecture
 
@@ -371,6 +376,24 @@ yields the Nacionales (CLP) charges, paged. Figures are anchored on their
 `$`/`US$` labels (a drift records nothing rather than a wrong number), and USD
 balances convert to CLP via lib/rates' multi-currency FX.
 
+Buda reads two signed REST surfaces (issue #3). Balances cover every wallet:
+one `crypto` product per currency, `units` kept fractional. Transactions cover
+**CLP deposits and withdrawals only**, minus annulled or rejected ones, paged
+through `meta.total_pages` (capped at 20 pages of 50 per direction, with a
+warning past that). Crypto movements
+are deliberately not imported: `transactions.amount` is integer CLP, and a
+crypto movement has no CLP amount unless it is priced at its date, which would
+need a historical price source. Crypto value history comes from the balance
+snapshots instead, converted at lib/rates' current tickers like every other
+crypto figure. A non-CLP amount that still reaches the parser is skipped with a
+warning, never truncated. Every Buda `ScrapedTransaction` carries
+`currency="CLP"` and the same `crypto` kind as the balances, so CLP movements
+attach to the CLP balance product. That product stays `crypto` rather than
+`wallet`: re-kinding it would change its identity and metrics shape (`units` to
+`balance`) under its snapshot history and any monitor bound to it, and a CLP
+`units` figure already converts 1:1. V020 deleted the crypto movements the old
+scraper had truncated and stored on it as pesos.
+
 **Balance conventions & net worth** are registry-driven: each kind's `role`
 (asset/liability/none) and `balance_convention` (value/available/owed/units)
 live in `packages/product-model` — see `packages/product-model/PRODUCTS.md`
@@ -454,7 +477,39 @@ shallow-merges `attributes`, always refreshes
 | `bci_lider` | `web` | Real Chrome over CDP (`bci_lider_web`) | Autofill in a real Chrome (managed by default; reuse via `LIDER_BCI_CDP_URL` + `make bci-lider-login`; Cloudflare Turnstile) | 24h |
 
 The three email-based scrapers reuse one `ImapSession`: it runs `NOOP` on
-each acquire and only re-logs-in when the mailbox has been dropped.
+each acquire and only re-logs-in when the mailbox has been dropped. imaplib is
+synchronous, so every IMAP round trip runs in `asyncio.to_thread` while the
+session lock is held: the email scrapers take turns on the connection without
+blocking the event loop for the other scrapers.
+
+Each institution declares an `EmailPattern`, and `parse_transaction` applies
+it to one email:
+
+- **Sender**: `sender_domains` entries must appear as whole labels of the
+  From address's domain (`somosmach` matches `somosmach.com`, never `bci.cl`,
+  a display name, or a local part), so MACH no longer claims Banco Bci mail.
+  Subject filters ignore case and accents.
+- **Amount**: `amount_rules` anchor the figure to its context
+  (`anchored("pagaste|compraste")` claims the first `$` figure within 60
+  characters after the phrase, never across a sentence end); the anchor that
+  appears earliest in the body wins, and a figure no anchor claims (a promo
+  banner, a balance line) is never read. An email skipped with such a figure
+  is logged at info level with its subject, so new wording shows up.
+- **Direction**: an email is income when its subject carries one of the
+  pattern's `income_keywords` ("recibiste una transferencia", "devolución") or
+  its figure was anchored by an `income=True` rule ("recibiste", "te
+  devolvimos"); everything else is an expense.
+- **Date**: the `Date` header in Chile's calendar, else the IMAP
+  INTERNALDATE, else today with a warning.
+- **Coverage**: `EMAIL_IMAP_MAILBOX` (default `INBOX`, opened read-only) and
+  `EMAIL_MAX_MESSAGES` (default 100 emails per institution and run, newest
+  first; a truncated window logs a warning) apply to every pattern unless it
+  sets its own `mailbox` / `max_messages`. Zero amounts are skipped with a
+  debug line naming the subject, and an email that fails to parse is logged
+  and skipped without costing the rest of the run.
+
+The synthetic corpus in `apps/scrapers/tests/fixtures/emails/` drives
+table-driven tests of that behaviour per institution.
 
 ### Product model
 
@@ -483,7 +538,7 @@ data without direct DB access.
 Transactions are deduplicated via `UNIQUE(product_id, external_id)`:
 
 - Fintual: no transactions (balance-only)
-- Buda: `buda_{deposit/withdrawal_id}`
+- Buda: `buda_{deposit/withdrawal_id}` (CLP movements only)
 - BanChile: the bank's own operation id where the portal exposes one, else a
   description-free fingerprint (issue #57). Three forms, each greppable:
   - `bch_op_{transaccionId}`: a checking movement's "ID Transacción", read
@@ -512,7 +567,8 @@ Transactions are deduplicated via `UNIQUE(product_id, external_id)`:
   occurrence date: see the two-dates note below); claiming is oldest-first and
   one-to-one, preferring an exact occurrence-date match. See V018 and V019.
 - BCI Lider: `bcl_{md5(date|description|amount|CLP)[:16]}` (no per-movement id in the DOM)
-- Email: `email_{institution}_{hash(message_id)}`
+- Email: `email_{institution}_{sha1(Message-ID)[:8]}`; an email without a
+  Message-ID hashes `Date|From|Subject|body` instead
 - CSV: `csv_{base64url(date|description|amount)[:24]}`
 
 ### On-demand refresh (control endpoint)
@@ -672,6 +728,30 @@ their complexity once a second person actually uses an instance. Until then the
 shared secret is the whole model, and the `users` table stays unused by the web
 app.
 
+## Testing and CI
+
+The web app is tested with vitest (`make test-ts`); each Python package runs
+its own pytest suite (`make test-py`: `apps/scrapers/tests`, then
+`packages/product-model/tests`), with the test tooling in
+`apps/scrapers/requirements-dev.txt`. Most scraper tests drive parsers and
+the writer's decisions through fakes. `test_writer_db.py` runs the real
+writer SQL instead: `apps/scrapers/tests/conftest.py` builds a
+`chanchito_test_tpl_*` template database once per session from every
+migration file (each in its own transaction, recorded in `_migrations` like
+`migrate.mjs` does), and each test clones it into its own `chanchito_test_*`
+database, points `DATABASE_URL` at it, resets the writer's pool, and drops it
+at teardown. The server comes from `TEST_DATABASE_URL`, which must name a
+disposable one: unset, the DB tests skip; set but unreachable, they fail.
+`make test-db` provides it as the `postgres-test` compose service (profile
+`test`, so `make up` never starts it; data in tmpfs; port 5436 or
+`POSTGRES_TEST_PORT`).
+
+CI (`.github/workflows/ci.yml`, GitHub Actions) runs on every pull request and
+push to `main` in two jobs: `web` (`make typecheck`, `make lint`,
+`make test-ts`) and `python` (`make install-py`, then `make test-py` against a
+`postgres:16-alpine` service, so the DB tests run rather than skip). Neither
+downloads a Playwright browser; no test launches one.
+
 ## Tech Stack
 
 | Layer | Technology |
@@ -684,31 +764,34 @@ app.
 | DB Driver (Python) | psycopg3 + psycopg-pool |
 | Containerization | Docker + Docker Compose |
 | Package Manager | pnpm (workspaces) |
+| Testing | vitest (web) + pytest (scrapers, product-model; DB tests on a throwaway PostgreSQL) |
+| CI | GitHub Actions |
 
 ## Monorepo Structure
 
 ```
 el-chanchito/
+├── .github/workflows/ci.yml          # CI: typecheck, lint, vitest, pytest
 ├── apps/
 │   ├── web/                          # Next.js dashboard
 │   │   ├── src/
 │   │   │   ├── app/
 │   │   │   │   ├── (dashboard)/      # All pages with sidebar layout
 │   │   │   │   │   ├── page.tsx      # Home
-│   │   │   │   │   ├── planning/     # Planificacion
+│   │   │   │   │   ├── monitors/     # Monitores + variaciones
 │   │   │   │   │   ├── history/      # Historial
 │   │   │   │   │   ├── institutions/ # Instituciones + productos
 │   │   │   │   │   ├── expenses/     # Gastos + CSV import
 │   │   │   │   │   ├── fixed/        # Gastos fijos
-│   │   │   │   │   ├── transfers/    # Movimientos internos
-│   │   │   │   │   └── settings/     # Config + split calculator
-│   │   │   │   └── api/              # 13 API route groups
+│   │   │   │   │   └── transfers/    # Movimientos internos
+│   │   │   │   └── api/              # 11 API route groups
 │   │   │   ├── components/
 │   │   │   │   ├── dashboard/        # ScraperStatus, CsvImport
 │   │   │   │   ├── layout/           # Sidebar
 │   │   │   │   └── ui/              # shadcn components
 │   │   │   └── lib/
-│   │   │       ├── budget-engine.ts  # Core formulas
+│   │   │       ├── monitors/        # Monitor engine + variaciones
+│   │   │       ├── budget-engine.ts  # Wealth + shared-expense helpers
 │   │   │       ├── db/              # Drizzle schema + connection
 │   │   │       └── utils.ts         # cn(), formatCLP()
 │   │   └── Dockerfile
@@ -717,7 +800,10 @@ el-chanchito/
 │       ├── scrapers/                 # 5 scraper implementations
 │       ├── db/                      # Connection pool + writer
 │       ├── main.py                  # Entry point + scheduler
+│       ├── tests/                   # pytest (conftest.py: per-test DB fixtures)
 │       ├── requirements.txt
+│       ├── requirements-dev.txt     # + pytest
+│       ├── pyproject.toml           # pytest config only
 │       └── Dockerfile
 │
 ├── packages/
@@ -730,7 +816,7 @@ el-chanchito/
 │       ├── generated/               # index.ts + product-model.schema.json
 │       └── PRODUCTS.md              # generated per-kind field matrix
 │
-├── docker-compose.yml
+├── docker-compose.yml               # + postgres-test (profile `test`) for DB tests
 ├── Makefile
 ├── USAGE.md
 └── ARCHITECTURE.md
