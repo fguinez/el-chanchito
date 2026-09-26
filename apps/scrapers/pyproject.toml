@@ -1,0 +1,9 @@
+# Test configuration only: the scraper service is not a packaged project (its
+# deps live in requirements*.txt). pytest picks this up for any path under
+# apps/scrapers, so `pytest apps/scrapers/tests` also works from the repo root.
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+markers = [
+    "db: needs a disposable PostgreSQL server via TEST_DATABASE_URL",
+]

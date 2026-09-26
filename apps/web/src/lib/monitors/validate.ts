@@ -47,6 +47,10 @@ export type ValidationFailure = {
 
 export type ValidationResult<T> = { ok: true; value: T } | ValidationFailure;
 
+/** Route ids (monitors, adjustments) are uuids; anything else is a 400. */
+export const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const SEVERITIES: readonly ThresholdSeverity[] = ["alert", "warning"];
 const COMPARATORS: readonly Comparator[] = ["<", "<=", ">", ">=", "=", "!="];
 const CURRENCY_RE = /^[A-Z]{3,}$/;

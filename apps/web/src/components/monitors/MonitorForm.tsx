@@ -26,6 +26,7 @@ import { cn, formatAmount } from "@/lib/utils";
 import {
   SEVERITY_LABELS,
   StatusBadge,
+  formatSignedAmount,
   referencesProduct,
   type ApiThreshold,
   type Comparator,
@@ -553,6 +554,8 @@ export function MonitorForm({ monitorId }: { monitorId?: string }) {
           : []),
       ],
       display: { chart, show_margin: showMargin },
+      // Editing: evaluate with the monitor's stored variaciones.
+      ...(monitorId != null && { monitorId }),
     };
     const controller = new AbortController();
     const timer = setTimeout(async () => {
@@ -585,6 +588,7 @@ export function MonitorForm({ monitorId }: { monitorId?: string }) {
     };
   }, [
     loading,
+    monitorId,
     name,
     description,
     currency,
@@ -1018,6 +1022,12 @@ export function MonitorForm({ monitorId }: { monitorId?: string }) {
                   </div>
                 ))}
               </div>
+              {preview.evaluation.adjustment !== 0 && (
+                <p className="text-xs text-muted-foreground tabular-nums">
+                  Los umbrales incluyen las variaciones vigentes hoy:{" "}
+                  {formatSignedAmount(currency, preview.evaluation.adjustment)}
+                </p>
+              )}
               {preview.evaluation.margin != null && (
                 <p className="text-sm font-medium tabular-nums">
                   Margen: {formatAmount(currency, preview.evaluation.margin)}
