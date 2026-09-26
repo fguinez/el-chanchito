@@ -20,7 +20,7 @@ export async function GET() {
   return NextResponse.json(result);
 }
 
-/** POST /api/categories/rules — add a category rule */
+/** POST /api/categories — add a category rule */
 export async function POST(request: NextRequest) {
   const body = await request.json();
   const { keyword, categoryId, priority } = body;
