@@ -1,6 +1,6 @@
 // DB-aware loaders for the monitors API: the product catalog the expression
-// engine resolves references against, and the snapshot rows history replay
-// consumes. This is the only monitors module that touches the database; the
+// engine resolves references against, the snapshot rows history replay
+// consumes, and each monitor's adjustments. This is the only monitors module that touches the database; the
 // engine and the validators stay pure and unit-testable.
 
 import { asc, eq, inArray } from "drizzle-orm";
@@ -8,10 +8,12 @@ import { db } from "@/lib/db";
 import {
   accounts,
   institutions,
+  monitorAdjustments,
   products,
   productSnapshots,
   type ProductMetrics,
 } from "@/lib/db/schema";
+import { toApiAdjustment, type ApiMonitorAdjustment } from "./adjustments";
 import type { ProductInfo } from "./evaluate";
 import type { SnapshotRow } from "./history";
 
@@ -99,4 +101,43 @@ export async function loadSnapshotsForProducts(
     metrics: row.metrics,
     asOf: row.asOf,
   }));
+}
+
+async function selectAdjustments(
+  monitorId?: string
+): Promise<ApiMonitorAdjustment[]> {
+  const rows = await db
+    .select()
+    .from(monitorAdjustments)
+    .where(
+      monitorId != null ? eq(monitorAdjustments.monitorId, monitorId) : undefined
+    )
+    .orderBy(
+      asc(monitorAdjustments.adjustmentDate),
+      asc(monitorAdjustments.createdAt),
+      asc(monitorAdjustments.id)
+    );
+  return rows.map(toApiAdjustment);
+}
+
+/** One monitor's adjustments, oldest day first (creation order within a
+ *  day). The table is small (a few manual rows per monitor and month), so
+ *  callers filter in memory. */
+export async function loadMonitorAdjustments(
+  monitorId: string
+): Promise<ApiMonitorAdjustment[]> {
+  return selectAdjustments(monitorId);
+}
+
+/** Every monitor's adjustments in one query, grouped by monitor id. */
+export async function loadAdjustmentsByMonitor(): Promise<
+  Map<string, ApiMonitorAdjustment[]>
+> {
+  const byMonitor = new Map<string, ApiMonitorAdjustment[]>();
+  for (const adjustment of await selectAdjustments()) {
+    const list = byMonitor.get(adjustment.monitorId) ?? [];
+    list.push(adjustment);
+    byMonitor.set(adjustment.monitorId, list);
+  }
+  return byMonitor;
 }

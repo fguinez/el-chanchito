@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  adjustmentOnDate,
   bindExpression,
   comparatorHolds,
   evaluateExpression,
@@ -447,5 +448,111 @@ describe("evaluateMonitor: status precedence and margins", () => {
     );
     expect(result.status).toBe("no_data");
     expect(result.noDataReason).toContain("Invalid expression");
+  });
+});
+
+describe("adjustmentOnDate", () => {
+  // Synthetic amounts; dates are local calendar days like DAY_OF_MONTH().
+  const adjustments = [
+    { adjustmentDate: "2026-06-30", amount: 999999 },
+    { adjustmentDate: "2026-07-01", amount: 30000 },
+    { adjustmentDate: "2026-07-15", amount: -50000 },
+    { adjustmentDate: "2026-07-15", amount: 10000 },
+    { adjustmentDate: "2026-07-31", amount: 1000000 },
+  ];
+
+  it.each([
+    ["before any adjustment of the month", new Date(2026, 5, 29), 0],
+    ["on the last day of the previous month", new Date(2026, 5, 30), 999999],
+    ["from the first day, without the previous month", new Date(2026, 6, 1), 30000],
+    ["the day before a same-day pair", new Date(2026, 6, 14), 30000],
+    ["on the day of a same-day pair, summed", new Date(2026, 6, 15), -10000],
+    ["late in the evening of that day", new Date(2026, 6, 15, 23, 30), -10000],
+    ["on the last day of the month", new Date(2026, 6, 31), 990000],
+    ["after the month ends", new Date(2026, 7, 1), 0],
+  ])("%s", (_label, date, expected) => {
+    expect(adjustmentOnDate(adjustments, date)).toBe(expected);
+  });
+
+  it("is 0 without adjustments", () => {
+    expect(adjustmentOnDate(undefined, new Date(2026, 6, 15))).toBe(0);
+    expect(adjustmentOnDate([], new Date(2026, 6, 15))).toBe(0);
+  });
+});
+
+describe("evaluateMonitor: adjustments (variaciones)", () => {
+  const left = "banchile:cuenta_corriente:balance"; // 2500000
+
+  function def(
+    adjustments: MonitorDefinition["adjustments"]
+  ): MonitorDefinition {
+    return {
+      currency: "CLP",
+      expression: serializeExpression(
+        bindExpression(parseExpression(left), catalog),
+        "uuid"
+      ),
+      thresholds: [
+        { severity: "alert", comparator: "<", expression: "2000000" },
+        { severity: "warning", comparator: "<", expression: "2400000" },
+      ],
+      adjustments,
+    };
+  }
+
+  it("adds the adjustments in effect to every threshold and its margin", () => {
+    const result = evaluateMonitor(
+      def([{ adjustmentDate: "2026-07-10", amount: 50000 }]),
+      ctx()
+    );
+    expect(result.adjustment).toBe(50000);
+    expect(result.thresholds).toEqual([
+      { severity: "alert", comparator: "<", value: 2050000, margin: 450000 },
+      { severity: "warning", comparator: "<", value: 2450000, margin: 50000 },
+    ]);
+    expect(result.margin).toBe(50000);
+    expect(result.status).toBe("ok");
+  });
+
+  it("flips the status once the shifted threshold is crossed", () => {
+    const result = evaluateMonitor(
+      def([
+        { adjustmentDate: "2026-07-15", amount: 100000 },
+        { adjustmentDate: "2026-07-15", amount: 50000 },
+      ]),
+      ctx()
+    );
+    expect(result.adjustment).toBe(150000);
+    expect(result.status).toBe("warning"); // 2500000 < 2400000 + 150000
+  });
+
+  it("ignores adjustments dated later in the month or in another month", () => {
+    const result = evaluateMonitor(
+      def([
+        { adjustmentDate: "2026-07-16", amount: 500000 },
+        { adjustmentDate: "2026-06-01", amount: 500000 },
+      ]),
+      ctx()
+    );
+    expect(result.adjustment).toBe(0);
+    expect(result.thresholds.map((t) => t.value)).toEqual([2000000, 2400000]);
+  });
+
+  it("keeps a no-data threshold null instead of shifting it", () => {
+    const result = evaluateMonitor(
+      {
+        ...def([{ adjustmentDate: "2026-07-01", amount: 50000 }]),
+        thresholds: [
+          {
+            severity: "alert",
+            comparator: "<",
+            expression: `@{${UNKNOWN_ID}:balance}`,
+          },
+        ],
+      },
+      ctx()
+    );
+    expect(result.status).toBe("no_data");
+    expect(result.thresholds[0].value).toBeNull();
   });
 });
