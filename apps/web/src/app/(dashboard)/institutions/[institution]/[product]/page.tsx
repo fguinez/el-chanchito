@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
   CartesianGrid,
@@ -43,7 +43,9 @@ import {
   productLimit,
   displayProductName,
   type InstitutionProduct,
+  type ProductParent,
 } from "@/components/institutions/shared";
+import { ProductEditDialog } from "@/components/institutions/product-edit-dialog";
 import {
   CupoUtilizationCard,
   InvestmentCompositionCard,
@@ -61,6 +63,7 @@ interface ProductDetailResponse {
     kind: string;
   };
   product: InstitutionProduct;
+  parent: ProductParent | null;
   history: ProductHistoryPoint[];
   transactions: ProductTransaction[];
 }
@@ -80,15 +83,19 @@ export default function ProductDetailPage() {
     institution: string;
     product: string;
   }>();
+  const router = useRouter();
 
   const [data, setData] = useState<ProductDetailResponse | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [error, setError] = useState(false);
+  // Bumped to re-fetch in place (e.g. after an edit that keeps the URL).
+  const [reloadKey, setReloadKey] = useState(0);
   const chart = useTimeSeriesChart();
+  const productUrl = `/api/institutions/${institutionSlug}/products/${productSlug}`;
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`/api/institutions/${institutionSlug}/products/${productSlug}`)
+    fetch(productUrl)
       .then((res) => {
         if (cancelled) return null;
         if (res.status === 404) {
@@ -112,7 +119,16 @@ export default function ProductDetailPage() {
     return () => {
       cancelled = true;
     };
-  }, [institutionSlug, productSlug]);
+  }, [productUrl, reloadKey]);
+
+  /** A new slug moves the page (the effect refetches on the new params). */
+  function handleSaved(slug: string) {
+    if (slug !== productSlug) {
+      router.replace(`/institutions/${institutionSlug}/${slug}`);
+    } else {
+      setReloadKey((k) => k + 1);
+    }
+  }
 
   if (notFound) {
     return (
@@ -144,7 +160,7 @@ export default function ProductDetailPage() {
     );
   }
 
-  const { institution, product, history, transactions } = data;
+  const { institution, product, parent, history, transactions } = data;
   const isLiability = KIND_INFO[product.kind].role === "liability";
   const chips = productDetailChips(product);
   const cupo = productLimit(product);
@@ -183,26 +199,44 @@ export default function ProductDetailPage() {
         </span>
       </div>
 
-      <div>
-        <h2 className="flex flex-wrap items-center gap-2 text-2xl font-bold">
-          {displayProductName(product, institution.name)}
-          <Badge
-            variant="outline"
-            className={cn(
-              "text-xs",
-              isLiability
-                ? "border-red-200 text-red-600"
-                : "border-green-200 text-green-700"
-            )}
-          >
-            {KIND_INFO[product.kind].labelEs}
-          </Badge>
-          {!product.isActive && <Badge variant="outline">Inactivo</Badge>}
-          <Badge variant="secondary">{product.currency}</Badge>
-        </h2>
-        {chips.length > 0 && (
-          <p className="mt-1 text-sm text-muted-foreground">{chips.join(" · ")}</p>
-        )}
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h2 className="flex flex-wrap items-center gap-2 text-2xl font-bold">
+            {displayProductName(product, institution.name)}
+            <Badge
+              variant="outline"
+              className={cn(
+                "text-xs",
+                isLiability
+                  ? "border-red-200 text-red-600"
+                  : "border-green-200 text-green-700"
+              )}
+            >
+              {KIND_INFO[product.kind].labelEs}
+            </Badge>
+            {!product.isActive && <Badge variant="outline">Inactivo</Badge>}
+            <Badge variant="secondary">{product.currency}</Badge>
+          </h2>
+          {chips.length > 0 && (
+            <p className="mt-1 text-sm text-muted-foreground">{chips.join(" · ")}</p>
+          )}
+          {parent && (
+            <p className="mt-1 text-sm text-muted-foreground">
+              Vinculado a{" "}
+              <Link
+                href={`/institutions/${parent.institutionSlug}/${parent.slug}`}
+                className="font-medium text-foreground hover:text-primary"
+              >
+                {displayProductName(parent, institution.name)}
+              </Link>
+            </p>
+          )}
+        </div>
+        <ProductEditDialog
+          institution={institution}
+          product={product}
+          onSaved={handleSaved}
+        />
       </div>
 
       {/* Current state */}
