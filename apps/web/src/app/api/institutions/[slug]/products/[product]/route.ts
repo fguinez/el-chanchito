@@ -29,6 +29,8 @@ export interface ProductHistoryPoint {
   balanceClp: number | null;
   /** Full typed metrics payload at `asOf` (empty object when unknown). */
   metrics: ProductMetrics | Record<string, never>;
+  /** Who recorded the observation (see SNAPSHOT_SOURCES in lib/manual-balance). */
+  source: string;
 }
 
 export interface ProductTransaction {
@@ -92,6 +94,7 @@ export async function GET(_request: Request, { params }: Context) {
         balance: productSnapshots.balance,
         metrics: productSnapshots.metrics,
         asOf: productSnapshots.asOf,
+        source: productSnapshots.source,
       })
       .from(productSnapshots)
       .where(eq(productSnapshots.productId, row.productId))
@@ -123,6 +126,7 @@ export async function GET(_request: Request, { params }: Context) {
         balance,
         balanceClp: toClp(row.currency, balance, rates),
         metrics: s.metrics,
+        source: s.source,
       };
     });
 
