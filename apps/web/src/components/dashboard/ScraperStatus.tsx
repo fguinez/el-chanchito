@@ -10,6 +10,11 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import {
+  hasRunDetails,
+  runStatusStyle,
+  truncateRunMessage,
+} from "@/lib/scraper-runs";
 import { AlertTriangle } from "lucide-react";
 
 interface ScraperRun {
@@ -48,9 +53,52 @@ function timeAgo(dateStr: string): string {
   return `hace ${days}d`;
 }
 
+const BANNER_TONES = {
+  error: {
+    box: "border-red-200 bg-red-50 dark:border-red-900 dark:bg-red-950",
+    icon: "text-red-600",
+    title: "text-red-800 dark:text-red-200",
+    body: "text-red-600 dark:text-red-400",
+  },
+  partial: {
+    box: "border-amber-200 bg-amber-50 dark:border-amber-900 dark:bg-amber-950",
+    icon: "text-amber-600",
+    title: "text-amber-800 dark:text-amber-200",
+    body: "text-amber-700 dark:text-amber-300",
+  },
+};
+
+function RunBanner({
+  tone,
+  title,
+  runs,
+  fallback,
+}: {
+  tone: keyof typeof BANNER_TONES;
+  title: string;
+  runs: ScraperRun[];
+  fallback: string;
+}) {
+  const t = BANNER_TONES[tone];
+  return (
+    <div className={cn("flex items-start gap-3 rounded-md border p-3", t.box)}>
+      <AlertTriangle className={cn("mt-0.5 h-4 w-4", t.icon)} />
+      <div className="flex-1 text-sm">
+        <p className={cn("font-medium", t.title)}>{title}</p>
+        {runs.map((r) => (
+          <p key={runKey(r)} className={cn("mt-1", t.body)}>
+            {runLabel(r)}:{" "}
+            {r.error_message ? truncateRunMessage(r.error_message) : fallback}
+          </p>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function ScraperStatus() {
   const [runs, setRuns] = useState<ScraperRun[]>([]);
-  const [expandedError, setExpandedError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<string | null>(null);
 
   useEffect(() => {
     fetch("/api/scrapers")
@@ -64,34 +112,35 @@ export function ScraperStatus() {
   }
 
   const errors = runs.filter((r) => r.status === "error");
+  // Part of the run's data landed and part failed (or the scraper warned about
+  // incomplete coverage): not an outage, but the numbers may be partly stale.
+  const partials = runs.filter((r) => r.status === "partial");
 
   return (
     <div className="space-y-3">
-      {/* Error banner */}
       {errors.length > 0 && (
-        <div className="flex items-start gap-3 rounded-md border border-red-200 bg-red-50 p-3 dark:border-red-900 dark:bg-red-950">
-          <AlertTriangle className="mt-0.5 h-4 w-4 text-red-600" />
-          <div className="flex-1 text-sm">
-            <p className="font-medium text-red-800 dark:text-red-200">
-              {errors.length === 1
-                ? `El scraper ${runLabel(errors[0])} tiene un error`
-                : `${errors.length} scrapers con errores`}
-            </p>
-            {errors.map((e) => (
-              <p
-                key={runKey(e)}
-                className="mt-1 text-red-600 dark:text-red-400"
-              >
-                {runLabel(e)}:{" "}
-                {e.error_message
-                  ? e.error_message.length > 120
-                    ? e.error_message.slice(0, 120) + "..."
-                    : e.error_message
-                  : "Error desconocido"}
-              </p>
-            ))}
-          </div>
-        </div>
+        <RunBanner
+          tone="error"
+          title={
+            errors.length === 1
+              ? `El scraper ${runLabel(errors[0])} tiene un error`
+              : `${errors.length} scrapers con errores`
+          }
+          runs={errors}
+          fallback="Error desconocido"
+        />
+      )}
+      {partials.length > 0 && (
+        <RunBanner
+          tone="partial"
+          title={
+            partials.length === 1
+              ? `El scraper ${runLabel(partials[0])} terminó con datos incompletos`
+              : `${partials.length} scrapers terminaron con datos incompletos`
+          }
+          runs={partials}
+          fallback="Sin detalles"
+        />
       )}
 
       {/* Status list */}
@@ -104,18 +153,18 @@ export function ScraperStatus() {
           <div className="space-y-2">
             {runs.map((run) => {
               const key = runKey(run);
+              const expandable = hasRunDetails(run);
+              const status = runStatusStyle(run.status);
               return (
                 <div key={key}>
                   <div
                     className={cn(
                       "flex items-center justify-between text-sm",
-                      run.status === "error" && "cursor-pointer"
+                      expandable && "cursor-pointer"
                     )}
                     onClick={() => {
-                      if (run.status === "error") {
-                        setExpandedError(
-                          expandedError === key ? null : key
-                        );
+                      if (expandable) {
+                        setExpanded(expanded === key ? null : key);
                       }
                     }}
                   >
@@ -128,26 +177,16 @@ export function ScraperStatus() {
                       )}
                       <Badge
                         variant="outline"
-                        className={cn(
-                          "text-xs",
-                          run.status === "success" &&
-                            "text-green-600 border-green-200",
-                          run.status === "error" &&
-                            "text-red-600 border-red-200",
-                          run.status === "running" &&
-                            "text-blue-600 border-blue-200",
-                          run.status === "partial" &&
-                            "text-yellow-600 border-yellow-200"
-                        )}
+                        className={cn("text-xs", status.badgeClass)}
                       >
-                        {run.status}
+                        {status.label}
                       </Badge>
                       <span className="text-muted-foreground">
                         {timeAgo(run.finished_at ?? run.started_at)}
                       </span>
                     </div>
                   </div>
-                  {expandedError === key && run.error_message && (
+                  {expanded === key && run.error_message && (
                     <p className="mt-1 rounded bg-muted p-2 text-xs text-muted-foreground">
                       {run.error_message}
                     </p>
