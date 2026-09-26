@@ -425,6 +425,16 @@ shallow-merges `attributes`, always refreshes
 The three email-based scrapers reuse one `ImapSession`: it runs `NOOP` on
 each acquire and only re-logs-in when the mailbox has been dropped.
 
+**`bci` (Banco BCI) is seeded but has no scraper, by decision (#7).** V009
+seeds it with the other institutions, but no Banco BCI product is tracked. The
+row is harmless: the dashboard lists only institutions that hold products. The
+BCI-group products that are tracked have slugs of their own (`bci_lider` for
+Tarjeta Lider Bci, `mach` for MACH), and MACH's email pattern does not match
+`bci` senders, so Banco BCI mail is never read as a MACH movement. To add a
+Banco BCI scraper later, weigh the options #6 did (open banking, `fintself`,
+notification email, or a real browser like `bci_lider`); an email one gets a
+pattern of its own that MACH's does not overlap.
+
 ### Product model
 
 `packages/product-model` is the single source of truth for product kinds: a
