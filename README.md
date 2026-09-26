@@ -38,7 +38,7 @@ make scrapers-start   # long-running, each scraper on its own schedule
 make fintual-login    # one-time Fintual sign-in (e-mail 2FA, session cached)
 ```
 
-A scraper is enabled only when all of its credentials are present. See [USAGE.md](USAGE.md) for the full guide: dashboard pages, daily and monthly workflows, CSV import, category auto-assignment, and the API reference.
+A scraper is enabled only when all of its credentials are present (Mercado Pago needs either the IMAP credentials or its access token). See [USAGE.md](USAGE.md) for the full guide: dashboard pages, daily and monthly workflows, CSV import, category auto-assignment, and the API reference.
 
 ## Configuration
 

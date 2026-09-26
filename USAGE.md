@@ -80,7 +80,8 @@ Secrets and their meaning:
 | `chanchito.MERCADOPAGO_ACCESS_TOKEN` | Mercado Pago access token (optional; refreshes the wallet balance, see "Wallet balances") |
 | `chanchito.DASHBOARD_PASSWORD` | Dashboard login password (see "Deployment"; required in production, not exported to `make dev`) |
 
-A scraper is enabled only when all of its credentials are present.
+A scraper is enabled only when all of its credentials are present (Mercado
+Pago needs either the IMAP credentials or its access token).
 On non-macOS hosts (e.g. Docker-only deploys), export the secret env vars
 directly instead of using the Keychain.
 

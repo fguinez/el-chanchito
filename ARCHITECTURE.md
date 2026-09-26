@@ -454,9 +454,11 @@ Two options were weighed and left out for now:
 `derived` (reserved, see above) and `wealth_snapshot` (V009's backfill of the
 legacy totals). The dashboard labels it in each product's history. Every source
 feeds `/api/wealth` alike, and the latest observation wins: a manual entry
-refreshes the product's `current_balance`/`metrics`/`balance_as_of` right away,
-and a later scraper reading that differs replaces it (the writer compares
-against the product's latest metrics, whatever wrote them). Manual entry is
+always appends a history row (an explicit confirmation counts even when the
+value is unchanged) and refreshes the product's `current_balance`/`metrics`/
+`balance_as_of` right away, and a later scraper reading that differs replaces
+it (the writer compares against the product's latest metrics, whatever wrote
+them, and locks the row while it does). Manual entry is
 limited to kinds whose whole metrics payload is one balance (today `wallet`),
 so it can never fabricate the rest of a richer observation.
 
