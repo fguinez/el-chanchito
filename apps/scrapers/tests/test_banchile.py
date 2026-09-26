@@ -414,3 +414,41 @@ class TestScrapeProducts:
 
         assert result.products == []
         assert result.warnings == ["BanChile: product scrape crashed: login failed"]
+
+
+class TestLoginCooldownSkip:
+    """A login the cooldown refused is a quiet skip: one warning, no traceback."""
+
+    SKIP = "full login skipped to avoid the bank's login throttling (allowed again in 540s)"
+
+    def setup_method(self):
+        self.scraper = BanChileScraper()
+
+    async def _refused(self, rut, password):
+        raise banchile_mod.LoginCooldownError(self.SKIP)
+
+    def _warnings_logged(self, caplog):
+        records = [r for r in caplog.records if r.name == banchile_mod.logger.name]
+        assert all(r.exc_info is None for r in records)
+        return [r.levelname for r in records]
+
+    def test_transactions_leg_still_fails_the_run(self, monkeypatch, caplog):
+        monkeypatch.setattr(banchile_mod, "fetch_session", self._refused)
+
+        try:
+            asyncio.run(self.scraper.scrape_transactions())
+        except banchile_mod.LoginCooldownError as exc:
+            assert str(exc) == self.SKIP
+        else:
+            raise AssertionError("a refused login must still fail the run")
+
+        assert self._warnings_logged(caplog) == ["WARNING"]
+
+    def test_products_leg_turns_it_into_a_warning(self, monkeypatch, caplog):
+        monkeypatch.setattr(banchile_mod, "fetch_balances", self._refused)
+
+        result = asyncio.run(self.scraper.scrape_products())
+
+        assert result.products == []
+        assert result.warnings == [f"BanChile: {self.SKIP}"]
+        assert self._warnings_logged(caplog) == ["WARNING"]

@@ -12,7 +12,13 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatCLP, cn } from "@/lib/utils";
-import { AlertTriangle, Building2, ExternalLink, RefreshCw } from "lucide-react";
+import {
+  AlertTriangle,
+  Building2,
+  Clock,
+  ExternalLink,
+  RefreshCw,
+} from "lucide-react";
 import {
   INSTITUTION_KIND_LABELS,
   timeAgo,
@@ -47,7 +53,7 @@ export default function InstitutionsPage() {
     loadInstitutions();
   }, []);
 
-  const { syncing, scrapers, serviceError, refresh } =
+  const { syncing, scrapers, serviceError, notice, refresh } =
     useInstitutionRefresh(loadInstitutions);
 
   if (error) {
@@ -110,6 +116,13 @@ export default function InstitutionsPage() {
           <p className="text-sm text-red-800 dark:text-red-200">
             {serviceError}
           </p>
+        </div>
+      )}
+
+      {notice && (
+        <div className="flex items-start gap-3 rounded-md border border-amber-200 bg-amber-50 p-3 dark:border-amber-900 dark:bg-amber-950">
+          <Clock className="mt-0.5 h-4 w-4 text-amber-600" />
+          <p className="text-sm text-amber-800 dark:text-amber-200">{notice}</p>
         </div>
       )}
 

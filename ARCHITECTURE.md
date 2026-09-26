@@ -293,7 +293,7 @@ apps/scrapers/scrapers/
     buda.py  fintual.py                      -> self-contained (HTTP APIs)
 ```
 
-BanChile drives **one self-contained Playwright login per run** (issue #57,
+BanChile drives **one self-contained Playwright session per run** (issue #57,
 which folded in #28). `scrape_transactions()` opens it, reads the balances
 (`backends/banchile_web.py`: the "Mis Productos" dashboard plus four detail
 routes) and the movements (`backends/banchile_movements.py`: the checking
@@ -303,8 +303,38 @@ and caches the products half for `scrape_products()` to serve. It uses the
 default headless shell) and polls for each widget, since they load via later
 XHRs. Because transactions and products are independent legs in `run_scraper`,
 a session that crashes still leaves the products leg able to open a
-balance-only login of its own (and a product-scrape crash is swallowed into a
-run warning, never raised).
+balance-only session of its own, through the same session cache (and a
+product-scrape crash is swallowed into a run warning, never raised).
+
+Both sessions authenticate through `banchile_web._authenticated_session`, which
+caches the web session between runs (issue #28): Playwright's `storage_state` in
+`BANCHILE_SESSION_FILE` (default `apps/scrapers/.banchile_session.json`,
+`/data` in Compose; written 0600, gitignored). A restored session counts only
+after one portal-home navigation renders the checking widget; any miss (no or
+corrupt file, restore error, dead session) deletes the file and runs the full
+RUT + password login. The state is saved again after the reads to keep rotated
+cookies. Verified live: a restored session survives back-to-back runs (every
+surface read, movements included, so it's a real authenticated hit even though
+`storage_state` carries no sessionStorage) but not an idle gap of several
+minutes, where validation reports a miss and the full login runs. So hits are
+realistic only shortly after the previous run: a manual refresh shortly after
+one, a service restart shortly after one, and the products-leg fallback within
+a run.
+
+The bank throttles full logins, so there's at most one per
+`BANCHILE_LOGIN_COOLDOWN_MINUTES` window (default 10, `0` disables) whatever
+triggered the run (scheduled, manual, startup or the products-leg fallback). A
+cache miss inside the window deletes the file and raises `LoginCooldownError`
+instead of calling `_login`, and a run that would certainly need that login (an
+attempt in the window and no session file, `login_cooldown_retry_after`) raises
+it before launching Chromium. A failed attempt counts too, since a quick retry
+is exactly what gets throttled. `BanChileScraper` logs the skip as a warning:
+the transactions leg re-raises it, so the run is still recorded as an error
+(`run_scraper` logs that generically, traceback included), and the products leg
+turns it into a run warning. The last attempt is claimed atomically but lives
+in process memory, so a service restart resets the window, and a
+`SCRAPER_MODE=once` / `make scrapers-once` run alongside the service isn't
+gated against it.
 
 Five surfaces feed BanChile's typed products: the dashboard (CLP + USD
 `checking` — the card row there is a static placeholder, so it's skipped), the
@@ -557,9 +587,23 @@ Browser → web POST /api/institutions/refresh {institution?}
   configured scraper), `GET /scrapers` (the enabled scraper slugs; the dashboard
   uses it to decide which refresh buttons to enable), `GET /health`.
 - Triggering just moves a job's next run time to now, so it reuses each job's
-  `coalesce=True` / `max_instances=1` guards — a manual trigger can't overlap a
-  scheduled or in-flight run of the same institution. The HTTP call returns `202`
-  immediately; the scrape runs asynchronously on the scheduler's event loop.
+  `coalesce=True` / `max_instances=1` guards: a manual trigger can't overlap a
+  scheduled or manual run of the same institution. The startup run
+  (`run_all_once`) isn't a job, so a trigger during it isn't guarded (known gap;
+  for BanChile the login cooldown still stops a second login). The HTTP call
+  returns `202` immediately; the scrape runs asynchronously on the scheduler's
+  event loop.
+- Those guards stop overlap, not frequency, so a scraper can also refuse manual
+  triggers (`_REFRESH_COOLDOWNS` in `main.py`; only BanChile, issue #28).
+  `banchile_web.login_cooldown_retry_after` refuses only a run that would
+  certainly need a full login inside the login cooldown: an attempt in the
+  window and no cached session file. With a file the trigger goes through (the
+  burst the cache serves); if that session turns out dead, the backend skips
+  the login and deletes the file, so the next press is refused. Refused,
+  `POST /refresh/{slug}` answers `429` with `Retry-After` and
+  `skipped: [{slug, retry_after_seconds}]`; `POST /refresh` triggers the rest
+  and lists it under `skipped` in its `202`. The dashboard shows either as a
+  "consulted recently, try again in N minutes" notice.
 - The server runs on a daemon thread and binds `0.0.0.0` inside the container.
   It's an **unauthenticated** trigger — keep it internal (Compose `expose`s port
   `8080` on the private network; never publish it — see #23). The web proxy
@@ -569,6 +613,7 @@ Browser → web POST /api/institutions/refresh {institution?}
 |---|---|---|
 | `SCRAPER_CONTROL_PORT` | scrapers | Port the control server binds (unset ⇒ disabled) |
 | `SCRAPER_CONTROL_URL` | web | Base URL the refresh proxy calls (e.g. `http://scrapers:8080`) |
+| `BANCHILE_LOGIN_COOLDOWN_MINUTES` | scrapers | Minimum minutes between full BanChile logins, which also gates manual refreshes (default `10`; `0` disables) |
 
 ## Dashboard authentication
 

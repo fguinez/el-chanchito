@@ -70,23 +70,22 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from scrapers.backends.banchile_web import (
-    DEFAULT_TIMEOUT,
     _CARD_LINK_SELECTORS,
     _CARD_LINK_TIMEOUTS_MS,
     _PORTAL_HOST,
     _RENDER_TIMEOUTS_MS,
+    _authenticated_session,
     _budget,
     _click_first,
     _dismiss_popup,
     _ensure_on_portal,
     _launch_browser,
-    _login,
-    _new_context,
     _on_portal,
     _parse_date_ddmmyyyy,
     _read_all_surfaces,
     _read_surface_with_retries,
     _recover_to_home,
+    _refuse_a_certain_login,
     parse_clp,
 )
 from scrapers.base import ScrapedProduct
@@ -1126,23 +1125,20 @@ def _session_sync(rut: str, password: str, headless: bool) -> BanChileSessionRes
     """
     from playwright.sync_api import sync_playwright  # lazy: keeps tests browser-free
 
+    _refuse_a_certain_login()
     with sync_playwright() as playwright:
         browser = _launch_browser(playwright, headless)
         try:
-            context = _new_context(browser)
-            page = context.new_page()
-            page.set_default_timeout(DEFAULT_TIMEOUT)
+            with _authenticated_session(browser, rut, password) as page:
+                _dismiss_popup(page)
 
-            _login(page, rut, password)
-            _dismiss_popup(page)
-
-            balances = _read_all_surfaces(page)
-            movements, failed = read_movement_surfaces(page)
-            return BanChileSessionResult(
-                products=balances.products,
-                movements=movements,
-                failed_surfaces=balances.failed_surfaces + failed,
-            )
+                balances = _read_all_surfaces(page)
+                movements, failed = read_movement_surfaces(page)
+                return BanChileSessionResult(
+                    products=balances.products,
+                    movements=movements,
+                    failed_surfaces=balances.failed_surfaces + failed,
+                )
         finally:
             browser.close()
 
