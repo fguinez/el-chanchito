@@ -248,6 +248,14 @@ scraper_runs                    transfer_date
   error_message
 ```
 
+New transactions are categorized in the database itself (V020): a `BEFORE
+INSERT` trigger on `transactions` fills a missing `category_id` from
+`category_rules` through `category_for_description()`, so every writer (the
+scrapers' DB writer, CSV import, manual entry) gets it without code of its own.
+Rows that arrive with a category, or flagged `is_manually_categorized`, are
+left alone. The dashboard's "Categorizar ahora" (`PUT /api/categories`) runs
+the same function over the rows that are still uncategorized.
+
 ## Migrations
 
 | File | Tables |
@@ -265,6 +273,7 @@ scraper_runs                    transfer_date
 | `V011__typed_product_attributes_and_snapshots.sql` | products gain attributes/metrics JSONB (details + credit_limit dropped, revolving metrics seeded); uq_products_identity; product_balances -> product_snapshots (adds metrics) |
 | `V012__retire_fintual_aggregate_product.sql` | deactivates the summed Fintual product + drops its snapshots (replaced by per-goal products) |
 | `V013__retire_banchile_summed_inversiones_products.sql` | deactivates the summed BanChile term_deposit + investment products + drops their snapshots (replaced by per-holding products) |
+| `V020__auto_categorize_transactions.sql` | `category_for_description()` + a BEFORE INSERT trigger on transactions that fills a missing category from category_rules |
 
 ## Scraper Architecture
 
@@ -659,6 +668,7 @@ el-chanchito/
 │   │   │   │   │   ├── history/      # Historial
 │   │   │   │   │   ├── institutions/ # Instituciones + productos
 │   │   │   │   │   ├── expenses/     # Gastos + CSV import
+│   │   │   │   │   ├── categories/   # Categorías + keyword rules
 │   │   │   │   │   ├── fixed/        # Gastos fijos
 │   │   │   │   │   ├── transfers/    # Movimientos internos
 │   │   │   │   │   └── settings/     # Config + split calculator
