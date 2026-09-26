@@ -11,6 +11,7 @@ import {
   Receipt,
   Landmark,
   ArrowLeftRight,
+  Tags,
   LogOut,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -21,6 +22,7 @@ const navItems = [
   { href: "/institutions", label: "Instituciones", icon: Building2 },
   { href: "/monitors", label: "Monitores", icon: Activity },
   { href: "/expenses", label: "Gastos", icon: Receipt },
+  { href: "/categories", label: "Categorías", icon: Tags },
   { href: "/fixed", label: "Gastos Fijos", icon: Landmark },
   { href: "/transfers", label: "Transferencias", icon: ArrowLeftRight },
 ];
