@@ -226,7 +226,8 @@ instead of spinning forever.
   - `POST /refresh/{slug}` — trigger one (`404` if the slug isn't configured)
   - `GET /scrapers`: the enabled scraper slugs (drives which refresh buttons
     are enabled)
-  - `GET /health` — liveness check
+  - `GET /health`: liveness check; `503` once the scheduler's heartbeat has
+    stalled for 10 minutes (the Compose healthcheck reads it)
 - **Dashboard** — set `SCRAPER_CONTROL_URL` to reach that server; the web route
   `POST /api/institutions/refresh` (optional body `{"institution":"<slug>"}`) proxies
   to it and returns `503` when it's unavailable.
@@ -423,6 +424,9 @@ make up        # Start everything (postgres + web + scrapers)
 make down      # Stop everything
 make logs      # View logs
 ```
+
+`docker compose ps` shows the `scrapers` service as `unhealthy` when its
+scheduler has stopped running jobs (its `/health` endpoint answers `503`).
 
 ### Production
 
