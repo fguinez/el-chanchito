@@ -23,7 +23,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { SELECT_CLASS } from "@/components/ui/native-select";
 import { useSortableData } from "@/lib/use-sortable-data";
-import { formatCLP } from "@/lib/utils";
+import { formatCLP, formatPlainDateEs } from "@/lib/utils";
 import { TRANSFER_CURRENCY, type TransferProductRef } from "@/lib/transfers";
 import { Trash2, Check } from "lucide-react";
 
@@ -465,7 +465,7 @@ export default function TransfersPage() {
                 {pendingSorted.map((t) => (
                   <TableRow key={t.id}>
                     <TableCell className="whitespace-nowrap">
-                      {new Date(t.transferDate).toLocaleDateString("es-CL")}
+                      {formatPlainDateEs(t.transferDate)}
                     </TableCell>
                     <TableCell>{t.description}</TableCell>
                     <TableCell>
@@ -590,7 +590,7 @@ export default function TransfersPage() {
                 {resolvedSorted.map((t) => (
                   <TableRow key={t.id} className="opacity-60">
                     <TableCell className="whitespace-nowrap">
-                      {new Date(t.transferDate).toLocaleDateString("es-CL")}
+                      {formatPlainDateEs(t.transferDate)}
                     </TableCell>
                     <TableCell>{t.description}</TableCell>
                     <TableCell>
