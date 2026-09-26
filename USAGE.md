@@ -100,7 +100,7 @@ For the email parser, you need a Gmail App Password (not your regular password):
 | **Historial** | `/history` | Wealth timeline chart + snapshot table (patrimonio, deuda, ahorro) |
 | **Gastos** | `/expenses` | Transaction list, manual entry form, CSV import |
 | **Gastos Fijos** | `/fixed` | Monthly fixed expenses with shared ratio (69%) |
-| **Transferencias** | `/transfers` | Internal money movements (pending/resolved) |
+| **Transferencias** | `/transfers` | Internal money movements between two of your CLP products (pending/resolved) |
 | **Configuracion** | `/settings` | Budget parameters, income split calculator, monthly reset |
 
 ## Daily Workflow
@@ -286,7 +286,7 @@ All API routes are under `/api/`:
 | GET/POST/PUT/DELETE | `/api/fixed-expenses` | Fixed expenses CRUD |
 | GET/POST/DELETE | `/api/wealth` | Wealth snapshots |
 | GET/POST/DELETE | `/api/income-sources` | Income sources |
-| GET/POST/PUT/DELETE | `/api/transfers` | Internal transfers |
+| GET/POST/PUT/DELETE | `/api/transfers` | Internal transfers (POST needs distinct CLP `fromProductId` + `toProductId`) |
 | GET/POST/PUT | `/api/categories` | Categories + auto-assign rules |
 | GET | `/api/institutions` | Institutions + nested products + CLP subtotals |
 | POST | `/api/institutions/refresh` | Trigger a scrape (all, or `{institution}`) |
