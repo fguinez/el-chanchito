@@ -28,7 +28,7 @@ make dev               # dashboard at http://localhost:3000
 
 ## Usage
 
-The dashboard runs at `http://localhost:3000`: **Inicio** shows the monitors needing attention, **Monitores** every monitor with its history and variaciones, **Historial** the net-worth timeline, and **Instituciones** every scraped product with an on-demand refresh button.
+The dashboard runs at `http://localhost:3000`: **Inicio** shows the monitors needing attention, **Monitores** every monitor with its history and variaciones, **Historial** the net-worth timeline, and **Instituciones** every scraped product with an on-demand refresh button and edit dialogs for institutions, accounts and products.
 
 Scrapers run separately from the dashboard and share its database:
 

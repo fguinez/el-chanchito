@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { slugify, uniqueSlug } from "@/lib/db/slug";
+import { normalizeSlug, slugify, uniqueSlug } from "@/lib/db/slug";
 
 // `slugify` and `uniqueSlug` mint the create-only, institution-unique product
 // slug. The vectors below are shared verbatim with the Python suite
@@ -27,6 +27,22 @@ describe("slugify", () => {
 
   it("falls back to the hyphenated kind when nothing is keepable", () => {
     expect(slugify("***", "term_deposit")).toBe("term-deposit");
+  });
+});
+
+describe("normalizeSlug", () => {
+  it("applies the slugify rules to an edited slug", () => {
+    expect(normalizeSlug("  Cuenta Vista N° 2 ")).toBe("cuenta-vista-n-2");
+  });
+
+  it("leaves a canonical slug unchanged", () => {
+    expect(normalizeSlug("tarjeta-de-credito-1234")).toBe(
+      "tarjeta-de-credito-1234"
+    );
+  });
+
+  it("returns null instead of a kind fallback when nothing is keepable", () => {
+    expect(normalizeSlug("---")).toBeNull();
   });
 });
 

@@ -18,6 +18,7 @@ import {
   type ApiInstitution,
 } from "@/components/institutions/shared";
 import { useInstitutionRefresh } from "@/components/institutions/use-institution-refresh";
+import { InstitutionEditDialog } from "@/components/institutions/institution-edit-dialog";
 
 export default function InstitutionDetailPage() {
   const { institution: slug } = useParams<{ institution: string }>();
@@ -123,6 +124,10 @@ export default function InstitutionDetailPage() {
               Sitio <ExternalLink className="h-3.5 w-3.5" />
             </a>
           )}
+          <InstitutionEditDialog
+            institution={institution}
+            onSaved={loadInstitution}
+          />
           <Button
             variant="outline"
             size="sm"
