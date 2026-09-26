@@ -2,10 +2,7 @@
 // it unit-tests in isolation and the UI can share the icon list and limits.
 // Every failure already carries the HTTP shape the routes return
 // (`{ error, field? }` with status 400).
-//
-// Rule keywords are normalized (trimmed, lowercased) the same way on write and
-// in the preview, so "probar regla" counts exactly what the rule will match.
-// Matching itself lives in Postgres (`category_for_description`, V020).
+// Matching itself lives in Postgres (`category_for_description`, V021).
 
 export const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -47,17 +44,14 @@ export type CategoryIconName = (typeof CATEGORY_ICON_NAMES)[number];
 
 const HEX_COLOR_RE = /^#[0-9a-f]{6}$/;
 
-/** A category write, validated and normalized. Create mode returns every
- *  field (color and icon default to null); partial mode returns only the
- *  fields present in the body. */
+/** A category write, validated and normalized. */
 export type NormalizedCategoryInput = {
   name: string;
   color: string | null;
   icon: CategoryIconName | null;
 };
 
-/** A rule write, validated and normalized (keyword trimmed and lowercased).
- *  Create mode defaults priority to 0. */
+/** A rule write, validated and normalized. */
 export type NormalizedRuleInput = {
   keyword: string;
   categoryId: string;

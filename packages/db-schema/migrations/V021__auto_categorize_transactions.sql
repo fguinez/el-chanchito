@@ -1,4 +1,4 @@
--- V020: Categorize new transactions from category_rules as they are inserted
+-- V021: Categorize new transactions from category_rules as they are inserted
 -- (issue #14).
 --
 -- Matching lives in the database, not in each writer, so every path that
@@ -11,15 +11,12 @@
 --
 -- A rule matches when its keyword is a case-insensitive LITERAL substring of
 -- the description (strpos, not LIKE/ILIKE, so `%` and `_` match themselves).
--- Blank keywords never match. The highest priority wins; ties go to the oldest
--- rule, then the lowest id, so the result is deterministic.
 --
 -- Rules only fill in missing categories: a row that arrives with a category, or
 -- flagged as manually categorized, is left alone. Editing or deleting a rule
 -- never undoes a category it already assigned.
 --
--- No backfill here: existing rows are categorized from the dashboard. Safe on
--- a fresh database, and idempotent.
+-- No backfill here: existing rows are categorized from the dashboard.
 
 CREATE OR REPLACE FUNCTION category_for_description(txn_description TEXT)
 RETURNS UUID

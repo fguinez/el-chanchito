@@ -87,7 +87,7 @@ export async function POST(request: NextRequest) {
  * PUT /api/categories: the "Categorizar ahora" backfill. Applies the rules to
  * every uncategorized, not manually categorized transaction in one UPDATE,
  * through the same `category_for_description` function the insert trigger
- * uses (V020). Returns `{ assigned }`.
+ * uses (V021). Returns `{ assigned }`.
  */
 export async function PUT() {
   try {
