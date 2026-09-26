@@ -58,6 +58,9 @@ services:
       # Cached Banco de Chile web session, in the same volume so a restart
       # doesn't force a fresh login (the bank throttles bursts of them).
       BANCHILE_SESSION_FILE: ${BANCHILE_SESSION_FILE:-/data/banchile_session.json}
+      # Minimum minutes between full Banco de Chile logins, which also gates
+      # manual refreshes (empty = default 10).
+      BANCHILE_LOGIN_COOLDOWN_MINUTES: ${BANCHILE_LOGIN_COOLDOWN_MINUTES:-}
       # On-demand refresh: the web app POSTs to this port to trigger a scrape.
       SCRAPER_CONTROL_PORT: ${SCRAPER_CONTROL_PORT:-8080}
     # `expose` (not `ports`) keeps the control endpoint on the private compose

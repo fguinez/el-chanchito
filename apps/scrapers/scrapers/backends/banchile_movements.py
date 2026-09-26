@@ -85,6 +85,7 @@ from scrapers.backends.banchile_web import (
     _read_all_surfaces,
     _read_surface_with_retries,
     _recover_to_home,
+    _refuse_a_certain_login,
     parse_clp,
 )
 from scrapers.base import ScrapedProduct
@@ -1124,6 +1125,7 @@ def _session_sync(rut: str, password: str, headless: bool) -> BanChileSessionRes
     """
     from playwright.sync_api import sync_playwright  # lazy: keeps tests browser-free
 
+    _refuse_a_certain_login()
     with sync_playwright() as playwright:
         browser = _launch_browser(playwright, headless)
         try:

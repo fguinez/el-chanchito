@@ -8,10 +8,14 @@ fabricated (see the repo's personal-data policy).
 """
 
 import datetime
+import time
 from contextlib import contextmanager
 from unittest.mock import MagicMock
 
+import pytest
+
 from scrapers.backends import banchile_movements as movements_mod
+from scrapers.backends import banchile_web as banchile_web_mod
 from scrapers.backends.banchile_movements import (
     BanChileMovement,
     _read_card_unbilled,
@@ -30,7 +34,7 @@ from scrapers.backends.banchile_movements import (
     parse_unbilled_movements,
     statement_dates,
 )
-from scrapers.backends.banchile_web import BalanceFetchResult
+from scrapers.backends.banchile_web import BalanceFetchResult, LoginCooldownError
 
 # --- Synthetic payload builders ------------------------------------------------
 
@@ -719,3 +723,18 @@ class TestSharedSession:
         # The post-read save sees the cookies both reads may have rotated.
         assert events == ["authenticated", "products", "movements", "session saved"]
         assert result.failed_surfaces == ("card", "tarjeta facturados")
+
+    def test_a_certain_login_is_refused_before_launching_chromium(
+        self, tmp_path, monkeypatch
+    ):
+        """A login attempt just now and no cached session: nothing to launch."""
+        monkeypatch.setenv("BANCHILE_SESSION_FILE", str(tmp_path / ".banchile_session.json"))
+        monkeypatch.delenv("BANCHILE_LOGIN_COOLDOWN_MINUTES", raising=False)
+        monkeypatch.setattr(banchile_web_mod, "_last_login_attempt", time.monotonic())
+        sync_playwright = MagicMock()
+        monkeypatch.setattr("playwright.sync_api.sync_playwright", sync_playwright)
+
+        with pytest.raises(LoginCooldownError):
+            movements_mod._session_sync("11.111.111-1", "synthetic-password", True)
+
+        sync_playwright.assert_not_called()

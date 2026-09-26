@@ -9,7 +9,10 @@ import datetime
 import json
 import logging
 import os
+import re
 import stat
+import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -22,8 +25,11 @@ from scrapers.backends import banchile_web as banchile_web_mod
 from scrapers.backends.banchile_web import (
     BalanceFetchResult,
     BanChileWebError,
+    LoginCooldownError,
     _authenticated_session,
     _balance_from_text,
+    _claim_login_attempt,
+    _login_cooldown_seconds,
     _merge_balances,
     _parse_date_ddmmyyyy,
     _parse_pct,
@@ -46,6 +52,7 @@ from scrapers.backends.banchile_web import (
     fondos_header_from_text,
     linea_balances_from_text,
     linea_saldo_from_text,
+    login_cooldown_retry_after,
     parse_amount,
     parse_clp,
 )
@@ -1840,9 +1847,13 @@ def session_file(tmp_path, monkeypatch):
 
 @pytest.fixture
 def login(monkeypatch):
-    """Record `_login` calls instead of driving the bank's login form."""
+    """Record `_login` calls instead of driving the bank's login form, with no
+    prior login attempt (reset, so it can't leak between tests) and the default
+    login cooldown."""
     fake = MagicMock()
     monkeypatch.setattr(banchile_web_mod, "_login", fake)
+    monkeypatch.setattr(banchile_web_mod, "_last_login_attempt", None)
+    monkeypatch.delenv("BANCHILE_LOGIN_COOLDOWN_MINUTES", raising=False)
     return fake
 
 
@@ -2047,6 +2058,219 @@ class TestSessionCache:
         assert "could not save the session cache" in caplog.text
 
 
+def _last_attempt():
+    return banchile_web_mod._last_login_attempt
+
+
+@pytest.fixture
+def attempted_ago(monkeypatch):
+    """Put the last full login attempt `seconds` before now (monotonic)."""
+
+    def set_attempt(seconds):
+        at = time.monotonic() - seconds
+        monkeypatch.setattr(banchile_web_mod, "_last_login_attempt", at)
+        return at
+
+    return set_attempt
+
+
+class TestLoginAttempts:
+    """What counts as a full login attempt for the login cooldown."""
+
+    def test_a_miss_records_the_attempt_before_logging_in(self, session_file, login):
+        seen_by_login = []
+        login.side_effect = lambda *args: seen_by_login.append(_last_attempt())
+        before = time.monotonic()
+
+        _authenticate(_fake_browser(_fake_context()))
+
+        assert seen_by_login == [_last_attempt()]
+        assert before <= _last_attempt() <= time.monotonic()
+
+    def test_a_reused_session_is_not_an_attempt(self, session_file, login):
+        session_file.write_text(json.dumps(CACHED_STATE))
+
+        _authenticate(_fake_browser(_fake_context()))
+
+        login.assert_not_called()
+        assert _last_attempt() is None
+
+    def test_a_failed_login_blocks_an_immediate_retry(self, session_file, login):
+        login.side_effect = BanChileWebError("Login did not reach the post-login page")
+        with pytest.raises(BanChileWebError):
+            _authenticate(_fake_browser(_fake_context()))
+
+        with pytest.raises(LoginCooldownError):
+            _authenticate(_fake_browser(_fake_context()))
+
+        login.assert_called_once()
+
+
+class TestLoginCooldown:
+    @pytest.mark.parametrize("cache", ["none", "dead"])
+    def test_a_miss_inside_the_window_skips_the_login(
+        self, session_file, login, attempted_ago, cache
+    ):
+        at = attempted_ago(60)
+        contexts = [_fake_context()]
+        if cache == "dead":
+            session_file.write_text(json.dumps(CACHED_STATE))
+            contexts.insert(0, _dead_on_login_page()[0])
+
+        with pytest.raises(LoginCooldownError) as raised:
+            _authenticate(_fake_browser(*contexts))
+
+        login.assert_not_called()
+        assert _last_attempt() == at  # a skipped login isn't a new attempt
+        # The dead file is gone, so the next manual refresh gets the 429.
+        assert not session_file.exists()
+        message = str(raised.value)
+        assert re.fullmatch(
+            r"full login skipped to avoid the bank's login throttling "
+            r"\(allowed again in 5\d\ds\)",
+            message,
+        )
+        # No `;`, which would split the message when run warnings are joined.
+        assert ";" not in message
+        assert RUT not in message and PASSWORD not in message
+
+    def test_a_miss_after_the_window_logs_in(self, session_file, login, attempted_ago):
+        at = attempted_ago(601)
+
+        page = _authenticate(_fake_browser(_fake_context()))
+
+        login.assert_called_once_with(page, RUT, PASSWORD)
+        assert _last_attempt() > at
+
+    def test_a_hit_inside_the_window_reuses_the_session(
+        self, session_file, login, attempted_ago
+    ):
+        at = attempted_ago(60)
+        session_file.write_text(json.dumps(CACHED_STATE))
+        restored = _fake_context()
+
+        page = _authenticate(_fake_browser(restored))
+
+        assert page is restored.new_page.return_value
+        login.assert_not_called()
+        assert _last_attempt() == at
+
+    def test_zero_disables_it(self, session_file, login, attempted_ago, monkeypatch):
+        monkeypatch.setenv("BANCHILE_LOGIN_COOLDOWN_MINUTES", "0")
+        attempted_ago(1)
+
+        _authenticate(_fake_browser(_fake_context()))
+
+        login.assert_called_once()
+
+    @pytest.mark.parametrize(
+        ("raw", "seconds", "warns"),
+        [
+            (None, 600, False),
+            ("", 600, False),
+            ("0", 0, False),
+            ("2.5", 150, False),
+            ("30", 1800, False),
+            ("soon", 600, True),
+            ("-5", 600, True),
+            ("inf", 600, True),
+            ("nan", 600, True),
+            ("1e307", 600, True),  # finite, but infinite once in seconds
+        ],
+    )
+    def test_minutes_from_env(self, monkeypatch, caplog, raw, seconds, warns):
+        if raw is None:
+            monkeypatch.delenv("BANCHILE_LOGIN_COOLDOWN_MINUTES", raising=False)
+        else:
+            monkeypatch.setenv("BANCHILE_LOGIN_COOLDOWN_MINUTES", raw)
+
+        assert _login_cooldown_seconds() == seconds
+        assert ("Ignoring BANCHILE_LOGIN_COOLDOWN_MINUTES" in caplog.text) == warns
+
+    def test_concurrent_claims_let_exactly_one_login_through(self, login, monkeypatch):
+        """The check and the record share one lock: a second claim can't read
+        the window before the first one has recorded its attempt."""
+        real_cooldown_left = banchile_web_mod._cooldown_left
+        both_checking = threading.Barrier(2)
+
+        def cooldown_left(*args):
+            # Only passes if the other thread gets in while this one checks,
+            # i.e. if the check isn't under the lock; otherwise it times out.
+            try:
+                both_checking.wait(timeout=0.2)
+            except threading.BrokenBarrierError:
+                pass
+            return real_cooldown_left(*args)
+
+        monkeypatch.setattr(banchile_web_mod, "_cooldown_left", cooldown_left)
+        start = threading.Barrier(2)
+        outcomes = []
+
+        def claim():
+            start.wait()
+            try:
+                _claim_login_attempt()
+                outcomes.append("claimed")
+            except LoginCooldownError:
+                outcomes.append("refused")
+
+        threads = [threading.Thread(target=claim) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+
+        assert sorted(outcomes) == ["claimed", "refused"]
+
+
+class TestLoginCooldownRetryAfter:
+    """Refused only when a new run would certainly need a full login inside the
+    window; the monotonic values are arbitrary (no wall clock)."""
+
+    @pytest.mark.parametrize(
+        ("attempt", "cached", "now", "expected"),
+        [
+            (None, False, 1180.0, None),
+            (1000.0, True, 1180.0, None),
+            (1000.0, False, 1180.0, 420.0),
+            (1000.0, "dir", 1180.0, 420.0),
+            (1000.0, False, 1600.0, None),
+            (1000.0, False, 5000.0, None),
+        ],
+        ids=[
+            "no-attempt",
+            "attempt-with-cached-session",
+            "attempt-without-session",
+            "attempt-with-a-directory-at-the-path",
+            "window-just-over",
+            "long-after",
+        ],
+    )
+    def test_truth_table(
+        self, session_file, login, monkeypatch, attempt, cached, now, expected
+    ):
+        monkeypatch.setattr(banchile_web_mod, "_last_login_attempt", attempt)
+        if cached == "dir":
+            session_file.mkdir()
+        elif cached:
+            session_file.write_text(json.dumps(CACHED_STATE))
+
+        assert login_cooldown_retry_after(now=now) == expected
+
+    def test_zero_cooldown_never_refuses(self, session_file, login, monkeypatch):
+        monkeypatch.setenv("BANCHILE_LOGIN_COOLDOWN_MINUTES", "0")
+        monkeypatch.setattr(banchile_web_mod, "_last_login_attempt", 1000.0)
+
+        assert login_cooldown_retry_after(now=1000.0) is None
+
+    def test_default_now_shares_the_attempts_time_base(
+        self, session_file, login, attempted_ago
+    ):
+        attempted_ago(0)
+
+        assert 0 < login_cooldown_retry_after() <= 600
+
+
 @contextmanager
 def _fake_playwright(browser):
     playwright = MagicMock()
@@ -2081,6 +2305,19 @@ class TestScrapeSyncSession:
         assert restored.storage_state.call_count == 2
         assert json.loads(session_file.read_text()) == after_reads
         browser.close.assert_called_once()
+
+    def test_a_certain_login_is_refused_before_launching_chromium(
+        self, session_file, login, attempted_ago, monkeypatch
+    ):
+        attempted_ago(60)
+        sync_playwright = MagicMock()
+        monkeypatch.setattr("playwright.sync_api.sync_playwright", sync_playwright)
+
+        with pytest.raises(LoginCooldownError):
+            _scrape_sync(RUT, PASSWORD, headless=True)
+
+        sync_playwright.assert_not_called()
+        login.assert_not_called()
 
     def test_save_failure_does_not_fail_the_scrape(self, session_file, login, monkeypatch):
         fresh = _fake_context()

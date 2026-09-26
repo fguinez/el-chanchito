@@ -222,14 +222,22 @@ service isn't reachable the dashboard shows *"Servicio de scrapers no disponible
 instead of spinning forever.
 
 - **Scraper service** — set `SCRAPER_CONTROL_PORT` (a small HTTP server binds to it):
-  - `POST /refresh` — trigger every configured scraper
-  - `POST /refresh/{slug}` — trigger one (`404` if the slug isn't configured)
+  - `POST /refresh`: trigger every configured scraper (`202` with the slugs it
+    `triggered` and those it `skipped` for a cooldown, see below)
+  - `POST /refresh/{slug}`: trigger one (`404` if the slug isn't configured,
+    `429` with `Retry-After` when it can't run yet, see below)
   - `GET /scrapers`: the enabled scraper slugs (drives which refresh buttons
     are enabled)
   - `GET /health` — liveness check
 - **Dashboard** — set `SCRAPER_CONTROL_URL` to reach that server; the web route
   `POST /api/institutions/refresh` (optional body `{"institution":"<slug>"}`) proxies
   to it and returns `503` when it's unavailable.
+
+Banco de Chile allows at most one full RUT + password login per
+`BANCHILE_LOGIN_COOLDOWN_MINUTES` (default 10, `0` disables), since the bank
+throttles logins. A refresh its cached session can serve goes through; one that
+would need a second login inside that window is refused, and the dashboard
+shows the minutes left instead.
 
 Under Docker Compose this is wired automatically (`scrapers` exposes `8080` on the
 compose network, `web` points at `http://scrapers:8080`). For **host-dev**,

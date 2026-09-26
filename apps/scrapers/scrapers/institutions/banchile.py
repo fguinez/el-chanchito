@@ -22,7 +22,11 @@ from scrapers.backends.banchile_movements import (
     BanChileSessionResult,
     fetch_session,
 )
-from scrapers.backends.banchile_web import _SURFACE_ATTEMPTS, fetch_balances
+from scrapers.backends.banchile_web import (
+    _SURFACE_ATTEMPTS,
+    LoginCooldownError,
+    fetch_balances,
+)
 from scrapers.base import BaseScraper, ProductScrapeResult, ScrapedTransaction
 
 logger = logging.getLogger(__name__)
@@ -144,6 +148,9 @@ class BanChileScraper(BaseScraper):
         self._session = None
         try:
             session = await fetch_session(self.rut, self.password)
+        except LoginCooldownError as e:
+            logger.warning("BanChile scrape skipped: %s", e)
+            raise
         except Exception:
             logger.exception("BanChile scrape failed")
             raise
@@ -182,6 +189,9 @@ class BanChileScraper(BaseScraper):
         if session is None:
             try:
                 result = await fetch_balances(self.rut, self.password)
+            except LoginCooldownError as e:
+                logger.warning("BanChile balance scrape skipped: %s", e)
+                return ProductScrapeResult([], [f"BanChile: {e}"])
             except Exception as e:
                 logger.exception("BanChile balance scrape failed")
                 return ProductScrapeResult([], [f"BanChile: product scrape crashed: {e}"])
