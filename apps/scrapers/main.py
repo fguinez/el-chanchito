@@ -43,6 +43,24 @@ logging.basicConfig(
 logger = logging.getLogger("scraper-service")
 
 
+def run_outcome(
+    errors: list[str], warnings: list[str], landed: int
+) -> tuple[str, str | None]:
+    """The final (status, error_message) of a run.
+
+    `landed` counts what the run did store: scraped transactions that were
+    written (new or already stored) plus products written. A failure only makes
+    the run `error` when nothing landed; a run that stored part of its data is
+    `partial`, as is one whose scraper reported warnings.
+    """
+    message = "; ".join(errors + warnings) or None
+    if errors and not landed:
+        return "error", message
+    if errors or warnings:
+        return "partial", message
+    return "success", None
+
+
 async def run_scraper(scraper: BaseScraper) -> None:
     """Run a single scraper with logging and DB tracking.
 
@@ -52,9 +70,10 @@ async def run_scraper(scraper: BaseScraper) -> None:
     session that crashes must still leave the balances refreshable: its products
     leg falls back to a balance-only login of its own.
 
-    The products leg can also report non-fatal warnings (e.g. a BanChile
-    surface that failed all its retries): a run with warnings but no errors is
-    recorded as `partial`, with the warnings as its message.
+    Writes are isolated per row too: a product or transaction that fails to
+    write is logged and counted, and the rest are still written. The final
+    status comes from `run_outcome`, and the products leg's non-fatal warnings
+    (e.g. a BanChile surface that failed all its retries) join the message.
     """
     run_id = start_scraper_run(scraper.method, scraper.institution)
     logger.info("Starting scraper: %s (run=%s)", scraper.name, run_id)
@@ -64,24 +83,49 @@ async def run_scraper(scraper: BaseScraper) -> None:
     n_tx = 0
     inserted = 0
     n_prod = 0
+    landed = 0
 
     try:
         transactions = await scraper.scrape_transactions()
         n_tx = len(transactions)
-        inserted = upsert_transactions(transactions)
+        written = upsert_transactions(transactions)
+        inserted = written.inserted
+        landed += n_tx - written.failed
+        if written.failed:
+            errors.append(f"transactions: {written.failed} of {n_tx} not written")
     except Exception as e:
         logger.exception("Scraper %s: transactions failed", scraper.name)
         errors.append(f"transactions: {e}")
 
     try:
         result = await scraper.scrape_products()
-        n_prod = len(result.products)
-        warnings.extend(result.warnings)
-        for sp in result.products:
-            upsert_product(sp)
     except Exception as e:
         logger.exception("Scraper %s: products failed", scraper.name)
         errors.append(f"products: {e}")
+    else:
+        n_prod = len(result.products)
+        warnings.extend(result.warnings)
+        written = 0
+        failed: list[str] = []
+        for sp in result.products:
+            try:
+                upsert_product(sp)
+                written += 1
+            except Exception as e:
+                logger.exception(
+                    "Scraper %s: writing %s/%s %s failed",
+                    scraper.name,
+                    sp.institution,
+                    sp.kind,
+                    sp.currency,
+                )
+                failed.append(f"{sp.institution}/{sp.kind} {sp.currency}: {e}")
+        landed += written
+        if written < n_prod:
+            errors.append(
+                f"products: {n_prod - written} of {n_prod} not written "
+                f"({'; '.join(failed)})"
+            )
 
     logger.info(
         "Scraper %s: %d transactions (%d new), %d products",
@@ -90,18 +134,10 @@ async def run_scraper(scraper: BaseScraper) -> None:
         inserted,
         n_prod,
     )
-    if errors:
-        finish_scraper_run(
-            run_id, "error", transactions_imported=inserted,
-            error_message="; ".join(errors + warnings),
-        )
-    elif warnings:
-        finish_scraper_run(
-            run_id, "partial", transactions_imported=inserted,
-            error_message="; ".join(warnings),
-        )
-    else:
-        finish_scraper_run(run_id, "success", transactions_imported=inserted)
+    status, message = run_outcome(errors, warnings, landed)
+    finish_scraper_run(
+        run_id, status, transactions_imported=inserted, error_message=message
+    )
 
 
 def build_scrapers() -> dict[str, BaseScraper]:
