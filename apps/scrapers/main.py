@@ -422,7 +422,10 @@ def main_scheduled() -> None:
     except (KeyboardInterrupt, SystemExit):
         pass
     finally:
-        scheduler.shutdown(wait=False)
+        # The signal handler has usually shut it down already, and a second
+        # shutdown() raises, which would skip the cleanup below.
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
         if control_server is not None:
             control_server.shutdown()
         try:
