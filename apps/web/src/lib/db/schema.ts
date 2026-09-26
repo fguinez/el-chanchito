@@ -361,6 +361,34 @@ export const monitors = pgTable("monitors", {
     .defaultNow(),
 });
 
+// Monitor adjustments ("variaciones"): from adjustment_date to the end of
+// that month, amount (monitor currency) is added to every threshold of the
+// monitor. Applied on read (see lib/monitors/evaluate adjustmentOnDate).
+export const monitorAdjustments = pgTable(
+  "monitor_adjustments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    monitorId: uuid("monitor_id")
+      .notNull()
+      .references(() => monitors.id, { onDelete: "cascade" }),
+    adjustmentDate: date("adjustment_date").notNull(),
+    amount: numeric("amount", { precision: 20, scale: 8 }).notNull(),
+    description: text("description"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("idx_monitor_adjustments_monitor").on(
+      table.monitorId,
+      table.adjustmentDate
+    ),
+  ]
+);
+
 // ---------------------------------------------------------------------------
 // Relations
 // ---------------------------------------------------------------------------

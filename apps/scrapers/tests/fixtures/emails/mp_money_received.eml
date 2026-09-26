@@ -1,0 +1,10 @@
+From: Mercado Pago <info@mercadopago.cl>
+To: Usuario Sintetico <usuario@example.com>
+Subject: Recibiste dinero
+Date: Mon, 21 Sep 2026 01:30:00 +0000
+Message-ID: <synthetic-mp-money-received@example.com>
+X-Fixture: synthetic
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+Recibiste $ 1.000.000 de Persona Sintetica.

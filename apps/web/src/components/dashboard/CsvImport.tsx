@@ -11,27 +11,19 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Upload } from "lucide-react";
-
-interface ParsedRow {
-  description: string;
-  amount: number;
-  date: string;
-}
-
-interface ColumnMapping {
-  description: number;
-  amount: number;
-  date: number;
-}
+import {
+  DEFAULT_MAPPING,
+  detectColumns,
+  splitCsvRows,
+  toParsedRows,
+  type ColumnMapping,
+  type ParsedRow,
+} from "@/lib/csv-parse";
 
 export function CsvImport({ onImported }: { onImported: () => void }) {
   const [csvData, setCsvData] = useState<string[][] | null>(null);
   const [headers, setHeaders] = useState<string[]>([]);
-  const [mapping, setMapping] = useState<ColumnMapping>({
-    description: 0,
-    amount: 1,
-    date: 2,
-  });
+  const [mapping, setMapping] = useState<ColumnMapping>(DEFAULT_MAPPING);
   const [institution, setInstitution] = useState("csv_import");
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState<string | null>(null);
@@ -44,73 +36,20 @@ export function CsvImport({ onImported }: { onImported: () => void }) {
     const reader = new FileReader();
     reader.onload = (evt) => {
       const text = evt.target?.result as string;
-      const lines = text
-        .split("\n")
-        .map((l) => l.trim())
-        .filter((l) => l);
-
-      if (lines.length < 2) return;
-
-      // Detect separator
-      const sep = lines[0].includes(";") ? ";" : ",";
-      const parsed = lines.map((line) =>
-        line.split(sep).map((cell) => cell.replace(/^"|"$/g, "").trim())
-      );
+      const parsed = splitCsvRows(text);
+      if (parsed.length < 2) return;
 
       setHeaders(parsed[0]);
       setCsvData(parsed.slice(1));
-
-      // Auto-detect column mapping
-      const h = parsed[0].map((h) => h.toLowerCase());
-      const descIdx = h.findIndex((c) =>
-        ["descripcion", "description", "detalle", "glosa", "concepto"].includes(c)
-      );
-      const amtIdx = h.findIndex((c) =>
-        ["monto", "amount", "valor", "cargo", "abono"].includes(c)
-      );
-      const dateIdx = h.findIndex((c) =>
-        ["fecha", "date", "dia"].includes(c)
-      );
-
-      setMapping({
-        description: descIdx >= 0 ? descIdx : 0,
-        amount: amtIdx >= 0 ? amtIdx : 1,
-        date: dateIdx >= 0 ? dateIdx : 2,
-      });
+      setMapping(detectColumns(parsed[0]));
 
       setResult(null);
     };
     reader.readAsText(file);
   };
 
-  const parseRows = (): ParsedRow[] => {
-    if (!csvData) return [];
-
-    return csvData
-      .map((row) => {
-        const desc = row[mapping.description] || "";
-        const rawAmount = row[mapping.amount] || "0";
-        const rawDate = row[mapping.date] || "";
-
-        // Parse amount: handle "1.234" (CLP thousands) and "-1.234,56"
-        const amountStr = rawAmount
-          .replace(/\./g, "")
-          .replace(",", ".")
-          .replace(/[^0-9.\-]/g, "");
-        const amount = parseFloat(amountStr) || 0;
-
-        // Parse date: try common Chilean formats
-        let dateStr = rawDate;
-        // DD/MM/YYYY or DD-MM-YYYY -> YYYY-MM-DD
-        const ddmmyyyy = rawDate.match(/(\d{1,2})[/-](\d{1,2})[/-](\d{4})/);
-        if (ddmmyyyy) {
-          dateStr = `${ddmmyyyy[3]}-${ddmmyyyy[2].padStart(2, "0")}-${ddmmyyyy[1].padStart(2, "0")}`;
-        }
-
-        return { description: desc, amount: Math.round(amount), date: dateStr };
-      })
-      .filter((r) => r.description && r.amount !== 0 && r.date);
-  };
+  const parseRows = (): ParsedRow[] =>
+    csvData ? toParsedRows(csvData, mapping) : [];
 
   const handleImport = async () => {
     const rows = parseRows();

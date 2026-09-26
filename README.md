@@ -8,7 +8,7 @@ El Chanchito (“the piggy bank”) is a self-hosted personal finance tracker. P
 
 ## Highlights
 
-- **Daily budget engine**: an expected balance for every day of the month, and the drift of your real balance against it.
+- **Monitors**: formula alerts over your products, with thresholds that can ramp through the month and one-off variaciones (a reimbursement, an extra budget) that shift them until month end.
 - **Six institution scrapers** on independent schedules, mixing REST APIs (Fintual, Buda), Playwright browser automation (Banco de Chile), and Gmail inbox parsing (MACH, MercadoPago, Tenpo).
 - **Typed product registry**: every product kind (checking, credit card, crypto, ...) is declared once in pydantic, grouped into display families with the column specs of their dashboard tables, and code-generated into TypeScript types, a JSON Schema, and per-kind docs.
 - **Net worth from snapshots**: derived from per-product snapshot history, with per-kind asset/liability conventions and multi-currency conversion to CLP.
@@ -28,7 +28,7 @@ make dev               # dashboard at http://localhost:3000
 
 ## Usage
 
-The dashboard runs at `http://localhost:3000`: **Inicio** shows today’s expected balance and drift, **Planificación** the day-by-day month plan, **Historial** the net-worth timeline, and **Instituciones** every scraped product with an on-demand refresh button.
+The dashboard runs at `http://localhost:3000`: **Inicio** shows the monitors needing attention, **Monitores** every monitor with its history and variaciones, **Historial** the net-worth timeline, and **Instituciones** every scraped product with an on-demand refresh button.
 
 Scrapers run separately from the dashboard and share its database:
 
@@ -54,12 +54,15 @@ A scraper is enabled only when all of its credentials are present (Mercado Pago 
 ## Development
 
 ```bash
-make test        # all tests: vitest (web) + pytest (scrapers)
+make test        # all tests: vitest (web) + pytest (scrapers, product-model)
+make test-db     # the Python tests plus the DB tests, on a throwaway Postgres
 make typecheck   # tsc --noEmit
 make lint        # eslint
 make product-model-generate  # regen TS/JSON artifacts after editing the registry
 make up          # full stack in Docker (postgres + web + scrapers)
 ```
+
+`make install` puts the Python test tooling (`apps/scrapers/requirements-dev.txt`) in `.venv`; `make install-deps` installs the same Node and Python dependencies without downloading the Playwright browser.
 
 ## Project structure
 
@@ -71,7 +74,8 @@ el-chanchito/
 ├── packages/
 │   ├── db-schema/      # SQL migrations (V001–V012) + runner
 │   └── product-model/  # Product-kind registry (pydantic → TS/JSON codegen)
-├── docker-compose.yml  # postgres + web + scrapers
+├── .github/workflows/  # CI: tests, typecheck, lint
+├── docker-compose.yml  # postgres + web + scrapers (+ postgres-test for DB tests)
 ├── Makefile            # every common task (`make help`)
 ├── USAGE.md
 └── ARCHITECTURE.md
@@ -85,7 +89,11 @@ For full detail, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Testing
 
-`make test` runs both suites: vitest for the dashboard and pytest for the scrapers. `make test-py` also covers `packages/product-model`, including a codegen drift test that fails if the generated TypeScript/JSON artifacts fall behind the registry.
+`make test` runs both suites: vitest for the dashboard (`make test-ts`) and pytest (`make test-py`) for the scrapers and `packages/product-model`, including a codegen drift test that fails if the generated TypeScript/JSON artifacts fall behind the registry.
+
+The DB writer tests (`apps/scrapers/tests/test_writer_db.py`) run the real writer SQL on a schema built from every migration, and are skipped unless `TEST_DATABASE_URL` is set. `make test-db` starts a throwaway `postgres-test` container (data in tmpfs, port 5436, or the `POSTGRES_TEST_PORT` shell variable; the Makefile does not read it from `.env`), runs `make test-py` against it, and leaves it up for the next run; `make test-db-down` removes it. Only ever point `TEST_DATABASE_URL` at a disposable server: the tests create and drop their own `chanchito_test_*` databases on it. When it is set but the server is unreachable, or unset in CI, the DB tests fail instead of skipping.
+
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on every pull request and push to `main`: typecheck, lint and vitest for the dashboard, and the full Python suite, DB tests included, against a Postgres service.
 
 ## Further reading
 
