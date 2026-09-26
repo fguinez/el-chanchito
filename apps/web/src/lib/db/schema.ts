@@ -255,8 +255,10 @@ export const transactions = pgTable(
 // Wealth & recurring items
 // ---------------------------------------------------------------------------
 
-// Wealth snapshots: legacy totals for pre-migration dates + manual entries.
-// The wealth series is now derived from product_snapshots (see /api/wealth).
+// Wealth snapshots: legacy totals for pre-migration dates. The wealth series
+// is derived from product_snapshots (see lib/wealth); these rows are
+// read-only history, except for backdating through POST /api/wealth before
+// the derived series starts.
 export const wealthSnapshots = pgTable("wealth_snapshots", {
   id: uuid("id").primaryKey().defaultRandom(),
   snapshotDate: date("snapshot_date").notNull().unique(),

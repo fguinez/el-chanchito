@@ -230,9 +230,10 @@ wealth_snapshots (legacy)     fixed_expenses
   fintual_balance               shared_ratio
   mercadopago_balance           active_from/to
   banchile_savings
-  -- pre-V009 totals + manual entries;
-  -- /api/wealth now derives the series
-  -- from product_snapshots
+  -- pre-migration totals; the series
+  -- is derived from product_snapshots
+  -- (lib/wealth); POST only backdates
+  -- before the derived series starts
 
 
                               internal_transfers
@@ -407,6 +408,20 @@ convention *is* owed (loan/mortgage), and otherwise contributes zero — a card
 with no metrics never guesses debt. `debit_card` counts nowhere — its money
 lives in the parent `checking`. Everything is converted to CLP before summing
 patrimonio/deuda.
+
+**Wealth series** (`web/src/lib/wealth.ts`, served by `/api/wealth`): legacy
+`wealth_snapshots` totals are authoritative up to their last date; after it,
+every local day with product observations becomes a computed point, carrying
+each product's latest snapshot forward. `POST /api/wealth` only backdates, and
+a backdated snapshot must never hide a computed point: it must be dated before
+today and before the derived series starts, i.e. the first real observation
+after the latest legacy date (`409` otherwise). Dates inside legacy history
+are always accepted (`409` if already taken). Observations on or before the
+latest legacy date (e.g. pre-migration scraper rows) are hidden by legacy
+totals anyway, and the V009 backfill rows (`source = 'wealth_snapshot'`, the
+three legacy component columns decomposed into per-product rows on legacy
+dates) never count as observations, so deleting the last legacy row and
+posting it again still works.
 
 Each institution scraper implements:
 

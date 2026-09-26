@@ -6,49 +6,20 @@ import {
   productSnapshots,
   accounts,
   institutions,
-  type ProductKind,
-  type ProductMetrics,
 } from "@/lib/db/schema";
-import { eq, asc } from "drizzle-orm";
-import { calcWealthMetrics } from "@/lib/budget-engine";
+import { eq, asc, max } from "drizzle-orm";
 import { getClpRates } from "@/lib/rates";
-import { assetClp, debtClp } from "@/lib/networth";
-import { formatLocalDate } from "@/lib/monitors/history";
+import {
+  buildWealthSeries,
+  derivedSeriesStart,
+  legacyEntryCutoff,
+  validateLegacySnapshot,
+} from "@/lib/wealth";
 
-interface WealthPoint {
-  id: string;
-  snapshotDate: string;
-  patrimonio: number;
-  deuda: number;
-  fintualBalance: number | null;
-  mercadopagoBalance: number | null;
-  banchileSavings: number | null;
-  notes: string | null;
-  source: "manual" | "computed";
-}
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** A snapshot's typed metrics, or null for rows that predate them (`{}`). */
-function snapshotMetrics(
-  metrics: ProductMetrics | Record<string, never>
-): ProductMetrics | null {
-  return "kind" in metrics ? (metrics as ProductMetrics) : null;
-}
-
-/**
- * GET /api/wealth — wealth series with derived metrics.
- *
- * Pre-migration dates come from legacy `wealth_snapshots` totals (which may
- * include components that never became products). Later dates are computed
- * from `product_snapshots`, carrying each product's latest observation forward
- * per date: patrimonio = Σ asset value, deuda = Σ owed, both in CLP. Debt
- * derives from each snapshot's *own* metrics (the limit/owed as observed on
- * that date), not from today's product row.
- *
- * Foreign/crypto balances are converted to CLP with current Buda tickers (see
- * lib/networth). Note: only *current* rates are available, so historical
- * points are valued at today's prices — acceptable while the computed series is
- * short; storing per-date rates would be the fix once history accumulates.
- */
+/** GET /api/wealth: the wealth series with derived metrics (see lib/wealth). */
 export async function GET() {
   const rates = await getClpRates();
 
@@ -57,12 +28,13 @@ export async function GET() {
     .from(wealthSnapshots)
     .orderBy(asc(wealthSnapshots.snapshotDate));
 
-  const balanceRows = await db
+  const snapshots = await db
     .select({
       productId: productSnapshots.productId,
       balance: productSnapshots.balance,
       metrics: productSnapshots.metrics,
       asOf: productSnapshots.asOf,
+      source: productSnapshots.source,
       kind: products.kind,
       currency: products.currency,
       slug: institutions.slug,
@@ -73,167 +45,76 @@ export async function GET() {
     .innerJoin(institutions, eq(accounts.institutionId, institutions.id))
     .orderBy(asc(productSnapshots.asOf));
 
-  // Legacy totals are authoritative up to their last date; the backfilled
-  // history rows on those dates only cover 3 components and would undercount.
-  const lastLegacyDate =
-    legacy.length > 0 ? legacy[legacy.length - 1].snapshotDate : "";
-
-  // Group history rows per local calendar day (the unit of the legacy
-  // snapshot_date column; an evening scrape belongs to today, not to
-  // tomorrow's UTC date), then walk chronologically carrying the latest
-  // balance per product.
-  const byDate = new Map<string, typeof balanceRows>();
-  for (const row of balanceRows) {
-    const dateStr = formatLocalDate(row.asOf);
-    if (!byDate.has(dateStr)) byDate.set(dateStr, []);
-    byDate.get(dateStr)!.push(row);
-  }
-
-  const latestByProduct = new Map<
-    string,
-    {
-      balance: number;
-      metrics: ProductMetrics | null;
-      kind: ProductKind;
-      currency: string;
-      slug: string;
-    }
-  >();
-  const computed: WealthPoint[] = [];
-
-  for (const [dateStr, rows] of [...byDate.entries()].sort(([a], [b]) =>
-    a.localeCompare(b)
-  )) {
-    for (const row of rows) {
-      latestByProduct.set(row.productId, {
-        balance: Number(row.balance),
-        metrics: snapshotMetrics(row.metrics),
-        kind: row.kind,
-        currency: row.currency,
-        slug: row.slug,
-      });
-    }
-
-    if (dateStr <= lastLegacyDate) continue;
-
-    let patrimonio = 0;
-    let deuda = 0;
-    let fintualBalance: number | null = null;
-    let mercadopagoBalance: number | null = null;
-    let banchileSavings: number | null = null;
-
-    for (const p of latestByProduct.values()) {
-      patrimonio += assetClp(p.kind, p.balance, p.currency, rates) ?? 0;
-      deuda += debtClp(p.kind, p.balance, p.metrics, p.currency, rates) ?? 0;
-      // These component columns are CLP-denominated products (informational).
-      // Fintual emits one product per goal, so its column sums across them.
-      if (p.slug === "fintual" && p.kind === "investment")
-        fintualBalance = (fintualBalance ?? 0) + p.balance;
-      if (p.slug === "mercadopago" && p.kind === "wallet")
-        mercadopagoBalance = p.balance;
-      if (p.slug === "banchile" && p.kind === "savings")
-        banchileSavings = p.balance;
-    }
-
-    computed.push({
-      id: `computed-${dateStr}`,
-      snapshotDate: dateStr,
-      patrimonio: Math.round(patrimonio),
-      deuda: Math.round(deuda),
-      fintualBalance,
-      mercadopagoBalance,
-      banchileSavings,
-      notes: null,
-      source: "computed",
-    });
-  }
-
-  const merged: WealthPoint[] = [
-    ...legacy.map((row) => ({
-      id: row.id,
-      snapshotDate: row.snapshotDate,
-      patrimonio: row.patrimonio,
-      deuda: row.deuda,
-      fintualBalance: row.fintualBalance,
-      mercadopagoBalance: row.mercadopagoBalance,
-      banchileSavings: row.banchileSavings,
-      notes: row.notes,
-      source: "manual" as const,
-    })),
-    ...computed,
-  ].sort((a, b) => a.snapshotDate.localeCompare(b.snapshotDate));
-
-  const enriched = merged.map((row, i) => {
-    const prev = i > 0 ? merged[i - 1] : null;
-    const metrics = calcWealthMetrics(
-      {
-        patrimonio: row.patrimonio,
-        deuda: row.deuda,
-        date: new Date(row.snapshotDate),
-      },
-      prev
-        ? {
-            patrimonio: prev.patrimonio,
-            deuda: prev.deuda,
-            date: new Date(prev.snapshotDate),
-          }
-        : null
-    );
-
-    return {
-      ...row,
-      ahorro: metrics.ahorro,
-      periodSavings: metrics.periodSavings,
-      monthsBetween: metrics.monthsBetween,
-      monthlyRate: metrics.monthlyRate,
-    };
-  });
-
-  return NextResponse.json(enriched);
+  return NextResponse.json(buildWealthSeries(legacy, snapshots, rates));
 }
 
-/** POST /api/wealth — create a manual wealth snapshot */
+/**
+ * POST /api/wealth: backdate a legacy snapshot (API only, no UI). The date
+ * must fall before today and before the first real product observation after
+ * the latest legacy date, so it never hides a computed point; dates inside
+ * legacy history are always accepted. 409 otherwise, and for a date that
+ * already has one.
+ */
 export async function POST(request: NextRequest) {
-  const body = await request.json();
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
 
-  const {
-    snapshotDate,
-    patrimonio,
-    deuda,
-    fintualBalance,
-    mercadopagoBalance,
-    banchileSavings,
-    notes,
-  } = body;
+  // No SQL filter: the rule lives in derivedSeriesStart alone.
+  const [[{ lastLegacyDate }], snapshots] = await Promise.all([
+    db
+      .select({ lastLegacyDate: max(wealthSnapshots.snapshotDate) })
+      .from(wealthSnapshots),
+    db
+      .select({ asOf: productSnapshots.asOf, source: productSnapshots.source })
+      .from(productSnapshots),
+  ]);
+  const derivedStart = derivedSeriesStart(snapshots, lastLegacyDate);
 
-  if (!snapshotDate || patrimonio === undefined) {
+  const result = validateLegacySnapshot(
+    body,
+    legacyEntryCutoff(derivedStart, new Date())
+  );
+  if (!result.ok) {
     return NextResponse.json(
-      { error: "Missing required fields: snapshotDate, patrimonio" },
-      { status: 400 }
+      { error: result.error },
+      { status: result.status }
     );
   }
 
   const [created] = await db
     .insert(wealthSnapshots)
-    .values({
-      snapshotDate,
-      patrimonio: Math.round(patrimonio),
-      deuda: Math.round(deuda ?? 0),
-      fintualBalance: fintualBalance != null ? Math.round(fintualBalance) : null,
-      mercadopagoBalance:
-        mercadopagoBalance != null ? Math.round(mercadopagoBalance) : null,
-      banchileSavings:
-        banchileSavings != null ? Math.round(banchileSavings) : null,
-      notes: notes ?? null,
-    })
+    .values(result.value)
+    .onConflictDoNothing({ target: wealthSnapshots.snapshotDate })
     .returning();
+  if (!created) {
+    return NextResponse.json(
+      {
+        error: `A legacy snapshot already exists for ${result.value.snapshotDate}`,
+      },
+      { status: 409 }
+    );
+  }
 
   return NextResponse.json(created, { status: 201 });
 }
 
-/** DELETE /api/wealth — delete a manual snapshot (computed points are derived) */
+/** DELETE /api/wealth: delete a legacy snapshot by id (computed points are
+ *  derived; 400 for them or a malformed id, 404 for an unknown one). */
 export async function DELETE(request: NextRequest) {
-  const { id } = await request.json();
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+  const id =
+    typeof body === "object" && body !== null && "id" in body
+      ? body.id
+      : undefined;
 
   if (!id) {
     return NextResponse.json({ error: "Missing id" }, { status: 400 });
@@ -244,7 +125,16 @@ export async function DELETE(request: NextRequest) {
       { status: 400 }
     );
   }
+  if (typeof id !== "string" || !UUID_RE.test(id)) {
+    return NextResponse.json({ error: "Invalid id" }, { status: 400 });
+  }
 
-  await db.delete(wealthSnapshots).where(eq(wealthSnapshots.id, id));
+  const deleted = await db
+    .delete(wealthSnapshots)
+    .where(eq(wealthSnapshots.id, id))
+    .returning({ id: wealthSnapshots.id });
+  if (deleted.length === 0) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
   return NextResponse.json({ ok: true });
 }
