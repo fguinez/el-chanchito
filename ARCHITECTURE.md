@@ -666,7 +666,7 @@ el-chanchito/
 │   │   │   │   │   ├── expenses/     # Gastos + CSV import
 │   │   │   │   │   ├── fixed/        # Gastos fijos
 │   │   │   │   │   └── transfers/    # Movimientos internos
-│   │   │   │   └── api/              # 13 API route groups
+│   │   │   │   └── api/              # 11 API route groups
 │   │   │   ├── components/
 │   │   │   │   ├── dashboard/        # ScraperStatus, CsvImport
 │   │   │   │   ├── layout/           # Sidebar

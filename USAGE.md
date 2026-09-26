@@ -105,7 +105,7 @@ For the email parser, you need a Gmail App Password (not your regular password):
 ## Daily Workflow
 
 1. Open the dashboard at `http://localhost:3000`
-2. The **Inicio** page lists the monitors in warning or alert, with the margin left before each crosses its nearest threshold
+2. The **Inicio** page lists the monitors in warning or alert
 3. Add manual expenses in **Gastos** or let scrapers import them automatically
 4. When something one-off changes the month's plan (a reimbursement, an extra budget), add it as a variación on the monitor's page (see [Monitors and variaciones](#monitors-and-variaciones))
 5. Check **Monitores** for every monitor and its day-by-day history
@@ -301,7 +301,7 @@ All API routes are under `/api/`:
 
 | Method | Endpoint | Description |
 |---|---|---|
-| GET/POST | `/api/monitors` | Monitors with their current evaluation and 30-day sparklines; create |
+| GET/POST | `/api/monitors` | Monitors with their current evaluation (line-chart monitors add a 30-day sparkline); create |
 | GET/PUT/DELETE | `/api/monitors/[id]` | One monitor with history, references and variaciones; update; delete |
 | POST | `/api/monitors/preview` | Evaluate an unsaved monitor (`monitorId` applies that monitor's variaciones) |
 | GET/POST | `/api/monitors/[id]/adjustments` | Variaciones (`?month=YYYY-MM`); create from `{ adjustmentDate, amount, description? }` |
