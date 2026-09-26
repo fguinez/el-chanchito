@@ -97,7 +97,7 @@ For the email parser, you need a Gmail App Password (not your regular password):
 |---|---|---|
 | **Inicio** | `/` | Today's budget status, expected balance, drift, quick actions |
 | **Planificacion** | `/planning` | Day-by-day expected balance table (31 rows, today highlighted) |
-| **Historial** | `/history` | Wealth timeline chart + snapshot table (patrimonio, deuda, ahorro) |
+| **Historial** | `/history` | Net-worth timeline computed from product balances, plus legacy snapshots (patrimonio, deuda, ahorro) |
 | **Gastos** | `/expenses` | Transaction list, manual entry form, CSV import |
 | **Gastos Fijos** | `/fixed` | Monthly fixed expenses with shared ratio (69%) |
 | **Transferencias** | `/transfers` | Internal money movements (pending/resolved) |
@@ -119,7 +119,9 @@ At the start of each month:
 2. Update any budget parameters that changed (salary, credit card limit, etc.)
 3. Click **"Crear proximo mes"** to initialize next month's config
 4. Review **Gastos Fijos** for any changes to recurring expenses
-5. Add a new wealth snapshot in **Historial** (patrimonio + deuda)
+5. Check **Historial**: net worth is computed from product balances, so there
+   is nothing to enter; if an institution looks stale, refresh it from
+   **Instituciones** (see [Net-worth history](#net-worth-history))
 
 ## Scrapers
 
@@ -273,6 +275,42 @@ Amounts: handles `1.234` (Chilean thousands separator) and `-1.234,56`
    curl -X PUT http://localhost:3000/api/categories
    ```
 
+## Net-worth history
+
+**Historial** charts patrimonio, deuda and ahorro (patrimonio minus deuda).
+Two kinds of points feed it:
+
+- **Calculado**: one point per day with product observations, carrying each
+  product's latest snapshot forward. Patrimonio is the sum of asset products
+  and deuda the amount owed on liability products (`credit_card`,
+  `line_of_credit`, `loan`, `mortgage`), all converted to CLP, so debt needs
+  no manual entry: scraping the card or línea is enough.
+- **Histórico**: legacy `wealth_snapshots` totals entered by hand before the
+  migration to product balances. They are authoritative up to the last legacy
+  date, which keeps the chart continuous across the boundary, and can be
+  deleted from the table. There is no form to add them.
+
+Legacy snapshots can still be posted through the API, but only to backdate
+history, and a backdated snapshot must never hide a computed point. The date
+must be before today and before the first real product observation after the
+latest legacy date; that date or later answers `409`. Dates inside legacy
+history are always accepted (a date that already has a snapshot answers
+`409`). The migration's backfill rows, which decomposed the three legacy
+component columns into per-product rows on legacy dates, don't count as
+observations.
+
+```bash
+# Synthetic values
+curl -X POST http://localhost:3000/api/wealth \
+  -H "Content-Type: application/json" \
+  -d '{"snapshotDate":"2023-03-01","patrimonio":2500000,"deuda":999999}'
+```
+
+`deuda` defaults to 0; `fintualBalance`, `mercadopagoBalance`,
+`banchileSavings` (informational component columns) and `notes` are optional.
+Amounts are rounded to whole pesos. `make seed-legacy-history` posts a set of
+synthetic legacy snapshots for demos.
+
 ## API Reference
 
 All API routes are under `/api/`:
@@ -284,7 +322,7 @@ All API routes are under `/api/`:
 | GET/POST | `/api/transactions` | Transactions (list, create) |
 | POST | `/api/import` | CSV import |
 | GET/POST/PUT/DELETE | `/api/fixed-expenses` | Fixed expenses CRUD |
-| GET/POST/DELETE | `/api/wealth` | Wealth snapshots |
+| GET/POST/DELETE | `/api/wealth` | Net-worth series (GET); backdate a legacy snapshot before the derived series starts (POST); delete a legacy snapshot (DELETE) |
 | GET/POST/DELETE | `/api/income-sources` | Income sources |
 | GET/POST/PUT/DELETE | `/api/transfers` | Internal transfers |
 | GET/POST/PUT | `/api/categories` | Categories + auto-assign rules |

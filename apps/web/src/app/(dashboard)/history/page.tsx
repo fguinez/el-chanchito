@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import {
   Card,
   CardAction,
@@ -24,10 +25,10 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { SortableTableHead } from "@/components/ui/sortable-table-head";
-import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useSortableData } from "@/lib/use-sortable-data";
-import { formatCLP } from "@/lib/utils";
+import { formatCLP, formatPlainDateEs } from "@/lib/utils";
 import { Trash2 } from "lucide-react";
 import {
   LineChart,
@@ -48,7 +49,7 @@ interface WealthSnapshot {
   mercadopagoBalance: number | null;
   banchileSavings: number | null;
   notes: string | null;
-  source: "manual" | "computed";
+  source: "legacy" | "computed";
   ahorro: number;
   periodSavings: number | null;
   monthsBetween: number | null;
@@ -57,6 +58,7 @@ interface WealthSnapshot {
 
 type SnapshotSortKey =
   | "fecha"
+  | "fuente"
   | "patrimonio"
   | "deuda"
   | "ahorro"
@@ -69,16 +71,7 @@ type SnapshotSortKey =
 
 export default function HistoryPage() {
   const [snapshots, setSnapshots] = useState<WealthSnapshot[]>([]);
-  const [form, setForm] = useState({
-    snapshotDate: new Date().toISOString().split("T")[0],
-    patrimonio: "",
-    deuda: "",
-    fintualBalance: "",
-    mercadopagoBalance: "",
-    banchileSavings: "",
-    notes: "",
-  });
-  const [saving, setSaving] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
   const chart = useTimeSeriesChart();
 
   const loadSnapshots = () => {
@@ -92,53 +85,27 @@ export default function HistoryPage() {
     loadSnapshots();
   }, []);
 
-  const handleAdd = async () => {
-    if (!form.patrimonio) return;
-    setSaving(true);
+  const handleDelete = async (id: string) => {
+    // No form re-enters legacy history, so deleting it is irreversible.
+    if (
+      !window.confirm(
+        "¿Eliminar este registro histórico? Esta acción no se puede deshacer."
+      )
+    ) {
+      return;
+    }
+    setActionError(null);
     try {
       const res = await fetch("/api/wealth", {
-        method: "POST",
+        method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          snapshotDate: form.snapshotDate,
-          patrimonio: parseInt(form.patrimonio),
-          deuda: form.deuda ? parseInt(form.deuda) : 0,
-          fintualBalance: form.fintualBalance
-            ? parseInt(form.fintualBalance)
-            : null,
-          mercadopagoBalance: form.mercadopagoBalance
-            ? parseInt(form.mercadopagoBalance)
-            : null,
-          banchileSavings: form.banchileSavings
-            ? parseInt(form.banchileSavings)
-            : null,
-          notes: form.notes || null,
-        }),
+        body: JSON.stringify({ id }),
       });
-      if (res.ok) {
-        setForm({
-          snapshotDate: new Date().toISOString().split("T")[0],
-          patrimonio: "",
-          deuda: "",
-          fintualBalance: "",
-          mercadopagoBalance: "",
-          banchileSavings: "",
-          notes: "",
-        });
-        loadSnapshots();
-      }
-    } finally {
-      setSaving(false);
+      if (!res.ok) throw new Error("failed");
+      loadSnapshots();
+    } catch {
+      setActionError("No se pudo eliminar el registro histórico.");
     }
-  };
-
-  const handleDelete = async (id: string) => {
-    await fetch("/api/wealth", {
-      method: "DELETE",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id }),
-    });
-    loadSnapshots();
   };
 
   const chartData = snapshots.map((s) => ({
@@ -155,6 +122,8 @@ export default function HistoryPage() {
       switch (key) {
         case "fecha":
           return s.snapshotDate; // ISO "YYYY-MM-DD" strings sort lexically.
+        case "fuente":
+          return s.source;
         case "patrimonio":
           return s.patrimonio;
         case "deuda":
@@ -230,7 +199,7 @@ export default function HistoryPage() {
       {chartData.length >= 2 && (
         <Card>
           <CardHeader>
-            <CardTitle>Evolucion patrimonial</CardTitle>
+            <CardTitle>Evolución patrimonial</CardTitle>
             <CardDescription>
               Patrimonio, deuda y ahorro en el tiempo
             </CardDescription>
@@ -279,126 +248,50 @@ export default function HistoryPage() {
         </Card>
       )}
 
-      {/* Add snapshot form */}
+      {/* Where the series comes from */}
       <Card>
         <CardHeader>
-          <CardTitle>Agregar registro</CardTitle>
+          <CardTitle>Cómo se calcula</CardTitle>
           <CardDescription>
-            Registra un punto en el historial de patrimonio
+            Patrimonio y deuda salen de los saldos de tus productos
           </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="grid gap-3 md:grid-cols-3">
-            <div>
-              <label className="mb-1 block text-sm text-muted-foreground">
-                Fecha
-              </label>
-              <Input
-                type="date"
-                value={form.snapshotDate}
-                onChange={(e) =>
-                  setForm((p) => ({ ...p, snapshotDate: e.target.value }))
-                }
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-sm text-muted-foreground">
-                Patrimonio total
-              </label>
-              <Input
-                type="number"
-                value={form.patrimonio}
-                onChange={(e) =>
-                  setForm((p) => ({ ...p, patrimonio: e.target.value }))
-                }
-                placeholder="2500000"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-sm text-muted-foreground">
-                Deuda total
-              </label>
-              <Input
-                type="number"
-                value={form.deuda}
-                onChange={(e) =>
-                  setForm((p) => ({ ...p, deuda: e.target.value }))
-                }
-                placeholder="999999"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-sm text-muted-foreground">
-                Fintual
-              </label>
-              <Input
-                type="number"
-                value={form.fintualBalance}
-                onChange={(e) =>
-                  setForm((p) => ({ ...p, fintualBalance: e.target.value }))
-                }
-                placeholder="1000000"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-sm text-muted-foreground">
-                Mercado Pago
-              </label>
-              <Input
-                type="number"
-                value={form.mercadopagoBalance}
-                onChange={(e) =>
-                  setForm((p) => ({ ...p, mercadopagoBalance: e.target.value }))
-                }
-                placeholder="1000000"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-sm text-muted-foreground">
-                BanChile Ahorro
-              </label>
-              <Input
-                type="number"
-                value={form.banchileSavings}
-                onChange={(e) =>
-                  setForm((p) => ({ ...p, banchileSavings: e.target.value }))
-                }
-                placeholder="999999"
-              />
-            </div>
-          </div>
-          <div className="mt-3 flex items-end gap-3">
-            <div className="flex-1">
-              <label className="mb-1 block text-sm text-muted-foreground">
-                Notas
-              </label>
-              <Input
-                value={form.notes}
-                onChange={(e) =>
-                  setForm((p) => ({ ...p, notes: e.target.value }))
-                }
-                placeholder="Opcional"
-              />
-            </div>
-            <Button onClick={handleAdd} disabled={saving}>
-              {saving ? "Guardando..." : "Agregar"}
+          <CardAction>
+            <Button asChild variant="outline" size="sm">
+              <Link href="/institutions">Ver saldos por institución</Link>
             </Button>
-          </div>
+          </CardAction>
+        </CardHeader>
+        <CardContent className="space-y-2 text-sm text-muted-foreground">
+          <p>
+            El patrimonio es la suma de tus activos; la deuda, lo adeudado en
+            tarjetas, líneas de crédito y créditos; el ahorro neto, la
+            diferencia entre ambos. Los scrapers mantienen esos saldos al día;
+            si alguno está desactualizado, actualízalo desde Instituciones.
+          </p>
+          <p>
+            Los registros <span className="font-medium">Histórico</span> se
+            ingresaron a mano antes de que el patrimonio se calculara desde los
+            saldos por producto; se muestran tal cual y se pueden eliminar.
+          </p>
         </CardContent>
       </Card>
 
       {/* Snapshot table */}
       <Card>
         <CardHeader>
-          <CardTitle>Registros historicos</CardTitle>
+          <CardTitle>Registros históricos</CardTitle>
           <CardDescription>
             {snapshots.length} registros
           </CardDescription>
         </CardHeader>
         <CardContent>
+          {actionError && (
+            <p className="mb-3 text-sm text-destructive">{actionError}</p>
+          )}
           {snapshots.length === 0 ? (
             <p className="text-muted-foreground">
-              No hay registros. Agrega el primero arriba.
+              No hay registros. Aparecerán cuando los scrapers registren
+              saldos de tus productos.
             </p>
           ) : (
             <div className="overflow-x-auto">
@@ -411,6 +304,15 @@ export default function HistoryPage() {
                       active={sort?.key === "fecha"}
                       direction={
                         sort?.key === "fecha" ? sort.direction : undefined
+                      }
+                      onSort={handleSort}
+                    />
+                    <SortableTableHead
+                      label="Fuente"
+                      columnKey="fuente"
+                      active={sort?.key === "fuente"}
+                      direction={
+                        sort?.key === "fuente" ? sort.direction : undefined
                       }
                       onSort={handleSort}
                     />
@@ -511,7 +413,17 @@ export default function HistoryPage() {
                   {sorted.map((s) => (
                     <TableRow key={s.id}>
                       <TableCell className="whitespace-nowrap">
-                        {new Date(s.snapshotDate).toLocaleDateString("es-CL")}
+                        {formatPlainDateEs(s.snapshotDate)}
+                      </TableCell>
+                      <TableCell>
+                        <Badge
+                          variant={
+                            s.source === "legacy" ? "secondary" : "outline"
+                          }
+                          className="text-xs"
+                        >
+                          {s.source === "legacy" ? "Histórico" : "Calculado"}
+                        </Badge>
                       </TableCell>
                       <TableCell className="text-right">
                         {formatCLP(s.patrimonio)}
@@ -551,10 +463,12 @@ export default function HistoryPage() {
                           : "-"}
                       </TableCell>
                       <TableCell>
-                        {s.source === "manual" && (
+                        {s.source === "legacy" && (
                           <button
                             onClick={() => handleDelete(s.id)}
                             className="text-muted-foreground hover:text-destructive"
+                            aria-label="Eliminar registro histórico"
+                            title="Eliminar registro histórico"
                           >
                             <Trash2 className="h-4 w-4" />
                           </button>

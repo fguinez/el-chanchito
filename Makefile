@@ -155,24 +155,31 @@ logs-scrapers: ## Tail scraper logs
 
 # ─── Utilities ───────────────────────────────────────────────────────────────
 
-seed-history: ## Seed wealth history with sample snapshots
-	@echo "Seeding historical wealth snapshots..."
-	@curl -s -X POST http://localhost:3000/api/wealth -H "Content-Type: application/json" -d '{"snapshotDate":"2023-02-01","patrimonio":1000000,"deuda":0}' > /dev/null
-	@curl -s -X POST http://localhost:3000/api/wealth -H "Content-Type: application/json" -d '{"snapshotDate":"2023-04-01","patrimonio":1500000,"deuda":200000}' > /dev/null
-	@curl -s -X POST http://localhost:3000/api/wealth -H "Content-Type: application/json" -d '{"snapshotDate":"2023-05-01","patrimonio":2000000,"deuda":200000}' > /dev/null
-	@curl -s -X POST http://localhost:3000/api/wealth -H "Content-Type: application/json" -d '{"snapshotDate":"2023-06-01","patrimonio":2500000,"deuda":300000}' > /dev/null
-	@curl -s -X POST http://localhost:3000/api/wealth -H "Content-Type: application/json" -d '{"snapshotDate":"2023-09-01","patrimonio":3500000,"deuda":300000}' > /dev/null
-	@curl -s -X POST http://localhost:3000/api/wealth -H "Content-Type: application/json" -d '{"snapshotDate":"2023-10-01","patrimonio":4000000,"deuda":250000}' > /dev/null
-	@curl -s -X POST http://localhost:3000/api/wealth -H "Content-Type: application/json" -d '{"snapshotDate":"2023-11-01","patrimonio":4500000,"deuda":250000}' > /dev/null
-	@curl -s -X POST http://localhost:3000/api/wealth -H "Content-Type: application/json" -d '{"snapshotDate":"2024-01-01","patrimonio":5500000,"deuda":400000}' > /dev/null
-	@curl -s -X POST http://localhost:3000/api/wealth -H "Content-Type: application/json" -d '{"snapshotDate":"2024-06-01","patrimonio":8000000,"deuda":500000}' > /dev/null
-	@curl -s -X POST http://localhost:3000/api/wealth -H "Content-Type: application/json" -d '{"snapshotDate":"2024-07-01","patrimonio":8500000,"deuda":500000}' > /dev/null
-	@curl -s -X POST http://localhost:3000/api/wealth -H "Content-Type: application/json" -d '{"snapshotDate":"2024-10-01","patrimonio":11000000,"deuda":600000}' > /dev/null
-	@curl -s -X POST http://localhost:3000/api/wealth -H "Content-Type: application/json" -d '{"snapshotDate":"2024-11-01","patrimonio":12000000,"deuda":600000}' > /dev/null
-	@curl -s -X POST http://localhost:3000/api/wealth -H "Content-Type: application/json" -d '{"snapshotDate":"2025-12-01","patrimonio":18000000,"deuda":700000,"fintualBalance":10000000,"mercadopagoBalance":2000000,"banchileSavings":3000000}' > /dev/null
-	@curl -s -X POST http://localhost:3000/api/wealth -H "Content-Type: application/json" -d '{"snapshotDate":"2026-01-01","patrimonio":19000000,"deuda":700000,"fintualBalance":10500000,"mercadopagoBalance":2200000,"banchileSavings":3100000}' > /dev/null
-	@curl -s -X POST http://localhost:3000/api/wealth -H "Content-Type: application/json" -d '{"snapshotDate":"2026-03-01","patrimonio":20000000,"deuda":800000,"fintualBalance":11000000,"mercadopagoBalance":2400000,"banchileSavings":3200000}' > /dev/null
-	@echo "Done: 15 snapshots seeded"
+seed-legacy-history: ## Seed synthetic pre-migration wealth snapshots for demos
+	@echo "Seeding synthetic legacy wealth snapshots..."
+	@created=0; \
+	for row in \
+		'{"snapshotDate":"2023-02-01","patrimonio":1000000,"deuda":0}' \
+		'{"snapshotDate":"2023-04-01","patrimonio":1500000,"deuda":200000}' \
+		'{"snapshotDate":"2023-05-01","patrimonio":2000000,"deuda":200000}' \
+		'{"snapshotDate":"2023-06-01","patrimonio":2500000,"deuda":300000}' \
+		'{"snapshotDate":"2023-09-01","patrimonio":3500000,"deuda":300000}' \
+		'{"snapshotDate":"2023-10-01","patrimonio":4000000,"deuda":250000}' \
+		'{"snapshotDate":"2023-11-01","patrimonio":4500000,"deuda":250000}' \
+		'{"snapshotDate":"2024-01-01","patrimonio":5500000,"deuda":400000}' \
+		'{"snapshotDate":"2024-06-01","patrimonio":8000000,"deuda":500000}' \
+		'{"snapshotDate":"2024-07-01","patrimonio":8500000,"deuda":500000}' \
+		'{"snapshotDate":"2024-10-01","patrimonio":11000000,"deuda":600000}' \
+		'{"snapshotDate":"2024-11-01","patrimonio":12000000,"deuda":600000}' \
+		'{"snapshotDate":"2025-12-01","patrimonio":18000000,"deuda":700000,"fintualBalance":10000000,"mercadopagoBalance":2000000,"banchileSavings":3000000}' \
+		'{"snapshotDate":"2026-01-01","patrimonio":19000000,"deuda":700000,"fintualBalance":10500000,"mercadopagoBalance":2200000,"banchileSavings":3100000}' \
+		'{"snapshotDate":"2026-03-01","patrimonio":20000000,"deuda":800000,"fintualBalance":11000000,"mercadopagoBalance":2400000,"banchileSavings":3200000}'; do \
+		status=$$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:3000/api/wealth \
+			-H "Content-Type: application/json" -d "$$row"); \
+		if [ "$$status" = 201 ]; then created=$$((created + 1)); \
+		else echo "  HTTP $$status for $$row"; fi; \
+	done; \
+	echo "Done: $$created of 15 snapshots created"
 
 seed-config: ## Seed default budget config for current month
 	@echo "Creating budget config..."
@@ -192,7 +199,7 @@ seed-category-rules: ## Seed default category assignment rules
 	curl -s -X POST http://localhost:3000/api/categories -H "Content-Type: application/json" -d "{\"keyword\":\"lider\",\"categoryId\":\"$$SUPER\",\"priority\":10}" > /dev/null && \
 	echo "Done: 4 rules seeded"
 
-seed-all: seed-config seed-history seed-category-rules ## Seed all default data
+seed-all: seed-config seed-legacy-history seed-category-rules ## Seed all default data
 
 categorize: ## Run category auto-assignment on all uncategorized transactions
 	@curl -s -X PUT http://localhost:3000/api/categories | python3 -m json.tool

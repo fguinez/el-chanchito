@@ -1,6 +1,7 @@
 // Wealth series behind /api/wealth: legacy wealth_snapshots totals merged
-// with points derived from product_snapshots. Pure (no db) so it unit-tests
-// in isolation; the route queries both tables and hands the rows over.
+// with points derived from product_snapshots, plus the rules for backdating
+// legacy history. Pure (no db) so it unit-tests in isolation; the route
+// queries both tables and hands the rows over.
 
 import type { ProductKind, ProductMetrics } from "@chanchito/product-model";
 import { calcWealthMetrics } from "./budget-engine";
@@ -43,7 +44,7 @@ export type WealthPoint = {
   mercadopagoBalance: number | null;
   banchileSavings: number | null;
   notes: string | null;
-  source: "manual" | "computed";
+  source: "legacy" | "computed";
 };
 
 /** A series point with the metrics derived against the previous point. */
@@ -53,6 +54,155 @@ export type WealthSeriesPoint = WealthPoint & {
   monthsBetween: number | null;
   monthlyRate: number | null;
 };
+
+/** product_snapshots source of the V009 backfill, which decomposed the three
+ *  legacy component columns into per-product rows on legacy dates. */
+export const BACKFILL_SOURCE = "wealth_snapshot";
+
+/**
+ * Local day (YYYY-MM-DD) of the first real product observation after
+ * `lastLegacyDate` (null or "" for no legacy rows), or null when there is none
+ * yet. Earlier observations are hidden by legacy totals anyway, and backfill
+ * rows are not observations, so neither starts the derived series.
+ */
+export function derivedSeriesStart(
+  snapshots: { asOf: Date; source: string }[],
+  lastLegacyDate: string | null
+): string | null {
+  let start: string | null = null;
+  for (const row of snapshots) {
+    if (row.source === BACKFILL_SOURCE) continue;
+    const day = formatLocalDate(row.asOf);
+    if (lastLegacyDate && day <= lastLegacyDate) continue;
+    if (start === null || day < start) start = day;
+  }
+  return start;
+}
+
+/** First date a legacy snapshot can no longer take: the derived series'
+ *  start or today, whichever comes first. Before it, a backdated snapshot
+ *  can never hide a computed point. */
+export function legacyEntryCutoff(
+  derivedStart: string | null,
+  now: Date
+): string {
+  const today = formatLocalDate(now);
+  return derivedStart !== null && derivedStart < today ? derivedStart : today;
+}
+
+/** A legacy snapshot write, validated and rounded for the INTEGER columns. */
+export type LegacySnapshotInput = Omit<LegacyWealthRow, "id">;
+
+type ValidationFailure = { ok: false; status: 400 | 409; error: string };
+
+export type LegacySnapshotValidation =
+  | { ok: true; value: LegacySnapshotInput }
+  | ValidationFailure;
+
+const INTEGER_MIN = -2147483648;
+const INTEGER_MAX = 2147483647;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const COMPONENT_FIELDS = [
+  "fintualBalance",
+  "mercadopagoBalance",
+  "banchileSavings",
+] as const;
+
+function fail(status: 400 | 409, error: string): ValidationFailure {
+  return { ok: false, status, error };
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** A real calendar date in YYYY-MM-DD form (2026-02-30 is not). */
+function isCalendarDate(value: unknown): value is string {
+  if (typeof value !== "string" || !DATE_RE.test(value)) return false;
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return (
+    date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
+  );
+}
+
+/** A JSON amount rounded to an integer that fits the INTEGER column. */
+function toInteger(
+  field: string,
+  raw: unknown,
+  nonNegative: boolean
+): { ok: true; value: number } | ValidationFailure {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) {
+    return fail(400, `Field '${field}' must be a number`);
+  }
+  if (nonNegative && raw < 0) {
+    return fail(400, `Field '${field}' must not be negative`);
+  }
+  const value = Math.round(raw);
+  if (value < INTEGER_MIN || value > INTEGER_MAX) {
+    return fail(400, `Field '${field}' does not fit an integer column`);
+  }
+  return { ok: true, value };
+}
+
+/**
+ * Validate a POST /api/wealth body against the backdating cutoff (see
+ * legacyEntryCutoff): 400 for a malformed body, 409 for a date the derived
+ * series owns. `deuda` defaults to 0; the component columns and `notes` to
+ * null.
+ */
+export function validateLegacySnapshot(
+  body: unknown,
+  cutoff: string
+): LegacySnapshotValidation {
+  if (!isPlainObject(body)) return fail(400, "Body must be a JSON object");
+
+  const { snapshotDate, notes } = body;
+  if (!isCalendarDate(snapshotDate)) {
+    return fail(
+      400,
+      "Field 'snapshotDate' must be a calendar date (YYYY-MM-DD)"
+    );
+  }
+
+  const patrimonio = toInteger("patrimonio", body.patrimonio, true);
+  if (!patrimonio.ok) return patrimonio;
+  const deuda = toInteger("deuda", body.deuda ?? 0, true);
+  if (!deuda.ok) return deuda;
+
+  const components: Record<(typeof COMPONENT_FIELDS)[number], number | null> =
+    { fintualBalance: null, mercadopagoBalance: null, banchileSavings: null };
+  for (const field of COMPONENT_FIELDS) {
+    if (body[field] == null) continue;
+    const amount = toInteger(field, body[field], false);
+    if (!amount.ok) return amount;
+    components[field] = amount.value;
+  }
+
+  if (notes != null && typeof notes !== "string") {
+    return fail(400, "Field 'notes' must be a string or null");
+  }
+
+  if (snapshotDate >= cutoff) {
+    return fail(
+      409,
+      `Legacy snapshots can only backdate history before ${cutoff}; from then on wealth is derived from product balances`
+    );
+  }
+
+  return {
+    ok: true,
+    value: {
+      snapshotDate,
+      patrimonio: patrimonio.value,
+      deuda: deuda.value,
+      ...components,
+      notes: notes ?? null,
+    },
+  };
+}
 
 /** A snapshot's typed metrics, or null for rows that predate them (`{}`). */
 function snapshotMetrics(
@@ -133,6 +283,9 @@ export function buildWealthSeries(
     }
 
     if (dateStr <= lastLegacyDate) continue;
+    // Backfill rows still carry forward, but a day with nothing else is no
+    // observation (the same rule derivedSeriesStart applies).
+    if (rows.every((row) => row.source === BACKFILL_SOURCE)) continue;
 
     let patrimonio = 0;
     let deuda = 0;
@@ -176,7 +329,7 @@ export function buildWealthSeries(
       mercadopagoBalance: row.mercadopagoBalance,
       banchileSavings: row.banchileSavings,
       notes: row.notes,
-      source: "manual" as const,
+      source: "legacy" as const,
     })),
     ...computed,
   ].sort((a, b) => a.snapshotDate.localeCompare(b.snapshotDate));
