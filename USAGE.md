@@ -2,9 +2,13 @@
 
 ## Prerequisites
 
-- **Node.js** >= 20 + **pnpm** >= 9
-- **Python** >= 3.11
+- **Node.js** >= 20 + **pnpm** 9 (`corepack enable` provides the version pinned
+  in `package.json`)
+- **Python** >= 3.12 as `python3` (the shared `packages/product-model` requires
+  it; `make install` builds `.venv` from whatever `python3` is on your PATH)
 - **Docker** + **Docker Compose**
+- **macOS** for the Keychain secret helpers (`make secrets-*`); on other hosts,
+  export the secrets as env vars instead (see "Configuration")
 
 `make install` installs everything, including the Playwright Chromium browser
 the BanChile scraper needs (in Docker this happens in the scrapers image).
@@ -13,13 +17,16 @@ the BanChile scraper needs (in Docker this happens in the scrapers image).
 
 ```bash
 # 1. Clone and install (Node deps, Python venv, Playwright Chromium)
+git clone https://github.com/fguinez/el-chanchito.git
+cd el-chanchito
 make install
 
 # 2. Set up environment
 cp .env.example .env
-# Edit .env with your credentials (see "Configuration" below)
+# Edit .env with your identifiers (see "Configuration" below)
+make secrets-init   # macOS: store passwords and API keys in the Keychain
 
-# 3. Start everything: postgres + scrapers (with on-demand refresh) + dashboard
+# 3. Start everything: postgres + migrations + scrapers (with on-demand refresh) + dashboard
 make dev
 
 # Open http://localhost:3000
@@ -31,14 +38,18 @@ service on the host (control endpoint on `:8080`, logs in
 stops the dashboard and the scraper service together. To run only the web dev
 server (e.g. pure UI work), use `make dev-web`.
 
+With no scraper configured the scraper service exits right away: `make dev`
+says so and keeps the dashboard running, but it stays empty and on-demand
+refresh is unavailable until at least one scraper is enabled.
+
 ## Configuration
 
 Configuration is split in two:
 
 - **`.env`** — non-secret config: Postgres settings and scraper identifiers.
 - **macOS Keychain** — secrets (passwords, tokens, API keys). Loaded automatically
-  by `make scrapers-once`, `make scrapers-start`, and `make up` via
-  `scripts/load-secrets.sh`.
+  by `make dev`, `make scrapers-once`, `make scrapers-start`, `make up`,
+  `make fintual-login` and `make bci-lider-login` via `scripts/load-secrets.sh`.
 
 Copy `.env.example` to `.env` and fill in the identifiers:
 
@@ -52,11 +63,17 @@ DATABASE_URL=postgres://finance:finance@localhost:5435/finance
 # Scraper identifiers (enable only the ones you need)
 BANCHILE_RUT=12345678-9          # Banco de Chile (via Playwright)
 LIDER_BCI_RUT=12345678-9         # Tarjeta Lider Bci (real Chrome over CDP)
-LIDER_BCI_CDP_URL=http://localhost:9222  # Tarjeta Lider Bci: the make bci-lider-login Chrome
+# LIDER_BCI_CDP_URL=http://localhost:9222  # optional: reuse the make bci-lider-login Chrome
 FINTUAL_EMAIL=your@email.com     # Fintual (web session; run `make fintual-login` once)
 EMAIL_IMAP_HOST=imap.gmail.com   # Email parser (MercadoPago, MACH, Tenpo)
 EMAIL_IMAP_USER=your@gmail.com
 ```
+
+`.env.example` also lists every optional setting with its default: the Postgres
+host port (`POSTGRES_PORT`), the e-mail lookback window (`EMAIL_LOOKBACK_DAYS`),
+the Fintual session cache (`FINTUAL_SESSION_FILE`), the Tarjeta Lider Bci Chrome
+(`LIDER_BCI_CDP_PORT`, `LIDER_BCI_CHROME_PATH`), the scraper service mode
+(`SCRAPER_MODE`), the on-demand refresh wiring and the dashboard login.
 
 Then store the secrets in the Keychain (prompts interactively, values never
 touch disk or shell history):
@@ -72,14 +89,23 @@ Secrets and their meaning:
 | Keychain item | Value |
 |---|---|
 | `chanchito.BANCHILE_PASSWORD` | Banco de Chile web password |
-| `chanchito.LIDER_BCI_PASSWORD` | Tarjeta Lider Bci clave (optional; only prefills the `make bci-lider-login` browser) |
+| `chanchito.LIDER_BCI_PASSWORD` | Tarjeta Lider Bci clave (autofills the login; without it someone has to type it into the Chrome window) |
 | `chanchito.FINTUAL_PASSWORD` | Fintual account password (used by `make fintual-login` to open a web session) |
 | `chanchito.BUDA_API_KEY` | Buda.com API key |
 | `chanchito.BUDA_API_SECRET` | Buda.com API secret |
 | `chanchito.EMAIL_IMAP_PASSWORD` | Gmail App Password (see below) |
 | `chanchito.DASHBOARD_PASSWORD` | Dashboard login password (see "Deployment"; required in production, not exported to `make dev`) |
 
-A scraper is enabled only when all of its credentials are present.
+A scraper is enabled only when its credentials are present:
+
+| Scraper | Enabled when set |
+|---|---|
+| Fintual | `FINTUAL_EMAIL` + `FINTUAL_PASSWORD` |
+| Buda | `BUDA_API_KEY` + `BUDA_API_SECRET` |
+| Banco de Chile | `BANCHILE_RUT` + `BANCHILE_PASSWORD` |
+| Tarjeta Lider Bci | `LIDER_BCI_RUT` |
+| MACH, MercadoPago, Tenpo | `EMAIL_IMAP_HOST` + `EMAIL_IMAP_USER` + `EMAIL_IMAP_PASSWORD` |
+
 On non-macOS hosts (e.g. Docker-only deploys), export the secret env vars
 directly instead of using the Keychain.
 
@@ -95,31 +121,39 @@ For the email parser, you need a Gmail App Password (not your regular password):
 
 | Page | URL | Description |
 |---|---|---|
-| **Inicio** | `/` | Today's budget status, expected balance, drift, quick actions |
-| **Planificacion** | `/planning` | Day-by-day expected balance table (31 rows, today highlighted) |
-| **Historial** | `/history` | Wealth timeline chart + snapshot table (patrimonio, deuda, ahorro) |
+| **Inicio** | `/` | Monitors in warning or alert, scraper status, quick actions |
+| **Historial** | `/history` | Net-worth timeline (patrimonio, deuda, ahorro) computed from product balances, plus legacy snapshots |
+| **Instituciones** | `/institutions` | Every scraped product grouped by institution, with on-demand refresh; drill into `/institutions/[institution]` and `/institutions/[institution]/[product]` for balance history and movements |
+| **Monitores** | `/monitors` | Formula alerts over product values; each monitor's page (`/monitors/[id]`) charts its history |
 | **Gastos** | `/expenses` | Transaction list, manual entry form, CSV import |
 | **Gastos Fijos** | `/fixed` | Monthly fixed expenses with shared ratio (69%) |
 | **Transferencias** | `/transfers` | Internal money movements (pending/resolved) |
-| **Configuracion** | `/settings` | Budget parameters, income split calculator, monthly reset |
 
 ## Daily Workflow
 
 1. Open the dashboard at `http://localhost:3000`
-2. The **Inicio** page shows your expected balance for today vs your real balance
-3. If the drift is negative, you're over budget; positive means under budget
-4. Add manual expenses in **Gastos** or let scrapers import them automatically
-5. Check **Planificacion** to see how the rest of the month looks
+2. The **Inicio** page lists the monitors in warning or alert (or says all is in
+   order) and the latest run of each scraper
+3. Add manual expenses in **Gastos** or let scrapers import them automatically
+4. Check **Monitores** for every monitor and its day-by-day history
 
 ## Monthly Workflow
 
 At the start of each month:
 
-1. Go to **Configuracion**
-2. Update any budget parameters that changed (salary, credit card limit, etc.)
-3. Click **"Crear proximo mes"** to initialize next month's config
-4. Review **Gastos Fijos** for any changes to recurring expenses
-5. Add a new wealth snapshot in **Historial** (patrimonio + deuda)
+1. Nothing to reset: thresholds built on `DAY_OF_MONTH()` (the "Rampa mensual"
+   preset) start over on their own
+2. Edit any monitor whose thresholds depend on a figure that changed (salary,
+   credit card limit, etc.)
+3. Review **Gastos Fijos** for any changes to recurring expenses
+4. Check **Historial**: net worth is computed from product balances, so there is
+   nothing to enter. If an institution looks stale, refresh it from
+   **Instituciones**
+
+The **Agregar registro** form on **Historial** is legacy, kept for backdating
+pre-migration history (issue #18 retires it). Don't use it for new months:
+legacy snapshots are authoritative up to the latest one, so a snapshot dated
+today hides every computed point up to today.
 
 ## Scrapers
 
@@ -195,14 +229,19 @@ Schedule per scraper:
 - **Buda**: every 1 hour
 - **BanChile**: every 24 hours
 - **BCI Lider**: every 24 hours
-- **Email parser**: every 30 minutes
+- **MACH, MercadoPago, Tenpo** (e-mail): every 30 minutes
+
+`make scrapers-start` (like `make dev` and the Compose service) also runs every
+enabled scraper once at startup, then follows the schedule.
 
 ### Checking scraper status
 
-The home page shows scraper status with:
-- Last sync time per account
-- Green/red badges for success/error
-- Error messages (click to expand)
+The **Estado de scrapers** card on **Inicio** shows the latest run of each
+scraper (one row per method and institution):
+- How long ago it ran
+- A status badge: `success`, `partial` (it finished with warnings), `error`, or
+  `running`
+- Error messages (click a failed row to expand)
 
 ### On-demand refresh (from the dashboard)
 
@@ -260,18 +299,30 @@ Amounts: handles `1.234` (Chilean thousands separator) and `-1.234,56`
 
 ## Category Auto-Assignment
 
+There is no screen for categories yet (issue #14), so rules are managed through
+the API. A rule matches when a transaction's description contains its keyword
+(case-insensitive); higher `priority` rules run first.
+
 1. Categories are pre-seeded: Supermercado, Transporte, Restaurantes, etc.
-2. Add keyword rules via the API:
+   (`GET /api/categories` lists them with their ids and rules)
+2. Add keyword rules:
    ```bash
    # Example: UBER -> Transporte
    curl -X POST http://localhost:3000/api/categories \
      -H "Content-Type: application/json" \
-     -d '{"keyword":"uber","categoryId":"<transport-category-id>"}'
+     -d '{"keyword":"uber","categoryId":"<transport-category-id>","priority":10}'
    ```
-3. Run auto-assignment:
+   `make seed-category-rules` adds a few example rules (uber, rappi,
+   supermercado, lider).
+3. Run auto-assignment over the uncategorized transactions (manually
+   categorized ones are never touched):
    ```bash
-   curl -X PUT http://localhost:3000/api/categories
+   curl -X PUT http://localhost:3000/api/categories   # or: make categorize
    ```
+
+Rules are applied only when you run step 3; new transactions arrive
+uncategorized. With `DASHBOARD_PASSWORD` set, these calls need a session cookie
+(see "API Reference").
 
 ## API Reference
 
@@ -279,20 +330,22 @@ All API routes are under `/api/`:
 
 | Method | Endpoint | Description |
 |---|---|---|
-| GET/POST | `/api/budget` | Budget config (current month) |
-| GET | `/api/planning` | Planning table + today status |
+| GET/POST | `/api/monitors` | Monitors with their current evaluation (line-chart monitors add a 30-day sparkline); create |
+| GET/PUT/DELETE | `/api/monitors/[id]` | One monitor with its history (`?days=N` or `?from=&to=`) and references; update; delete |
+| POST | `/api/monitors/preview` | Validate and evaluate an unsaved monitor |
+| GET | `/api/institutions` | Institutions + nested products + CLP subtotals |
+| GET | `/api/institutions/[slug]` | One institution, same shape as a list item |
+| GET | `/api/institutions/[slug]/products/[product]` | One product with its balance history and recent transactions |
+| POST | `/api/institutions/refresh` | Trigger a scrape (all, or `{institution}`) |
+| GET | `/api/scrapers` | Latest run per scraper |
+| GET | `/api/scrapers/available` | Enabled scraper slugs, from the scraper service |
+| GET | `/api/balances` | Latest balance per product |
 | GET/POST | `/api/transactions` | Transactions (list, create) |
 | POST | `/api/import` | CSV import |
+| GET/POST/PUT | `/api/categories` | Categories with their rules (GET); add a rule (POST); auto-assign (PUT) |
 | GET/POST/PUT/DELETE | `/api/fixed-expenses` | Fixed expenses CRUD |
-| GET/POST/DELETE | `/api/wealth` | Wealth snapshots |
-| GET/POST/DELETE | `/api/income-sources` | Income sources |
 | GET/POST/PUT/DELETE | `/api/transfers` | Internal transfers |
-| GET/POST/PUT | `/api/categories` | Categories + auto-assign rules |
-| GET | `/api/institutions` | Institutions + nested products + CLP subtotals |
-| POST | `/api/institutions/refresh` | Trigger a scrape (all, or `{institution}`) |
-| GET | `/api/scrapers` | Scraper run status |
-| GET | `/api/balances` | Latest balance per account |
-| POST | `/api/month-reset` | Create next month's config |
+| GET/POST/DELETE | `/api/wealth` | Net-worth series (GET); legacy snapshots (POST, DELETE) |
 | POST | `/api/auth/login` | Exchange `DASHBOARD_PASSWORD` for a session cookie |
 | POST | `/api/auth/logout` | Clear the session cookie (public) |
 | GET | `/api/auth/session` | `{ enabled, authenticated }` (public) |
@@ -319,6 +372,8 @@ user management). Setup:
 ```bash
 # macOS: store it in the login Keychain alongside the scraper secrets
 make secret-set KEY=DASHBOARD_PASSWORD
+# ...and export it when deploying (no make target exports it, see below)
+DASHBOARD_PASSWORD="$(security find-generic-password -a "$USER" -s chanchito.DASHBOARD_PASSWORD -w)" make up
 
 # anywhere else: export it (Compose passes it through to the web service)
 export DASHBOARD_PASSWORD='choose-a-long-random-one'
