@@ -27,7 +27,7 @@ import { SortableTableHead } from "@/components/ui/sortable-table-head";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { useSortableData } from "@/lib/use-sortable-data";
-import { formatCLP } from "@/lib/utils";
+import { formatCLP, parseNumberInput } from "@/lib/utils";
 import { Trash2 } from "lucide-react";
 import {
   LineChart,
@@ -93,7 +93,8 @@ export default function HistoryPage() {
   }, []);
 
   const handleAdd = async () => {
-    if (!form.patrimonio) return;
+    const patrimonio = parseNumberInput(form.patrimonio);
+    if (patrimonio === null) return;
     setSaving(true);
     try {
       const res = await fetch("/api/wealth", {
@@ -101,17 +102,11 @@ export default function HistoryPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           snapshotDate: form.snapshotDate,
-          patrimonio: parseInt(form.patrimonio),
-          deuda: form.deuda ? parseInt(form.deuda) : 0,
-          fintualBalance: form.fintualBalance
-            ? parseInt(form.fintualBalance)
-            : null,
-          mercadopagoBalance: form.mercadopagoBalance
-            ? parseInt(form.mercadopagoBalance)
-            : null,
-          banchileSavings: form.banchileSavings
-            ? parseInt(form.banchileSavings)
-            : null,
+          patrimonio,
+          deuda: parseNumberInput(form.deuda) ?? 0,
+          fintualBalance: parseNumberInput(form.fintualBalance),
+          mercadopagoBalance: parseNumberInput(form.mercadopagoBalance),
+          banchileSavings: parseNumberInput(form.banchileSavings),
           notes: form.notes || null,
         }),
       });
