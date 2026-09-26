@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const sql = postgres(
-  process.env.DATABASE_URL || "postgres://finance:finance@localhost:5432/finance"
+  process.env.DATABASE_URL || "postgres://finance:finance@localhost:5435/finance"
 );
 
 async function migrate() {

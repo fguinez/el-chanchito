@@ -23,11 +23,22 @@ export type MonitorDisplay = {
 
 export type MonitorStatus = "ok" | "warning" | "breached" | "no_data";
 
-/** What the engine needs to evaluate a monitor (a projection of the DB row). */
+/** A dated one-off threshold shift ("variación"): from `adjustmentDate`
+ *  (YYYY-MM-DD, a local day) to the end of that calendar month, `amount` (in
+ *  the monitor currency) is added to every threshold. A new month starts
+ *  with none, like DAY_OF_MONTH() ramps. */
+export type MonitorAdjustment = {
+  adjustmentDate: string;
+  amount: number;
+};
+
+/** What the engine needs to evaluate a monitor (a projection of the DB row,
+ *  plus its adjustments when the caller loaded them). */
 export type MonitorDefinition = {
   currency: string;
   expression: string;
   thresholds: MonitorThreshold[];
+  adjustments?: readonly MonitorAdjustment[];
 };
 
 /** Per-threshold evaluation: today's threshold value and the margin before
@@ -45,6 +56,8 @@ export type MonitorEvaluation = {
   thresholds: ThresholdEvaluation[];
   /** Min across thresholds (nearest to crossing); null for =/!= or no_data. */
   margin: number | null;
+  /** Adjustments already added to every threshold value above (0 if none). */
+  adjustment: number;
   /** Oldest balanceAsOf among referenced products, ISO string. */
   staleAsOf: string | null;
   noDataReason: string | null;

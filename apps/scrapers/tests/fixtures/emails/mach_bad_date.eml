@@ -1,0 +1,10 @@
+From: MACH <notificaciones@somosmach.com>
+To: Usuario Sintetico <usuario@example.com>
+Subject: Compra aprobada
+Date: not a date
+Message-ID: <synthetic-mach-bad-date@example.com>
+X-Fixture: synthetic
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+Compraste en COMERCIO SINTETICO por $ 999.999.
