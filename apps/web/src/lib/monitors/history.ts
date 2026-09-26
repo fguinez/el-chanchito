@@ -4,19 +4,22 @@
 // lands in today, not in tomorrow's UTC date), walk the range chronologically
 // carrying each product's latest observation forward, and evaluate the
 // monitor (left side + thresholds) on every day with that day's date, so
-// DAY_OF_MONTH ramps reset month by month.
+// DAY_OF_MONTH ramps and adjustments reset month by month.
 //
 // Known v1 approximation (same as /api/wealth): only current rates are
 // available, so past days convert at today's prices.
 
 import type { ProductMetrics } from "@chanchito/product-model";
 import type { ClpRates } from "@/lib/rates";
+import { formatLocalDate } from "./dates";
 import { evaluateMonitor, type ProductInfo } from "./evaluate";
 import type {
   MonitorDefinition,
   MonitorStatus,
   ThresholdEvaluation,
 } from "./types";
+
+export { formatLocalDate };
 
 /** One product_snapshots row, as queried (metrics may be a legacy `{}`). */
 export type SnapshotRow = {
@@ -31,6 +34,8 @@ export type HistoryPoint = {
   value: number | null;
   status: MonitorStatus;
   margin: number | null;
+  /** Adjustments included in that day's threshold values (0 if none). */
+  adjustment: number;
   thresholds: ThresholdEvaluation[];
 };
 
@@ -70,14 +75,6 @@ function toUtcMs(dateStr: string): number {
 function toEvalDate(dateStr: string): Date {
   const [year, month, day] = dateStr.split("-").map(Number);
   return new Date(year, month - 1, day, 12);
-}
-
-/** YYYY-MM-DD from a Date's local parts (the replay window's day unit). */
-export function formatLocalDate(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, "0");
-  const d = String(date.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
 }
 
 /**
@@ -159,6 +156,7 @@ export function replayHistory(
       value: evaluation.value,
       status: evaluation.status,
       margin: evaluation.margin,
+      adjustment: evaluation.adjustment,
       thresholds: evaluation.thresholds,
     });
   }

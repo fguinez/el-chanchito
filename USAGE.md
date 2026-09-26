@@ -70,10 +70,19 @@ EMAIL_IMAP_USER=your@gmail.com
 ```
 
 `.env.example` also lists every optional setting with its default: the Postgres
-host port (`POSTGRES_PORT`), the e-mail lookback window (`EMAIL_LOOKBACK_DAYS`),
-the Fintual session cache (`FINTUAL_SESSION_FILE`), the Tarjeta Lider Bci Chrome
+host port (`POSTGRES_PORT`), the e-mail tuning (`EMAIL_LOOKBACK_DAYS`,
+`EMAIL_MAX_MESSAGES`, `EMAIL_IMAP_MAILBOX`), the Fintual session cache
+(`FINTUAL_SESSION_FILE`), the Tarjeta Lider Bci Chrome
 (`LIDER_BCI_CDP_PORT`, `LIDER_BCI_CHROME_PATH`), the scraper service mode
 (`SCRAPER_MODE`), the on-demand refresh wiring and the dashboard login.
+
+Optional email parser tuning (defaults in parentheses):
+
+| Variable | Meaning |
+|---|---|
+| `EMAIL_LOOKBACK_DAYS` (7) | Days of mail searched on each run |
+| `EMAIL_MAX_MESSAGES` (100) | Emails parsed per institution and run, newest first; a truncated window logs a warning |
+| `EMAIL_IMAP_MAILBOX` (`INBOX`) | Mailbox searched for notifications. Set it to Gmail's All Mail (`[Gmail]/All Mail`, or `[Gmail]/Todos` with a Spanish Gmail UI) when filters archive them. Fintual 2FA codes are always read from `INBOX` |
 
 Then store the secrets in the Keychain (prompts interactively, values never
 touch disk or shell history):
@@ -122,9 +131,9 @@ For the email parser, you need a Gmail App Password (not your regular password):
 | Page | URL | Description |
 |---|---|---|
 | **Inicio** | `/` | Monitors in warning or alert, scraper status, quick actions |
+| **Monitores** | `/monitors` | Formula alerts over product values; each monitor's page (`/monitors/[id]`) charts its history and manages its monthly variaciones |
 | **Historial** | `/history` | Net-worth timeline (patrimonio, deuda, ahorro) computed from product balances, plus legacy snapshots |
 | **Instituciones** | `/institutions` | Every scraped product grouped by institution, with on-demand refresh; drill into `/institutions/[institution]` and `/institutions/[institution]/[product]` for balance history and movements |
-| **Monitores** | `/monitors` | Formula alerts over product values; each monitor's page (`/monitors/[id]`) charts its history |
 | **Gastos** | `/expenses` | Transaction list, manual entry form, CSV import |
 | **Gastos Fijos** | `/fixed` | Monthly fixed expenses with shared ratio (69%) |
 | **Transferencias** | `/transfers` | Internal money movements (pending/resolved) |
@@ -135,14 +144,15 @@ For the email parser, you need a Gmail App Password (not your regular password):
 2. The **Inicio** page lists the monitors in warning or alert (or says all is in
    order) and the latest run of each scraper
 3. Add manual expenses in **Gastos** or let scrapers import them automatically
-4. Check **Monitores** for every monitor and its day-by-day history
+4. When something one-off changes the month's plan (a reimbursement, an extra budget), add it as a variación on the monitor's page (see [Monitors and variaciones](#monitors-and-variaciones))
+5. Check **Monitores** for every monitor and its day-by-day history
 
 ## Monthly Workflow
 
 At the start of each month:
 
 1. Nothing to reset: thresholds built on `DAY_OF_MONTH()` (the "Rampa mensual"
-   preset) start over on their own
+   preset) start over on their own, and every monitor starts the month with no variaciones
 2. Edit any monitor whose thresholds depend on a figure that changed (salary,
    credit card limit, etc.)
 3. Review **Gastos Fijos** for any changes to recurring expenses
@@ -154,6 +164,30 @@ The **Agregar registro** form on **Historial** is legacy, kept for backdating
 pre-migration history (issue #18 retires it). Don't use it for new months:
 legacy snapshots are authoritative up to the latest one, so a snapshot dated
 today hides every computed point up to today.
+
+## Monitors and variaciones
+
+A monitor is one equation over product values (for example, the checking
+balance minus what the cards owe) compared against an alert threshold and an
+optional warning one. Thresholds can ramp through the month; the "Rampa
+mensual" preset builds `base - descuento * (DAY_OF_MONTH() - 1)`. Create them
+from **Monitores > Nuevo monitor**.
+
+**Variaciones** are one-off adjustments to a monitor's plan for the month, like
+the "Variaciones" column of the old planning sheet: a reimbursement, a one-off
+gift budget. On the monitor's page, the **Variaciones** card adds one with a
+date, an amount in the monitor's currency and an optional description:
+
+- From that day to the end of its month, the amount is added to every
+  threshold of the monitor; a negative amount lowers them. The status, the
+  margin, the history chart and the Inicio card all shift from that day on.
+- Several variaciones on one day add up. The card shows each day's total and
+  the month-to-date sum, and every entry can still be edited or deleted.
+- A new month starts with none; the card's arrows browse other months.
+
+For example (synthetic figures), with a balance floor that ramps down through
+the month, a `-50000` gift budget on the 15th lowers the floor by $ 50.000 from
+the 15th on, so spending that money does not trip the alert.
 
 ## Scrapers
 
@@ -331,8 +365,10 @@ All API routes are under `/api/`:
 | Method | Endpoint | Description |
 |---|---|---|
 | GET/POST | `/api/monitors` | Monitors with their current evaluation (line-chart monitors add a 30-day sparkline); create |
-| GET/PUT/DELETE | `/api/monitors/[id]` | One monitor with its history (`?days=N` or `?from=&to=`) and references; update; delete |
-| POST | `/api/monitors/preview` | Validate and evaluate an unsaved monitor |
+| GET/PUT/DELETE | `/api/monitors/[id]` | One monitor with its history (`?days=N` or `?from=&to=`), referencias and variaciones; update; delete |
+| POST | `/api/monitors/preview` | Validate and evaluate an unsaved monitor (`monitorId` applies that monitor's variaciones) |
+| GET/POST | `/api/monitors/[id]/adjustments` | Variaciones (`?month=YYYY-MM`); create from `{ adjustmentDate, amount, description? }` |
+| PATCH/DELETE | `/api/monitors/[id]/adjustments/[adjustmentId]` | Edit or delete one variación |
 | GET | `/api/institutions` | Institutions + nested products + CLP subtotals |
 | GET | `/api/institutions/[slug]` | One institution, same shape as a list item |
 | GET | `/api/institutions/[slug]/products/[product]` | One product with its balance history and recent transactions |

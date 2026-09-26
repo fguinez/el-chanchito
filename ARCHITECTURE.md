@@ -20,15 +20,15 @@
 │       ▼              ▼              ▼                ▼          │
 │  ┌───────────────────────────────────────────────────────────┐  │
 │  │                    API Routes (/api/*)                    │  │
-│  │  monitors | institutions | wealth | transactions | import │  │
-│  │  fixed-expenses | transfers | categories | balances       │  │
-│  │  scrapers | auth                                          │  │
+│  │  monitors (+ adjustments) | institutions | wealth         │  │
+│  │  transactions | import | fixed-expenses | transfers       │  │
+│  │  categories | balances | scrapers | auth                  │  │
 │  │  institutions/refresh (→ scraper control endpoint)        │  │
 │  └─────────────────────────────┬─────────────────────────────┘  │
 │                                │                                │
 │  ┌─────────────────────────────┴─────────────────────────────┐  │
-│  │    Drizzle ORM + lib/monitors + networth.ts + rates.ts    │  │
-│  └─────────────────────────────┬─────────────────────────────┘  │
+│  │  Drizzle ORM + lib/monitors + networth.ts + rates.ts      │  │
+│  └─────────────────────────────┴─────────────────────────────┘  │
 └────────────────────────────────┼────────────────────────────────┘
                                  │
                                  ▼
@@ -38,8 +38,8 @@
 │                                                                 │
 │  users | institutions | accounts | products | product_snapshots │
 │  transactions | categories | category_rules | monitors          │
-│  fixed_expenses | internal_transfers | scraper_runs             │
-│  wealth_snapshots (legacy)                                      │
+│  monitor_adjustments | fixed_expenses | internal_transfers      │
+│  scraper_runs | wealth_snapshots (legacy)                       │
 └────────────────────────────────▲────────────────────────────────┘
                                  │
                                  │ writes directly (psycopg3)
@@ -108,8 +108,10 @@
         ┌────────────────────────────────────┐
         │  Dashboard API (Next.js)           │
         │  - monitors: evaluate expressions  │
-        │    over products + replay history  │
-        │    from product_snapshots          │
+        │    over products (+ ajustes) +      │
+        │    replay history from              │
+        │    product_snapshots -> status,     │
+        │    margin, history                  │
         │  - wealth: reads product_snapshots │
         │    -> computes derived metrics     │
         └──────────────────┬─────────────────┘
@@ -119,13 +121,15 @@
         │          Browser (React)           │
         │  - Inicio: monitors in alert +     │
         │    scraper status                  │
+        │  - Monitor cards + detail,         │
+        │    Variaciones (adjustments)       │
         │  - Monitor and wealth charts       │
         │    (Recharts)                      │
         │  - Institution and product tables  │
         └────────────────────────────────────┘
 ```
 
-## Monitors
+## Monitors and variaciones
 
 Monitors replaced the old budget engine (the Planificacion and Configuracion
 pages, whose tables V016 dropped). A monitor is one stored equation
@@ -151,6 +155,26 @@ series (the list only replays a 30-day sparkline for line-chart monitors). A mon
 `breached`. References are stored in uuid form (`@{product_uuid:field}`) so a
 product rename never breaks them, and the API round-trips them to the display
 form (`institution:product:field`).
+
+The old sheet's "Variaciones" (a reimbursement, a one-off gift budget) live on
+as **monitor adjustments** (`monitor_adjustments`, V022). An adjustment dated
+day N adds its amount, in the monitor's currency, to every threshold of its
+monitor from day N to the end of that calendar month. Same-day adjustments add
+up, and each month starts with none:
+
+```
+threshold(day) =
+    threshold_expression(day)
+  + sum(adjustments dated in day's month, on or before day)
+
+margin = value - threshold   (for < and <=; threshold - value for > and >=)
+```
+
+`adjustmentOnDate` in `evaluate.ts` applies them inside `evaluateMonitor`, so
+the current evaluation, the history replay, the list sparklines and the edit
+preview all include them. Days are local calendar days, the same unit as
+`DAY_OF_MONTH()`. The monitor detail page manages them ("Variaciones" card)
+through `/api/monitors/[id]/adjustments`.
 
 `lib/budget-engine.ts` survives only as two helpers: `calcWealthMetrics`
 (Historial) and `calcPersonalAmount` (Gastos Fijos).
@@ -219,17 +243,28 @@ transactions ──────────┐
   is_manually_categorized
 
 
-monitors                      wealth_snapshots (legacy)
-  id PK                         id PK
-  name, description             snapshot_date (unique)
-  currency                      patrimonio
-  expression (uuid refs)        deuda
-  thresholds JSONB              fintual_balance
-    [{severity, comparator,     mercadopago_balance
-      expression}]              banchile_savings
-  display JSONB                 -- pre-V009 totals + manual entries;
-  is_active                     -- /api/wealth now derives the series
-                                -- from product_snapshots
+monitors                      monitor_adjustments
+  id PK ──────────────────────< monitor_id FK (cascade)
+  name, description             id PK
+  currency                      adjustment_date
+  expression (uuid refs)        amount NUMERIC(20,8), <> 0
+  thresholds JSONB              description
+    [{severity, comparator,     -- added to every threshold
+      expression}]              --   from its day to month end
+  display JSONB
+  is_active
+
+wealth_snapshots (legacy)
+  id PK
+  snapshot_date (unique)
+  patrimonio
+  deuda
+  fintual_balance
+  mercadopago_balance
+  banchile_savings
+  -- pre-V009 totals + manual entries;
+  -- /api/wealth now derives the series
+  -- from product_snapshots
 
 
 fixed_expenses                internal_transfers
@@ -244,7 +279,7 @@ fixed_expenses                internal_transfers
 
 scraper_runs
   id PK
-  method       (email|web|http_api; 'fintself'/'open_banking' on legacy rows)
+  method       (email|web|http_api|fintself|open_banking; last two on legacy rows)
   institution  (mach|mercadopago|tenpo|banchile|bci_lider|...)
   started_at
   finished_at
@@ -276,6 +311,8 @@ scraper_runs
 | `V017__bci_lider_transaction_ids_drop_description.sql` | re-keys BCI Lider transactions on date + amount (the description changes once a charge is billed) and collapses the duplicates |
 | `V018__banchile_transaction_ids_adopt_operation_id.sql` | prepares BanChile transactions for operation-id keys; the writer re-keys stored rows on the next scrape |
 | `V019__transactions_accounting_date.sql` | transactions gain a nullable `accounting_date` (the posting date, where the institution reports one) |
+| `V020__buda_drop_crypto_movements_stored_as_clp.sql` | deletes the crypto movements the old Buda scraper truncated and stored as pesos (CLP movements only now) |
+| `V022__monitor_adjustments.sql` | monitor_adjustments: dated variaciones that shift a monitor's thresholds until month end |
 
 ## Scraper Architecture
 
@@ -382,6 +419,24 @@ yields the Nacionales (CLP) charges, paged. Figures are anchored on their
 `$`/`US$` labels (a drift records nothing rather than a wrong number), and USD
 balances convert to CLP via lib/rates' multi-currency FX.
 
+Buda reads two signed REST surfaces (issue #3). Balances cover every wallet:
+one `crypto` product per currency, `units` kept fractional. Transactions cover
+**CLP deposits and withdrawals only**, minus annulled or rejected ones, paged
+through `meta.total_pages` (capped at 20 pages of 50 per direction, with a
+warning past that). Crypto movements
+are deliberately not imported: `transactions.amount` is integer CLP, and a
+crypto movement has no CLP amount unless it is priced at its date, which would
+need a historical price source. Crypto value history comes from the balance
+snapshots instead, converted at lib/rates' current tickers like every other
+crypto figure. A non-CLP amount that still reaches the parser is skipped with a
+warning, never truncated. Every Buda `ScrapedTransaction` carries
+`currency="CLP"` and the same `crypto` kind as the balances, so CLP movements
+attach to the CLP balance product. That product stays `crypto` rather than
+`wallet`: re-kinding it would change its identity and metrics shape (`units` to
+`balance`) under its snapshot history and any monitor bound to it, and a CLP
+`units` figure already converts 1:1. V020 deleted the crypto movements the old
+scraper had truncated and stored on it as pesos.
+
 **Balance conventions & net worth** are registry-driven: each kind's `role`
 (asset/liability/none) and `balance_convention` (value/available/owed/units)
 live in `packages/product-model` — see `packages/product-model/PRODUCTS.md`
@@ -434,7 +489,39 @@ shallow-merges `attributes`, always refreshes
 | `bci_lider` | `web` | Real Chrome over CDP (`bci_lider_web`) | Autofill in a real Chrome (managed by default; reuse via `LIDER_BCI_CDP_URL` + `make bci-lider-login`; Cloudflare Turnstile) | 24h |
 
 The three email-based scrapers reuse one `ImapSession`: it runs `NOOP` on
-each acquire and only re-logs-in when the mailbox has been dropped.
+each acquire and only re-logs-in when the mailbox has been dropped. imaplib is
+synchronous, so every IMAP round trip runs in `asyncio.to_thread` while the
+session lock is held: the email scrapers take turns on the connection without
+blocking the event loop for the other scrapers.
+
+Each institution declares an `EmailPattern`, and `parse_transaction` applies
+it to one email:
+
+- **Sender**: `sender_domains` entries must appear as whole labels of the
+  From address's domain (`somosmach` matches `somosmach.com`, never `bci.cl`,
+  a display name, or a local part), so MACH no longer claims Banco Bci mail.
+  Subject filters ignore case and accents.
+- **Amount**: `amount_rules` anchor the figure to its context
+  (`anchored("pagaste|compraste")` claims the first `$` figure within 60
+  characters after the phrase, never across a sentence end); the anchor that
+  appears earliest in the body wins, and a figure no anchor claims (a promo
+  banner, a balance line) is never read. An email skipped with such a figure
+  is logged at info level with its subject, so new wording shows up.
+- **Direction**: an email is income when its subject carries one of the
+  pattern's `income_keywords` ("recibiste una transferencia", "devolución") or
+  its figure was anchored by an `income=True` rule ("recibiste", "te
+  devolvimos"); everything else is an expense.
+- **Date**: the `Date` header in Chile's calendar, else the IMAP
+  INTERNALDATE, else today with a warning.
+- **Coverage**: `EMAIL_IMAP_MAILBOX` (default `INBOX`, opened read-only) and
+  `EMAIL_MAX_MESSAGES` (default 100 emails per institution and run, newest
+  first; a truncated window logs a warning) apply to every pattern unless it
+  sets its own `mailbox` / `max_messages`. Zero amounts are skipped with a
+  debug line naming the subject, and an email that fails to parse is logged
+  and skipped without costing the rest of the run.
+
+The synthetic corpus in `apps/scrapers/tests/fixtures/emails/` drives
+table-driven tests of that behaviour per institution.
 
 ### Product model
 
@@ -463,7 +550,7 @@ data without direct DB access.
 Transactions are deduplicated via `UNIQUE(product_id, external_id)`:
 
 - Fintual: no transactions (balance-only)
-- Buda: `buda_{deposit/withdrawal_id}`
+- Buda: `buda_{deposit/withdrawal_id}` (CLP movements only)
 - BanChile: the bank's own operation id where the portal exposes one, else a
   description-free fingerprint (issue #57). Three forms, each greppable:
   - `bch_op_{transaccionId}`: a checking movement's "ID Transacción", read
@@ -494,8 +581,9 @@ Transactions are deduplicated via `UNIQUE(product_id, external_id)`:
 - BCI Lider: `bcl_{md5(date|amount|CLP)[:16]}` (no per-movement id in the DOM;
   the description is left out because the portal rewrites it once a charge is
   billed, see V017)
-- Email: `email_{institution}_{sha1(message_id)[:8]}` (`hashlib`, not Python's
-  per-process salted `hash()`)
+- Email: `email_{institution}_{sha1(Message-ID)[:8]}` (`hashlib`, not Python's
+  per-process salted `hash()`); an email without a Message-ID hashes
+  `Date|From|Subject|body` instead
 - CSV: `csv_{base64url(date|description|amount)[:24]}`
 
 ### On-demand refresh (control endpoint)
@@ -646,6 +734,30 @@ their complexity once a second person actually uses an instance. Until then the
 shared secret is the whole model, and the `users` table stays unused by the web
 app.
 
+## Testing and CI
+
+The web app is tested with vitest (`make test-ts`); each Python package runs
+its own pytest suite (`make test-py`: `apps/scrapers/tests`, then
+`packages/product-model/tests`), with the test tooling in
+`apps/scrapers/requirements-dev.txt`. Most scraper tests drive parsers and
+the writer's decisions through fakes. `test_writer_db.py` runs the real
+writer SQL instead: `apps/scrapers/tests/conftest.py` builds a
+`chanchito_test_tpl_*` template database once per session from every
+migration file (each in its own transaction, recorded in `_migrations` like
+`migrate.mjs` does), and each test clones it into its own `chanchito_test_*`
+database, points `DATABASE_URL` at it, resets the writer's pool, and drops it
+at teardown. The server comes from `TEST_DATABASE_URL`, which must name a
+disposable one: unset, the DB tests skip; set but unreachable, they fail.
+`make test-db` provides it as the `postgres-test` compose service (profile
+`test`, so `make up` never starts it; data in tmpfs; port 5436 or
+`POSTGRES_TEST_PORT`).
+
+CI (`.github/workflows/ci.yml`, GitHub Actions) runs on every pull request and
+push to `main` in two jobs: `web` (`make typecheck`, `make lint`,
+`make test-ts`) and `python` (`make install-py`, then `make test-py` against a
+`postgres:16-alpine` service, so the DB tests run rather than skip). Neither
+downloads a Playwright browser; no test launches one.
+
 ## Tech Stack
 
 | Layer | Technology |
@@ -660,11 +772,14 @@ app.
 | Tests | Vitest (web) + pytest (scrapers, product model) |
 | Containerization | Docker + Docker Compose |
 | Package Manager | pnpm (workspaces) |
+| Testing | vitest (web) + pytest (scrapers, product-model; DB tests on a throwaway PostgreSQL) |
+| CI | GitHub Actions |
 
 ## Monorepo Structure
 
 ```
 el-chanchito/
+├── .github/workflows/ci.yml          # CI: typecheck, lint, vitest, pytest
 ├── apps/
 │   ├── web/                          # Next.js dashboard
 │   │   ├── src/
@@ -672,7 +787,7 @@ el-chanchito/
 │   │   │   │   ├── (auth)/           # Login + "not configured" notice
 │   │   │   │   ├── (dashboard)/      # All pages with sidebar layout
 │   │   │   │   │   ├── page.tsx      # Inicio
-│   │   │   │   │   ├── monitors/     # Monitores (list, new, [id], [id]/edit)
+│   │   │   │   │   ├── monitors/     # Monitores (list, new, [id], [id]/edit + variaciones)
 │   │   │   │   │   ├── history/      # Historial
 │   │   │   │   │   ├── institutions/ # Instituciones, [institution], [product]
 │   │   │   │   │   ├── expenses/     # Gastos + CSV import
@@ -687,7 +802,7 @@ el-chanchito/
 │   │   │   │   ├── layout/           # Sidebar
 │   │   │   │   └── ui/               # shadcn components
 │   │   │   ├── lib/
-│   │   │   │   ├── monitors/         # Expression language, evaluation, history
+│   │   │   │   ├── monitors/         # Expression language, evaluation, history + variaciones
 │   │   │   │   ├── auth/             # Session, throttle, CSRF, config
 │   │   │   │   ├── db/               # Drizzle schema + connection + resolver
 │   │   │   │   ├── networth.ts       # Asset/debt derivation per kind
@@ -703,14 +818,16 @@ el-chanchito/
 │       │   └── institutions/         # 7 scrapers: banchile, bci_lider, buda, fintual,
 │       │                             #   mach, mercadopago, tenpo
 │       ├── db/                       # Connection pool + writer + slug
-│       ├── tests/                    # pytest
+│       ├── tests/                    # pytest (conftest.py: per-test DB fixtures)
 │       ├── main.py                   # Entry point + scheduler + control endpoint
 │       ├── requirements.txt
+│       ├── requirements-dev.txt     # + pytest
+│       ├── pyproject.toml           # pytest config only
 │       └── Dockerfile
 │
 ├── packages/
 │   ├── db-schema/                    # Shared SQL migrations
-│   │   ├── migrations/               # V001 through V019
+│   │   ├── migrations/               # V001 through V020 plus V022
 │   │   └── migrate.mjs               # Migration runner
 │   └── product-model/                # Product-kind registry (pydantic v2)
 │       ├── product_model/            # kinds, attributes, metrics, display, envelopes
@@ -720,7 +837,7 @@ el-chanchito/
 │
 ├── scripts/                          # dev.sh (make dev), load-secrets.sh (Keychain)
 ├── docs/screenshots/                 # README screenshot (synthetic data)
-├── docker-compose.yml
+├── docker-compose.yml               # + postgres-test (profile `test`) for DB tests
 ├── Makefile
 ├── README.md
 ├── USAGE.md

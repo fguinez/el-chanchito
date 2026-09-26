@@ -257,3 +257,25 @@ describe("replayHistory", () => {
     expect(defaulted[1].value).toBe(700000);
   });
 });
+
+describe("replayHistory: adjustments", () => {
+  it("shifts thresholds from the adjustment day to month end, then resets", () => {
+    const points = replayHistory(
+      {
+        ...def,
+        adjustments: [
+          { adjustmentDate: "2026-07-30", amount: 50000 },
+          { adjustmentDate: "2026-07-30", amount: -20000 },
+        ],
+      },
+      { snapshots, products, rates, from: "2026-07-29", to: "2026-08-02" }
+    );
+
+    expect(points.map((p) => p.adjustment)).toEqual([0, 30000, 30000, 0, 0]);
+    // Ramp 1000000 - 30000 * (day - 1), plus the 30000 net adjustment on
+    // 07-30 and 07-31; August restarts the ramp with no adjustment.
+    expect(points.map((p) => p.thresholds[0].value)).toEqual([
+      160000, 160000, 130000, 1000000, 970000,
+    ]);
+  });
+});

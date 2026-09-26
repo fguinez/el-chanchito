@@ -21,7 +21,7 @@ Either way the dashboard serves at [http://localhost:3000](http://localhost:3000
 ## Layout
 
 - App Router pages live in `src/app/(dashboard)/` (**Inicio**, **Historial**, **Instituciones**, **Monitores**, **Gastos**, **Gastos Fijos**, **Transferencias**) and the login in `src/app/(auth)/`; API routes in `src/app/api/`.
-- The monitor engine (expression language, evaluation, history replay) lives in `src/lib/monitors/`; auth is enforced in `src/proxy.ts`.
+- The monitor engine (expression language, evaluation, history replay, variaciones/adjustments) lives in `src/lib/monitors/`; auth is enforced in `src/proxy.ts`.
 - Data access uses Drizzle ORM against the shared PostgreSQL database.
 - Product types and the per-family column specs behind the Instituciones tables are code-generated from `packages/product-model`; run `make product-model-generate` after editing the registry.
 
