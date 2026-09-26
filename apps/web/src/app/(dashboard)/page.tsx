@@ -12,12 +12,15 @@ import { Button } from "@/components/ui/button";
 import { ScraperStatus } from "@/components/dashboard/ScraperStatus";
 import { MonitorCard } from "@/components/monitors/MonitorCard";
 import { type ApiMonitor } from "@/components/monitors/shared";
+import { STALE_AFTER_HOURS, groupForInicio } from "@/lib/monitors/overview";
 
-function needsAttention(monitor: ApiMonitor): boolean {
-  return (
-    monitor.evaluation.status === "breached" ||
-    monitor.evaluation.status === "warning"
-  );
+const STALE_AFTER_DAYS = STALE_AFTER_HOURS / 24;
+
+/** Note for the OK monitors computed from stale data, singular or plural. */
+function staleOkNote(count: number): string {
+  const subject =
+    count === 1 ? "1 monitor en orden usa" : `${count} monitores en orden usan`;
+  return `${subject} datos de hace más de ${STALE_AFTER_DAYS} días.`;
 }
 
 export default function HomePage() {
@@ -34,7 +37,16 @@ export default function HomePage() {
       .catch(() => setError(true));
   }, []);
 
-  const attention = monitorList?.filter(needsAttention) ?? [];
+  const { attention, noData, staleOk } = groupForInicio(
+    monitorList ?? [],
+    new Date()
+  );
+  const hasActive = monitorList?.some((m) => m.isActive) ?? false;
+  const staleNote = staleOk.length > 0 && (
+    <p className="text-xs text-muted-foreground">
+      {staleOkNote(staleOk.length)}
+    </p>
+  );
 
   return (
     <div className="space-y-6">
@@ -46,7 +58,8 @@ export default function HomePage() {
           <div>
             <CardTitle className="text-base">Monitores</CardTitle>
             <p className="text-sm text-muted-foreground">
-              Los que necesitan atención aparecen aquí.
+              Aquí aparecen las alertas, las advertencias y los monitores sin
+              datos.
             </p>
           </div>
           <Button asChild variant="outline" size="sm">
@@ -72,12 +85,15 @@ export default function HomePage() {
               </Button>
             </CardContent>
           </Card>
-        ) : attention.length === 0 ? (
+        ) : attention.length === 0 && noData.length === 0 ? (
           <Card>
-            <CardContent className="text-center">
+            <CardContent className="space-y-1 text-center">
               <p className="text-muted-foreground">
-                Todo en orden: ningún monitor necesita atención.
+                {hasActive
+                  ? "Todo en orden: ningún monitor necesita atención."
+                  : "No hay monitores activos."}
               </p>
+              {staleNote}
             </CardContent>
           </Card>
         ) : (
@@ -85,6 +101,20 @@ export default function HomePage() {
             {attention.map((monitor) => (
               <MonitorCard key={monitor.id} monitor={monitor} />
             ))}
+            {noData.length > 0 && (
+              <div className="space-y-3 pt-2">
+                <div>
+                  <h3 className="text-sm font-semibold">Sin datos</h3>
+                  <p className="text-sm text-muted-foreground">
+                    No se pueden calcular: revisa el motivo en cada uno.
+                  </p>
+                </div>
+                {noData.map((monitor) => (
+                  <MonitorCard key={monitor.id} monitor={monitor} />
+                ))}
+              </div>
+            )}
+            {staleNote}
           </div>
         )}
       </div>
