@@ -8,7 +8,7 @@ El Chanchito (“the piggy bank”) is a self-hosted personal finance tracker. P
 
 ## Highlights
 
-- **Daily budget engine**: an expected balance for every day of the month, and the drift of your real balance against it.
+- **Monitors**: formula alerts over your products, with thresholds that can ramp through the month and one-off variaciones (a reimbursement, an extra budget) that shift them until month end.
 - **Six institution scrapers** on independent schedules, mixing REST APIs (Fintual, Buda), Playwright browser automation (Banco de Chile), and Gmail inbox parsing (MACH, MercadoPago, Tenpo).
 - **Typed product registry**: every product kind (checking, credit card, crypto, ...) is declared once in pydantic, grouped into display families with the column specs of their dashboard tables, and code-generated into TypeScript types, a JSON Schema, and per-kind docs.
 - **Net worth from snapshots**: derived from per-product snapshot history, with per-kind asset/liability conventions and multi-currency conversion to CLP.
@@ -28,7 +28,7 @@ make dev               # dashboard at http://localhost:3000
 
 ## Usage
 
-The dashboard runs at `http://localhost:3000`: **Inicio** shows today’s expected balance and drift, **Planificación** the day-by-day month plan, **Historial** the net-worth timeline, and **Instituciones** every scraped product with an on-demand refresh button.
+The dashboard runs at `http://localhost:3000`: **Inicio** shows the monitors needing attention, **Monitores** every monitor with its history and variaciones, **Historial** the net-worth timeline, and **Instituciones** every scraped product with an on-demand refresh button.
 
 Scrapers run separately from the dashboard and share its database:
 

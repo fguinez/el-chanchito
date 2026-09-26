@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Pencil, Trash2 } from "lucide-react";
 import {
   CartesianGrid,
@@ -38,10 +38,13 @@ import {
   SEVERITY_LABELS,
   StatusBadge,
   formatDateEs,
+  formatSignedAmount,
+  type ApiAdjustment,
   type ApiMonitor,
   type HistoryPoint,
   type MonitorReference,
 } from "@/components/monitors/shared";
+import { AdjustmentsCard } from "@/components/monitors/AdjustmentsCard";
 import {
   InteractiveChart,
   useTimeSeriesChart,
@@ -50,6 +53,7 @@ import { TimeRangeControl } from "@/components/charts/time-range-control";
 import { dayStartMs, rangeQuery } from "@/components/charts/x-axis-range";
 
 interface MonitorDetail extends ApiMonitor {
+  adjustments: ApiAdjustment[];
   history: HistoryPoint[];
   references: MonitorReference[];
 }
@@ -78,21 +82,31 @@ export default function MonitorDetailPage() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
   const chart = useTimeSeriesChart({ kind: "days", days: 30 });
+  // Bumped after each variación write: refetch with the last loaded range.
+  const [reloadKey, setReloadKey] = useState(0);
+  const lastQuery = useRef<string | null>(null);
+  const handledReload = useRef(0);
 
   // Dragged ("custom") windows only re-frame the already-loaded history; the
-  // API is queried again when a preset or exact date range is picked.
+  // API is queried again when a preset or exact date range is picked, or
+  // when a variación changes the thresholds.
   const query = rangeQuery(chart.x.range);
   useEffect(() => {
-    if (query == null) {
+    // A reload counts as handled only once its data lands, so a drag that
+    // cancels the fetch mid-flight still refetches on the next run.
+    const reload = reloadKey !== handledReload.current;
+    const fetchQuery = query ?? (reload ? lastQuery.current : null);
+    if (fetchQuery == null) {
       // A dragged window re-frames the loaded data; also drop any in-flight
       // fetch's loading state, since its cleanup cancelled the updates.
       setHistoryLoading(false);
       return;
     }
+    lastQuery.current = fetchQuery;
     let cancelled = false;
     setHistoryLoading(true);
     setError(false);
-    fetch(`/api/monitors/${id}?${query}`)
+    fetch(`/api/monitors/${id}?${fetchQuery}`)
       .then((res) => {
         if (res.status === 404) {
           if (!cancelled) setNotFound(true);
@@ -102,7 +116,9 @@ export default function MonitorDetailPage() {
         return res.json();
       })
       .then((data: MonitorDetail) => {
-        if (!cancelled) setMonitor(data);
+        if (cancelled) return;
+        handledReload.current = reloadKey;
+        setMonitor(data);
       })
       .catch(() => {
         if (!cancelled) setError(true);
@@ -113,7 +129,7 @@ export default function MonitorDetailPage() {
     return () => {
       cancelled = true;
     };
-  }, [id, query]);
+  }, [id, query, reloadKey]);
 
   // Client-side sorting for the references table (one table on the page).
   const getReferenceValue = useCallback(
@@ -257,6 +273,12 @@ export default function MonitorDetailPage() {
                   <span className="text-muted-foreground">sin dato</span>
                 )}
               </CardTitle>
+              {t.value != null && evaluation.adjustment !== 0 && (
+                <p className="text-xs text-muted-foreground tabular-nums">
+                  incluye variaciones{" "}
+                  {formatSignedAmount(monitor.currency, evaluation.adjustment)}
+                </p>
+              )}
             </CardHeader>
           </Card>
         ))}
@@ -378,6 +400,14 @@ export default function MonitorDetailPage() {
           </CardContent>
         </Card>
       )}
+
+      <AdjustmentsCard
+        monitorId={monitor.id}
+        currency={monitor.currency}
+        adjustments={monitor.adjustments}
+        refreshing={historyLoading}
+        onChanged={() => setReloadKey((key) => key + 1)}
+      />
 
       {/* The stored equation, in display syntax */}
       <Card>

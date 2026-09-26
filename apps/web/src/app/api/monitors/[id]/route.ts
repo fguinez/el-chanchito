@@ -6,10 +6,11 @@ import { getClpRates } from "@/lib/rates";
 import { evaluateMonitor } from "@/lib/monitors/evaluate";
 import { replayHistory } from "@/lib/monitors/history";
 import {
+  loadMonitorAdjustments,
   loadProductCatalog,
   loadSnapshotsForProducts,
 } from "@/lib/monitors/catalog";
-import { validateMonitorInput } from "@/lib/monitors/validate";
+import { UUID_RE, validateMonitorInput } from "@/lib/monitors/validate";
 import {
   buildReferences,
   enrichMonitor,
@@ -17,18 +18,16 @@ import {
   resolveHistoryRange,
 } from "@/lib/monitors/serialize";
 
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 // Next 16: dynamic segment params arrive as a Promise on the context arg.
 type Context = { params: Promise<{ id: string }> };
 
 /**
  * GET /api/monitors/[id]: one monitor with evaluation, snapshot-replayed
- * `history`, and a `references` row per distinct product/field the
- * expressions mention. The history window comes from `?days=N` (default 90,
- * clamped to [1, 365]) or an explicit `?from`/`?to` day range (inclusive,
- * max 365 days, `to` defaults to today).
+ * `history`, a `references` row per distinct product/field the expressions
+ * mention, and every `adjustments` row (oldest day first), which the
+ * evaluation and history thresholds already include. The history window
+ * comes from `?days=N` (default 90, clamped to [1, 365]) or an explicit
+ * `?from`/`?to` day range (inclusive, max 365 days, `to` defaults to today).
  */
 export async function GET(request: NextRequest, { params }: Context) {
   try {
@@ -59,18 +58,20 @@ export async function GET(request: NextRequest, { params }: Context) {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
 
-    const [catalog, rates] = await Promise.all([
+    const [catalog, rates, adjustments] = await Promise.all([
       loadProductCatalog(),
       getClpRates(),
+      loadMonitorAdjustments(id),
     ]);
-    const evaluation = evaluateMonitor(row, {
+    const def = { ...row, adjustments };
+    const evaluation = evaluateMonitor(def, {
       date: now,
       products: catalog.byId,
       rates,
       currency: row.currency,
     });
     const snapshots = await loadSnapshotsForProducts(referencedProductIds(row));
-    const history = replayHistory(row, {
+    const history = replayHistory(def, {
       snapshots,
       products: catalog.byId,
       rates,
@@ -81,6 +82,7 @@ export async function GET(request: NextRequest, { params }: Context) {
 
     return NextResponse.json({
       ...enrichMonitor(row, catalog, evaluation),
+      adjustments,
       history,
       references,
     });
@@ -124,13 +126,19 @@ export async function PUT(request: NextRequest, { params }: Context) {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
 
-    const rates = await getClpRates();
-    const evaluation = evaluateMonitor(updated, {
-      date: new Date(),
-      products: catalog.byId,
-      rates,
-      currency: updated.currency,
-    });
+    const [rates, adjustments] = await Promise.all([
+      getClpRates(),
+      loadMonitorAdjustments(id),
+    ]);
+    const evaluation = evaluateMonitor(
+      { ...updated, adjustments },
+      {
+        date: new Date(),
+        products: catalog.byId,
+        rates,
+        currency: updated.currency,
+      }
+    );
     return NextResponse.json(enrichMonitor(updated, catalog, evaluation));
   } catch (error) {
     console.error("PUT /api/monitors/[id] failed:", error);
@@ -138,7 +146,7 @@ export async function PUT(request: NextRequest, { params }: Context) {
   }
 }
 
-/** DELETE /api/monitors/[id]: hard delete. */
+/** DELETE /api/monitors/[id]: hard delete (its adjustments cascade). */
 export async function DELETE(request: NextRequest, { params }: Context) {
   try {
     const { id } = await params;

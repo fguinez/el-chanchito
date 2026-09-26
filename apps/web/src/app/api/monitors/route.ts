@@ -5,6 +5,7 @@ import { monitors } from "@/lib/db/schema";
 import { getClpRates } from "@/lib/rates";
 import { evaluateMonitor } from "@/lib/monitors/evaluate";
 import {
+  loadAdjustmentsByMonitor,
   loadProductCatalog,
   loadSnapshotsForProducts,
 } from "@/lib/monitors/catalog";
@@ -20,15 +21,16 @@ import {
  * GET /api/monitors: every monitor with its display-form expressions and
  * current evaluation; monitors displayed as line charts also get a 30-day
  * `sparkline` replayed from product_snapshots (one combined query across all
- * referenced products). Past days are valued at current rates (see
- * lib/monitors/history).
+ * referenced products). Thresholds include each monitor's adjustments. Past
+ * days are valued at current rates (see lib/monitors/history).
  */
 export async function GET() {
   try {
-    const [catalog, rates, rows] = await Promise.all([
+    const [catalog, rates, rows, adjustments] = await Promise.all([
       loadProductCatalog(),
       getClpRates(),
       db.select().from(monitors).orderBy(asc(monitors.createdAt)),
+      loadAdjustmentsByMonitor(),
     ]);
     const now = new Date();
 
@@ -42,7 +44,8 @@ export async function GET() {
     const snapshots = await loadSnapshotsForProducts([...sparklineProductIds]);
 
     const enriched = rows.map((row) => {
-      const evaluation = evaluateMonitor(row, {
+      const def = { ...row, adjustments: adjustments.get(row.id) ?? [] };
+      const evaluation = evaluateMonitor(def, {
         date: now,
         products: catalog.byId,
         rates,
@@ -50,7 +53,7 @@ export async function GET() {
       });
       let sparkline: SparklinePoint[] | undefined;
       if (row.display.chart === "line") {
-        sparkline = buildSparkline(row, {
+        sparkline = buildSparkline(def, {
           snapshots,
           products: catalog.byId,
           rates,
