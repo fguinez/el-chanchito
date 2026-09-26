@@ -8,7 +8,8 @@ from scrapers.base import BaseScraper, ProductScrapeResult, ScrapedTransaction
 PATTERN = EmailPattern(
     institution="mach",
     product_kind="wallet",
-    sender_contains=["mach", "somosmach", "bci"],
+    # No bare "bci" (MACH is a Bci product): it matched Banco BCI's own mail too.
+    sender_contains=["mach", "somosmach"],
     subject_contains=["compra", "pago", "transaccion", "transferencia"],
     amount_patterns=[
         r"\$\s*([\d.,]+)",

@@ -1,7 +1,13 @@
 """Tests for the agnostic email backend + per-institution pattern matching."""
 
+import asyncio
+import re
+from email import message_from_bytes
+from email.message import EmailMessage
+
 import pytest
 
+from scrapers.backends import email as email_backend
 from scrapers.backends.email import (
     _decode_header_value,
     _match_pattern,
@@ -96,6 +102,20 @@ class TestMatchPattern:
             "info@tenpo.cl", "Transaccion exitosa", TENPO_PATTERN
         )
 
+    @pytest.mark.parametrize(
+        "sender",
+        [
+            "Bci <notificaciones@bci.cl>",
+            "contacto@bci.cl",
+            "Banco Bci <alertas@mail.bci.cl>",
+        ],
+    )
+    def test_banco_bci_sender_is_not_mach(self, sender):
+        """A Banco BCI mail with a subject MACH accepts still isn't MACH's."""
+        assert not _match_pattern(
+            sender, "Comprobante de transferencia", MACH_PATTERN
+        )
+
     def test_unknown_sender_rejects(self):
         assert not _match_pattern("noreply@other.com", "Hello", MP_PATTERN)
         assert not _match_pattern("noreply@other.com", "Hello", MACH_PATTERN)
@@ -134,3 +154,74 @@ class TestDecodeHeader:
 
     def test_empty(self):
         assert _decode_header_value("") == ""
+
+
+def _synthetic_mail(sender: str, subject: str, body: str, message_id: str) -> bytes:
+    """A fabricated notification email: every figure and id in it is synthetic."""
+    msg = EmailMessage()
+    msg["From"] = sender
+    msg["Subject"] = subject
+    msg["Date"] = "Mon, 07 Sep 2026 12:00:00 -0300"
+    msg["Message-ID"] = message_id
+    msg.set_content(body)
+    return msg.as_bytes()
+
+
+class _FakeMailbox:
+    """In-memory IMAP double: `FROM` search is a case-insensitive substring
+    match on the From header, as RFC 3501 specifies."""
+
+    def __init__(self, messages: list[bytes]):
+        self._messages = messages
+
+    def search(self, charset, criteria):
+        keyword = re.search(r'FROM "([^"]+)"', criteria).group(1).lower()
+        ids = [
+            str(i + 1).encode()
+            for i, raw in enumerate(self._messages)
+            if keyword in message_from_bytes(raw).get("From", "").lower()
+        ]
+        return "OK", [b" ".join(ids)]
+
+    def fetch(self, msg_id, parts):
+        raw = self._messages[int(msg_id) - 1]
+        return "OK", [(msg_id + b" (RFC822 {%d}" % len(raw), raw), b")"]
+
+
+class _FakeSession:
+    def __init__(self, mailbox: _FakeMailbox):
+        self._mailbox = mailbox
+
+    async def __aenter__(self):
+        return self._mailbox
+
+    async def __aexit__(self, *exc):
+        return None
+
+
+class TestFetchTransactionsForPattern:
+    def test_banco_bci_mail_is_not_imported_as_mach(self, monkeypatch):
+        """Only the MACH email lands; the Banco BCI one beside it is left alone."""
+        mailbox = _FakeMailbox([
+            _synthetic_mail(
+                "MACH <notificaciones@somosmach.com>",
+                "Compra aprobada",
+                "Compraste en Comercio de Prueba por $ 999.999.",
+                "<synthetic-mach@example.test>",
+            ),
+            _synthetic_mail(
+                "Bci <notificaciones@bci.cl>",
+                "Comprobante de transferencia",
+                "Transferiste $ 1.000.000 a Cuenta de Prueba.",
+                "<synthetic-bci@example.test>",
+            ),
+        ])
+        monkeypatch.setattr(
+            email_backend, "get_session", lambda: _FakeSession(mailbox)
+        )
+
+        transactions = asyncio.run(
+            email_backend.fetch_transactions_for_pattern(MACH_PATTERN)
+        )
+
+        assert {t.amount for t in transactions} == {-999_999}
