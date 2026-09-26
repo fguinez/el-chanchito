@@ -181,8 +181,8 @@ products ──────────────┘      product_snapshots (h
   parent_product_id FK (self:   balance NUMERIC(20,8) -- headline
     debit->checking,            metrics JSONB ('{}' pre-V011)
     línea->cta.cte.)            as_of (unique w/ product_id)
-  kind (checking|savings|       source
-    vista|wallet|term_deposit|
+  kind (checking|savings|       source (scraper|manual|
+    vista|wallet|term_deposit|    derived|wealth_snapshot)
     credit_card|debit_card|
     prepaid_card|line_of_credit|
     loan|mortgage|investment|
@@ -287,7 +287,8 @@ apps/scrapers/scrapers/
     banchile_movements.py  # BdC movements + the shared session -> fetch_session()
     bci_lider_web.py       # real Chrome over CDP -> scrape_card() / save_login_session()
   institutions/
-    mach.py  mercadopago.py  tenpo.py       -> consume backends/email
+    mach.py  tenpo.py                       -> consume backends/email
+    mercadopago.py                           -> backends/email (tx) + REST API (balance)
     banchile.py                              -> banchile_movements (one login: tx + balances)
     bci_lider.py                             -> bci_lider_web (one CDP drive: tx + balances)
     buda.py  fintual.py                      -> self-contained (HTTP APIs)
@@ -441,7 +442,7 @@ shallow-merges `attributes`, always refreshes
 | `buda` | `http_api` | REST API | HMAC-SHA384 signed requests | 1h |
 | `banchile` | `web` | Browser (Playwright: `banchile_web` + `banchile_movements`) | RUT + password | 24h |
 | `mach` | `email` | IMAP (Gmail) | Shared IMAP session | 30m |
-| `mercadopago` | `email` | IMAP (Gmail) | Shared IMAP session | 30m |
+| `mercadopago` | `email`, or `http_api` with a token | IMAP (Gmail) for movements; REST API (`/users/{id}/mercadopago_account/balance`) for the balance | Shared IMAP session + `MERCADOPAGO_ACCESS_TOKEN` | 30m |
 | `tenpo` | `email` | IMAP (Gmail) | Shared IMAP session | 30m |
 | `bci_lider` | `web` | Real Chrome over CDP (`bci_lider_web`) | Autofill in a real Chrome (managed by default; reuse via `LIDER_BCI_CDP_URL` + `make bci-lider-login`; Cloudflare Turnstile) | 24h |
 
@@ -479,6 +480,42 @@ it to one email:
 
 The synthetic corpus in `apps/scrapers/tests/fixtures/emails/` drives
 table-driven tests of that behaviour per institution.
+
+### Wallet balances
+
+Notification e-mails carry movements, not balances, so the e-mail scrapers
+alone would leave the wallets' balances frozen (or never set) and the wealth
+series flat for them (#10). Each wallet gets a balance source of its own:
+
+| Wallet | Balance source | Why |
+|---|---|---|
+| `mercadopago` | **API**: Mercado Pago's REST API, read by the scraper's products leg when `MERCADOPAGO_ACCESS_TOKEN` is set | The only wallet with an official API. `GET /users/me` yields the owner's id, then `GET /users/{id}/mercadopago_account/balance` gives `available_balance`, written as a `wallet` observation on the same product the e-mail movements use. With the token set the run is recorded as `http_api` (the balance is its authoritative leg); movements still come from the inbox when IMAP is configured, and a token alone enables the scraper with only the balance leg. |
+| `mach`, `tenpo` | **Manual**: entered from the product page (`POST /api/institutions/{slug}/products/{product}/balance`) | No public API. |
+
+Two options were weighed and left out for now:
+
+- **Balance-bearing e-mails** (an optional balance regex on `EmailPattern`): no
+  notification format carrying a "saldo disponible" has been confirmed, and a
+  balance read from a days-old e-mail inside the lookback window would
+  overwrite a newer manual entry unless the writer learned to compare
+  observation times. Worth revisiting once a redacted sample confirms a format.
+- **A derived running balance** (last known balance + Σ movements since): it
+  drifts with every e-mail the parser misses or misreads, and the e-mail
+  backend still books every movement as an expense (#11). `derived` stays
+  reserved in the `source` vocabulary for when the movements are trustworthy.
+
+`product_snapshots.source` records where each history row came from:
+`scraper` (the Python writer), `manual` (a balance typed into the dashboard),
+`derived` (reserved, see above) and `wealth_snapshot` (V009's backfill of the
+legacy totals). The dashboard labels it in each product's history. Every source
+feeds `/api/wealth` alike, and the latest observation wins: a manual entry
+always appends a history row (an explicit confirmation counts even when the
+value is unchanged) and refreshes the product's `current_balance`/`metrics`/
+`balance_as_of` right away, and a later scraper reading that differs replaces
+it (the writer compares against the product's latest metrics, whatever wrote
+them, and locks the row while it does). Manual entry is
+limited to kinds whose whole metrics payload is one balance (today `wallet`),
+so it can never fabricate the rest of a richer observation.
 
 ### Product model
 

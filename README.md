@@ -38,7 +38,7 @@ make scrapers-start   # long-running, each scraper on its own schedule
 make fintual-login    # one-time Fintual sign-in (e-mail 2FA, session cached)
 ```
 
-A scraper is enabled only when all of its credentials are present. See [USAGE.md](USAGE.md) for the full guide: dashboard pages, daily and monthly workflows, CSV import, category auto-assignment, and the API reference.
+A scraper is enabled only when all of its credentials are present (Mercado Pago needs either the IMAP credentials or its access token). See [USAGE.md](USAGE.md) for the full guide: dashboard pages, daily and monthly workflows, CSV import, category auto-assignment, and the API reference.
 
 ## Configuration
 
@@ -48,6 +48,7 @@ A scraper is enabled only when all of its credentials are present. See [USAGE.md
 | `BANCHILE_RUT` | no | Banco de Chile RUT; enables the BanChile scraper (Playwright) |
 | `FINTUAL_EMAIL` | no | Fintual account e-mail; enables the Fintual scraper (run `make fintual-login` once) |
 | `EMAIL_IMAP_HOST` / `EMAIL_IMAP_USER` | no | Gmail IMAP identifiers; enable the e-mail parsers (MACH, MercadoPago, Tenpo) |
+| `chanchito.MERCADOPAGO_ACCESS_TOKEN` | no | Mercado Pago access token; refreshes the Mercado Pago wallet balance from its REST API (MACH and Tenpo balances are entered by hand; see [USAGE.md](USAGE.md#wallet-balances-mercado-pago-mach-tenpo)) |
 | `chanchito.*` | scrapers only | Secrets (bank passwords, Buda API keys, Gmail App Password) live in the macOS Keychain: `make secrets-init` / `make secrets-status`. On non-macOS hosts, export them as env vars instead |
 
 ## Development
