@@ -11,7 +11,7 @@
 --
 -- A rule matches when its keyword is a case-insensitive LITERAL substring of
 -- the description (strpos, not LIKE/ILIKE, so `%` and `_` match themselves).
--- Empty keywords never match. The highest priority wins; ties go to the oldest
+-- Blank keywords never match. The highest priority wins; ties go to the oldest
 -- rule, then the lowest id, so the result is deterministic.
 --
 -- Rules only fill in missing categories: a row that arrives with a category, or
@@ -28,7 +28,7 @@ STABLE
 AS $$
   SELECT r.category_id
   FROM category_rules r
-  WHERE r.keyword <> ''
+  WHERE btrim(r.keyword) <> ''
     AND strpos(lower(txn_description), lower(r.keyword)) > 0
   ORDER BY r.priority DESC, r.created_at ASC, r.id ASC
   LIMIT 1

@@ -189,7 +189,7 @@ describe("normalizeKeyword", () => {
     );
   });
 
-  it("keeps LIKE wildcards as plain characters", () => {
+  it("does not escape % or _", () => {
     expect(expectValue(normalizeKeyword("50%_OFF"))).toBe("50%_off");
   });
 

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { and, asc, count, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
+import { asc, count, desc, isNotNull, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { categories, categoryRules, transactions } from "@/lib/db/schema";
 import { validateCategoryInput } from "@/lib/categories";
@@ -91,18 +91,24 @@ export async function POST(request: NextRequest) {
  */
 export async function PUT() {
   try {
-    const matched = sql<string | null>`category_for_description(${transactions.description})`;
-    const updated = await db
-      .update(transactions)
-      .set({ categoryId: matched, updatedAt: new Date() })
-      .where(
-        and(
-          isNull(transactions.categoryId),
-          eq(transactions.isManuallyCategorized, false),
-          isNotNull(matched)
-        )
+    // MATERIALIZED keeps Postgres from inlining the CTE, so the function runs
+    // once per row; the outer conditions are re-checked on rows another
+    // writer changed in the meantime.
+    const updated = await db.execute(sql`
+      WITH m AS MATERIALIZED (
+        SELECT id, category_for_description(description) AS category_id
+        FROM transactions
+        WHERE category_id IS NULL AND NOT is_manually_categorized
       )
-      .returning({ id: transactions.id });
+      UPDATE transactions t
+      SET category_id = m.category_id, updated_at = now()
+      FROM m
+      WHERE t.id = m.id
+        AND m.category_id IS NOT NULL
+        AND t.category_id IS NULL
+        AND NOT t.is_manually_categorized
+      RETURNING t.id
+    `);
 
     return NextResponse.json({ assigned: updated.length });
   } catch (error) {

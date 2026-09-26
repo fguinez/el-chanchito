@@ -54,7 +54,8 @@ export async function GET(request: NextRequest) {
         .where(matches)
         .orderBy(
           desc(transactions.transactionDate),
-          desc(transactions.createdAt)
+          desc(transactions.createdAt),
+          desc(transactions.id)
         )
         .limit(PREVIEW_LIMIT),
     ]);
