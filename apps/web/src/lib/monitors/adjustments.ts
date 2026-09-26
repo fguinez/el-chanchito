@@ -1,9 +1,11 @@
-// Monitor adjustments ("variaciones"): request validation and the API shape.
-// Pure (no db, no next imports) like validate.ts; how an adjustment moves the
-// thresholds lives in evaluate.ts (adjustmentOnDate).
+// Monitor adjustments ("variaciones"): request validation, the API shape, and
+// the per-day grouping the monitor page renders. Pure (no db, no next
+// imports) like validate.ts; how an adjustment moves the thresholds lives in
+// evaluate.ts (adjustmentOnDate).
 
 import type { monitorAdjustments } from "@/lib/db/schema";
 import { isValidDay } from "./dates";
+import type { MonitorAdjustment } from "./types";
 import type { ValidationFailure, ValidationResult } from "./validate";
 
 /** An adjustment write, validated and normalized. Create mode returns every
@@ -144,4 +146,36 @@ export function toApiAdjustment(
   row: MonitorAdjustmentRow
 ): ApiMonitorAdjustment {
   return { ...row, amount: Number(row.amount) };
+}
+
+export type AdjustmentDay<A extends MonitorAdjustment> = {
+  adjustmentDate: string;
+  /** That day's adjustments, in the order given. */
+  entries: A[];
+  dayTotal: number;
+  /** Month-to-date sum through this day: what every threshold carries from
+   *  this day until the next adjustment day (see adjustmentOnDate). */
+  runningTotal: number;
+};
+
+/** One month's (YYYY-MM) adjustments grouped per day, oldest day first. */
+export function groupAdjustmentsByDay<A extends MonitorAdjustment>(
+  adjustments: readonly A[],
+  month: string
+): AdjustmentDay<A>[] {
+  const byDay = new Map<string, A[]>();
+  for (const adjustment of adjustments) {
+    if (!adjustment.adjustmentDate.startsWith(`${month}-`)) continue;
+    const entries = byDay.get(adjustment.adjustmentDate) ?? [];
+    entries.push(adjustment);
+    byDay.set(adjustment.adjustmentDate, entries);
+  }
+
+  let runningTotal = 0;
+  return [...byDay.keys()].sort().map((adjustmentDate) => {
+    const entries = byDay.get(adjustmentDate)!;
+    const dayTotal = entries.reduce((sum, a) => sum + a.amount, 0);
+    runningTotal += dayTotal;
+    return { adjustmentDate, entries, dayTotal, runningTotal };
+  });
 }

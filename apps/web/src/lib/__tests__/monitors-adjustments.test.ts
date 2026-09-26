@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  groupAdjustmentsByDay,
   parseMonthParam,
   toApiAdjustment,
   validateAdjustmentInput,
@@ -147,5 +148,39 @@ describe("toApiAdjustment", () => {
     });
     expect(adjustment.amount).toBe(-50000);
     expect(adjustment.adjustmentDate).toBe("2026-07-15");
+  });
+});
+
+describe("groupAdjustmentsByDay", () => {
+  const adjustments = [
+    { id: "a", adjustmentDate: "2026-07-15", amount: -50000 },
+    { id: "b", adjustmentDate: "2026-07-03", amount: 30000 },
+    { id: "c", adjustmentDate: "2026-07-15", amount: 10000 },
+    { id: "d", adjustmentDate: "2026-08-01", amount: 999999 },
+  ];
+
+  it("sums same-day adjustments and carries a month-to-date total", () => {
+    const days = groupAdjustmentsByDay(adjustments, "2026-07");
+    expect(
+      days.map((d) => ({
+        date: d.adjustmentDate,
+        ids: d.entries.map((e) => e.id),
+        dayTotal: d.dayTotal,
+        runningTotal: d.runningTotal,
+      }))
+    ).toEqual([
+      { date: "2026-07-03", ids: ["b"], dayTotal: 30000, runningTotal: 30000 },
+      {
+        date: "2026-07-15",
+        ids: ["a", "c"],
+        dayTotal: -40000,
+        runningTotal: -10000,
+      },
+    ]);
+  });
+
+  it("keeps only the requested month", () => {
+    expect(groupAdjustmentsByDay(adjustments, "2026-08")).toHaveLength(1);
+    expect(groupAdjustmentsByDay(adjustments, "2026-09")).toEqual([]);
   });
 });
