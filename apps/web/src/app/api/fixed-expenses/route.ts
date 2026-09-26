@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { fixedExpenses } from "@/lib/db/schema";
+import { DEFAULT_SHARED_RATIO } from "@/lib/fixed-expenses";
 import { eq, isNull, or, gte } from "drizzle-orm";
 import { withJsonBody } from "@/lib/api/validation";
 import {
@@ -33,7 +34,9 @@ export const POST = withJsonBody(createFixedExpenseSchema, async (body) => {
       name,
       amount,
       isShared: isShared ?? false,
-      sharedRatio: isShared ? (sharedRatio?.toString() ?? "0.6900") : null,
+      sharedRatio: isShared
+        ? (sharedRatio?.toString() ?? DEFAULT_SHARED_RATIO)
+        : null,
       activeFrom: activeFrom ?? null,
       activeTo: activeTo ?? null,
     })

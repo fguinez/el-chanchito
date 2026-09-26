@@ -19,6 +19,7 @@ import {
 import { SortableTableHead } from "@/components/ui/sortable-table-head";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { DEFAULT_SHARED_RATIO } from "@/lib/fixed-expenses";
 import { useSortableData } from "@/lib/use-sortable-data";
 import { formatCLP, parseNumberInput } from "@/lib/utils";
 import { calcPersonalAmount } from "@/lib/budget-engine";
@@ -39,7 +40,9 @@ export default function FixedExpensesPage() {
   const [name, setName] = useState("");
   const [amount, setAmount] = useState("");
   const [isShared, setIsShared] = useState(false);
-  const [sharedRatio, setSharedRatio] = useState("0.69");
+  const [sharedRatio, setSharedRatio] = useState(
+    String(parseFloat(DEFAULT_SHARED_RATIO))
+  );
   const [saving, setSaving] = useState(false);
 
   const loadExpenses = () => {
