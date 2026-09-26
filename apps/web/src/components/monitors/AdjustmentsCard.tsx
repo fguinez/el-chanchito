@@ -100,17 +100,20 @@ async function writeError(res: Response): Promise<string> {
  * The monitor's variaciones for one month: add, edit and delete them. Every
  * variación adds its amount to all thresholds from its day to the end of the
  * month; same-day entries show their summed total. `onChanged` runs after
- * each write so the page refetches the evaluation, the chart and this list.
+ * each write so the page refetches the evaluation, the chart and this list;
+ * `refreshing` is true while that refetch is in flight.
  */
 export function AdjustmentsCard({
   monitorId,
   currency,
   adjustments,
+  refreshing,
   onChanged,
 }: {
   monitorId: string;
   currency: string;
   adjustments: ApiAdjustment[];
+  refreshing: boolean;
   onChanged: () => void;
 }) {
   const today = formatLocalDate(new Date());
@@ -129,6 +132,12 @@ export function AdjustmentsCard({
   const [rowError, setRowError] = useState<string | null>(null);
 
   const days = groupAdjustmentsByDay(adjustments, month);
+  const busy = adding || savingEdit || refreshing;
+
+  function showMonth(next: string) {
+    cancelEdit();
+    setMonth(next);
+  }
   const monthTotal = days.length > 0 ? days[days.length - 1].runningTotal : 0;
   const baseUrl = `/api/monitors/${monitorId}/adjustments`;
 
@@ -150,7 +159,7 @@ export function AdjustmentsCard({
         setAddError(await writeError(res));
         return;
       }
-      setDraft({ ...draft, amount: "", description: "" });
+      setDraft((d) => ({ ...d, amount: "", description: "" }));
       // Show the month the new variación landed in.
       setMonth(parsed.body.adjustmentDate.slice(0, 7));
       onChanged();
@@ -194,6 +203,8 @@ export function AdjustmentsCard({
       });
       if (!res.ok) {
         setRowError(await writeError(res));
+        // Deleted meanwhile: refetch so the stale row goes away.
+        if (res.status === 404) onChanged();
         return;
       }
       cancelEdit();
@@ -214,7 +225,6 @@ export function AdjustmentsCard({
         method: "DELETE",
       });
       if (!res.ok && res.status !== 404) throw new Error("failed");
-      if (editingId === adjustment.id) cancelEdit();
       onChanged();
     } catch {
       setRowError("No se pudo eliminar la variación.");
@@ -237,7 +247,7 @@ export function AdjustmentsCard({
               variant="ghost"
               size="icon-sm"
               aria-label="Mes anterior"
-              onClick={() => setMonth(shiftMonth(month, -1))}
+              onClick={() => showMonth(shiftMonth(month, -1))}
             >
               <ChevronLeft />
             </Button>
@@ -248,14 +258,18 @@ export function AdjustmentsCard({
               variant="ghost"
               size="icon-sm"
               aria-label="Mes siguiente"
-              onClick={() => setMonth(shiftMonth(month, 1))}
+              onClick={() => showMonth(shiftMonth(month, 1))}
             >
               <ChevronRight />
             </Button>
           </div>
         </CardAction>
       </CardHeader>
-      <CardContent className="space-y-4">
+      <CardContent
+        className={
+          refreshing ? "space-y-4 opacity-60 transition-opacity" : "space-y-4"
+        }
+      >
         <div className="flex flex-wrap items-end gap-3">
           <div className="w-40">
             <label
@@ -306,7 +320,7 @@ export function AdjustmentsCard({
               placeholder="Ej: Reembolso del seguro"
             />
           </div>
-          <Button onClick={handleAdd} disabled={adding}>
+          <Button onClick={handleAdd} disabled={busy}>
             {adding ? "Guardando..." : "Agregar variación"}
           </Button>
         </div>
@@ -335,6 +349,11 @@ export function AdjustmentsCard({
                     {day.entries.map((adjustment, index) => {
                       const editing =
                         editingId === adjustment.id && editDraft != null;
+                      const label = `del ${formatPlainDateEs(day.adjustmentDate)}${
+                        adjustment.description
+                          ? ` (${adjustment.description})`
+                          : ""
+                      }`;
                       const span = day.entries.length;
                       // Shared day cells sit at the top of a multi-entry day.
                       const spanAlign = span > 1 ? "align-top" : "";
@@ -428,7 +447,7 @@ export function AdjustmentsCard({
                                   variant="ghost"
                                   size="icon-xs"
                                   aria-label="Guardar"
-                                  disabled={savingEdit}
+                                  disabled={busy}
                                   onClick={handleSaveEdit}
                                 >
                                   <Check />
@@ -447,7 +466,8 @@ export function AdjustmentsCard({
                                 <Button
                                   variant="ghost"
                                   size="icon-xs"
-                                  aria-label="Editar variación"
+                                  aria-label={`Editar variación ${label}`}
+                                  disabled={busy}
                                   onClick={() => startEdit(adjustment)}
                                 >
                                   <Pencil />
@@ -455,8 +475,9 @@ export function AdjustmentsCard({
                                 <Button
                                   variant="ghost"
                                   size="icon-xs"
-                                  aria-label="Eliminar variación"
+                                  aria-label={`Eliminar variación ${label}`}
                                   className="hover:text-destructive"
+                                  disabled={busy}
                                   onClick={() => handleDelete(adjustment)}
                                 >
                                   <Trash2 />

@@ -193,6 +193,19 @@ describe("groupAdjustmentsByDay", () => {
     ]);
   });
 
+  it("rounds the sums to the stored 8 decimals", () => {
+    const fractional = [
+      { adjustmentDate: "2026-07-01", amount: 0.1 },
+      { adjustmentDate: "2026-07-01", amount: 0.2 },
+      { adjustmentDate: "2026-07-02", amount: -0.3 },
+    ];
+    const days = groupAdjustmentsByDay(fractional, "2026-07");
+    expect(days.map((d) => [d.dayTotal, d.runningTotal])).toEqual([
+      [0.3, 0.3],
+      [-0.3, 0],
+    ]);
+  });
+
   it("keeps only the requested month", () => {
     expect(groupAdjustmentsByDay(adjustments, "2026-08")).toHaveLength(1);
     expect(groupAdjustmentsByDay(adjustments, "2026-09")).toEqual([]);

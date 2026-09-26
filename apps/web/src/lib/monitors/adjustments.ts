@@ -182,11 +182,13 @@ export function groupAdjustmentsByDay<A extends MonitorAdjustment>(
     byDay.set(adjustment.adjustmentDate, entries);
   }
 
+  // Sums go back to the stored 8-decimal scale, like adjustmentOnDate.
+  const round = (value: number) => Number(value.toFixed(AMOUNT_DECIMALS));
   let runningTotal = 0;
   return [...byDay.keys()].sort().map((adjustmentDate) => {
     const entries = byDay.get(adjustmentDate)!;
-    const dayTotal = entries.reduce((sum, a) => sum + a.amount, 0);
-    runningTotal += dayTotal;
+    const dayTotal = round(entries.reduce((sum, a) => sum + a.amount, 0));
+    runningTotal = round(runningTotal + dayTotal);
     return { adjustmentDate, entries, dayTotal, runningTotal };
   });
 }

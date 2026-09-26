@@ -1,7 +1,8 @@
 // DB-aware loaders for the monitors API: the product catalog the expression
 // engine resolves references against, the snapshot rows history replay
-// consumes, and each monitor's adjustments. This is the only monitors module that touches the database; the
-// engine and the validators stay pure and unit-testable.
+// consumes, and each monitor's adjustments. This is the only monitors module
+// that touches the database; the engine and the validators stay pure and
+// unit-testable.
 
 import { asc, eq, inArray } from "drizzle-orm";
 import { db } from "@/lib/db";

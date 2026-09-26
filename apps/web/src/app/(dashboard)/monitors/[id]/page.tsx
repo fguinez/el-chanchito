@@ -92,8 +92,9 @@ export default function MonitorDetailPage() {
   // when a variación changes the thresholds.
   const query = rangeQuery(chart.x.range);
   useEffect(() => {
+    // A reload counts as handled only once its data lands, so a drag that
+    // cancels the fetch mid-flight still refetches on the next run.
     const reload = reloadKey !== handledReload.current;
-    handledReload.current = reloadKey;
     const fetchQuery = query ?? (reload ? lastQuery.current : null);
     if (fetchQuery == null) {
       // A dragged window re-frames the loaded data; also drop any in-flight
@@ -115,7 +116,9 @@ export default function MonitorDetailPage() {
         return res.json();
       })
       .then((data: MonitorDetail) => {
-        if (!cancelled) setMonitor(data);
+        if (cancelled) return;
+        handledReload.current = reloadKey;
+        setMonitor(data);
       })
       .catch(() => {
         if (!cancelled) setError(true);
@@ -402,6 +405,7 @@ export default function MonitorDetailPage() {
         monitorId={monitor.id}
         currency={monitor.currency}
         adjustments={monitor.adjustments}
+        refreshing={historyLoading}
         onChanged={() => setReloadKey((key) => key + 1)}
       />
 
