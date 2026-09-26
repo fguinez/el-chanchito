@@ -16,6 +16,9 @@ import {
   validateLegacySnapshot,
 } from "@/lib/wealth";
 
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /** GET /api/wealth: the wealth series with derived metrics (see lib/wealth). */
 export async function GET() {
   const rates = await getClpRates();
@@ -99,9 +102,19 @@ export async function POST(request: NextRequest) {
   return NextResponse.json(created, { status: 201 });
 }
 
-/** DELETE /api/wealth: delete a legacy snapshot (computed points are derived) */
+/** DELETE /api/wealth: delete a legacy snapshot by id (computed points are
+ *  derived; 400 for them or a malformed id, 404 for an unknown one). */
 export async function DELETE(request: NextRequest) {
-  const { id } = await request.json();
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+  const id =
+    typeof body === "object" && body !== null && "id" in body
+      ? body.id
+      : undefined;
 
   if (!id) {
     return NextResponse.json({ error: "Missing id" }, { status: 400 });
@@ -112,7 +125,16 @@ export async function DELETE(request: NextRequest) {
       { status: 400 }
     );
   }
+  if (typeof id !== "string" || !UUID_RE.test(id)) {
+    return NextResponse.json({ error: "Invalid id" }, { status: 400 });
+  }
 
-  await db.delete(wealthSnapshots).where(eq(wealthSnapshots.id, id));
+  const deleted = await db
+    .delete(wealthSnapshots)
+    .where(eq(wealthSnapshots.id, id))
+    .returning({ id: wealthSnapshots.id });
+  if (deleted.length === 0) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
   return NextResponse.json({ ok: true });
 }

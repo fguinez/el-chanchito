@@ -7,8 +7,9 @@ import { wealthSnapshots } from "@/lib/db/schema";
 // the product observations after it, the body goes through
 // validateLegacySnapshot, and a duplicate date is a conflict rather than an
 // overwrite. The db is a stub that answers the queries POST issues:
-// `select ... from` (max(snapshot_date), or every snapshot's asOf/source)
-// and `insert ... onConflictDoNothing ... returning`.
+// `select ... from` (max(snapshot_date), or every snapshot's asOf/source),
+// `insert ... onConflictDoNothing ... returning` and
+// `delete ... where ... returning`.
 
 type SnapshotRow = { asOf: Date; source: string };
 
@@ -16,6 +17,7 @@ const lastLegacyDate = vi.fn<() => string | null>();
 const snapshotRows = vi.fn<() => SnapshotRow[]>();
 const insertValues = vi.fn();
 const insertReturning = vi.fn<() => unknown[]>();
+const deleteReturning = vi.fn<() => unknown[]>();
 
 vi.mock("@/lib/db", () => ({
   db: {
@@ -35,26 +37,34 @@ vi.mock("@/lib/db", () => ({
         };
       },
     }),
+    delete: () => ({
+      where: () => ({ returning: async () => deleteReturning() }),
+    }),
   },
 }));
 
-const { POST } = await import("@/app/api/wealth/route");
+const { POST, DELETE } = await import("@/app/api/wealth/route");
 
-function postRequest(body: string) {
+function request(method: "POST" | "DELETE", body: string) {
   return new NextRequest(new URL("http://localhost:3000/api/wealth"), {
-    method: "POST",
+    method,
     headers: { "content-type": "application/json" },
     body,
   });
 }
 
+const postRequest = (body: string) => request("POST", body);
 const post = (body: unknown) => POST(postRequest(JSON.stringify(body)));
+const del = (body: unknown) => DELETE(request("DELETE", JSON.stringify(body)));
+
+const LEGACY_ID = "44444444-4444-4444-8444-444444444444";
 
 beforeEach(() => {
   lastLegacyDate.mockReset();
   snapshotRows.mockReset();
   insertValues.mockReset();
   insertReturning.mockReset();
+  deleteReturning.mockReset();
   // Legacy history ends on 2026-03-01; real scraping after it starts on
   // 2026-04-10. The earlier rows must not move the cutoff: a pre-migration
   // scraper row and a backfill row left behind after the legacy date.
@@ -65,6 +75,7 @@ beforeEach(() => {
     { asOf: new Date(2026, 3, 10, 10), source: "scraper" },
   ]);
   insertReturning.mockReturnValue([{ id: "legacy-row-id" }]);
+  deleteReturning.mockReturnValue([{ id: LEGACY_ID }]);
   // The cutoff is also capped at today, so pin the clock.
   vi.useFakeTimers();
   vi.setSystemTime(new Date(2026, 5, 15, 12));
@@ -173,5 +184,32 @@ describe("POST /api/wealth", () => {
       });
       expect(response.status).toBe(201);
     });
+  });
+});
+
+describe("DELETE /api/wealth", () => {
+  it("deletes a legacy snapshot by id", async () => {
+    const response = await del({ id: LEGACY_ID });
+
+    expect(response.status).toBe(200);
+  });
+
+  it.each([
+    ["invalid JSON", "{"],
+    ["a missing id", JSON.stringify({})],
+    ["a computed point", JSON.stringify({ id: "computed-2026-04-10" })],
+    ["a malformed id", JSON.stringify({ id: "not-a-uuid" })],
+  ])("answers 400 for %s", async (_label, body) => {
+    const response = await DELETE(request("DELETE", body));
+
+    expect(response.status).toBe(400);
+  });
+
+  it("answers 404 for an unknown id", async () => {
+    deleteReturning.mockReturnValue([]);
+
+    const response = await del({ id: LEGACY_ID });
+
+    expect(response.status).toBe(404);
   });
 });
