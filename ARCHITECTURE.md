@@ -719,6 +719,7 @@ downloads a Playwright browser; no test launches one.
 | Frontend | Next.js 16 (App Router) + React 19 + TypeScript |
 | UI | Tailwind CSS 4 + shadcn/ui (New York) + Recharts |
 | ORM | Drizzle ORM |
+| API validation | zod (request bodies and query strings, `lib/api`) |
 | Database | PostgreSQL 16 (Alpine) |
 | Scrapers | Python 3.12 + httpx + Playwright + APScheduler |
 | DB Driver (Python) | psycopg3 + psycopg-pool |
@@ -750,6 +751,7 @@ el-chanchito/
 │   │   │   │   ├── layout/           # Sidebar
 │   │   │   │   └── ui/              # shadcn components
 │   │   │   └── lib/
+│   │   │       ├── api/             # zod request schemas + 400 helpers
 │   │   │       ├── monitors/        # Monitor engine + variaciones
 │   │   │       ├── budget-engine.ts  # Wealth + shared-expense helpers
 │   │   │       ├── db/              # Drizzle schema + connection

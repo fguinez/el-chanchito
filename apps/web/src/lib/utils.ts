@@ -14,6 +14,14 @@ export function formatCLP(amount: number): string {
   }).format(amount);
 }
 
+/** The number typed into a form input, or null when it is blank or not a
+ *  finite number (parseInt would give NaN, which JSON sends as null). */
+export function parseNumberInput(value: string): number | null {
+  if (value.trim() === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 /** Format an amount in an arbitrary currency: CLP as pesos, anything else
  *  (crypto, foreign) as a trimmed decimal followed by its currency code. */
 export function formatAmount(currency: string, amount: number): string {

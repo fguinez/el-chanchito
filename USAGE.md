@@ -284,7 +284,9 @@ SCRAPER_CONTROL_URL=http://localhost:8080 make dev-web
 6. Preview the first 5 rows
 7. Click **Importar**
 
-Supported date formats: `DD/MM/YYYY`, `DD-MM-YYYY`, `YYYY-MM-DD`
+Supported date formats: `DD/MM/YYYY`, `DD-MM-YYYY`, `YYYY-MM-DD`, `YYYY/MM/DD`
+(a trailing time is ignored). Rows with any other date are skipped and counted
+under **Omitidos**.
 
 Amounts: handles `1.234` (Chilean thousands separator) and `-1.234,56`
 
@@ -332,6 +334,14 @@ When `DASHBOARD_PASSWORD` is set, every route above except the three marked
 public (`/api/auth/login`, `/api/auth/logout`, `/api/auth/session`) answers `401`
 without a valid session. Mutating requests are additionally rejected with `403`
 when they look cross-origin, logout included.
+
+Request bodies and query strings are validated before anything touches the
+database. An empty or malformed JSON body answers `400 {"error": "Invalid JSON body"}`;
+a body or query string that fails its schema answers `400` with `error` (the
+first problem, prefixed by its field), `field`, and `issues` (every problem as
+`{ path, message }`). Dates are `YYYY-MM-DD`, ids are uuids, amounts are numbers
+rounded to whole pesos (`0` included), and `kind` and transfer `status` must be
+one of the values the schema defines.
 
 ## Deployment
 

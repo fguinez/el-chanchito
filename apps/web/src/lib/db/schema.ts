@@ -291,6 +291,11 @@ export const fixedExpenses = pgTable("fixed_expenses", {
     .defaultNow(),
 });
 
+// Internal transfer lifecycle. The column has no CHECK constraint (V004), so
+// the API validates against this list.
+export const TRANSFER_STATUSES = ["pending", "resolved"] as const;
+export type TransferStatus = (typeof TRANSFER_STATUSES)[number];
+
 // Internal transfers (between products)
 export const internalTransfers = pgTable("internal_transfers", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -299,7 +304,7 @@ export const internalTransfers = pgTable("internal_transfers", {
   fromProductId: uuid("from_product_id").references(() => products.id),
   toProductId: uuid("to_product_id").references(() => products.id),
   transferDate: date("transfer_date").notNull(),
-  status: text("status").notNull().default("pending"),
+  status: text("status").$type<TransferStatus>().notNull().default("pending"),
   notes: text("notes"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()

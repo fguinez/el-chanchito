@@ -20,7 +20,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useSortableData } from "@/lib/use-sortable-data";
-import { formatCLP } from "@/lib/utils";
+import { formatCLP, parseNumberInput } from "@/lib/utils";
 import { CsvImport } from "@/components/dashboard/CsvImport";
 
 interface Transaction {
@@ -58,7 +58,8 @@ export default function ExpensesPage() {
   }, []);
 
   const handleAdd = async () => {
-    if (!description || !amount) return;
+    const parsedAmount = parseNumberInput(amount);
+    if (!description || parsedAmount === null) return;
 
     setSaving(true);
     try {
@@ -67,7 +68,7 @@ export default function ExpensesPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           description,
-          amount: -Math.abs(parseInt(amount)), // expenses are negative
+          amount: -Math.abs(Math.round(parsedAmount)), // expenses are negative
           transactionDate,
         }),
       });
