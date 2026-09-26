@@ -371,6 +371,24 @@ yields the Nacionales (CLP) charges, paged. Figures are anchored on their
 `$`/`US$` labels (a drift records nothing rather than a wrong number), and USD
 balances convert to CLP via lib/rates' multi-currency FX.
 
+Buda reads two signed REST surfaces (issue #3). Balances cover every wallet:
+one `crypto` product per currency, `units` kept fractional. Transactions cover
+**CLP deposits and withdrawals only**, minus annulled or rejected ones, paged
+through `meta.total_pages` (capped at 20 pages of 50 per direction, with a
+warning past that). Crypto movements
+are deliberately not imported: `transactions.amount` is integer CLP, and a
+crypto movement has no CLP amount unless it is priced at its date, which would
+need a historical price source. Crypto value history comes from the balance
+snapshots instead, converted at lib/rates' current tickers like every other
+crypto figure. A non-CLP amount that still reaches the parser is skipped with a
+warning, never truncated. Every Buda `ScrapedTransaction` carries
+`currency="CLP"` and the same `crypto` kind as the balances, so CLP movements
+attach to the CLP balance product. That product stays `crypto` rather than
+`wallet`: re-kinding it would change its identity and metrics shape (`units` to
+`balance`) under its snapshot history and any monitor bound to it, and a CLP
+`units` figure already converts 1:1. V020 deleted the crypto movements the old
+scraper had truncated and stored on it as pesos.
+
 **Balance conventions & net worth** are registry-driven: each kind's `role`
 (asset/liability/none) and `balance_convention` (value/available/owed/units)
 live in `packages/product-model` — see `packages/product-model/PRODUCTS.md`
@@ -452,7 +470,7 @@ data without direct DB access.
 Transactions are deduplicated via `UNIQUE(product_id, external_id)`:
 
 - Fintual: no transactions (balance-only)
-- Buda: `buda_{deposit/withdrawal_id}`
+- Buda: `buda_{deposit/withdrawal_id}` (CLP movements only)
 - BanChile: the bank's own operation id where the portal exposes one, else a
   description-free fingerprint (issue #57). Three forms, each greppable:
   - `bch_op_{transaccionId}`: a checking movement's "ID Transacción", read
