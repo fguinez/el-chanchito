@@ -8,6 +8,8 @@ fabricated (see the repo's personal-data policy).
 """
 
 import datetime
+from contextlib import contextmanager
+from unittest.mock import MagicMock
 
 from scrapers.backends import banchile_movements as movements_mod
 from scrapers.backends.banchile_movements import (
@@ -28,6 +30,7 @@ from scrapers.backends.banchile_movements import (
     parse_unbilled_movements,
     statement_dates,
 )
+from scrapers.backends.banchile_web import BalanceFetchResult
 
 # --- Synthetic payload builders ------------------------------------------------
 
@@ -678,3 +681,41 @@ class TestCartolaAccountNumber:
     def test_empty_payloads(self):
         assert cartola_account_number({"movimientos": []}) == ""
         assert cartola_account_number(None) == ""
+
+
+class TestSharedSession:
+    """`_session_sync` authenticates through banchile_web's session cache."""
+
+    def test_both_reads_run_inside_the_cached_session(self, monkeypatch):
+        events = []
+        page = MagicMock()
+
+        @contextmanager
+        def authenticated_session(browser, rut, password):
+            events.append("authenticated")
+            yield page
+            events.append("session saved")
+
+        @contextmanager
+        def sync_playwright():
+            yield MagicMock()
+
+        def read_products(p):
+            events.append("products")
+            return BalanceFetchResult(products=[], failed_surfaces=("card",))
+
+        def read_movements(p):
+            events.append("movements")
+            return [], ("tarjeta facturados",)
+
+        monkeypatch.setattr("playwright.sync_api.sync_playwright", sync_playwright)
+        monkeypatch.setattr(movements_mod, "_authenticated_session", authenticated_session)
+        monkeypatch.setattr(movements_mod, "_dismiss_popup", lambda p: None)
+        monkeypatch.setattr(movements_mod, "_read_all_surfaces", read_products)
+        monkeypatch.setattr(movements_mod, "read_movement_surfaces", read_movements)
+
+        result = movements_mod._session_sync("11.111.111-1", "synthetic-password", True)
+
+        # The post-read save sees the cookies both reads may have rotated.
+        assert events == ["authenticated", "products", "movements", "session saved"]
+        assert result.failed_surfaces == ("card", "tarjeta facturados")

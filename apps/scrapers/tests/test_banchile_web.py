@@ -6,18 +6,30 @@ whose `evaluate` returns canned page text.
 """
 
 import datetime
+import json
+import logging
+import os
+import stat
+from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import MagicMock
+
+import pytest
 
 from product_model import CheckingMetrics, CreditCardMetrics
 
 from scrapers.backends import banchile_web as banchile_web_mod
 from scrapers.backends.banchile_web import (
+    BalanceFetchResult,
+    BanChileWebError,
+    _authenticated_session,
     _balance_from_text,
     _merge_balances,
     _parse_date_ddmmyyyy,
     _parse_pct,
     _parse_term_days,
     _read_all_surfaces,
+    _scrape_sync,
     _usd_checking_from_text,
     balances_by_kind,
     balances_from_page,
@@ -1757,3 +1769,327 @@ class TestSurfaceRetries:
         assert [(b.external_ref, b.metrics.balance) for b in deposits] == [
             (None, 4499999)
         ]
+
+
+# --- Session cache (issue #28) -------------------------------------------------
+# Every credential and cookie below is synthetic; the storage states only mimic
+# the shape Playwright's `context.storage_state()` returns.
+RUT = "11.111.111-1"
+PASSWORD = "synthetic-password"
+CACHED_STATE = {
+    "cookies": [
+        {
+            "name": "SESSION",
+            "value": "synthetic-cookie",
+            "domain": "portalpersonas.bancochile.cl",
+            "path": "/",
+        }
+    ],
+    "origins": [],
+}
+FRESH_STATE = {
+    "cookies": [
+        {
+            "name": "SESSION",
+            "value": "synthetic-cookie-rotated",
+            "domain": "portalpersonas.bancochile.cl",
+            "path": "/",
+        }
+    ],
+    "origins": [],
+}
+
+
+def _fake_context(landing_url=banchile_web_mod._PORTAL_HOME, text=REAL_DASHBOARD):
+    """A context whose one page shows `text` at `landing_url` after any goto."""
+    context = MagicMock()
+    page = MagicMock()
+    page.url = "about:blank"
+
+    def goto(url, **kwargs):
+        page.url = landing_url
+
+    page.goto.side_effect = goto
+    page.evaluate.return_value = text
+    context.new_page.return_value = page
+    context.storage_state.return_value = FRESH_STATE
+    return context
+
+
+def _fake_browser(*contexts):
+    """A browser handing out `contexts` in order; an exception entry is raised."""
+    browser = MagicMock()
+    browser.new_context.side_effect = list(contexts)
+    return browser
+
+
+def _authenticate(browser):
+    with _authenticated_session(browser, RUT, PASSWORD) as page:
+        return page
+
+
+@pytest.fixture
+def session_file(tmp_path, monkeypatch):
+    """Point BANCHILE_SESSION_FILE at a temp path; zero the validation budget so
+    a restored session that never renders is judged without real waiting."""
+    path = tmp_path / ".banchile_session.json"
+    monkeypatch.setenv("BANCHILE_SESSION_FILE", str(path))
+    monkeypatch.setattr(banchile_web_mod, "_SESSION_CHECK_TIMEOUT_MS", 0)
+    return path
+
+
+@pytest.fixture
+def login(monkeypatch):
+    """Record `_login` calls instead of driving the bank's login form."""
+    fake = MagicMock()
+    monkeypatch.setattr(banchile_web_mod, "_login", fake)
+    return fake
+
+
+# Ways a restored session can be dead. Each returns what the browser's first
+# `new_context` yields and the restored context the helper must close (None when
+# building it already failed).
+def _dead_on_login_page():
+    restored = _fake_context(landing_url=banchile_web_mod.LOGIN_URL, text="Ingresar RUT")
+    return restored, restored
+
+
+def _dead_without_data():
+    restored = _fake_context(text="Cargando...")
+    return restored, restored
+
+
+def _dead_goto_error():
+    restored = _fake_context()
+    restored.new_page.return_value.goto.side_effect = RuntimeError("Timeout exceeded")
+    return restored, restored
+
+
+def _dead_context_error():
+    return RuntimeError("invalid storage state"), None
+
+
+class TestSessionCache:
+    def test_valid_cached_session_skips_login(self, session_file, login, caplog):
+        session_file.write_text(json.dumps(CACHED_STATE))
+        restored = _fake_context()
+        browser = _fake_browser(restored)
+
+        with caplog.at_level(logging.INFO):
+            page = _authenticate(browser)
+
+        login.assert_not_called()
+        assert page is restored.new_page.return_value
+        assert browser.new_context.call_count == 1
+        assert browser.new_context.call_args.kwargs["storage_state"] == CACHED_STATE
+        page.goto.assert_called_once()  # one validation navigation, no probing
+        assert page.goto.call_args.args[0] == banchile_web_mod._PORTAL_HOME
+        assert json.loads(session_file.read_text()) == FRESH_STATE
+        assert "BanChile session reused" in caplog.text
+        assert "synthetic-cookie" not in caplog.text
+
+    def test_missing_file_takes_full_login(self, session_file, login, caplog):
+        fresh = _fake_context()
+        browser = _fake_browser(fresh)
+
+        with caplog.at_level(logging.INFO):
+            page = _authenticate(browser)
+
+        login.assert_called_once_with(page, RUT, PASSWORD)
+        assert browser.new_context.call_args.kwargs["storage_state"] is None
+        assert json.loads(session_file.read_text()) == FRESH_STATE
+        assert "cache miss (no session file)" in caplog.text
+        assert "synthetic-cookie" not in caplog.text
+
+    @pytest.mark.parametrize(
+        "content",
+        [b"{not json", b"", b'["SESSION"]', b"\xff\xfe\x00"],
+        ids=["bad-json", "empty", "not-a-dict", "bad-encoding"],
+    )
+    def test_corrupt_file_takes_full_login(self, session_file, login, content):
+        session_file.write_bytes(content)
+        browser = _fake_browser(_fake_context())
+
+        page = _authenticate(browser)
+
+        login.assert_called_once_with(page, RUT, PASSWORD)
+        assert browser.new_context.call_count == 1  # nothing to restore
+        assert json.loads(session_file.read_text()) == FRESH_STATE
+
+    @pytest.mark.parametrize(
+        "scenario",
+        [_dead_on_login_page, _dead_without_data, _dead_goto_error, _dead_context_error],
+        ids=["lands-on-login", "no-dashboard-data", "goto-error", "context-error"],
+    )
+    def test_dead_restored_session_takes_full_login(self, session_file, login, scenario):
+        session_file.write_text(json.dumps(CACHED_STATE))
+        restored, restored_context = scenario()
+        fresh = _fake_context()
+        browser = _fake_browser(restored, fresh)
+
+        page = _authenticate(browser)
+
+        assert page is fresh.new_page.return_value
+        login.assert_called_once_with(page, RUT, PASSWORD)
+        if restored_context is not None:
+            restored_context.close.assert_called_once()
+        assert json.loads(session_file.read_text()) == FRESH_STATE
+
+    def test_stale_file_is_discarded_even_when_login_fails(self, session_file, login):
+        """A session that proved dead is not retried by the next run, and the
+        login failure still raises exactly as it did before the cache."""
+        session_file.write_text(json.dumps(CACHED_STATE))
+        login.side_effect = BanChileWebError("Login did not reach the post-login page")
+        restored, _ = _dead_on_login_page()
+        browser = _fake_browser(restored, _fake_context())
+
+        with pytest.raises(BanChileWebError):
+            _authenticate(browser)
+
+        assert not session_file.exists()
+
+    def test_session_file_is_private(self, session_file, login, monkeypatch):
+        """0o600 before the swap-in, whatever the umask or the old file's mode."""
+        session_file.write_text("{not json")
+        os.chmod(session_file, 0o644)
+        swapped_in = []
+        real_replace = os.replace
+
+        def replace(src, dst):
+            swapped_in.append((Path(src), stat.S_IMODE(os.stat(src).st_mode)))
+            real_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", replace)
+        old_umask = os.umask(0)
+        try:
+            _authenticate(_fake_browser(_fake_context()))
+        finally:
+            os.umask(old_umask)
+
+        assert len(swapped_in) == 2  # after authenticating and after the reads
+        for tmp, mode in swapped_in:
+            assert mode == 0o600
+            # Same directory, and still matched by the `.banchile_session.json*`
+            # gitignore pattern.
+            assert tmp.parent == session_file.parent
+            assert tmp.name.startswith(session_file.name)
+        assert stat.S_IMODE(session_file.stat().st_mode) == 0o600
+        assert json.loads(session_file.read_text()) == FRESH_STATE
+        assert list(session_file.parent.iterdir()) == [session_file]
+
+    @pytest.mark.parametrize("failure", ["storage_state", "replace"])
+    def test_save_failure_is_only_a_warning(
+        self, session_file, login, monkeypatch, caplog, failure
+    ):
+        fresh = _fake_context()
+        if failure == "storage_state":
+            fresh.storage_state.side_effect = RuntimeError("context closed")
+        else:
+            def replace(src, dst):
+                raise PermissionError("read-only directory")
+
+            monkeypatch.setattr(os, "replace", replace)
+        browser = _fake_browser(fresh)
+
+        page = _authenticate(browser)
+
+        assert page is fresh.new_page.return_value
+        login.assert_called_once()
+        assert not session_file.exists()
+        assert list(session_file.parent.iterdir()) == []  # no temp file left behind
+        assert "could not save the session cache" in caplog.text
+
+    def test_empty_env_var_uses_the_default_path(self, tmp_path, monkeypatch, login):
+        """`BANCHILE_SESSION_FILE=` (set but empty) means unset, not `Path(".")`."""
+        default = tmp_path / ".banchile_session.json"
+        monkeypatch.setattr(banchile_web_mod, "_DEFAULT_SESSION_FILE", default)
+        monkeypatch.setenv("BANCHILE_SESSION_FILE", "")
+
+        page = _authenticate(_fake_browser(_fake_context()))
+
+        login.assert_called_once_with(page, RUT, PASSWORD)
+        assert json.loads(default.read_text()) == FRESH_STATE
+
+    def test_directory_at_the_session_path_is_a_miss(self, session_file, login, caplog):
+        session_file.mkdir()
+
+        with caplog.at_level(logging.INFO):
+            page = _authenticate(_fake_browser(_fake_context()))
+
+        login.assert_called_once_with(page, RUT, PASSWORD)
+        assert "cache miss (unreadable session file)" in caplog.text
+        assert "could not save the session cache" in caplog.text
+        assert list(session_file.parent.iterdir()) == [session_file]
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+    def test_unwritable_directory_is_only_a_warning(
+        self, tmp_path, monkeypatch, login, caplog
+    ):
+        locked = tmp_path / "locked"
+        locked.mkdir(mode=0o500)
+        monkeypatch.setenv("BANCHILE_SESSION_FILE", str(locked / ".banchile_session.json"))
+        try:
+            page = _authenticate(_fake_browser(_fake_context()))
+        finally:
+            locked.chmod(0o700)
+
+        login.assert_called_once_with(page, RUT, PASSWORD)
+        assert list(locked.iterdir()) == []
+        assert "could not save the session cache" in caplog.text
+
+    def test_save_to_a_nameless_path_never_raises(self, tmp_path, monkeypatch, caplog):
+        """`Path(".")` used to raise while naming the temp file, outside the try."""
+        monkeypatch.chdir(tmp_path)
+
+        banchile_web_mod._save_session(_fake_context(), Path("."))
+
+        assert list(tmp_path.iterdir()) == []
+        assert "could not save the session cache" in caplog.text
+
+
+@contextmanager
+def _fake_playwright(browser):
+    playwright = MagicMock()
+    playwright.chromium.launch.return_value = browser
+    yield playwright
+
+
+class TestScrapeSyncSession:
+    """`_scrape_sync` end to end through the cache, with no browser."""
+
+    def _run(self, monkeypatch, browser, reads):
+        monkeypatch.setattr(
+            "playwright.sync_api.sync_playwright", lambda: _fake_playwright(browser)
+        )
+        monkeypatch.setattr(banchile_web_mod, "_dismiss_popup", lambda page: None)
+        monkeypatch.setattr(banchile_web_mod, "_read_all_surfaces", reads)
+        return _scrape_sync(RUT, PASSWORD, headless=True)
+
+    def test_cache_is_refreshed_after_the_reads(self, session_file, login, monkeypatch):
+        """Cookies rotated during the reads are what the next run restores."""
+        session_file.write_text(json.dumps(CACHED_STATE))
+        restored = _fake_context()
+        after_reads = {"cookies": [], "origins": [{"origin": "synthetic", "localStorage": []}]}
+        restored.storage_state.side_effect = [FRESH_STATE, after_reads]
+        browser = _fake_browser(restored)
+        expected = BalanceFetchResult(products=[], failed_surfaces=("card",))
+
+        result = self._run(monkeypatch, browser, lambda page: expected)
+
+        assert result is expected
+        login.assert_not_called()
+        assert restored.storage_state.call_count == 2
+        assert json.loads(session_file.read_text()) == after_reads
+        browser.close.assert_called_once()
+
+    def test_save_failure_does_not_fail_the_scrape(self, session_file, login, monkeypatch):
+        fresh = _fake_context()
+        fresh.storage_state.side_effect = RuntimeError("context closed")
+        browser = _fake_browser(fresh)
+        expected = BalanceFetchResult(products=[], failed_surfaces=())
+
+        result = self._run(monkeypatch, browser, lambda page: expected)
+
+        assert result is expected
+        login.assert_called_once()
+        assert not session_file.exists()

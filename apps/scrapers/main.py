@@ -50,7 +50,8 @@ async def run_scraper(scraper: BaseScraper) -> None:
     must not stop the other. BanChile in particular reads both from one browser
     session (the transactions leg opens it and caches the products half), so a
     session that crashes must still leave the balances refreshable: its products
-    leg falls back to a balance-only login of its own.
+    leg falls back to a balance-only session of its own, which reuses the
+    cached one while it's live.
 
     The products leg can also report non-fatal warnings (e.g. a BanChile
     surface that failed all its retries): a run with warnings but no errors is
