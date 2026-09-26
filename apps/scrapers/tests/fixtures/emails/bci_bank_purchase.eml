@@ -1,0 +1,10 @@
+From: Banco Bci <notificaciones@bci.cl>
+To: Usuario Sintetico <usuario@example.com>
+Subject: =?UTF-8?Q?Compra_con_tu_Tarjeta_de_Cr=C3=A9dito?=
+Date: Sun, 20 Sep 2026 13:00:00 -0300
+Message-ID: <synthetic-bci-purchase@example.com>
+X-Fixture: synthetic
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+Compraste en COMERCIO SINTETICO por $ 999.999 con tu Tarjeta Bci terminada en 1234.

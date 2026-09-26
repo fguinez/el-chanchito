@@ -13,13 +13,9 @@ import {
   type ProductCatalog,
   type RefExpr,
 } from "./expr";
+import { formatLocalDate, isValidDay } from "./dates";
 import type { ProductInfo } from "./evaluate";
-import {
-  formatLocalDate,
-  replayHistory,
-  type HistoryPoint,
-  type SnapshotRow,
-} from "./history";
+import { replayHistory, type HistoryPoint, type SnapshotRow } from "./history";
 import type {
   MonitorDefinition,
   MonitorDisplay,
@@ -120,21 +116,7 @@ export type ReplayWindowOptions = {
 export const DEFAULT_HISTORY_DAYS = 90;
 export const MAX_HISTORY_DAYS = 365;
 
-const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const DAY_MS = 24 * 60 * 60 * 1000;
-
-/** True for a well-formed YYYY-MM-DD string naming a real calendar day
- *  (rejects e.g. 2026-02-31, which Date.UTC would silently roll over). */
-function isValidDay(dateStr: string): boolean {
-  if (!DAY_RE.test(dateStr)) return false;
-  const [year, month, day] = dateStr.split("-").map(Number);
-  const date = new Date(Date.UTC(year, month - 1, day));
-  return (
-    date.getUTCFullYear() === year &&
-    date.getUTCMonth() === month - 1 &&
-    date.getUTCDate() === day
-  );
-}
 
 function utcMs(dateStr: string): number {
   const [year, month, day] = dateStr.split("-").map(Number);
