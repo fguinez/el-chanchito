@@ -1,0 +1,9 @@
+From: Tenpo <notificaciones@tenpo.cl>
+To: Usuario Sintetico <usuario@example.com>
+Subject: Compra aprobada
+Date: Sun, 20 Sep 2026 12:30:00 -0300
+X-Fixture: synthetic
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+Realizaste una compra por $ 999.999 en COMERCIO SINTETICO.
