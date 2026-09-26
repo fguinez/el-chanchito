@@ -639,6 +639,7 @@ app.
 | Frontend | Next.js 16 (App Router) + React 19 + TypeScript |
 | UI | Tailwind CSS 4 + shadcn/ui (New York) + Recharts |
 | ORM | Drizzle ORM |
+| API validation | zod (request bodies and query strings, `lib/api`) |
 | Database | PostgreSQL 16 (Alpine) |
 | Scrapers | Python 3.12 + httpx + Playwright + APScheduler |
 | DB Driver (Python) | psycopg3 + psycopg-pool |
@@ -668,6 +669,7 @@ el-chanchito/
 │   │   │   │   ├── layout/           # Sidebar
 │   │   │   │   └── ui/              # shadcn components
 │   │   │   └── lib/
+│   │   │       ├── api/             # zod request schemas + 400 helpers
 │   │   │       ├── budget-engine.ts  # Core formulas
 │   │   │       ├── db/              # Drizzle schema + connection
 │   │   │       └── utils.ts         # cn(), formatCLP()
