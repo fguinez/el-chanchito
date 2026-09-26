@@ -13,21 +13,21 @@
 │                    Dashboard (Next.js 16)                        │
 │                                                                 │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────┐   │
-│  │  Inicio  │  │Planning  │  │ History  │  │   Settings   │   │
-│  │  (Home)  │  │ (Table)  │  │ (Chart)  │  │  (Config)    │   │
+│  │  Inicio  │  │ Monitors │  │ History  │  │ Institutions │   │
+│  │  (Home)  │  │ (Alerts) │  │ (Chart)  │  │  (Products)  │   │
 │  └────┬─────┘  └────┬─────┘  └────┬─────┘  └──────┬───────┘   │
 │       │              │              │               │           │
 │       ▼              ▼              ▼               ▼           │
 │  ┌─────────────────────────────────────────────────────────┐   │
 │  │                   API Routes (/api/*)                    │   │
-│  │  budget | planning | transactions | wealth | scrapers   │   │
-│  │  fixed-expenses | income-sources | transfers | import   │   │
-│  │  categories | balances | month-reset | institutions     │   │
+│  │  monitors (+ adjustments) | transactions | wealth       │   │
+│  │  scrapers | fixed-expenses | transfers | import         │   │
+│  │  categories | balances | institutions                   │   │
 │  │  institutions/refresh (→ scraper control endpoint)      │   │
 │  └────────────────────────┬────────────────────────────────┘   │
 │                           │                                     │
 │  ┌────────────────────────┴────────────────────────────────┐   │
-│  │              Drizzle ORM + budget-engine.ts              │   │
+│  │         Drizzle ORM + lib/monitors + budget-engine.ts    │   │
 │  └────────────────────────┬────────────────────────────────┘   │
 └───────────────────────────┼─────────────────────────────────────┘
                             │
@@ -38,8 +38,8 @@
 │                                                                 │
 │  users | institutions | accounts | products                     │
 │  product_snapshots | transactions | categories | category_rules │
-│  budget_configs | budget_adjustments | wealth_snapshots          │
-│  fixed_expenses | income_sources | internal_transfers           │
+│  monitors | monitor_adjustments | wealth_snapshots               │
+│  fixed_expenses | internal_transfers                            │
 │  scraper_runs                                                   │
 └───────────────────────────▲─────────────────────────────────────┘
                             │
@@ -105,9 +105,9 @@
                        ▼
         ┌────────────────────────────────────┐
         │  Dashboard API (Next.js)           │
-        │  - planning: reads budget_configs  │
-        │    + transactions + balances       │
-        │    -> computes expected vs real    │
+        │  - monitors: equations over        │
+        │    products + adjustments          │
+        │    -> status, margin, history      │
         │  - wealth: reads product_snapshots │
         │    -> computes derived metrics     │
         └──────────────┬─────────────────────┘
@@ -115,34 +115,40 @@
                        ▼
         ┌────────────────────────────────────┐
         │          Browser (React)           │
-        │  - TodayStatus widget              │
-        │  - Planning table                  │
+        │  - Monitor cards + detail          │
+        │  - Variaciones (adjustments)       │
         │  - Wealth chart (Recharts)         │
         └────────────────────────────────────┘
 ```
 
-## Budget Engine
+## Monitors and variaciones
 
-The core formula behind the "Planificacion" table:
+Monitors (`apps/web/src/lib/monitors`, table `monitors`, V015) replaced the
+old budget engine and its Planificacion and Configuracion pages, retired in
+V016. A monitor is one equation: a left expression over product values
+compared against one or more thresholds, each of which may vary by day
+(`DAY_OF_MONTH()`, `DAYS_IN_MONTH()`). Nothing is precomputed: the API
+evaluates monitors on read and replays their history from `product_snapshots`.
 
-```
-presup_diario = variable_budget / days_in_month
-cupo_tc_mes = credit_card_limit - future_debts
-
-expected_balance(day) =
-    cupo_tc_mes
-  - presup_diario * day
-  + checking_initial_balance
-  + sum(adjustments[1..day])
-
-drift = real_balance - expected_balance
-```
+The old sheet's "Variaciones" (a reimbursement, a one-off gift budget) live on
+as **monitor adjustments** (`monitor_adjustments`, V022). An adjustment dated
+day N adds its amount, in the monitor's currency, to every threshold of its
+monitor from day N to the end of that calendar month. Same-day adjustments add
+up, and each month starts with none:
 
 ```
-drift > 0  =>  under budget (good)
-drift < 0  =>  over budget (overspending)
-drift = 0  =>  exactly on track
+threshold(day) =
+    threshold_expression(day)
+  + sum(adjustments dated in day's month, on or before day)
+
+margin = value - threshold   (for < and <=; threshold - value for > and >=)
 ```
+
+`adjustmentOnDate` in `evaluate.ts` applies them inside `evaluateMonitor`, so
+the current evaluation, the history replay, the list sparklines and the edit
+preview all include them. Days are local calendar days, the same unit as
+`DAY_OF_MONTH()`. The monitor detail page manages them ("Variaciones" card)
+through `/api/monitors/[id]/adjustments`.
 
 ## Database Schema (ER Diagram)
 
@@ -206,16 +212,14 @@ transactions ──────────┐
   is_manually_categorized
 
 
-budget_configs                budget_adjustments
-  id PK                         id PK
-  month (unique) ─────────────< budget_config_id FK
-  variable_budget               adjustment_date
-  fixed_budget                  amount
-  credit_card_limit             description
-  checking_initial_balance
-  salary
-  shared_expenses_ratio
-  day_start
+monitors                      monitor_adjustments
+  id PK ──────────────────────< monitor_id FK (cascade)
+  name, description             id PK
+  currency                      adjustment_date
+  expression (uuid refs)        amount NUMERIC(20,8), <> 0
+  thresholds JSONB              description
+  display JSONB                 -- added to every threshold
+  is_active                     --   from its day to month end
 
 
 wealth_snapshots (legacy)     fixed_expenses
@@ -231,10 +235,10 @@ wealth_snapshots (legacy)     fixed_expenses
   -- from product_snapshots
 
 
-income_sources                internal_transfers
-  id PK                         id PK
-  name                          description
-  monthly_amount                amount
+                              internal_transfers
+                                id PK
+                                description
+                                amount
                                 from_product_id FK
                                 to_product_id FK
 scraper_runs                    transfer_date
@@ -265,6 +269,7 @@ scraper_runs                    transfer_date
 | `V011__typed_product_attributes_and_snapshots.sql` | products gain attributes/metrics JSONB (details + credit_limit dropped, revolving metrics seeded); uq_products_identity; product_balances -> product_snapshots (adds metrics) |
 | `V012__retire_fintual_aggregate_product.sql` | deactivates the summed Fintual product + drops its snapshots (replaced by per-goal products) |
 | `V013__retire_banchile_summed_inversiones_products.sql` | deactivates the summed BanChile term_deposit + investment products + drops their snapshots (replaced by per-holding products) |
+| `V022__monitor_adjustments.sql` | monitor_adjustments: dated variaciones that shift a monitor's thresholds until month end |
 
 ## Scraper Architecture
 
@@ -655,20 +660,20 @@ el-chanchito/
 │   │   │   ├── app/
 │   │   │   │   ├── (dashboard)/      # All pages with sidebar layout
 │   │   │   │   │   ├── page.tsx      # Home
-│   │   │   │   │   ├── planning/     # Planificacion
+│   │   │   │   │   ├── monitors/     # Monitores + variaciones
 │   │   │   │   │   ├── history/      # Historial
 │   │   │   │   │   ├── institutions/ # Instituciones + productos
 │   │   │   │   │   ├── expenses/     # Gastos + CSV import
 │   │   │   │   │   ├── fixed/        # Gastos fijos
-│   │   │   │   │   ├── transfers/    # Movimientos internos
-│   │   │   │   │   └── settings/     # Config + split calculator
+│   │   │   │   │   └── transfers/    # Movimientos internos
 │   │   │   │   └── api/              # 13 API route groups
 │   │   │   ├── components/
 │   │   │   │   ├── dashboard/        # ScraperStatus, CsvImport
 │   │   │   │   ├── layout/           # Sidebar
 │   │   │   │   └── ui/              # shadcn components
 │   │   │   └── lib/
-│   │   │       ├── budget-engine.ts  # Core formulas
+│   │   │       ├── monitors/        # Monitor engine + variaciones
+│   │   │       ├── budget-engine.ts  # Wealth + shared-expense helpers
 │   │   │       ├── db/              # Drizzle schema + connection
 │   │   │       └── utils.ts         # cn(), formatCLP()
 │   │   └── Dockerfile
