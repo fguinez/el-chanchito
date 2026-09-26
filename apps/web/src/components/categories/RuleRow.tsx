@@ -21,6 +21,8 @@ import {
   type ApiCategoryRule,
 } from "./shared";
 
+const RULE_GONE_MESSAGE = "La regla ya no existe";
+
 type RuleDraft = { keyword: string; categoryId: string; priority: string };
 
 export function RuleRow({
@@ -39,11 +41,15 @@ export function RuleRow({
   // null while viewing; the fields being edited otherwise.
   const [draft, setDraft] = useState<RuleDraft | null>(null);
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // The keyword under test (the draft's while editing), or null when closed.
   const [previewKeyword, setPreviewKeyword] = useState<string | null>(null);
 
   const category = categoriesById.get(rule.categoryId);
+  // Falls back to the placeholder if the draft's category was deleted.
+  const selectedCategoryId =
+    draft && categoriesById.has(draft.categoryId) ? draft.categoryId : "";
 
   function startEditing() {
     setError(null);
@@ -76,13 +82,19 @@ export function RuleRow({
       setError("La palabra clave es obligatoria");
       return;
     }
+    if (!selectedCategoryId) {
+      setError("Elige una categoría");
+      return;
+    }
     if (priority === null) {
       setError(PRIORITY_ERROR);
       return;
     }
     const patch: Record<string, string | number> = {};
     if (keyword !== rule.keyword) patch.keyword = keyword;
-    if (draft.categoryId !== rule.categoryId) patch.categoryId = draft.categoryId;
+    if (selectedCategoryId !== rule.categoryId) {
+      patch.categoryId = selectedCategoryId;
+    }
     if (priority !== rule.priority) patch.priority = priority;
     if (Object.keys(patch).length === 0) {
       stopEditing();
@@ -98,7 +110,11 @@ export function RuleRow({
         body: JSON.stringify(patch),
       });
       if (!res.ok) {
-        setError(await readApiError(res, "No se pudo guardar la regla"));
+        setError(
+          await readApiError(res, "No se pudo guardar la regla", {
+            404: RULE_GONE_MESSAGE,
+          })
+        );
         return;
       }
       stopEditing();
@@ -112,29 +128,37 @@ export function RuleRow({
 
   async function handleDelete() {
     if (
+      deleting ||
       !window.confirm(
         `¿Eliminar la regla "${rule.keyword}"?\n\nLas transacciones que ya categorizó mantienen su categoría.`
       )
     ) {
       return;
     }
+    setDeleting(true);
     setError(null);
     try {
       const res = await fetch(`/api/categories/rules/${rule.id}`, {
         method: "DELETE",
       });
       if (!res.ok) {
-        setError(await readApiError(res, "No se pudo eliminar la regla"));
+        setError(
+          await readApiError(res, "No se pudo eliminar la regla", {
+            404: RULE_GONE_MESSAGE,
+          })
+        );
         return;
       }
       onChange();
     } catch {
       setError("No se pudo eliminar la regla");
+    } finally {
+      setDeleting(false);
     }
   }
 
   function onKeyDown(e: React.KeyboardEvent) {
-    if (e.key === "Enter") handleSave();
+    if (e.key === "Enter" && !saving) handleSave();
     if (e.key === "Escape") stopEditing();
   }
 
@@ -165,12 +189,17 @@ export function RuleRow({
           {draft ? (
             <select
               aria-label="Categoría de la regla"
-              value={draft.categoryId}
+              value={selectedCategoryId}
               onChange={(e) =>
                 setDraft({ ...draft, categoryId: e.target.value })
               }
               className={`${SELECT_CLASS} max-w-56`}
             >
+              {!selectedCategoryId && (
+                <option value="" disabled>
+                  Elige una categoría
+                </option>
+              )}
               {categories.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.name}
@@ -237,6 +266,7 @@ export function RuleRow({
                   aria-label={`Eliminar regla ${rule.keyword}`}
                   title="Eliminar"
                   onClick={handleDelete}
+                  disabled={deleting}
                   className="text-muted-foreground hover:text-destructive"
                 >
                   <Trash2 />

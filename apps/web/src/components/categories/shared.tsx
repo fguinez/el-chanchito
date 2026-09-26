@@ -47,19 +47,22 @@ export const SELECT_CLASS =
 export const COLOR_INPUT_CLASS =
   "h-9 w-12 shrink-0 cursor-pointer rounded-md border border-input bg-transparent p-1 shadow-xs disabled:cursor-not-allowed disabled:opacity-50";
 
-/** Shown in the color input while a category has no color of its own. */
+/** The color new categories start with (the seeded "Otros" color); also
+ *  shown in the color input while a category has no color of its own. */
 export const DEFAULT_CATEGORY_COLOR = "#94a3b8";
 
 export const NAME_CLASH_MESSAGE = "Ya existe una categoría con ese nombre";
 
-/** The `error` of a failed API response; `byStatus` swaps in a Spanish
- *  message for statuses the UI can explain better. */
+/** The message for a failed API response: the `byStatus` entry for its
+ *  status if any, the server's `error` for a validation failure (400), and
+ *  the Spanish `fallback` otherwise. */
 export async function readApiError(
   res: Response,
   fallback: string,
   byStatus: Partial<Record<number, string>> = {}
 ): Promise<string> {
   if (byStatus[res.status]) return byStatus[res.status]!;
+  if (res.status !== 400) return fallback;
   try {
     const data = await res.json();
     if (typeof data?.error === "string") return data.error;

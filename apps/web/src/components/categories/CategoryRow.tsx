@@ -20,6 +20,8 @@ import {
   type ApiCategory,
 } from "./shared";
 
+const CATEGORY_GONE_MESSAGE = "La categoría ya no existe";
+
 type CategoryDraft = {
   name: string;
   color: string;
@@ -59,6 +61,7 @@ export function CategoryRow({
   // null while viewing; the fields being edited otherwise.
   const [draft, setDraft] = useState<CategoryDraft | null>(null);
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const originalColor = category.color ?? DEFAULT_CATEGORY_COLOR;
@@ -69,6 +72,11 @@ export function CategoryRow({
     setDraft({ name: category.name, color: originalColor, icon: originalIcon });
   }
 
+  function stopEditing() {
+    setDraft(null);
+    setError(null);
+  }
+
   async function handleSave() {
     if (!draft) return;
     const name = draft.name.trim();
@@ -76,7 +84,8 @@ export function CategoryRow({
       setError("El nombre es obligatorio");
       return;
     }
-    // Only what changed, so an untouched color stays unset.
+    // Only what changed, so a category without a color keeps none unless
+    // one is picked.
     const patch: Record<string, string | null> = {};
     if (name !== category.name) patch.name = name;
     if (draft.color !== originalColor) patch.color = draft.color;
@@ -97,6 +106,7 @@ export function CategoryRow({
       if (!res.ok) {
         setError(
           await readApiError(res, "No se pudo guardar la categoría", {
+            404: CATEGORY_GONE_MESSAGE,
             409: NAME_CLASH_MESSAGE,
           })
         );
@@ -112,19 +122,26 @@ export function CategoryRow({
   }
 
   async function handleDelete() {
-    if (!window.confirm(deleteMessage(category))) return;
+    if (deleting || !window.confirm(deleteMessage(category))) return;
+    setDeleting(true);
     setError(null);
     try {
       const res = await fetch(`/api/categories/${category.id}`, {
         method: "DELETE",
       });
       if (!res.ok) {
-        setError(await readApiError(res, "No se pudo eliminar la categoría"));
+        setError(
+          await readApiError(res, "No se pudo eliminar la categoría", {
+            404: CATEGORY_GONE_MESSAGE,
+          })
+        );
         return;
       }
       onChange();
     } catch {
       setError("No se pudo eliminar la categoría");
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -144,11 +161,13 @@ export function CategoryRow({
               aria-label="Color"
               value={draft.color}
               onChange={(e) => setDraft({ ...draft, color: e.target.value })}
+              disabled={saving}
               className={COLOR_INPUT_CLASS}
             />
             <IconPicker
               value={draft.icon}
               onChange={(icon) => setDraft({ ...draft, icon })}
+              disabled={saving}
             />
             <Input
               aria-label="Nombre de la categoría"
@@ -156,9 +175,10 @@ export function CategoryRow({
               maxLength={CATEGORY_NAME_MAX_LENGTH}
               onChange={(e) => setDraft({ ...draft, name: e.target.value })}
               onKeyDown={(e) => {
-                if (e.key === "Enter") handleSave();
-                if (e.key === "Escape") setDraft(null);
+                if (e.key === "Enter" && !saving) handleSave();
+                if (e.key === "Escape") stopEditing();
               }}
+              readOnly={saving}
               aria-invalid={error != null}
               className="max-w-64"
               autoFocus
@@ -186,10 +206,7 @@ export function CategoryRow({
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => {
-                  setDraft(null);
-                  setError(null);
-                }}
+                onClick={stopEditing}
                 disabled={saving}
               >
                 <X className="h-4 w-4" />
@@ -213,6 +230,7 @@ export function CategoryRow({
                 aria-label={`Eliminar ${category.name}`}
                 title="Eliminar"
                 onClick={handleDelete}
+                disabled={deleting}
                 className="text-muted-foreground hover:text-destructive"
               >
                 <Trash2 />
