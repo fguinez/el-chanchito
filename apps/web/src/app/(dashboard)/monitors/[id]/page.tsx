@@ -36,8 +36,9 @@ import { useSortableData } from "@/lib/use-sortable-data";
 import { formatAmount } from "@/lib/utils";
 import {
   SEVERITY_LABELS,
+  StaleAsOf,
   StatusBadge,
-  formatDateEs,
+  formatDateTimeEs,
   type ApiMonitor,
   type HistoryPoint,
   type MonitorReference,
@@ -237,11 +238,7 @@ export default function MonitorDetailPage() {
                 <span className="text-muted-foreground">sin dato</span>
               )}
             </CardTitle>
-            {evaluation.staleAsOf && (
-              <p className="text-xs text-muted-foreground">
-                al {formatDateEs(evaluation.staleAsOf)}
-              </p>
-            )}
+            <StaleAsOf staleAsOf={evaluation.staleAsOf} />
           </CardHeader>
         </Card>
         {evaluation.thresholds.map((t) => (
@@ -496,7 +493,7 @@ export default function MonitorDetailPage() {
                       )}
                     </TableCell>
                     <TableCell className="text-right text-sm text-muted-foreground">
-                      {ref.balanceAsOf ? formatDateEs(ref.balanceAsOf) : "-"}
+                      {ref.balanceAsOf ? formatDateTimeEs(ref.balanceAsOf) : "-"}
                     </TableCell>
                     <TableCell>
                       {ref.broken && (

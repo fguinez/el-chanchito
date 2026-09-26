@@ -3,9 +3,15 @@
 // the list, detail, and builder views.
 
 import { Badge } from "@/components/ui/badge";
-import { cn } from "@/lib/utils";
+import { isStale } from "@/lib/monitors/overview";
+import { cn, formatDateTimeEs } from "@/lib/utils";
 // Date/axis formatters are shared across features (Monitores, Instituciones).
-export { formatDateEs, formatDayEs, formatAxisValue } from "@/lib/utils";
+export {
+  formatDateEs,
+  formatDateTimeEs,
+  formatDayEs,
+  formatAxisValue,
+} from "@/lib/utils";
 
 export type MonitorStatus = "ok" | "warning" | "breached" | "no_data";
 export type ThresholdSeverity = "alert" | "warning";
@@ -143,5 +149,30 @@ export function StatusBadge({
 export function referencesProduct(source: string): boolean {
   return /@\{|[a-z0-9][a-z0-9_-]*:[a-z0-9][a-z0-9_-]*:[a-z][a-z0-9_]*/.test(
     source
+  );
+}
+
+/** "Datos al <fecha, hora>" for a monitor's oldest observation, in amber and
+ *  flagged when older than STALE_AFTER_HOURS; nothing when there is none. */
+export function StaleAsOf({
+  staleAsOf,
+  className,
+}: {
+  staleAsOf: string | null;
+  className?: string;
+}) {
+  if (staleAsOf == null) return null;
+  const stale = isStale(staleAsOf, new Date());
+  return (
+    <p
+      className={cn(
+        "text-xs",
+        stale ? "text-amber-600" : "text-muted-foreground",
+        className
+      )}
+    >
+      Datos al {formatDateTimeEs(staleAsOf)}
+      {stale && " (desactualizados)"}
+    </p>
   );
 }
