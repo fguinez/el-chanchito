@@ -103,8 +103,12 @@ export function CsvImport({ onImported }: { onImported: () => void }) {
         let dateStr = rawDate;
         // DD/MM/YYYY or DD-MM-YYYY -> YYYY-MM-DD
         const ddmmyyyy = rawDate.match(/(\d{1,2})[/-](\d{1,2})[/-](\d{4})/);
+        // YYYY/MM/DD, or YYYY-MM-DD with a trailing time -> YYYY-MM-DD
+        const yyyymmdd = rawDate.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})/);
         if (ddmmyyyy) {
           dateStr = `${ddmmyyyy[3]}-${ddmmyyyy[2].padStart(2, "0")}-${ddmmyyyy[1].padStart(2, "0")}`;
+        } else if (yyyymmdd) {
+          dateStr = `${yyyymmdd[1]}-${yyyymmdd[2].padStart(2, "0")}-${yyyymmdd[3].padStart(2, "0")}`;
         }
 
         return { description: desc, amount: Math.round(amount), date: dateStr };
