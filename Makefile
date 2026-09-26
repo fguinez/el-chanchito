@@ -174,12 +174,6 @@ seed-history: ## Seed wealth history with sample snapshots
 	@curl -s -X POST http://localhost:3000/api/wealth -H "Content-Type: application/json" -d '{"snapshotDate":"2026-03-01","patrimonio":20000000,"deuda":800000,"fintualBalance":11000000,"mercadopagoBalance":2400000,"banchileSavings":3200000}' > /dev/null
 	@echo "Done: 15 snapshots seeded"
 
-seed-config: ## Seed default budget config for current month
-	@echo "Creating budget config..."
-	@curl -s -X POST http://localhost:3000/api/budget -H "Content-Type: application/json" \
-		-d "$$(printf '{"month":"%s-01","variableBudget":600000,"fixedBudget":1000000,"creditCardLimit":2000000,"checkingInitialBalance":0,"salary":1500000,"sharedExpensesRatio":0.69,"dayStart":1}' "$$(date +%Y-%m)")" | python3 -m json.tool
-	@echo "Done"
-
 seed-category-rules: ## Seed default category assignment rules
 	@echo "Adding category rules..."
 	@CATS=$$(curl -s http://localhost:3000/api/categories) && \
@@ -192,13 +186,10 @@ seed-category-rules: ## Seed default category assignment rules
 	curl -s -X POST http://localhost:3000/api/categories -H "Content-Type: application/json" -d "{\"keyword\":\"lider\",\"categoryId\":\"$$SUPER\",\"priority\":10}" > /dev/null && \
 	echo "Done: 4 rules seeded"
 
-seed-all: seed-config seed-history seed-category-rules ## Seed all default data
+seed-all: seed-history seed-category-rules ## Seed all default data
 
 categorize: ## Run category auto-assignment on all uncategorized transactions
 	@curl -s -X PUT http://localhost:3000/api/categories | python3 -m json.tool
-
-month-reset: ## Create next month's budget config
-	@curl -s -X POST http://localhost:3000/api/month-reset | python3 -m json.tool
 
 clean: ## Remove build artifacts and volumes
 	rm -rf apps/web/.next apps/web/node_modules/.cache
