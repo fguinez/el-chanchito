@@ -10,6 +10,7 @@ import asyncio
 from datetime import date
 from unittest.mock import MagicMock
 
+import psycopg
 import pytest
 
 from product_model import CheckingMetrics, CreditCardMetrics
@@ -209,6 +210,25 @@ class TestPerRowIsolation:
             error_message=(
                 "products: 1 of 2 not written "
                 "(banchile/credit_card CLP: bad metrics)"
+            ),
+        )
+
+    def test_a_database_outage_stops_the_remaining_product_writes(
+        self, writer, finish
+    ):
+        """Once retries are exhausted, the rest would each block on their own."""
+        writer["upsert_product"].side_effect = psycopg.OperationalError("db down")
+        scraper = _StubScraper(products=[_card(), _product(), _product()])
+
+        asyncio.run(run_scraper(scraper))
+
+        assert writer["upsert_product"].call_count == 1
+        finish.assert_called_once_with(
+            "run-1",
+            "error",
+            transactions_imported=0,
+            error_message=(
+                "products: 3 of 3 not written (banchile/credit_card CLP: db down)"
             ),
         )
 

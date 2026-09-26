@@ -23,6 +23,7 @@ from scrapers.base import (
     ScrapedProduct,
     ScrapedTransaction,
 )
+from scrapers.retry import send_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,14 @@ class BudaScraper(BaseScraper):
             "X-SBTC-SIGNATURE": signature,
         }
 
+    async def _get(self, client: httpx.AsyncClient, path: str) -> httpx.Response:
+        """Signed GET with bounded retries; each attempt is re-signed, since
+        Buda rejects a nonce it has already seen."""
+        return await send_with_retry(
+            lambda: client.get(f"{BUDA_BASE}{path}", headers=self._sign("GET", path)),
+            label=f"Buda GET {path}",
+        )
+
     async def scrape_transactions(self) -> list[ScrapedTransaction]:
         """Fetch recent CLP/BTC deposits and withdrawals."""
         transactions: list[ScrapedTransaction] = []
@@ -71,13 +80,9 @@ class BudaScraper(BaseScraper):
             for currency in ["clp", "btc"]:
                 for tx_type in ["deposits", "withdrawals"]:
                     path = f"/api/v2/currencies/{currency}/{tx_type}.json?per=50"
-                    headers = self._sign("GET", path)
 
                     try:
-                        resp = await client.get(
-                            f"{BUDA_BASE}{path}",
-                            headers=headers,
-                        )
+                        resp = await self._get(client, path)
                         resp.raise_for_status()
                         data = resp.json()
 
@@ -131,11 +136,8 @@ class BudaScraper(BaseScraper):
 
     async def scrape_products(self) -> ProductScrapeResult:
         """Fetch all currency balances as crypto products."""
-        path = "/api/v2/balances.json"
-        headers = self._sign("GET", path)
-
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(f"{BUDA_BASE}{path}", headers=headers)
+            resp = await self._get(client, "/api/v2/balances.json")
             resp.raise_for_status()
 
             products: list[ScrapedProduct] = []

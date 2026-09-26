@@ -19,6 +19,7 @@ fail if a bad row poisons the rows after it.
 from datetime import date
 from decimal import Decimal
 
+import psycopg
 import pytest
 
 from db import writer
@@ -30,6 +31,7 @@ from db.writer import (
     _headline_decimal,
     _is_final_id,
     _write_decision,
+    start_scraper_run,
     upsert_product,
     upsert_transactions,
 )
@@ -584,17 +586,22 @@ class _FakeTxConn:
     query orders by. `_resolve_product` is monkeypatched, so only the
     transaction queries reach here. An INSERT of an id in `fail_on` raises and,
     like Postgres, aborts the transaction: every statement after it fails
-    until a `transaction()` block rolls back past it.
+    until a `transaction()` block rolls back past it. An INSERT of an id in
+    `drop_on` drops the connection once; each `pool.connection()` checkout is
+    a fresh connection over the same rows.
     """
 
-    def __init__(self, rows=None, fail_on=()):
+    def __init__(self, rows=None, fail_on=(), drop_on=()):
         self.rows = list(rows or [])
         self.executed = []
         self._clock = 100
         self.fail_on = set(fail_on)
+        self.drop_on = set(drop_on)
         self.aborted = False
+        self.broken = False
 
     def __enter__(self):
+        self.broken = False
         return self
 
     def __exit__(self, *exc):
@@ -663,6 +670,10 @@ class _FakeTxConn:
             if ext in self.fail_on:
                 self.aborted = True
                 raise RuntimeError("value too long for type")
+            if ext in self.drop_on:
+                self.drop_on.discard(ext)
+                self.broken = True
+                raise psycopg.OperationalError("server closed the connection")
             self._clock += 1
             self.rows.append(
                 {
@@ -739,6 +750,38 @@ def _use_tx_conn(monkeypatch, conn):
     )
 
 
+class _DroppingRunConn:
+    """Records scraper_runs INSERTs; the first raises as a dropped connection
+    whose commit may or may not have landed."""
+
+    def __init__(self):
+        self.inserted_ids = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        self.inserted_ids.append(params[0])
+        if len(self.inserted_ids) == 1:
+            raise psycopg.OperationalError("server closed the connection")
+        return _FakeCursor()
+
+
+class TestStartScraperRun:
+    def test_a_retry_reuses_the_run_id(self, monkeypatch):
+        """A replayed INSERT can't leave a second run stuck in `running`."""
+        conn = _DroppingRunConn()
+        monkeypatch.setattr(writer, "get_pool", lambda: _FakePool(conn))
+        monkeypatch.setattr("scrapers.retry.BASE_DELAY_SECONDS", 0.0)
+
+        run_id = start_scraper_run("http_api", "buda")
+
+        assert conn.inserted_ids == [run_id, run_id]
+
+
 class TestUpsertTransactionsIsolation:
     """One transaction that fails to write must not take the rest with it."""
 
@@ -779,6 +822,31 @@ class TestUpsertTransactionsIsolation:
         )
 
         assert result == TransactionWriteResult(inserted=1, failed=1)
+
+    def test_a_dropped_connection_replays_the_batch_without_duplicates(
+        self, monkeypatch
+    ):
+        """A broken connection re-raises instead of failing row by row, and
+        `with_db_retry` replays the batch: the row the lost attempt committed is
+        found, not inserted again."""
+        conn = _FakeTxConn(drop_on={"bch_op_12345678902"})
+        _use_tx_conn(monkeypatch, conn)
+        monkeypatch.setattr("scrapers.retry.BASE_DELAY_SECONDS", 0.0)
+
+        result = upsert_transactions(
+            [
+                _txn("bch_op_12345678901", amount=-999999),
+                _txn("bch_op_12345678902", amount=-1000000),
+                _txn("bch_op_12345678903", amount=-2500000),
+            ]
+        )
+
+        assert result == TransactionWriteResult(inserted=2, failed=0)
+        assert [row["external_id"] for row in conn.rows] == [
+            "bch_op_12345678901",
+            "bch_op_12345678902",
+            "bch_op_12345678903",
+        ]
 
 
 class TestUpsertTransactionsAdoption:

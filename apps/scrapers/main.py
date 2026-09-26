@@ -17,7 +17,7 @@ load_dotenv()
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
-from db.connection import close_pool
+from db.connection import close_pool, is_transient_db_error
 from db.writer import (
     finish_scraper_run,
     start_scraper_run,
@@ -120,6 +120,11 @@ async def run_scraper(scraper: BaseScraper) -> None:
                     sp.currency,
                 )
                 failed.append(f"{sp.institution}/{sp.kind} {sp.currency}: {e}")
+                if is_transient_db_error(e):
+                    # upsert_product already retried, so the database is down:
+                    # each remaining write would block the loop through its own
+                    # retries. They count as not written.
+                    break
         landed += written
         if written < n_prod:
             errors.append(

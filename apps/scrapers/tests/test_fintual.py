@@ -203,6 +203,22 @@ class TestAutoLogin:
         else:
             raise AssertionError("expected FintualSessionError")
 
+    def test_a_transient_503_is_retried_without_relogging_in(self, monkeypatch):
+        """A 5xx is the server's hiccup, not an expired session."""
+        monkeypatch.setattr("scrapers.retry.BASE_DELAY_SECONDS", 0.0)
+        monkeypatch.setattr(FintualScraper, "_load_session", lambda self, client: True)
+        login = AsyncMock()
+        monkeypatch.setattr(FintualScraper, "login", login)
+        client = _SequencedClient(
+            [(503, {}), (200, {"data": [_goal("34567", name="Risky Norris", nav=1.0)]})]
+        )
+        monkeypatch.setattr(fintual_mod.httpx, "AsyncClient", lambda **kwargs: client)
+
+        result = asyncio.run(FintualScraper().scrape_products())
+
+        login.assert_not_awaited()
+        assert (client.gets, len(result.products)) == (2, 1)
+
     def test_missing_session_with_imap_match_relogs_in(self, monkeypatch):
         """No cached session + matching IMAP user logs in automatically."""
         monkeypatch.setenv("FINTUAL_EMAIL", "test@example.com")

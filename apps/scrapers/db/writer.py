@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from psycopg.types.json import Jsonb
 
-from db.connection import get_pool
+from db.connection import get_pool, with_db_retry
 from db.slug import slugify, unique_slug
 from scrapers.base import ScrapedProduct, ScrapedTransaction
 
@@ -23,18 +23,30 @@ def start_scraper_run(method: str, institution: str) -> str:
     'open_banking'); `institution` is the platform being scraped.
     """
     run_id = str(uuid4())
+    _insert_scraper_run(run_id, method, institution, datetime.now(timezone.utc))
+    return run_id
+
+
+@with_db_retry
+def _insert_scraper_run(
+    run_id: str, method: str, institution: str, started_at: datetime
+) -> None:
+    """The id is minted by the caller, so a retry after a commit whose
+    acknowledgement was lost finds its own row instead of adding a second one
+    that would stay `running` forever."""
     pool = get_pool()
     with pool.connection() as conn:
         conn.execute(
             """
             INSERT INTO scraper_runs (id, method, institution, started_at, status)
             VALUES (%s, %s, %s, %s, 'running')
+            ON CONFLICT (id) DO NOTHING
             """,
-            (run_id, method, institution, datetime.now(timezone.utc)),
+            (run_id, method, institution, started_at),
         )
-    return run_id
 
 
+@with_db_retry
 def finish_scraper_run(
     run_id: str,
     status: str,
@@ -501,6 +513,7 @@ class TransactionWriteResult:
     failed: int = 0
 
 
+@with_db_retry
 def upsert_transactions(
     transactions: list[ScrapedTransaction],
 ) -> TransactionWriteResult:
@@ -520,9 +533,13 @@ def upsert_transactions(
     backfills them.
 
     Each product resolution and each transaction runs in its own
-    `conn.transaction()` block, so one that fails is rolled back alone and
-    counted in `failed` instead of leaving the connection in an aborted
-    transaction that fails every row after it.
+    `conn.transaction()` block, so one that fails (a serialization failure
+    included) is rolled back alone and counted in `failed` instead of leaving
+    the connection in an aborted transaction that fails every row after it. A
+    dropped connection is the exception: it re-raises, and `with_db_retry`
+    replays the batch, which is safe because every step is idempotent (rows the
+    lost attempt committed are found, not re-inserted, so they are missing from
+    `inserted`).
     """
     if not transactions:
         return TransactionWriteResult()
@@ -548,6 +565,8 @@ def upsert_transactions(
                         )
                     products[key] = product_id
             except Exception:
+                if conn.broken:
+                    raise
                 logger.exception(
                     "Failed to resolve the product for: %s", txn.external_id
                 )
@@ -568,6 +587,8 @@ def upsert_transactions(
                         conn, txn, product_id, claimed, incoming.get(product_id, set())
                     )
             except Exception:
+                if conn.broken:
+                    raise
                 failed += 1
                 logger.exception("Failed to insert transaction: %s", txn.external_id)
                 continue
@@ -577,6 +598,7 @@ def upsert_transactions(
     return TransactionWriteResult(inserted=inserted, failed=failed)
 
 
+@with_db_retry
 def upsert_product(sp: ScrapedProduct) -> None:
     """Record one scraped product observation.
 
