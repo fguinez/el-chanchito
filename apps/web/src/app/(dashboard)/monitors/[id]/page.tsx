@@ -277,7 +277,7 @@ export default function MonitorDetailPage() {
 
       {evaluation.status === "no_data" && evaluation.noDataReason && (
         <p className="text-sm text-muted-foreground">
-          Sin datos: {evaluation.noDataReason}
+          {evaluation.noDataReason}
         </p>
       )}
 
