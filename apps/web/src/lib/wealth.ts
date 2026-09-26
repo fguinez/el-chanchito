@@ -211,6 +211,15 @@ function snapshotMetrics(
   return "kind" in metrics ? (metrics as ProductMetrics) : null;
 }
 
+/** Local-midnight Date for a YYYY-MM-DD day key. calcWealthMetrics reads
+ *  local month fields, and `new Date("YYYY-MM-DD")` is UTC midnight: the
+ *  previous local day west of UTC, so a 1st-of-month counted as the month
+ *  before. */
+function localDate(day: string): Date {
+  const [year, month, date] = day.split("-").map(Number);
+  return new Date(year, month - 1, date);
+}
+
 /**
  * Wealth series with derived metrics, in date order.
  *
@@ -340,13 +349,13 @@ export function buildWealthSeries(
       {
         patrimonio: row.patrimonio,
         deuda: row.deuda,
-        date: new Date(row.snapshotDate),
+        date: localDate(row.snapshotDate),
       },
       prev
         ? {
             patrimonio: prev.patrimonio,
             deuda: prev.deuda,
-            date: new Date(prev.snapshotDate),
+            date: localDate(prev.snapshotDate),
           }
         : null
     );

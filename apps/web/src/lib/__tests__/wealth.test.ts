@@ -210,6 +210,21 @@ describe("buildWealthSeries", () => {
       monthlyRate: 250000,
     });
   });
+
+  it("counts months between local calendar dates", () => {
+    // Parsed as UTC midnight, 2026-03-01 would read as February here.
+    const series = buildWealthSeries(
+      [legacyRow("2026-03-01", 2000000, 1000000)],
+      [checking(new Date(2026, 3, 15, 10), 2500000)],
+      rates
+    );
+
+    expect(series[1]).toMatchObject({
+      snapshotDate: "2026-04-15",
+      monthsBetween: 1,
+      monthlyRate: 1500000,
+    });
+  });
 });
 
 describe("derivedSeriesStart", () => {
