@@ -11,22 +11,27 @@ real `_resolve_product` to check a new product's INSERT carries an
 institution-unique slug (the slug helpers themselves live in test_slug.py).
 `_claim_decision` and `_FakeTxConn` cover issue #57's adoption path: a stored
 BanChile row is re-keyed in place when its movement comes back under the bank's
-operation id, instead of being imported a second time.
+operation id, instead of being imported a second time. `_FakeTxConn` also
+models Postgres's aborted-transaction state, so the per-row isolation tests
+fail if a bad row poisons the rows after it.
 """
 
 from datetime import date
 from decimal import Decimal
 
+import psycopg
 import pytest
 
 from db import writer
 from db.writer import (
+    TransactionWriteResult,
     _adopts_stored_rows,
     _canonical_metrics,
     _claim_decision,
     _headline_decimal,
     _is_final_id,
     _write_decision,
+    start_scraper_run,
     upsert_product,
     upsert_transactions,
 )
@@ -556,26 +561,58 @@ class TestAdoptsStoredRows:
         assert _is_final_id("bch_fp_0123456789abcdef") is False
 
 
+class _FakeBlock:
+    """`conn.transaction()`: a body that raises rolls its rows back and leaves
+    the connection usable again, as a rolled-back block does."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def __enter__(self):
+        self._saved = [dict(row) for row in self._conn.rows]
+        return self
+
+    def __exit__(self, exc_type, *exc):
+        if exc_type is not None:
+            self._conn.rows = self._saved
+            self._conn.aborted = False
+        return False
+
+
 class _FakeTxConn:
     """A transactions table stand-in for `upsert_transactions`.
 
     Rows are dicts; `created_at` is the insertion order, which is what the real
     query orders by. `_resolve_product` is monkeypatched, so only the
-    transaction queries reach here.
+    transaction queries reach here. An INSERT of an id in `fail_on` raises and,
+    like Postgres, aborts the transaction: every statement after it fails
+    until a `transaction()` block rolls back past it. An INSERT of an id in
+    `drop_on` drops the connection once; each `pool.connection()` checkout is
+    a fresh connection over the same rows.
     """
 
-    def __init__(self, rows=None):
+    def __init__(self, rows=None, fail_on=(), drop_on=()):
         self.rows = list(rows or [])
         self.executed = []
         self._clock = 100
+        self.fail_on = set(fail_on)
+        self.drop_on = set(drop_on)
+        self.aborted = False
+        self.broken = False
 
     def __enter__(self):
+        self.broken = False
         return self
 
     def __exit__(self, *exc):
         return False
 
+    def transaction(self):
+        return _FakeBlock(self)
+
     def execute(self, sql, params=None):
+        if self.aborted:
+            raise RuntimeError("current transaction is aborted")
         q = " ".join(sql.split())
         self.executed.append((q, params))
         p = params or ()
@@ -630,6 +667,13 @@ class _FakeTxConn:
                 source,
                 ext,
             ) = p
+            if ext in self.fail_on:
+                self.aborted = True
+                raise RuntimeError("value too long for type")
+            if ext in self.drop_on:
+                self.drop_on.discard(ext)
+                self.broken = True
+                raise psycopg.OperationalError("server closed the connection")
             self._clock += 1
             self.rows.append(
                 {
@@ -706,6 +750,105 @@ def _use_tx_conn(monkeypatch, conn):
     )
 
 
+class _DroppingRunConn:
+    """Records scraper_runs INSERTs; the first raises as a dropped connection
+    whose commit may or may not have landed."""
+
+    def __init__(self):
+        self.inserted_ids = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        self.inserted_ids.append(params[0])
+        if len(self.inserted_ids) == 1:
+            raise psycopg.OperationalError("server closed the connection")
+        return _FakeCursor()
+
+
+class TestStartScraperRun:
+    def test_a_retry_reuses_the_run_id(self, monkeypatch):
+        """A replayed INSERT can't leave a second run stuck in `running`."""
+        conn = _DroppingRunConn()
+        monkeypatch.setattr(writer, "get_pool", lambda: _FakePool(conn))
+        monkeypatch.setattr("scrapers.retry.BASE_DELAY_SECONDS", 0.0)
+
+        run_id = start_scraper_run("http_api", "buda")
+
+        assert conn.inserted_ids == [run_id, run_id]
+
+
+class TestUpsertTransactionsIsolation:
+    """One transaction that fails to write must not take the rest with it."""
+
+    def test_a_failing_row_is_skipped_and_the_rest_are_written(self, monkeypatch):
+        conn = _FakeTxConn(fail_on={"bch_op_12345678902"})
+        _use_tx_conn(monkeypatch, conn)
+
+        result = upsert_transactions(
+            [
+                _txn("bch_op_12345678901", amount=-999999),
+                _txn("bch_op_12345678902", amount=-1000000),
+                _txn("bch_op_12345678903", amount=-2500000),
+            ]
+        )
+
+        assert result == TransactionWriteResult(inserted=2, failed=1)
+        assert [row["external_id"] for row in conn.rows] == [
+            "bch_op_12345678901",
+            "bch_op_12345678903",
+        ]
+
+    def test_an_unresolvable_product_counts_its_rows_as_failed(self, monkeypatch):
+        conn = _FakeTxConn()
+        monkeypatch.setattr(writer, "get_pool", lambda: _FakePool(conn))
+
+        def resolve(conn, institution, kind, currency="CLP", external_ref=None, name=None):
+            if kind == "credit_card":
+                raise RuntimeError("no such kind")
+            return "prod-1"
+
+        monkeypatch.setattr(writer, "_resolve_product", resolve)
+
+        result = upsert_transactions(
+            [
+                _txn("bch_ref_200812345678", kind="credit_card"),
+                _txn("bch_op_12345678901"),
+            ]
+        )
+
+        assert result == TransactionWriteResult(inserted=1, failed=1)
+
+    def test_a_dropped_connection_replays_the_batch_without_duplicates(
+        self, monkeypatch
+    ):
+        """A broken connection re-raises instead of failing row by row, and
+        `with_db_retry` replays the batch: the row the lost attempt committed is
+        found, not inserted again."""
+        conn = _FakeTxConn(drop_on={"bch_op_12345678902"})
+        _use_tx_conn(monkeypatch, conn)
+        monkeypatch.setattr("scrapers.retry.BASE_DELAY_SECONDS", 0.0)
+
+        result = upsert_transactions(
+            [
+                _txn("bch_op_12345678901", amount=-999999),
+                _txn("bch_op_12345678902", amount=-1000000),
+                _txn("bch_op_12345678903", amount=-2500000),
+            ]
+        )
+
+        assert result == TransactionWriteResult(inserted=2, failed=0)
+        assert [row["external_id"] for row in conn.rows] == [
+            "bch_op_12345678901",
+            "bch_op_12345678902",
+            "bch_op_12345678903",
+        ]
+
+
 class TestUpsertTransactionsAdoption:
     """Issue #57: a re-keyed movement is rewritten in place, never duplicated."""
 
@@ -713,7 +856,7 @@ class TestUpsertTransactionsAdoption:
         conn = _FakeTxConn([_legacy_row("row-1", "bch_a1b2c3d4e5f60718", 1)])
         _use_tx_conn(monkeypatch, conn)
 
-        inserted = upsert_transactions([_txn("bch_op_12345678901")])
+        inserted = upsert_transactions([_txn("bch_op_12345678901")]).inserted
 
         assert inserted == 0
         assert len(conn.rows) == 1
@@ -732,7 +875,7 @@ class TestUpsertTransactionsAdoption:
 
         inserted = upsert_transactions(
             [_txn(f"bch_op_1234567890{n}") for n in range(3)]
-        )
+        ).inserted
 
         assert inserted == 0
         assert sorted(row["external_id"] for row in conn.rows) == [
@@ -747,7 +890,7 @@ class TestUpsertTransactionsAdoption:
 
         inserted = upsert_transactions(
             [_txn("bch_op_12345678901"), _txn("bch_op_12345678902")]
-        )
+        ).inserted
 
         assert inserted == 1
         assert len(conn.rows) == 2
@@ -757,8 +900,8 @@ class TestUpsertTransactionsAdoption:
         _use_tx_conn(monkeypatch, conn)
         batch = [_txn("bch_op_12345678901"), _txn("bch_op_12345678902")]
 
-        first = upsert_transactions(batch)
-        second = upsert_transactions(batch)
+        first = upsert_transactions(batch).inserted
+        second = upsert_transactions(batch).inserted
 
         assert (first, second) == (1, 0)
         assert len(conn.rows) == 2
@@ -770,7 +913,7 @@ class TestUpsertTransactionsAdoption:
 
         inserted = upsert_transactions(
             [_txn("bch_ref_200812345678", kind="credit_card")]
-        )
+        ).inserted
 
         assert inserted == 0
         assert conn.rows[0]["external_id"] == "bch_ref_200812345678"
@@ -785,7 +928,7 @@ class TestUpsertTransactionsAdoption:
         )
         _use_tx_conn(monkeypatch, conn)
 
-        inserted = upsert_transactions([_txn("bch_op_12345678901")])
+        inserted = upsert_transactions([_txn("bch_op_12345678901")]).inserted
 
         assert inserted == 1
         assert conn.rows[0]["external_id"] == "bch_aaaaaaaaaaaaaaaa"
@@ -798,7 +941,7 @@ class TestUpsertTransactionsAdoption:
 
         inserted = upsert_transactions(
             [_txn("bch_op_12345678901", description="COMERCIO SINTETICO S.A.")]
-        )
+        ).inserted
 
         assert (inserted, len(conn.rows)) == (0, 1)
         assert conn.executed[-1][0].startswith("SELECT id FROM transactions")
@@ -808,7 +951,7 @@ class TestUpsertTransactionsAdoption:
         conn = _FakeTxConn([_legacy_row("row-1", "bch_op_12345678901", 1)])
         _use_tx_conn(monkeypatch, conn)
 
-        inserted = upsert_transactions([_txn("bch_fp_a1b2c3d4e5f60718")])
+        inserted = upsert_transactions([_txn("bch_fp_a1b2c3d4e5f60718")]).inserted
 
         assert (inserted, len(conn.rows)) == (0, 1)
         assert conn.rows[0]["external_id"] == "bch_op_12345678901"
@@ -828,7 +971,7 @@ class TestUpsertTransactionsAdoption:
             external_id="bcl_ffffffffffffffff",
         )
 
-        inserted = upsert_transactions([txn])
+        inserted = upsert_transactions([txn]).inserted
 
         assert inserted == 1
         assert len(conn.rows) == 2
@@ -857,7 +1000,7 @@ class TestAdoptionAcrossTheDateShift:
         )
         _use_tx_conn(monkeypatch, conn)
 
-        inserted = upsert_transactions([self._incoming()])
+        inserted = upsert_transactions([self._incoming()]).inserted
 
         assert (inserted, len(conn.rows)) == (0, 1)
         assert conn.rows[0]["external_id"] == "bch_op_12345678901"
@@ -902,7 +1045,7 @@ class TestAdoptionAcrossTheDateShift:
         )
         _use_tx_conn(monkeypatch, conn)
 
-        inserted = upsert_transactions([self._incoming()])
+        inserted = upsert_transactions([self._incoming()]).inserted
 
         assert (inserted, len(conn.rows)) == (1, 2)
         assert conn.rows[0]["external_id"] == "bch_aaaaaaaaaaaaaaaa"
@@ -919,7 +1062,7 @@ class TestAdoptionAcrossTheDateShift:
         )
         _use_tx_conn(monkeypatch, conn)
 
-        inserted = upsert_transactions([self._incoming()])
+        inserted = upsert_transactions([self._incoming()]).inserted
 
         assert (inserted, len(conn.rows)) == (1, 2)
         assert conn.rows[0]["external_id"] == "csv_import_1"
@@ -942,7 +1085,7 @@ class TestAdoptionAcrossTheDateShift:
 
         inserted = upsert_transactions(
             [_txn("bch_ref_200812345678", kind="credit_card")]
-        )
+        ).inserted
 
         assert (inserted, len(conn.rows)) == (0, 1)
         assert conn.rows[0]["external_id"] == "bch_ref_200812345678"

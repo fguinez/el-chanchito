@@ -85,6 +85,18 @@ services:
     # network only — it's an unauthenticated trigger, never publish it (see #23).
     expose:
       - "8080"
+    # GET /health answers 503 once the scheduler's heartbeat job has stopped
+    # running (a wedged event loop), which marks the container unhealthy.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/health' % os.environ['SCRAPER_CONTROL_PORT'], timeout=5)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     volumes:
       - scraper_state:/data
     depends_on:
