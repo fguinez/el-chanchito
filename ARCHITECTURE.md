@@ -423,7 +423,39 @@ shallow-merges `attributes`, always refreshes
 | `bci_lider` | `web` | Real Chrome over CDP (`bci_lider_web`) | Autofill in a real Chrome (managed by default; reuse via `LIDER_BCI_CDP_URL` + `make bci-lider-login`; Cloudflare Turnstile) | 24h |
 
 The three email-based scrapers reuse one `ImapSession`: it runs `NOOP` on
-each acquire and only re-logs-in when the mailbox has been dropped.
+each acquire and only re-logs-in when the mailbox has been dropped. imaplib is
+synchronous, so every IMAP round trip runs in `asyncio.to_thread` while the
+session lock is held: the email scrapers take turns on the connection without
+blocking the event loop for the other scrapers.
+
+Each institution declares an `EmailPattern`, and `parse_transaction` applies
+it to one email:
+
+- **Sender**: `sender_domains` entries must appear as whole labels of the
+  From address's domain (`somosmach` matches `somosmach.com`, never `bci.cl`,
+  a display name, or a local part), so MACH no longer claims Banco Bci mail.
+  Subject filters ignore case and accents.
+- **Amount**: `amount_rules` anchor the figure to its context
+  (`anchored("pagaste|compraste")` claims the first `$` figure within 60
+  characters after the phrase, never across a sentence end); the anchor that
+  appears earliest in the body wins, and a figure no anchor claims (a promo
+  banner, a balance line) is never read. An email skipped with such a figure
+  is logged at info level with its subject, so new wording shows up.
+- **Direction**: an email is income when its subject carries one of the
+  pattern's `income_keywords` ("recibiste una transferencia", "devolución") or
+  its figure was anchored by an `income=True` rule ("recibiste", "te
+  devolvimos"); everything else is an expense.
+- **Date**: the `Date` header in Chile's calendar, else the IMAP
+  INTERNALDATE, else today with a warning.
+- **Coverage**: `EMAIL_IMAP_MAILBOX` (default `INBOX`, opened read-only) and
+  `EMAIL_MAX_MESSAGES` (default 100 emails per institution and run, newest
+  first; a truncated window logs a warning) apply to every pattern unless it
+  sets its own `mailbox` / `max_messages`. Zero amounts are skipped with a
+  debug line naming the subject, and an email that fails to parse is logged
+  and skipped without costing the rest of the run.
+
+The synthetic corpus in `apps/scrapers/tests/fixtures/emails/` drives
+table-driven tests of that behaviour per institution.
 
 ### Product model
 
@@ -481,7 +513,8 @@ Transactions are deduplicated via `UNIQUE(product_id, external_id)`:
   occurrence date: see the two-dates note below); claiming is oldest-first and
   one-to-one, preferring an exact occurrence-date match. See V018 and V019.
 - BCI Lider: `bcl_{md5(date|description|amount|CLP)[:16]}` (no per-movement id in the DOM)
-- Email: `email_{institution}_{hash(message_id)}`
+- Email: `email_{institution}_{sha1(Message-ID)[:8]}`; an email without a
+  Message-ID hashes `Date|From|Subject|body` instead
 - CSV: `csv_{base64url(date|description|amount)[:24]}`
 
 ### On-demand refresh (control endpoint)
