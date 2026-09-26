@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Card,
   CardContent,
@@ -19,19 +19,28 @@ import {
 import { SortableTableHead } from "@/components/ui/sortable-table-head";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { DEFAULT_SHARED_RATIO } from "@/lib/fixed-expenses";
+import { Badge } from "@/components/ui/badge";
+import { FixedExpenseEditDialog } from "@/components/fixed-expenses/fixed-expense-edit-dialog";
 import { useSortableData } from "@/lib/use-sortable-data";
-import { formatCLP } from "@/lib/utils";
-import { calcPersonalAmount } from "@/lib/budget-engine";
+import { cn, formatCLP } from "@/lib/utils";
+import {
+  fixedExpensePersonalAmount,
+  fixedExpenseStatus,
+  fixedExpenseTotals,
+  formatActiveWindow,
+  parseFixedExpenseForm,
+  ratioInput,
+  sharedRatioValue,
+  sortByStatus,
+  type FixedExpense,
+} from "@/lib/fixed-expenses";
+import { formatLocalDate } from "@/lib/monitors/history";
 import { Trash2 } from "lucide-react";
 
-interface FixedExpense {
-  id: string;
-  name: string;
-  amount: number;
-  isShared: boolean;
-  sharedRatio: string | null;
-}
+const STATUS_BADGES = {
+  scheduled: { label: "Programado", variant: "outline" },
+  ended: { label: "Finalizado", variant: "secondary" },
+} as const;
 
 type ExpenseSortKey = "gasto" | "total" | "personal" | "compartido";
 
@@ -40,9 +49,10 @@ export default function FixedExpensesPage() {
   const [name, setName] = useState("");
   const [amount, setAmount] = useState("");
   const [isShared, setIsShared] = useState(false);
-  const [sharedRatio, setSharedRatio] = useState(
-    String(parseFloat(DEFAULT_SHARED_RATIO))
-  );
+  const [sharedRatio, setSharedRatio] = useState(ratioInput(null));
+  const [activeFrom, setActiveFrom] = useState("");
+  const [activeTo, setActiveTo] = useState("");
+  const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   const loadExpenses = () => {
@@ -57,27 +67,41 @@ export default function FixedExpensesPage() {
   }, []);
 
   const handleAdd = async () => {
-    if (!name || !amount) return;
+    const parsed = parseFixedExpenseForm({
+      name,
+      amount,
+      isShared,
+      sharedRatio,
+      activeFrom,
+      activeTo,
+    });
+    if (!parsed.ok) {
+      setFormError(parsed.error);
+      return;
+    }
 
     setSaving(true);
+    setFormError(null);
     try {
       const res = await fetch("/api/fixed-expenses", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name,
-          amount: parseInt(amount),
-          isShared,
-          sharedRatio: isShared ? parseFloat(sharedRatio) : null,
-        }),
+        body: JSON.stringify(parsed.body),
       });
 
       if (res.ok) {
         setName("");
         setAmount("");
         setIsShared(false);
+        setActiveFrom("");
+        setActiveTo("");
         loadExpenses();
+      } else {
+        const data = await res.json().catch(() => null);
+        setFormError(data?.error ?? "No se pudo agregar el gasto");
       }
+    } catch {
+      setFormError("No se pudo agregar el gasto");
     } finally {
       setSaving(false);
     }
@@ -92,32 +116,37 @@ export default function FixedExpensesPage() {
     loadExpenses();
   };
 
-  const totalPersonal = expenses.reduce((sum, e) => {
-    const ratio = e.sharedRatio ? parseFloat(e.sharedRatio) : 0;
-    return sum + calcPersonalAmount(e.amount, e.isShared, ratio);
-  }, 0);
-
-  const totalFull = expenses.reduce((sum, e) => sum + e.amount, 0);
+  // Vigencia is decided on the browser's local day, never the UTC date.
+  const today = formatLocalDate(new Date());
+  const totals = fixedExpenseTotals(expenses, today);
+  const registeredLabel =
+    expenses.length === 1
+      ? "1 gasto fijo registrado"
+      : `${expenses.length} gastos fijos registrados`;
+  const activeLabel =
+    totals.activeCount === 1
+      ? "1 vigente hoy"
+      : `${totals.activeCount} vigentes hoy`;
 
   const getValue = useCallback(
     (expense: FixedExpense, key: ExpenseSortKey): string | number | null => {
-      const ratio = expense.sharedRatio ? parseFloat(expense.sharedRatio) : 0;
       switch (key) {
         case "gasto":
           return expense.name;
         case "total":
           return expense.amount;
         case "personal":
-          return calcPersonalAmount(expense.amount, expense.isShared, ratio);
+          return fixedExpensePersonalAmount(expense);
         case "compartido":
           // "Compartido" renders a share % (or "No", i.e. 0%): sort numerically.
-          return expense.isShared ? ratio : 0;
+          return expense.isShared ? sharedRatioValue(expense.sharedRatio) : 0;
       }
     },
     []
   );
 
-  const { sorted, sort, toggleSort } = useSortableData(expenses, getValue);
+  const byStatus = useMemo(() => sortByStatus(expenses, today), [expenses, today]);
+  const { sorted, sort, toggleSort } = useSortableData(byStatus, getValue);
   // Bridge the generic header's string key to our typed key union.
   const handleSort = (key: string) => toggleSort(key as ExpenseSortKey);
 
@@ -126,19 +155,28 @@ export default function FixedExpensesPage() {
       <h2 className="text-2xl font-bold">Gastos Fijos Mensuales</h2>
 
       {/* Summary */}
-      <div className="grid gap-4 md:grid-cols-2">
-        <Card>
-          <CardHeader className="pb-2">
-            <CardDescription>Total personal</CardDescription>
-            <CardTitle className="text-xl">{formatCLP(totalPersonal)}</CardTitle>
-          </CardHeader>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardDescription>Total completo (antes de compartir)</CardDescription>
-            <CardTitle className="text-xl">{formatCLP(totalFull)}</CardTitle>
-          </CardHeader>
-        </Card>
+      <div className="space-y-2">
+        <div className="grid gap-4 md:grid-cols-2">
+          <Card>
+            <CardHeader className="pb-2">
+              <CardDescription>Total personal</CardDescription>
+              <CardTitle className="text-xl">
+                {formatCLP(totals.personal)}
+              </CardTitle>
+            </CardHeader>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardDescription>
+                Total completo (antes de compartir)
+              </CardDescription>
+              <CardTitle className="text-xl">{formatCLP(totals.full)}</CardTitle>
+            </CardHeader>
+          </Card>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Los totales suman solo los gastos vigentes hoy.
+        </p>
       </div>
 
       {/* Add form */}
@@ -147,8 +185,8 @@ export default function FixedExpensesPage() {
           <CardTitle>Agregar gasto fijo</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="flex items-end gap-3">
-            <div className="flex-1">
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="min-w-48 flex-1">
               <label className="mb-1 block text-sm text-muted-foreground">
                 Nombre
               </label>
@@ -189,15 +227,48 @@ export default function FixedExpensesPage() {
                 <Input
                   type="number"
                   step="0.01"
+                  min="0"
+                  max="1"
                   value={sharedRatio}
                   onChange={(e) => setSharedRatio(e.target.value)}
                 />
               </div>
             )}
+            <div className="w-40">
+              <label
+                htmlFor="active-from"
+                className="mb-1 block text-sm text-muted-foreground"
+              >
+                Vigente desde
+              </label>
+              <Input
+                id="active-from"
+                type="date"
+                value={activeFrom}
+                onChange={(e) => setActiveFrom(e.target.value)}
+              />
+            </div>
+            <div className="w-40">
+              <label
+                htmlFor="active-to"
+                className="mb-1 block text-sm text-muted-foreground"
+              >
+                Vigente hasta
+              </label>
+              <Input
+                id="active-to"
+                type="date"
+                value={activeTo}
+                onChange={(e) => setActiveTo(e.target.value)}
+              />
+            </div>
             <Button onClick={handleAdd} disabled={saving}>
               {saving ? "..." : "Agregar"}
             </Button>
           </div>
+          {formError && (
+            <p className="mt-3 text-sm text-destructive">{formError}</p>
+          )}
         </CardContent>
       </Card>
 
@@ -206,7 +277,7 @@ export default function FixedExpensesPage() {
         <CardHeader>
           <CardTitle>Gastos fijos</CardTitle>
           <CardDescription>
-            {expenses.length} gastos fijos registrados
+            {registeredLabel}, {activeLabel}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -253,23 +324,28 @@ export default function FixedExpensesPage() {
                     }
                     onSort={handleSort}
                   />
-                  <TableHead className="w-12"></TableHead>
+                  <TableHead>Vigencia</TableHead>
+                  <TableHead className="w-16"></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {sorted.map((expense) => {
-                  const ratio = expense.sharedRatio
-                    ? parseFloat(expense.sharedRatio)
-                    : 0;
-                  const personal = calcPersonalAmount(
-                    expense.amount,
-                    expense.isShared,
-                    ratio
-                  );
+                  const ratio = sharedRatioValue(expense.sharedRatio);
+                  const personal = fixedExpensePersonalAmount(expense);
+                  const status = fixedExpenseStatus(expense, today);
+                  const badge = status === "active" ? null : STATUS_BADGES[status];
                   return (
-                    <TableRow key={expense.id}>
+                    <TableRow
+                      key={expense.id}
+                      className={cn(badge && "text-muted-foreground")}
+                    >
                       <TableCell className="font-medium">
-                        {expense.name}
+                        <span className="flex items-center gap-2">
+                          {expense.name}
+                          {badge && (
+                            <Badge variant={badge.variant}>{badge.label}</Badge>
+                          )}
+                        </span>
                       </TableCell>
                       <TableCell className="text-right">
                         {formatCLP(expense.amount)}
@@ -282,13 +358,21 @@ export default function FixedExpensesPage() {
                           ? `${Math.round(ratio * 100)}%`
                           : "No"}
                       </TableCell>
+                      <TableCell>{formatActiveWindow(expense)}</TableCell>
                       <TableCell>
-                        <button
-                          onClick={() => handleDelete(expense.id)}
-                          className="text-muted-foreground hover:text-destructive"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </button>
+                        <div className="flex items-center gap-3">
+                          <FixedExpenseEditDialog
+                            expense={expense}
+                            onSaved={loadExpenses}
+                          />
+                          <button
+                            onClick={() => handleDelete(expense.id)}
+                            aria-label="Eliminar"
+                            className="text-muted-foreground hover:text-destructive"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </div>
                       </TableCell>
                     </TableRow>
                   );
