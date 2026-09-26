@@ -40,6 +40,9 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
+# httpx logs every request URL at INFO, and some carry account ids (Mercado
+# Pago's balance path holds the user id); keep only its warnings.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("scraper-service")
 
 
