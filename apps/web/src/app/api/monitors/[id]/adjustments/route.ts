@@ -5,6 +5,7 @@ import { monitorAdjustments, monitors } from "@/lib/db/schema";
 import { loadMonitorAdjustments } from "@/lib/monitors/catalog";
 import { UUID_RE } from "@/lib/monitors/validate";
 import {
+  isForeignKeyViolation,
   parseMonthParam,
   toApiAdjustment,
   validateAdjustmentInput,
@@ -57,7 +58,8 @@ export async function GET(request: NextRequest, { params }: Context) {
 }
 
 /** POST /api/monitors/[id]/adjustments: create an adjustment from
- *  `{ adjustmentDate, amount, description? }`; 404 if the monitor is gone. */
+ *  `{ adjustmentDate, amount, description? }`; 404 if the monitor is gone
+ *  (the foreign key decides, so a concurrent monitor delete is a 404 too). */
 export async function POST(request: NextRequest, { params }: Context) {
   try {
     const { id } = await params;
@@ -78,9 +80,6 @@ export async function POST(request: NextRequest, { params }: Context) {
         { status: result.status }
       );
     }
-    if (!(await monitorExists(id))) {
-      return NextResponse.json({ error: "Not found" }, { status: 404 });
-    }
 
     const [created] = await db
       .insert(monitorAdjustments)
@@ -93,6 +92,9 @@ export async function POST(request: NextRequest, { params }: Context) {
       .returning();
     return NextResponse.json(toApiAdjustment(created), { status: 201 });
   } catch (error) {
+    if (isForeignKeyViolation(error)) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
     console.error("POST /api/monitors/[id]/adjustments failed:", error);
     return NextResponse.json({ error: "Internal error" }, { status: 500 });
   }

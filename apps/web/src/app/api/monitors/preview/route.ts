@@ -25,10 +25,13 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
     }
 
-    const monitorId =
+    // null or absent: a new monitor. A well-formed id with no stored
+    // monitor simply has no adjustments.
+    const rawMonitorId =
       typeof body === "object" && body !== null && "monitorId" in body
         ? body.monitorId
         : undefined;
+    const monitorId = rawMonitorId ?? undefined;
     if (
       monitorId !== undefined &&
       (typeof monitorId !== "string" || !UUID_RE.test(monitorId))

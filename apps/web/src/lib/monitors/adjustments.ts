@@ -134,6 +134,17 @@ export function parseMonthParam(
   return { ok: true, value: raw };
 }
 
+/** Whether a failed insert broke a foreign key (Postgres 23503), e.g. the
+ *  monitor was deleted meanwhile. Drizzle wraps the driver error in `cause`. */
+export function isForeignKeyViolation(error: unknown): boolean {
+  for (let e: unknown = error, depth = 0; e != null && depth < 3; depth++) {
+    if (typeof e !== "object") return false;
+    if ((e as { code?: unknown }).code === "23503") return true;
+    e = (e as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 export type MonitorAdjustmentRow = typeof monitorAdjustments.$inferSelect;
 
 /** The API shape of an adjustment: the row with `amount` as a number (drizzle

@@ -79,7 +79,8 @@ export function adjustmentOnDate(
       total += adjustment.amount;
     }
   }
-  return total;
+  // Back to the stored 8-decimal scale, so 0.1 + 0.2 sums to exactly 0.3.
+  return Number(total.toFixed(8));
 }
 
 /** Metrics are a discriminated-union JSONB payload with dynamic field names,

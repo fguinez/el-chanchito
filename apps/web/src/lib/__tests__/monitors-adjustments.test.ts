@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   groupAdjustmentsByDay,
+  isForeignKeyViolation,
   parseMonthParam,
   toApiAdjustment,
   validateAdjustmentInput,
@@ -42,6 +43,17 @@ describe("validateAdjustmentInput: create", () => {
     expect(blank.ok && blank.value.description).toBeNull();
   });
 
+  it.each([999999999999.99, -999999999999.99])(
+    "accepts %d, just inside the stored range",
+    (amount) => {
+      const result = validateAdjustmentInput({
+        adjustmentDate: "2026-07-15",
+        amount,
+      });
+      expect(result.ok).toBe(true);
+    }
+  );
+
   it("rounds the amount to the stored 8 decimals", () => {
     const result = validateAdjustmentInput({
       adjustmentDate: "2026-07-15",
@@ -58,9 +70,11 @@ describe("validateAdjustmentInput: create", () => {
     [{ adjustmentDate: 20260715, amount: 1 }, "adjustmentDate", "YYYY-MM-DD"],
     [{ adjustmentDate: "2026-07-15", amount: 0 }, "amount", "must not be zero"],
     [{ adjustmentDate: "2026-07-15", amount: 1e-9 }, "amount", "must not be zero"],
+    [{ adjustmentDate: "2026-07-15", amount: -0 }, "amount", "must not be zero"],
     [{ adjustmentDate: "2026-07-15", amount: "30000" }, "amount", "must be a number"],
     [{ adjustmentDate: "2026-07-15", amount: Number.NaN }, "amount", "must be a number"],
     [{ adjustmentDate: "2026-07-15", amount: 1e12 }, "amount", "too large"],
+    [{ adjustmentDate: "2026-07-15", amount: -1e12 }, "amount", "too large"],
     [
       { adjustmentDate: "2026-07-15", amount: 1, description: 5 },
       "description",
@@ -182,5 +196,17 @@ describe("groupAdjustmentsByDay", () => {
   it("keeps only the requested month", () => {
     expect(groupAdjustmentsByDay(adjustments, "2026-08")).toHaveLength(1);
     expect(groupAdjustmentsByDay(adjustments, "2026-09")).toEqual([]);
+  });
+});
+
+describe("isForeignKeyViolation", () => {
+  it.each([
+    [{ code: "23503" }, true],
+    [{ message: "Failed query", cause: { code: "23503" } }, true],
+    [{ cause: { code: "23505" } }, false],
+    [new Error("boom"), false],
+    [null, false],
+  ])("%j -> %s", (error, expected) => {
+    expect(isForeignKeyViolation(error)).toBe(expected);
   });
 });

@@ -454,6 +454,7 @@ describe("evaluateMonitor: status precedence and margins", () => {
 describe("adjustmentOnDate", () => {
   // Synthetic amounts; dates are local calendar days like DAY_OF_MONTH().
   const adjustments = [
+    { adjustmentDate: "2025-07-10", amount: 999999 },
     { adjustmentDate: "2026-06-30", amount: 999999 },
     { adjustmentDate: "2026-07-01", amount: 30000 },
     { adjustmentDate: "2026-07-15", amount: -50000 },
@@ -467,11 +468,21 @@ describe("adjustmentOnDate", () => {
     ["from the first day, without the previous month", new Date(2026, 6, 1), 30000],
     ["the day before a same-day pair", new Date(2026, 6, 14), 30000],
     ["on the day of a same-day pair, summed", new Date(2026, 6, 15), -10000],
-    ["late in the evening of that day", new Date(2026, 6, 15, 23, 30), -10000],
     ["on the last day of the month", new Date(2026, 6, 31), 990000],
+    // Evenings whose UTC date is already the next month still count locally.
+    ["late on the month's last evening", new Date(2026, 6, 31, 23, 30), 990000],
+    ["late on the previous month's last evening", new Date(2026, 5, 30, 23, 30), 999999],
     ["after the month ends", new Date(2026, 7, 1), 0],
   ])("%s", (_label, date, expected) => {
     expect(adjustmentOnDate(adjustments, date)).toBe(expected);
+  });
+
+  it("rounds the sum to the stored 8 decimals", () => {
+    const fractional = [
+      { adjustmentDate: "2026-07-01", amount: 0.1 },
+      { adjustmentDate: "2026-07-01", amount: 0.2 },
+    ];
+    expect(adjustmentOnDate(fractional, new Date(2026, 6, 1))).toBe(0.3);
   });
 
   it("is 0 without adjustments", () => {
