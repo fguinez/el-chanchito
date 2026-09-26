@@ -1,0 +1,4 @@
+# Runtime deps plus the test tooling. The Dockerfile installs requirements.txt
+# only; `make install` / `make install-py` install this file.
+-r requirements.txt
+pytest>=9,<10

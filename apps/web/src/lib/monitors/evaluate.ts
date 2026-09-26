@@ -11,6 +11,7 @@ import {
   type ProductMetrics,
 } from "@chanchito/product-model";
 import type { ClpRates } from "@/lib/rates";
+import { formatLocalDate } from "./dates";
 import {
   ExprError,
   collectRefs,
@@ -20,6 +21,7 @@ import {
 } from "./expr";
 import type {
   Comparator,
+  MonitorAdjustment,
   MonitorDefinition,
   MonitorEvaluation,
   MonitorStatus,
@@ -61,6 +63,26 @@ function dayOfMonth(date: Date): number {
 
 function daysInMonth(date: Date): number {
   return new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
+}
+
+/** Sum of the adjustments in effect on `date`: those dated in the same local
+ *  calendar month, on or before that day. Same-day adjustments add up. */
+export function adjustmentOnDate(
+  adjustments: readonly MonitorAdjustment[] | undefined,
+  date: Date
+): number {
+  if (adjustments == null || adjustments.length === 0) return 0;
+  const day = formatLocalDate(date);
+  const month = day.slice(0, 7);
+  let total = 0;
+  for (const adjustment of adjustments) {
+    const adjustmentDay = adjustment.adjustmentDate;
+    if (adjustmentDay.slice(0, 7) === month && adjustmentDay <= day) {
+      total += adjustment.amount;
+    }
+  }
+  // Back to the stored 8-decimal scale, so 0.1 + 0.2 sums to exactly 0.3.
+  return Number(total.toFixed(8));
 }
 
 /** Metrics are a discriminated-union JSONB payload with dynamic field names,
@@ -243,6 +265,7 @@ function parseSource(source: string): ParsedSource {
 
 /**
  * Evaluate a monitor (left expression + thresholds) at a point in time.
+ * Every threshold value includes the adjustments in effect that day.
  * Status precedence: no_data (anything unresolvable, on either side) beats
  * breached (an alert threshold's condition holds) beats warning beats ok.
  */
@@ -257,6 +280,7 @@ export function evaluateMonitor(
 
   let noDataReason = leftResult.ok ? null : leftResult.reason;
   const refs: RefExpr[] = leftParsed.expr ? collectRefs(leftParsed.expr) : [];
+  const adjustment = adjustmentOnDate(def.adjustments, ctx.date);
 
   let breached = false;
   let warned = false;
@@ -267,11 +291,12 @@ export function evaluateMonitor(
       ? evaluateExpression(parsed.expr, ctx)
       : { ok: false, reason: `Umbral inválido: ${parsed.error}` };
     if (!result.ok && noDataReason == null) noDataReason = result.reason;
+    const value = result.ok ? result.value + adjustment : null;
 
     let margin: number | null = null;
-    if (leftResult.ok && result.ok) {
-      margin = thresholdMargin(t.comparator, leftResult.value, result.value);
-      if (comparatorHolds(t.comparator, leftResult.value, result.value)) {
+    if (leftResult.ok && value != null) {
+      margin = thresholdMargin(t.comparator, leftResult.value, value);
+      if (comparatorHolds(t.comparator, leftResult.value, value)) {
         if (t.severity === "alert") breached = true;
         else warned = true;
       }
@@ -279,7 +304,7 @@ export function evaluateMonitor(
     return {
       severity: t.severity,
       comparator: t.comparator,
-      value: result.ok ? result.value : null,
+      value,
       margin,
     };
   });
@@ -317,6 +342,7 @@ export function evaluateMonitor(
     value: leftResult.ok ? leftResult.value : null,
     thresholds,
     margin,
+    adjustment,
     staleAsOf: oldest ? oldest.toISOString() : null,
     noDataReason,
   };

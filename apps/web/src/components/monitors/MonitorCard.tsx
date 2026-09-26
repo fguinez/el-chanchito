@@ -9,6 +9,7 @@ import {
   SEVERITY_LABELS,
   StaleAsOf,
   StatusBadge,
+  formatSignedAmount,
   type ApiMonitor,
   type MonitorEvaluation,
   type ThresholdEvaluation,
@@ -103,6 +104,13 @@ export function MonitorCard({ monitor }: { monitor: ApiMonitor }) {
                 <span className="tabular-nums">
                   {formatAmount(monitor.currency, nearest.value)}
                 </span>
+                {evaluation.adjustment !== 0 && (
+                  <span className="tabular-nums">
+                    {" "}
+                    (incluye variaciones{" "}
+                    {formatSignedAmount(monitor.currency, evaluation.adjustment)})
+                  </span>
+                )}
               </p>
             )}
             {showMargin && (

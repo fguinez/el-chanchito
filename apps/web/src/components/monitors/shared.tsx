@@ -4,7 +4,7 @@
 
 import { Badge } from "@/components/ui/badge";
 import { isStale } from "@/lib/monitors/overview";
-import { cn, formatDateTimeEs } from "@/lib/utils";
+import { cn, formatAmount, formatDateTimeEs } from "@/lib/utils";
 // Date/axis formatters are shared across features (Monitores, Instituciones).
 export {
   formatDateEs,
@@ -30,6 +30,8 @@ export interface MonitorEvaluation {
   thresholds: ThresholdEvaluation[];
   /** Min across thresholds (nearest to crossing); null for =/!= or no_data. */
   margin: number | null;
+  /** Adjustments already included in every threshold value (0 if none). */
+  adjustment: number;
   /** Oldest balanceAsOf among referenced products, ISO string. */
   staleAsOf: string | null;
   noDataReason: string | null;
@@ -72,7 +74,20 @@ export interface HistoryPoint {
   value: number | null;
   status: MonitorStatus;
   margin: number | null;
+  adjustment: number;
   thresholds: ThresholdEvaluation[];
+}
+
+/** A variación: from `adjustmentDate` (YYYY-MM-DD) to the end of that month,
+ *  `amount` is added to every threshold. */
+export interface ApiAdjustment {
+  id: string;
+  monitorId: string;
+  adjustmentDate: string;
+  amount: number;
+  description: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface MonitorReference {
@@ -142,6 +157,13 @@ export function StatusBadge({
       {STATUS_LABELS.ok}
     </Badge>
   );
+}
+
+/** An amount with an explicit leading sign ("+$30.000", "-$50.000"), for
+ *  adjustments, which can move thresholds either way. */
+export function formatSignedAmount(currency: string, amount: number): string {
+  const sign = amount > 0 ? "+" : amount < 0 ? "-" : "";
+  return `${sign}${formatAmount(currency, Math.abs(amount))}`;
 }
 
 /** True when an expression (display or stored uuid form) references a
