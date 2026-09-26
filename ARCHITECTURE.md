@@ -655,6 +655,30 @@ their complexity once a second person actually uses an instance. Until then the
 shared secret is the whole model, and the `users` table stays unused by the web
 app.
 
+## Testing and CI
+
+The web app is tested with vitest (`make test-ts`); each Python package runs
+its own pytest suite (`make test-py`: `apps/scrapers/tests`, then
+`packages/product-model/tests`), with the test tooling in
+`apps/scrapers/requirements-dev.txt`. Most scraper tests drive parsers and
+the writer's decisions through fakes. `test_writer_db.py` runs the real
+writer SQL instead: `apps/scrapers/tests/conftest.py` builds a
+`chanchito_test_tpl_*` template database once per session from every
+migration file (each in its own transaction, recorded in `_migrations` like
+`migrate.mjs` does), and each test clones it into its own `chanchito_test_*`
+database, points `DATABASE_URL` at it, resets the writer's pool, and drops it
+at teardown. The server comes from `TEST_DATABASE_URL`, which must name a
+disposable one: unset, the DB tests skip; set but unreachable, they fail.
+`make test-db` provides it as the `postgres-test` compose service (profile
+`test`, so `make up` never starts it; data in tmpfs; port 5436 or
+`POSTGRES_TEST_PORT`).
+
+CI (`.github/workflows/ci.yml`, GitHub Actions) runs on every pull request and
+push to `main` in two jobs: `web` (`make typecheck`, `make lint`,
+`make test-ts`) and `python` (`make install-py`, then `make test-py` against a
+`postgres:16-alpine` service, so the DB tests run rather than skip). Neither
+downloads a Playwright browser; no test launches one.
+
 ## Tech Stack
 
 | Layer | Technology |
@@ -667,11 +691,14 @@ app.
 | DB Driver (Python) | psycopg3 + psycopg-pool |
 | Containerization | Docker + Docker Compose |
 | Package Manager | pnpm (workspaces) |
+| Testing | vitest (web) + pytest (scrapers, product-model; DB tests on a throwaway PostgreSQL) |
+| CI | GitHub Actions |
 
 ## Monorepo Structure
 
 ```
 el-chanchito/
+├── .github/workflows/ci.yml          # CI: typecheck, lint, vitest, pytest
 ├── apps/
 │   ├── web/                          # Next.js dashboard
 │   │   ├── src/
@@ -700,7 +727,10 @@ el-chanchito/
 │       ├── scrapers/                 # 5 scraper implementations
 │       ├── db/                      # Connection pool + writer
 │       ├── main.py                  # Entry point + scheduler
+│       ├── tests/                   # pytest (conftest.py: per-test DB fixtures)
 │       ├── requirements.txt
+│       ├── requirements-dev.txt     # + pytest
+│       ├── pyproject.toml           # pytest config only
 │       └── Dockerfile
 │
 ├── packages/
@@ -713,7 +743,7 @@ el-chanchito/
 │       ├── generated/               # index.ts + product-model.schema.json
 │       └── PRODUCTS.md              # generated per-kind field matrix
 │
-├── docker-compose.yml
+├── docker-compose.yml               # + postgres-test (profile `test`) for DB tests
 ├── Makefile
 ├── USAGE.md
 └── ARCHITECTURE.md

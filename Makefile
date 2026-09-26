@@ -1,6 +1,6 @@
-.PHONY: help install dev dev-web build db-up db-down db-migrate db-reset db-shell \
-       scrapers-once scrapers-start scrapers-test fintual-login bci-lider-login up down logs clean typecheck lint test \
-       product-model-generate
+.PHONY: help install install-deps install-py dev dev-web build db-up db-down db-migrate db-reset db-shell \
+       scrapers-once scrapers-start scrapers-test fintual-login bci-lider-login up down logs clean typecheck lint \
+       test test-ts test-py test-db test-db-up test-db-down product-model-generate
 
 # ─── Help ────────────────────────────────────────────────────────────────────
 
@@ -10,14 +10,18 @@ help: ## Show this help
 
 # ─── Setup ───────────────────────────────────────────────────────────────────
 
-install: ## Install all dependencies (Node + Python + Playwright browser)
+install: install-deps ## Install all dependencies (Node + Python + Playwright browser)
+	.venv/bin/playwright install chromium
+
+install-deps: install-py ## Install Node + Python dependencies, without the Playwright browser
 	pnpm install
+
+install-py: ## Create .venv and install the scraper runtime + test dependencies
 	python3 -m venv .venv
 	# pip resolves the `-e ../../packages/product-model` line relative to its
 	# working directory, so install from apps/scrapers (the Dockerfile does the
 	# same via WORKDIR).
-	cd apps/scrapers && ../../.venv/bin/pip install -r requirements.txt
-	.venv/bin/playwright install chromium
+	cd apps/scrapers && ../../.venv/bin/pip install -r requirements-dev.txt
 
 env: ## Create .env from .env.example
 	@test -f .env || (cp .env.example .env && echo "Created .env — edit it with your credentials")
@@ -94,16 +98,27 @@ typecheck: ## Run TypeScript type checking
 lint: ## Run ESLint
 	pnpm --filter @chanchito/web lint
 
-test: ## Run all tests (TypeScript + Python)
-	pnpm --filter @chanchito/web test
-	cd apps/scrapers && ../../.venv/bin/python -m pytest tests/ -v
+test: test-ts test-py ## Run all tests (TypeScript + Python)
 
 test-ts: ## Run TypeScript tests only
 	pnpm --filter @chanchito/web test
 
-test-py: ## Run Python tests only
+test-py: ## Run Python tests only (DB tests skip unless TEST_DATABASE_URL is set)
 	cd apps/scrapers && ../../.venv/bin/python -m pytest tests/ -v
 	cd packages/product-model && ../../.venv/bin/python -m pytest tests/ -v
+
+# The DB tests create and drop their own chanchito_test_* databases on the
+# server TEST_DATABASE_URL names, so it must be a disposable one: this target
+# points it at the tmpfs `postgres-test` service, never at the dev database.
+test-db: test-db-up ## Run the Python tests, DB tests included, against the throwaway test PostgreSQL
+	TEST_DATABASE_URL=postgres://finance:finance@127.0.0.1:$${POSTGRES_TEST_PORT:-5436}/postgres \
+		$(MAKE) test-py
+
+test-db-up: ## Start the throwaway test PostgreSQL (tmpfs, port 5436)
+	docker compose --profile test up -d --wait postgres-test
+
+test-db-down: ## Stop and remove the test PostgreSQL container (its data goes with it)
+	docker compose --profile test rm -sf postgres-test
 
 # ─── Product model ───────────────────────────────────────────────────────────
 
