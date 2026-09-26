@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { WandSparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CategoriesCard } from "@/components/categories/CategoriesCard";
@@ -15,15 +15,22 @@ export default function CategoriesPage() {
   const [categorizing, setCategorizing] = useState(false);
   const [categorizeResult, setCategorizeResult] = useState<string | null>(null);
   const [categorizeError, setCategorizeError] = useState<string | null>(null);
+  // Only the latest load may update state, so a slow earlier response never
+  // overwrites a newer one.
+  const loadSeq = useRef(0);
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     try {
       const res = await fetch("/api/categories");
       if (!res.ok) throw new Error("failed");
-      setCategories(await res.json());
+      const data: ApiCategory[] = await res.json();
+      if (seq !== loadSeq.current) return;
+      setCategories(data);
       setVersion((v) => v + 1);
       setLoadError(false);
     } catch {
+      if (seq !== loadSeq.current) return;
       setLoadError(true);
     }
   }, []);
@@ -96,6 +103,12 @@ export default function CategoriesPage() {
         <p className="text-muted-foreground">Cargando...</p>
       ) : (
         <>
+          {loadError && (
+            <p className="text-sm text-destructive">
+              No se pudieron actualizar las categorías; lo que ves puede estar
+              desactualizado.
+            </p>
+          )}
           <CategoriesCard categories={categories} onChange={load} />
           <RulesCard categories={categories} version={version} onChange={load} />
         </>
