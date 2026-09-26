@@ -1,8 +1,9 @@
-"""Tests for run_scraper's final status decision (success / partial / error).
+"""Tests for run_scraper's final status decision and build_scrapers' env gating.
 
 The DB writer functions are patched out (no database): what's asserted is the
 status + error_message handed to `finish_scraper_run` for each combination of
-leg outcomes, driven through stub scrapers with fabricated payloads.
+leg outcomes, driven through stub scrapers with fabricated payloads. The
+build_scrapers tests run against a cleared environment with synthetic creds.
 """
 
 import asyncio
@@ -111,3 +112,68 @@ class TestRunScraperStatus:
                 "BanChile: línea surface failed after 3 attempts"
             ),
         )
+
+
+# Every env var that enables some scraper in build_scrapers(); cleared so the
+# developer's shell (or a stray .env picked up by load_dotenv) can't leak in.
+_ENABLING_VARS = (
+    "FINTUAL_EMAIL",
+    "FINTUAL_PASSWORD",
+    "FINTUAL_TOKEN",
+    "BUDA_API_KEY",
+    "BUDA_API_SECRET",
+    "BANCHILE_RUT",
+    "BANCHILE_PASSWORD",
+    "LIDER_BCI_RUT",
+    "EMAIL_IMAP_HOST",
+    "EMAIL_IMAP_USER",
+    "EMAIL_IMAP_PASSWORD",
+    "MERCADOPAGO_ACCESS_TOKEN",
+)
+
+
+@pytest.fixture
+def clean_env(monkeypatch):
+    """Start from an environment where no scraper is configured."""
+    for var in _ENABLING_VARS:
+        monkeypatch.delenv(var, raising=False)
+    return monkeypatch
+
+
+def _configure(monkeypatch, *, imap: bool, token: bool) -> None:
+    """Set synthetic IMAP credentials and/or a synthetic MercadoPago token."""
+    if imap:
+        monkeypatch.setenv("EMAIL_IMAP_HOST", "imap.example.com")
+        monkeypatch.setenv("EMAIL_IMAP_USER", "synthetic@example.com")
+        monkeypatch.setenv("EMAIL_IMAP_PASSWORD", "synthetic-password")
+    if token:
+        monkeypatch.setenv("MERCADOPAGO_ACCESS_TOKEN", "APP_USR-0000-synthetic")
+
+
+class TestBuildScrapers:
+    def test_nothing_configured_builds_nothing(self, clean_env):
+        """Without credentials no scraper is instantiated."""
+        scrapers = main_mod.build_scrapers()
+
+        assert scrapers == {}
+
+    @pytest.mark.parametrize(
+        ("imap", "token", "expected_keys", "mp_method"),
+        [
+            (True, False, {"mach", "mercadopago", "tenpo"}, "email"),
+            (False, True, {"mercadopago"}, "http_api"),
+            (True, True, {"mach", "mercadopago", "tenpo"}, "http_api"),
+        ],
+    )
+    def test_mercadopago_legs_follow_config(
+        self, clean_env, imap, token, expected_keys, mp_method
+    ):
+        """MercadoPago runs on IMAP, a token, or both; e-mail reading needs IMAP."""
+        _configure(clean_env, imap=imap, token=token)
+
+        scrapers = main_mod.build_scrapers()
+
+        assert set(scrapers) == expected_keys
+        mercadopago = scrapers["mercadopago"]
+        assert mercadopago.method == mp_method
+        assert mercadopago.read_email is imap
