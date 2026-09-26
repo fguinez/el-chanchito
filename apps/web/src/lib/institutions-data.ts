@@ -34,6 +34,7 @@ export interface ApiProduct {
   attributes: ProductAttributes | Record<string, never>;
   metrics: ProductMetrics | null;
   isActive: boolean;
+  displayOrder: number;
 }
 
 export interface InstitutionSubtotals {
@@ -95,6 +96,7 @@ const institutionSelect = {
   attributes: products.attributes,
   metrics: products.metrics,
   isActive: products.isActive,
+  displayOrder: products.displayOrder,
 };
 
 async function loadInstitutionRows(where?: SQL) {
@@ -168,6 +170,7 @@ function buildInstitutions(
       attributes: row.attributes,
       metrics: row.metrics,
       isActive: row.isActive,
+      displayOrder: row.displayOrder,
     });
   }
 
