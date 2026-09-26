@@ -58,6 +58,14 @@ EMAIL_IMAP_HOST=imap.gmail.com   # Email parser (MercadoPago, MACH, Tenpo)
 EMAIL_IMAP_USER=your@gmail.com
 ```
 
+Optional email parser tuning (defaults in parentheses):
+
+| Variable | Meaning |
+|---|---|
+| `EMAIL_LOOKBACK_DAYS` (7) | Days of mail searched on each run |
+| `EMAIL_MAX_MESSAGES` (100) | Emails parsed per institution and run, newest first; a truncated window logs a warning |
+| `EMAIL_IMAP_MAILBOX` (`INBOX`) | Mailbox searched for notifications. Set it to Gmail's All Mail (`[Gmail]/All Mail`, or `[Gmail]/Todos` with a Spanish Gmail UI) when filters archive them. Fintual 2FA codes are always read from `INBOX` |
+
 Then store the secrets in the Keychain (prompts interactively, values never
 touch disk or shell history):
 
