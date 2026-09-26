@@ -22,7 +22,7 @@
 │  │                   API Routes (/api/*)                    │   │
 │  │  budget | planning | transactions | wealth | scrapers   │   │
 │  │  fixed-expenses | income-sources | transfers | import   │   │
-│  │  categories | balances | month-reset | institutions     │   │
+│  │  categories | accounts | month-reset | institutions     │   │
 │  │  institutions/refresh (→ scraper control endpoint)      │   │
 │  └────────────────────────┬────────────────────────────────┘   │
 │                           │                                     │
@@ -446,6 +446,37 @@ artifacts can't silently fall behind the registry. The `ScrapedProduct` /
 travel in-process from scraper to `db/writer.py`, and the plan is to put the
 same validation behind a REST ingest API so non-Python scrapers can submit
 data without direct DB access.
+
+### Product management
+
+Scrapers own a product's identity: `(account, kind, currency, external_ref)`
+is the `uq_products_identity` key they upsert on, and `attributes`/`metrics`
+are typed by kind. The dashboard owns its display metadata, which the writer
+never overwrites (`name` and `slug` are insert-only there). The management
+routes follow that split, with their rules in `lib/management.ts`:
+
+- `PATCH /api/institutions/{slug}/products/{product}` edits `name`, `slug`,
+  `parent_product_id`, `is_active` and `display_order`. Kind, currency and
+  external_ref are refused, since changing them would fork the product on its
+  next scrape. A new slug is canonicalized with the generated-slug rules and
+  must be free across the institution (retired products included); the
+  `(account_id, slug)` index backstops a scraper minting the same slug
+  mid-edit. Parents stay inside the institution and can't form a loop. The
+  institution and product rows are locked (`FOR NO KEY UPDATE`) while the
+  rules run, so concurrent edits serialize per institution.
+- Deactivating a product with no balance is refused: inactive without a
+  balance is the retired-ghost shape (`lib/retired-products.ts`) the UI hides,
+  so the product could never be reactivated from the dashboard. The writer
+  skips an inactive product's balance (`skip_inactive`) but still imports its
+  transactions; net worth keeps its last balance, and monitors that reference
+  it evaluate as inactive.
+- `PATCH /api/institutions/{slug}` edits name, kind, country and URL; the slug
+  is the scrapers' key and stays read-only. `PATCH /api/accounts/{id}` renames
+  an account, which is safe because resolvers pick an institution's account by
+  display order, not by name.
+
+The old `GET /api/balances` is gone: `/api/institutions` already returns every
+product with its denormalized balance.
 
 ### Deduplication
 
