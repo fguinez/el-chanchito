@@ -9,7 +9,7 @@ const PREVIEW_LIMIT = 20;
 /**
  * GET /api/categories/rules/preview?keyword=...: what a rule with this keyword
  * would match ("probar regla"), with the same normalization and literal
- * substring semantics as `category_for_description` (V020). Returns
+ * substring semantics as `category_for_description` (V021). Returns
  * `{ keyword, total, uncategorized, transactions }`: `total` counts every
  * matching transaction, `uncategorized` the matches a backfill could still
  * categorize (no category, not manual), and `transactions` lists up to 20

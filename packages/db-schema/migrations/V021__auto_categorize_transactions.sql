@@ -1,4 +1,4 @@
--- V020: Categorize new transactions from category_rules as they are inserted
+-- V021: Categorize new transactions from category_rules as they are inserted
 -- (issue #14).
 --
 -- Matching lives in the database, not in each writer, so every path that

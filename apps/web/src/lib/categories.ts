@@ -5,7 +5,7 @@
 //
 // Rule keywords are normalized (trimmed, lowercased) the same way on write and
 // in the preview, so "probar regla" counts exactly what the rule will match.
-// Matching itself lives in Postgres (`category_for_description`, V020).
+// Matching itself lives in Postgres (`category_for_description`, V021).
 
 export const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
