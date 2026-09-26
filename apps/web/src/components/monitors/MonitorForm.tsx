@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { SELECT_CLASS } from "@/components/ui/native-select";
 import { Textarea } from "@/components/ui/textarea";
 import { cn, formatAmount } from "@/lib/utils";
 import {
@@ -36,10 +37,6 @@ import {
 const PREVIEW_DEBOUNCE_MS = 500;
 
 const COMPARATORS: Comparator[] = ["<", "<=", ">", ">=", "=", "!="];
-
-// Native <select> styled to match the Input primitive.
-const SELECT_CLASS =
-  "h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-input/30";
 
 type ThresholdMode = "fixed" | "percent" | "ramp" | "advanced";
 
