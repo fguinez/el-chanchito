@@ -1,0 +1,14 @@
+From: MACH <notificaciones@somosmach.com>
+To: Usuario Sintetico <usuario@example.com>
+Subject: Recibiste una transferencia
+Date: Sun, 20 Sep 2026 09:15:00 -0300
+Message-ID: <synthetic-mach-transfer-in@example.com>
+X-Fixture: synthetic
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+Hola,
+
+Recibiste una transferencia de Persona Sintetica por $ 1.000.000.
+
+El dinero ya esta disponible en tu cuenta MACH.

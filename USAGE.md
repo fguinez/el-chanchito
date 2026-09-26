@@ -58,6 +58,14 @@ EMAIL_IMAP_HOST=imap.gmail.com   # Email parser (MercadoPago, MACH, Tenpo)
 EMAIL_IMAP_USER=your@gmail.com
 ```
 
+Optional email parser tuning (defaults in parentheses):
+
+| Variable | Meaning |
+|---|---|
+| `EMAIL_LOOKBACK_DAYS` (7) | Days of mail searched on each run |
+| `EMAIL_MAX_MESSAGES` (100) | Emails parsed per institution and run, newest first; a truncated window logs a warning |
+| `EMAIL_IMAP_MAILBOX` (`INBOX`) | Mailbox searched for notifications. Set it to Gmail's All Mail (`[Gmail]/All Mail`, or `[Gmail]/Todos` with a Spanish Gmail UI) when filters archive them. Fintual 2FA codes are always read from `INBOX` |
+
 Then store the secrets in the Keychain (prompts interactively, values never
 touch disk or shell history):
 
@@ -95,31 +103,53 @@ For the email parser, you need a Gmail App Password (not your regular password):
 
 | Page | URL | Description |
 |---|---|---|
-| **Inicio** | `/` | Today's budget status, expected balance, drift, quick actions |
-| **Planificacion** | `/planning` | Day-by-day expected balance table (31 rows, today highlighted) |
+| **Inicio** | `/` | Monitors needing attention, scraper status, quick actions |
+| **Monitores** | `/monitors` | Formula alerts over product values; each monitor's page has its history chart and its monthly variaciones |
 | **Historial** | `/history` | Wealth timeline chart + snapshot table (patrimonio, deuda, ahorro) |
 | **Gastos** | `/expenses` | Transaction list, manual entry form, CSV import |
 | **Gastos Fijos** | `/fixed` | Monthly fixed expenses with shared ratio (69%) |
 | **Transferencias** | `/transfers` | Internal money movements (pending/resolved) |
-| **Configuracion** | `/settings` | Budget parameters, income split calculator, monthly reset |
 
 ## Daily Workflow
 
 1. Open the dashboard at `http://localhost:3000`
-2. The **Inicio** page shows your expected balance for today vs your real balance
-3. If the drift is negative, you're over budget; positive means under budget
-4. Add manual expenses in **Gastos** or let scrapers import them automatically
-5. Check **Planificacion** to see how the rest of the month looks
+2. The **Inicio** page lists the monitors in warning or alert
+3. Add manual expenses in **Gastos** or let scrapers import them automatically
+4. When something one-off changes the month's plan (a reimbursement, an extra budget), add it as a variación on the monitor's page (see [Monitors and variaciones](#monitors-and-variaciones))
+5. Check **Monitores** for every monitor and its day-by-day history
 
 ## Monthly Workflow
 
 At the start of each month:
 
-1. Go to **Configuracion**
-2. Update any budget parameters that changed (salary, credit card limit, etc.)
-3. Click **"Crear proximo mes"** to initialize next month's config
-4. Review **Gastos Fijos** for any changes to recurring expenses
-5. Add a new wealth snapshot in **Historial** (patrimonio + deuda)
+1. Nothing to reset: monthly ramps (`DAY_OF_MONTH()`) restart and every monitor starts the month with no variaciones
+2. Edit any monitor whose thresholds depend on a figure that changed (salary, credit card limit, etc.)
+3. Review **Gastos Fijos** for any changes to recurring expenses
+4. Add a new wealth snapshot in **Historial** (patrimonio + deuda)
+
+## Monitors and variaciones
+
+A monitor is one equation over product values (for example, the checking
+balance minus what the cards owe) compared against an alert threshold and an
+optional warning one. Thresholds can ramp through the month; the "Rampa
+mensual" preset builds `base - descuento * (DAY_OF_MONTH() - 1)`. Create them
+from **Monitores > Nuevo monitor**.
+
+**Variaciones** are one-off adjustments to a monitor's plan for the month, like
+the "Variaciones" column of the old planning sheet: a reimbursement, a one-off
+gift budget. On the monitor's page, the **Variaciones** card adds one with a
+date, an amount in the monitor's currency and an optional description:
+
+- From that day to the end of its month, the amount is added to every
+  threshold of the monitor; a negative amount lowers them. The status, the
+  margin, the history chart and the Inicio card all shift from that day on.
+- Several variaciones on one day add up. The card shows each day's total and
+  the month-to-date sum, and every entry can still be edited or deleted.
+- A new month starts with none; the card's arrows browse other months.
+
+For example (synthetic figures), with a balance floor that ramps down through
+the month, a `-50000` gift budget on the 15th lowers the floor by $ 50.000 from
+the 15th on, so spending that money does not trip the alert.
 
 ## Scrapers
 
@@ -287,20 +317,21 @@ All API routes are under `/api/`:
 
 | Method | Endpoint | Description |
 |---|---|---|
-| GET/POST | `/api/budget` | Budget config (current month) |
-| GET | `/api/planning` | Planning table + today status |
+| GET/POST | `/api/monitors` | Monitors with their current evaluation (line-chart monitors add a 30-day sparkline); create |
+| GET/PUT/DELETE | `/api/monitors/[id]` | One monitor with history, references and variaciones; update; delete |
+| POST | `/api/monitors/preview` | Evaluate an unsaved monitor (`monitorId` applies that monitor's variaciones) |
+| GET/POST | `/api/monitors/[id]/adjustments` | Variaciones (`?month=YYYY-MM`); create from `{ adjustmentDate, amount, description? }` |
+| PATCH/DELETE | `/api/monitors/[id]/adjustments/[adjustmentId]` | Edit or delete one variación |
 | GET/POST | `/api/transactions` | Transactions (list, create) |
 | POST | `/api/import` | CSV import |
 | GET/POST/PUT/DELETE | `/api/fixed-expenses` | Fixed expenses CRUD |
 | GET/POST/DELETE | `/api/wealth` | Wealth snapshots |
-| GET/POST/DELETE | `/api/income-sources` | Income sources |
 | GET/POST/PUT/DELETE | `/api/transfers` | Internal transfers |
 | GET/POST/PUT | `/api/categories` | Categories + auto-assign rules |
 | GET | `/api/institutions` | Institutions + nested products + CLP subtotals |
 | POST | `/api/institutions/refresh` | Trigger a scrape (all, or `{institution}`) |
 | GET | `/api/scrapers` | Scraper run status |
 | GET | `/api/balances` | Latest balance per account |
-| POST | `/api/month-reset` | Create next month's config |
 | POST | `/api/auth/login` | Exchange `DASHBOARD_PASSWORD` for a session cookie |
 | POST | `/api/auth/logout` | Clear the session cookie (public) |
 | GET | `/api/auth/session` | `{ enabled, authenticated }` (public) |

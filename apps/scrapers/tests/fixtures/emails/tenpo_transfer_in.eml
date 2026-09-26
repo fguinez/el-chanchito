@@ -1,0 +1,10 @@
+From: Tenpo <notificaciones@tenpo.cl>
+To: Usuario Sintetico <usuario@example.com>
+Subject: Recibiste una transferencia
+Date: Sun, 20 Sep 2026 08:00:00 -0300
+Message-ID: <synthetic-tenpo-transfer-in@example.com>
+X-Fixture: synthetic
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+Recibiste $ 1.000.000 de Persona Sintetica.
