@@ -1,8 +1,8 @@
 "use client";
 
-// Manual balance entry for products with no automatic balance source (wallets
-// such as MACH or Tenpo): POSTs the typed CLP amount to the product's
-// /balance endpoint and lets the page re-fetch so every card reflects it.
+// Manual balance entry for wallets (MACH and Tenpo have no automatic balance
+// source): POSTs the typed CLP amount to the product's /balance endpoint and
+// lets the page re-fetch so every card reflects it.
 
 import { useState } from "react";
 import {
@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { parseClpInput } from "@/lib/manual-balance";
 
 export function ManualBalanceCard({
   endpoint,
@@ -30,16 +31,21 @@ export function ManualBalanceCard({
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
-    if (!value) return;
+    if (!value.trim()) return;
+    const balance = parseClpInput(value);
+    if (balance === null) {
+      setError("Ingresa el saldo en pesos, por ejemplo 2.500.000");
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
-      // Validation lives server-side (whole, non-negative CLP); a decimal
-      // comes back as a 400 whose message is shown as is.
+      // The server re-validates (whole, non-negative CLP, within range) and
+      // its 400 message is shown as is.
       const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ balance: Number(value) }),
+        body: JSON.stringify({ balance }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => null);
@@ -60,23 +66,22 @@ export function ManualBalanceCard({
       <CardHeader>
         <CardTitle>Registrar saldo</CardTitle>
         <CardDescription>
-          Para billeteras sin fuente automática de saldo: ingresa el saldo que
-          muestra la app.
+          Ingresa el saldo que muestra la app. Si la billetera tiene una fuente
+          automática, su próxima lectura lo reemplaza si difiere.
         </CardDescription>
       </CardHeader>
       <CardContent>
         <form onSubmit={handleSubmit} className="flex max-w-sm gap-2">
+          {/* Text, not number: a number input reads "250.000" as 250. */}
           <Input
-            type="number"
+            type="text"
             inputMode="numeric"
-            min={0}
-            step={1}
-            placeholder="2500000"
+            placeholder="2.500.000"
             aria-label="Saldo en CLP"
             value={value}
             onChange={(event) => setValue(event.target.value)}
           />
-          <Button type="submit" disabled={saving || !value}>
+          <Button type="submit" disabled={saving || !value.trim()}>
             {saving ? "Guardando..." : "Guardar"}
           </Button>
         </form>

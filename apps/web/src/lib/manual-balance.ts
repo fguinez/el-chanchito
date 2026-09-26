@@ -37,6 +37,20 @@ export type ManualBalanceResult =
   | { ok: true; balance: number }
   | { ok: false; error: string };
 
+/** product_snapshots.balance is NUMERIC(20, 8): at most 12 integer digits. */
+export const MAX_MANUAL_BALANCE = 999_999_999_999;
+
+/**
+ * Read a CLP amount typed the way the apps print it ("$ 2.500.000") or bare
+ * ("2500000"). Dots are accepted only as thousands separators, so a decimal
+ * like "2500.50" or "250,5" is rejected instead of read as another amount.
+ */
+export function parseClpInput(text: string): number | null {
+  const compact = text.replace(/[$\s]/g, "");
+  if (!/^(\d+|\d{1,3}(\.\d{3})+)$/.test(compact)) return null;
+  return Number(compact.replace(/\./g, ""));
+}
+
 /**
  * Validate a `{ balance }` POST body. The balance is whole CLP (no decimals),
  * so anything but a non-negative safe integer is rejected rather than rounded.
@@ -54,6 +68,9 @@ export function parseManualBalance(body: unknown): ManualBalanceResult {
   }
   if (balance < 0) {
     return { ok: false, error: "El saldo no puede ser negativo" };
+  }
+  if (balance > MAX_MANUAL_BALANCE) {
+    return { ok: false, error: "El saldo es demasiado grande" };
   }
   return { ok: true, balance };
 }

@@ -266,6 +266,13 @@ export default function ProductDetailPage() {
         </Card>
       </div>
 
+      {error && (
+        <p role="alert" className="text-sm text-destructive">
+          No se pudo actualizar el producto; se muestran los últimos datos
+          cargados.
+        </p>
+      )}
+
       {acceptsManualBalance(product.kind) && product.isActive && (
         <ManualBalanceCard
           endpoint={`${productUrl}/balance`}
