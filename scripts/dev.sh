@@ -36,8 +36,38 @@ ensure_node
 . ./scripts/load-secrets.sh
 
 DATABASE_URL="${DATABASE_URL:-postgres://finance:finance@localhost:5435/finance}"
-SCRAPER_CONTROL_PORT="${SCRAPER_CONTROL_PORT:-8080}"
 export DATABASE_URL
+
+# The control server binds 0.0.0.0, so probe the same address. 8080 is a
+# popular port: if another stack already holds it, fall back to the next free
+# one instead of crashing the scraper service (and pointing the dashboard at
+# whatever else is listening there). An explicitly set port is never moved.
+port_free() {
+  .venv/bin/python -c 'import socket,sys
+s = socket.socket()
+try:
+    s.bind(("0.0.0.0", int(sys.argv[1])))
+except OSError:
+    sys.exit(1)' "$1"
+}
+if [ -n "${SCRAPER_CONTROL_PORT:-}" ]; then
+  if ! port_free "$SCRAPER_CONTROL_PORT"; then
+    echo "!!  SCRAPER_CONTROL_PORT=$SCRAPER_CONTROL_PORT is already in use; pick another." >&2
+    exit 1
+  fi
+else
+  SCRAPER_CONTROL_PORT=8080
+  while ! port_free "$SCRAPER_CONTROL_PORT"; do
+    SCRAPER_CONTROL_PORT=$((SCRAPER_CONTROL_PORT + 1))
+    if [ "$SCRAPER_CONTROL_PORT" -gt 8099 ]; then
+      echo "!!  No free scraper control port in 8080-8099; set SCRAPER_CONTROL_PORT." >&2
+      exit 1
+    fi
+  done
+  if [ "$SCRAPER_CONTROL_PORT" -ne 8080 ]; then
+    echo "==> Port 8080 is busy; scraper control endpoint will use :$SCRAPER_CONTROL_PORT"
+  fi
+fi
 
 echo "==> Starting PostgreSQL"
 docker compose up -d --wait postgres
