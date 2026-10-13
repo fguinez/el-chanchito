@@ -53,6 +53,11 @@ import {
   type ProductHistoryPoint,
   type ProductTransaction,
 } from "@/components/institutions/product-graphs";
+import { ManualBalanceCard } from "@/components/institutions/manual-balance-card";
+import {
+  acceptsManualBalance,
+  snapshotSourceLabel,
+} from "@/lib/manual-balance";
 
 interface ProductDetailResponse {
   institution: {
@@ -84,11 +89,14 @@ export default function ProductDetailPage() {
   const [data, setData] = useState<ProductDetailResponse | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [error, setError] = useState(false);
+  // Bumped to re-fetch in place (e.g. after a manual balance is saved).
+  const [reloadKey, setReloadKey] = useState(0);
   const chart = useTimeSeriesChart();
+  const productUrl = `/api/institutions/${institutionSlug}/products/${productSlug}`;
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`/api/institutions/${institutionSlug}/products/${productSlug}`)
+    fetch(productUrl)
       .then((res) => {
         if (cancelled) return null;
         if (res.status === 404) {
@@ -112,7 +120,7 @@ export default function ProductDetailPage() {
     return () => {
       cancelled = true;
     };
-  }, [institutionSlug, productSlug]);
+  }, [productUrl, reloadKey]);
 
   if (notFound) {
     return (
@@ -258,6 +266,20 @@ export default function ProductDetailPage() {
         </Card>
       </div>
 
+      {error && (
+        <p role="alert" className="text-sm text-destructive">
+          No se pudo actualizar el producto; se muestran los últimos datos
+          cargados.
+        </p>
+      )}
+
+      {acceptsManualBalance(product.kind) && product.isActive && (
+        <ManualBalanceCard
+          endpoint={`${productUrl}/balance`}
+          onSaved={() => setReloadKey((k) => k + 1)}
+        />
+      )}
+
       {/* Per-kind insight graphs */}
       {isCreditKind && <CupoUtilizationCard product={product} history={history} />}
       {product.kind === "investment" && (
@@ -324,6 +346,7 @@ export default function ProductDetailPage() {
                     {product.currency !== "CLP" && (
                       <TableHead align="right">≈ CLP</TableHead>
                     )}
+                    <TableHead>Fuente</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -340,6 +363,9 @@ export default function ProductDetailPage() {
                           {p.balanceClp != null ? formatCLP(p.balanceClp) : "—"}
                         </TableCell>
                       )}
+                      <TableCell className="text-muted-foreground">
+                        {snapshotSourceLabel(p.source)}
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>

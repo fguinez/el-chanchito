@@ -63,6 +63,8 @@ export interface ProductHistoryPoint {
   balanceClp: number | null;
   /** Full typed metrics payload at `asOf` (empty object when unknown). */
   metrics: ProductMetrics | Record<string, never>;
+  /** Who recorded the observation (see SNAPSHOT_SOURCES in lib/manual-balance). */
+  source: string;
 }
 
 /** Products whose charted balance is money the user holds (value convention). */

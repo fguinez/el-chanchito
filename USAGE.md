@@ -85,9 +85,11 @@ Secrets and their meaning:
 | `chanchito.BUDA_API_KEY` | Buda.com API key |
 | `chanchito.BUDA_API_SECRET` | Buda.com API secret |
 | `chanchito.EMAIL_IMAP_PASSWORD` | Gmail App Password (see below) |
+| `chanchito.MERCADOPAGO_ACCESS_TOKEN` | Mercado Pago access token (optional; refreshes the wallet balance, see "Wallet balances") |
 | `chanchito.DASHBOARD_PASSWORD` | Dashboard login password (see "Deployment"; required in production, not exported to `make dev`) |
 
-A scraper is enabled only when all of its credentials are present.
+A scraper is enabled only when all of its credentials are present (Mercado
+Pago needs either the IMAP credentials or its access token).
 On non-macOS hosts (e.g. Docker-only deploys), export the secret env vars
 directly instead of using the Keychain.
 
@@ -208,6 +210,33 @@ In reuse mode scrapes drive that Chrome (reusing the signed-in tab or re-logging
 via autofill) and report `Could not reach the Chrome debug port…` when it isn't up.
 (Override the debug port with `LIDER_BCI_CDP_PORT`.)
 
+### Wallet balances (Mercado Pago, MACH, Tenpo)
+
+The three wallets import their movements from notification e-mails, and those
+e-mails don't reliably carry a balance, so each wallet gets its balance another
+way:
+
+- **Mercado Pago**: read automatically from Mercado Pago's REST API when a
+  token is configured. Create an application in the
+  [Mercado Pago developer panel](https://www.mercadopago.cl/developers/panel/app),
+  copy its production access token, and store it:
+
+  ```bash
+  make secret-set KEY=MERCADOPAGO_ACCESS_TOKEN
+  ```
+
+  The token acts on your own account, so treat it like a password. With it set,
+  each Mercado Pago run (every 30 minutes) records the available balance; the
+  movements still come from the inbox. A run that reports `MercadoPago API
+  rejected the access token` needs a new token.
+- **MACH and Tenpo**: no public API, so the balance is entered by hand. Open the
+  wallet's page (Instituciones → the institution → the wallet), type the balance
+  the app shows under **Registrar saldo** and save. Mercado Pago accepts manual
+  entries too, which the next API reading replaces if it differs.
+
+Either way the balance lands in the product's history, tagged with its source
+(`Scraper` or `Manual`), and moves the net-worth chart in **Historial**.
+
 ### Running scrapers once
 
 ```bash
@@ -322,6 +351,8 @@ All API routes are under `/api/`:
 | GET/POST/PUT | `/api/categories` | Categories + auto-assign rules |
 | GET | `/api/institutions` | Institutions + nested products + CLP subtotals |
 | POST | `/api/institutions/refresh` | Trigger a scrape (all, or `{institution}`) |
+| GET | `/api/institutions/{slug}/products/{product}` | One product with its balance history (each point tagged with its `source`) and transactions |
+| POST | `/api/institutions/{slug}/products/{product}/balance` | Record a manual balance `{balance}` (integer CLP) for a wallet |
 | GET | `/api/scrapers` | Scraper run status |
 | GET | `/api/balances` | Latest balance per account |
 | POST | `/api/auth/login` | Exchange `DASHBOARD_PASSWORD` for a session cookie |

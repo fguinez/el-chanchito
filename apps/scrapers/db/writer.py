@@ -618,8 +618,10 @@ def upsert_product(sp: ScrapedProduct) -> None:
         metrics_dict = sp.metrics.model_dump(mode="json", exclude_none=True)
         headline = _headline_decimal(sp.metrics.headline())
 
+        # Locked so a manual balance saved from the dashboard between this read
+        # and the UPDATE below can't leave the row and its history disagreeing.
         row = conn.execute(
-            "SELECT metrics FROM products WHERE id = %s", (product_id,)
+            "SELECT metrics FROM products WHERE id = %s FOR UPDATE", (product_id,)
         ).fetchone()
         current_metrics = row[0] if row else None
 

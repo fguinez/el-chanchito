@@ -40,6 +40,9 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
+# httpx logs every request URL at INFO, and some carry account ids (Mercado
+# Pago's balance path holds the user id); keep only its warnings.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("scraper-service")
 
 
@@ -128,14 +131,25 @@ def build_scrapers() -> dict[str, BaseScraper]:
         scrapers["bci_lider"] = BciLiderScraper()
         logger.info("BCI Lider scraper enabled")
 
-    if all(
+    imap_configured = all(
         os.environ.get(k)
         for k in ("EMAIL_IMAP_HOST", "EMAIL_IMAP_USER", "EMAIL_IMAP_PASSWORD")
-    ):
+    )
+    if imap_configured:
         scrapers["mach"] = MachScraper()
-        scrapers["mercadopago"] = MercadoPagoScraper()
         scrapers["tenpo"] = TenpoScraper()
-        logger.info("Email-based scrapers enabled: mach, mercadopago, tenpo")
+        logger.info("Email-based scrapers enabled: mach, tenpo")
+
+    # MercadoPago has two independent legs, movements from the inbox and the
+    # balance from its REST API; either one is enough to enable it.
+    has_mp_token = bool(os.environ.get("MERCADOPAGO_ACCESS_TOKEN"))
+    if imap_configured or has_mp_token:
+        scrapers["mercadopago"] = MercadoPagoScraper(read_email=imap_configured)
+        logger.info(
+            "MercadoPago scraper enabled (e-mail movements: %s, API balance: %s)",
+            "on" if imap_configured else "off",
+            "on" if has_mp_token else "off",
+        )
 
     return scrapers
 
@@ -159,7 +173,7 @@ _SCHEDULES: dict[str, dict] = {
     "banchile":     {"hours": 24, "label": "BanChile (daily)"},
     "bci_lider":    {"hours": 24, "label": "BCI Lider (daily)"},
     "mach":         {"minutes": _EMAIL_INTERVAL_MINUTES, "label": "MACH email (every 30m)"},
-    "mercadopago":  {"minutes": _EMAIL_INTERVAL_MINUTES, "label": "MercadoPago email (every 30m)"},
+    "mercadopago":  {"minutes": _EMAIL_INTERVAL_MINUTES, "label": "MercadoPago (every 30m)"},
     "tenpo":        {"minutes": _EMAIL_INTERVAL_MINUTES, "label": "Tenpo email (every 30m)"},
 }
 

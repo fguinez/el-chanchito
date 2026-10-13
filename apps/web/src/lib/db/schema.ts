@@ -145,9 +145,10 @@ export const products = pgTable(
   ]
 );
 
-// Product observation history: one row per metrics change (not one per scrape).
-// `balance` is the headline; `metrics` the full typed payload at `as_of`
-// (empty `{}` for rows that predate typed observations).
+// Product observation history: one row per scraped metrics change (not one per
+// scrape), plus one per manual balance entry. `balance` is the headline;
+// `metrics` the full typed payload at `as_of` (empty `{}` for rows that predate
+// typed observations); `source` who recorded it (see lib/manual-balance).
 export const productSnapshots = pgTable(
   "product_snapshots",
   {
