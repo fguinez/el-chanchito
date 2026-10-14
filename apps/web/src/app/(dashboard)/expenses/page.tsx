@@ -1,7 +1,6 @@
 "use client";
 
 import { Suspense, useCallback, useEffect, useState } from "react";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   Card,
   CardContent,
@@ -24,6 +23,7 @@ import { useSortableData } from "@/lib/use-sortable-data";
 import { formatCLP, formatPlainDateEs } from "@/lib/utils";
 import { CsvImport } from "@/components/dashboard/CsvImport";
 import { TransactionDetailSheet } from "@/components/transactions/transaction-detail-sheet";
+import { useSelectedTransaction } from "@/components/transactions/use-selected-transaction";
 
 interface Transaction {
   id: string;
@@ -36,9 +36,6 @@ interface Transaction {
 }
 
 type TransactionSortKey = "fecha" | "descripcion" | "fuente" | "monto";
-
-/** Query param holding the transaction shown in the detail panel. */
-const TXN_PARAM = "txn";
 
 // useSearchParams needs a Suspense boundary for the static prerender.
 export default function ExpensesPage() {
@@ -76,24 +73,8 @@ function ExpensesSkeleton() {
 }
 
 function ExpensesView() {
-  const router = useRouter();
-  const pathname = usePathname();
-  const searchParams = useSearchParams();
-  const selectedTxnId = searchParams.get(TXN_PARAM);
-
-  /** Opens (id) or closes (null) the detail panel, keeping other params. */
-  const selectTransaction = useCallback(
-    (id: string | null) => {
-      const params = new URLSearchParams(searchParams.toString());
-      if (id) params.set(TXN_PARAM, id);
-      else params.delete(TXN_PARAM);
-      const query = params.toString();
-      router.replace(query ? `${pathname}?${query}` : pathname, {
-        scroll: false,
-      });
-    },
-    [router, pathname, searchParams]
-  );
+  const { selectedTxnId, selectTransaction, rowProps } =
+    useSelectedTransaction();
 
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [description, setDescription] = useState("");
@@ -305,33 +286,7 @@ function ExpensesView() {
               </TableHeader>
               <TableBody>
                 {sorted.map((txn) => (
-                  <TableRow
-                    key={txn.id}
-                    tabIndex={0}
-                    data-state={
-                      txn.id === selectedTxnId ? "selected" : undefined
-                    }
-                    className="cursor-pointer focus-visible:bg-muted/50 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
-                    onClick={(e) => {
-                      // Let users select and copy cell text without opening.
-                      const sel = window.getSelection();
-                      if (
-                        sel?.toString() &&
-                        sel.anchorNode &&
-                        e.currentTarget.contains(sel.anchorNode)
-                      ) {
-                        return;
-                      }
-                      selectTransaction(txn.id);
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.target !== e.currentTarget) return;
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
-                        selectTransaction(txn.id);
-                      }
-                    }}
-                  >
+                  <TableRow key={txn.id} {...rowProps(txn.id)}>
                     <TableCell className="text-sm">
                       {formatPlainDateEs(txn.transactionDate)}
                     </TableCell>
