@@ -9,6 +9,9 @@ movements ourselves (`backends/banchile_movements.py`) and key them on the
 bank's own ids, which also removes the second heavy login per run (#28): the
 transactions leg opens the session, reads products *and* movements, and the
 products leg serves its half from that cache.
+
+Since issue #79 every movement carries its currency, so the USD card and USD
+checking movements land on their own products.
 """
 
 import hashlib
@@ -89,12 +92,26 @@ def external_id_for(movement: BanChileMovement) -> str:
           mapping rule can bridge them.
         * card, billed without a usable reference: date, amount, card and the
           statement date.
+
+    USD movements (issue #79) use the same three forms. A USD billed purchase
+    is ``bch_ref_`` + its `numeroDocumento` ("DDMM" + 23 digits), and a USD
+    fingerprint is hashed with the currency in front (``USD|...``) and its
+    amount as a quantized Decimal, so a USD and a CLP movement can never share
+    a key even if routing ever changed. CLP keys are byte-identical to what
+    they were before the currency existed.
     """
     operation_id = _normalized_id(movement.operation_id)
     if operation_id is not None:
         prefix = "bch_ref_" if movement.source == "card_billed" else "bch_op_"
         return f"{prefix}{operation_id}"
-    raw = "|".join(movement.fingerprint)
+    parts = movement.fingerprint
+    if movement.currency != "CLP":
+        parts = (movement.currency, *parts)
+    return _fingerprint_id(parts)
+
+
+def _fingerprint_id(parts: tuple[str, ...]) -> str:
+    raw = "|".join(parts)
     return f"bch_fp_{hashlib.md5(raw.encode()).hexdigest()[:16]}"
 
 
@@ -127,6 +144,7 @@ class BanChileScraper(BaseScraper):
             product_kind=movement.product_kind,
             description=movement.description,
             amount=movement.amount,
+            currency=movement.currency,
             transaction_date=tx_date,
             accounting_date=movement.accounting_date,
             external_id=external_id_for(movement),
@@ -157,10 +175,12 @@ class BanChileScraper(BaseScraper):
                 logger.exception("Failed to convert a %s movement", movement.source)
 
         checking = sum(1 for t in transactions if t.product_kind == "checking")
+        usd = sum(1 for t in transactions if t.currency == "USD")
         logger.info(
-            "BanChile: %d checking, %d credit card transactions",
+            "BanChile: %d checking, %d credit card transactions (%d in USD)",
             checking,
             len(transactions) - checking,
+            usd,
         )
         return transactions
 
