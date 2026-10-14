@@ -6,6 +6,7 @@ leg outcomes, driven through stub scrapers with fabricated payloads.
 """
 
 import asyncio
+from datetime import date
 from unittest.mock import MagicMock
 
 import pytest
@@ -14,7 +15,12 @@ from product_model import CheckingMetrics
 
 import main as main_mod
 from main import run_scraper
-from scrapers.base import BaseScraper, ProductScrapeResult, ScrapedProduct
+from scrapers.base import (
+    BaseScraper,
+    ProductScrapeResult,
+    ScrapedProduct,
+    SupersededTransaction,
+)
 
 
 class _StubScraper(BaseScraper):
@@ -23,11 +29,17 @@ class _StubScraper(BaseScraper):
     method = "http_api"
     institution = "stub"
 
-    def __init__(self, products=None, warnings=None, tx_exc=None, prod_exc=None):
+    def __init__(
+        self, products=None, warnings=None, tx_exc=None, prod_exc=None, superseded=()
+    ):
         self._products = products or []
         self._warnings = warnings or []
         self._tx_exc = tx_exc
         self._prod_exc = prod_exc
+        self._superseded = list(superseded)
+
+    def superseded_transactions(self):
+        return self._superseded
 
     async def scrape_transactions(self):
         if self._tx_exc is not None:
@@ -56,6 +68,7 @@ def finish(monkeypatch):
     monkeypatch.setattr(main_mod, "upsert_transactions", MagicMock(return_value=0))
     monkeypatch.setattr(main_mod, "upsert_product", MagicMock())
     monkeypatch.setattr(main_mod, "finish_scraper_run", mock)
+    monkeypatch.setattr(main_mod, "delete_superseded_transactions", MagicMock())
     return mock
 
 
@@ -110,4 +123,58 @@ class TestRunScraperStatus:
                 "transactions: imap down; "
                 "BanChile: línea surface failed after 3 attempts"
             ),
+        )
+
+
+_TWIN = SupersededTransaction(
+    institution="banchile",
+    product_kind="credit_card",
+    currency="CLP",
+    transaction_date=date(2026, 8, 20),
+    amount=-12,
+    external_id_prefix="bch_fp_",
+)
+
+
+class TestSupersededCleanup:
+    """Rows a scrape replaced are deleted once its transactions are written."""
+
+    def test_runs_after_the_write(self, finish, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            main_mod, "upsert_transactions", lambda txns: calls.append("write") or 0
+        )
+        monkeypatch.setattr(
+            main_mod,
+            "delete_superseded_transactions",
+            lambda items, keys: calls.append(("delete", items, keys)),
+        )
+
+        asyncio.run(run_scraper(_StubScraper(superseded=[_TWIN])))
+
+        assert calls == ["write", ("delete", [_TWIN], set())]
+
+    def test_skipped_when_there_is_nothing_to_delete(self, finish):
+        asyncio.run(run_scraper(_StubScraper()))
+
+        main_mod.delete_superseded_transactions.assert_not_called()
+
+    def test_skipped_when_the_transactions_leg_failed(self, finish):
+        scraper = _StubScraper(tx_exc=RuntimeError("login failed"), superseded=[_TWIN])
+
+        asyncio.run(run_scraper(scraper))
+
+        main_mod.delete_superseded_transactions.assert_not_called()
+
+    def test_a_cleanup_failure_is_a_warning(self, finish, monkeypatch):
+        monkeypatch.setattr(
+            main_mod,
+            "delete_superseded_transactions",
+            MagicMock(side_effect=RuntimeError("db down")),
+        )
+
+        asyncio.run(run_scraper(_StubScraper(superseded=[_TWIN])))
+
+        finish.assert_called_once_with(
+            "run-1", "partial", transactions_imported=0, error_message="cleanup: db down"
         )

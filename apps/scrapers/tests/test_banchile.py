@@ -29,7 +29,11 @@ from scrapers.backends.banchile_movements import (
 from scrapers.backends.banchile_web import BalanceFetchResult
 from scrapers.base import ScrapedProduct
 from scrapers.institutions import banchile as banchile_mod
-from scrapers.institutions.banchile import BanChileScraper, external_id_for
+from scrapers.institutions.banchile import (
+    BanChileScraper,
+    external_id_for,
+    legacy_external_id_for,
+)
 
 ACCOUNT = "00-000-00000-01"
 CARD_LAST4 = "1234"
@@ -503,3 +507,69 @@ class TestUsdMapping:
     def test_a_usd_purchase_is_keyed_on_its_reference(self):
         (movement,) = parse_international_billed_movements(_intl_payload([_intl_row()]))
         assert external_id_for(movement) == "bch_ref_2008" + "1" * 23
+
+    def test_the_legacy_key_is_what_the_clp_only_code_stored(self):
+        """Pinned with that code: the same synthetic row read as CLP."""
+        movement = parse_unbilled_movement(_unbilled_row(monto=1234.56, origen="INT"))
+        assert legacy_external_id_for(movement) == "bch_fp_109da42d5aba2816"
+        assert movement.legacy_amount == -1235
+
+        half = parse_unbilled_movement(_unbilled_row(monto=12.5, origen="INT"))
+        assert legacy_external_id_for(half) == "bch_fp_b2074085fb82a9a7"
+        assert half.legacy_amount == -12
+
+    def test_clp_movements_have_no_legacy_key(self):
+        assert legacy_external_id_for(parse_unbilled_movement(_unbilled_row())) is None
+
+
+class TestSupersededTransactions:
+    """Which CLP-card rows a scrape names as the old twins of its USD charges."""
+
+    def setup_method(self):
+        self.scraper = BanChileScraper()
+
+    def _scrape(self, monkeypatch, movements, failed=()):
+        async def fake_fetch(rut, password):
+            return BanChileSessionResult(movements=movements, failed_surfaces=failed)
+
+        monkeypatch.setattr(banchile_mod, "fetch_session", fake_fetch)
+        asyncio.run(self.scraper.scrape_transactions())
+        return self.scraper.superseded_transactions()
+
+    def _movements(self):
+        return [
+            parse_unbilled_movement(_unbilled_row()),
+            parse_unbilled_movement(_unbilled_row(monto=1234.56, origen="INT")),
+            *parse_international_billed_movements(_intl_payload([_intl_row(monto=12.5)])),
+        ]
+
+    def test_one_per_usd_card_movement(self, monkeypatch):
+        exact, loose = self._scrape(monkeypatch, self._movements())
+
+        assert (exact.external_id, exact.amount) == ("bch_fp_109da42d5aba2816", -1235)
+        assert (loose.external_id, loose.amount) == (None, -12)
+        for item in (exact, loose):
+            assert (item.institution, item.product_kind, item.currency) == (
+                "banchile",
+                "credit_card",
+                "CLP",
+            )
+            assert item.external_id_prefix == "bch_fp_"
+            assert item.transaction_date == date(2026, 8, 20)
+
+    def test_the_loose_match_needs_both_clp_card_legs(self, monkeypatch):
+        """Otherwise a genuine CLP row of the window might not be protected."""
+        (exact,) = self._scrape(
+            monkeypatch, self._movements(), failed=("tarjeta facturados",)
+        )
+        assert exact.external_id == "bch_fp_109da42d5aba2816"
+
+    def test_a_usd_checking_failure_does_not_block_it(self, monkeypatch):
+        found = self._scrape(
+            monkeypatch, self._movements(), failed=("movimientos USD",)
+        )
+        assert len(found) == 2
+
+    def test_none_without_usd_card_movements(self, monkeypatch):
+        movements = [parse_unbilled_movement(_unbilled_row())]
+        assert self._scrape(monkeypatch, movements) == []

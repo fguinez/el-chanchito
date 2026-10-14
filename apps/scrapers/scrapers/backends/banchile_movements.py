@@ -1415,6 +1415,9 @@ _MOVEMENT_READERS: list[tuple[str, Callable]] = [
     ("tarjeta facturados", _read_card_billed),
     ("tarjeta facturados USD", _read_card_billed_usd),
 ]
+# The CLP card legs: when both loaded, every CLP card row of their window is in
+# the scrape, which is what makes the date+amount cleanup match safe.
+CLP_CARD_SURFACES = ("tarjeta no facturados", "tarjeta facturados")
 
 
 def read_movement_surfaces(page) -> tuple[list[BanChileMovement], tuple[str, ...]]:

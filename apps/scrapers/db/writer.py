@@ -10,7 +10,7 @@ from psycopg.types.json import Jsonb
 
 from db.connection import get_pool
 from db.slug import slugify, unique_slug
-from scrapers.base import ScrapedProduct, ScrapedTransaction
+from scrapers.base import ScrapedProduct, ScrapedTransaction, SupersededTransaction
 
 logger = logging.getLogger(__name__)
 
@@ -533,6 +533,131 @@ def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
                 logger.exception("Failed to insert transaction: %s", txn.external_id)
 
     return inserted
+
+
+def _like_prefix(prefix: str) -> str:
+    """`prefix` as a LIKE pattern, its wildcards escaped (backslash, as above)."""
+    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"{escaped}%"
+
+
+def _carries_user_edits(is_manually_categorized, is_internal_transfer, notes) -> bool:
+    """True for a row the user touched: categorised, annotated or paired."""
+    return bool(is_manually_categorized or is_internal_transfer or (notes or "").strip())
+
+
+def delete_superseded_transactions(
+    superseded: list[SupersededTransaction],
+    protected_external_ids: set[str] = frozenset(),
+) -> int:
+    """Delete the stored rows a scrape has replaced (issue #79). Returns the count.
+
+    Each `SupersededTransaction` removes at most one row of its institution's
+    (kind, currency) product, one-to-one and oldest first, among the rows its
+    own scraper wrote whose `external_id` starts with `external_id_prefix` and
+    whose date and amount match exactly. With an `external_id`, only the row
+    under that very key qualifies; without one, any such row does. Exact keys
+    are claimed first, so a date-and-amount match can never take a row an
+    exact key names.
+
+    A row whose key is in `protected_external_ids` (this scrape's own keys) is
+    never a candidate: it is a movement the bank still lists, not a leftover.
+    A matching row the user categorised, annotated or marked as an internal
+    transfer is left in place and logged instead.
+    """
+    if not superseded:
+        return 0
+
+    pool = get_pool()
+    deleted = 0
+    kept: list = []
+    claimed: set = set()
+    with pool.connection() as conn:
+        products: dict[tuple, list] = {}
+
+        def products_of(item: SupersededTransaction) -> list:
+            key = (item.institution, item.product_kind, item.currency)
+            if key not in products:
+                products[key] = [
+                    row[0]
+                    for row in conn.execute(
+                        """
+                        SELECT p.id FROM products p
+                        JOIN accounts a ON p.account_id = a.id
+                        JOIN institutions i ON a.institution_id = i.id
+                        WHERE i.slug = %s AND p.kind = %s AND p.currency = %s
+                          AND p.external_ref IS NULL
+                        """,
+                        key,
+                    ).fetchall()
+                ]
+            return products[key]
+
+        # Exact keys first: they name their row, so a looser match must not
+        # take it from them.
+        ordered = sorted(superseded, key=lambda item: item.external_id is None)
+        for item in ordered:
+            product_ids = products_of(item)
+            if not product_ids:
+                continue
+            exact = item.external_id is not None
+            rows = conn.execute(
+                """
+                SELECT id, external_id, is_manually_categorized,
+                       is_internal_transfer, notes
+                FROM transactions
+                WHERE product_id = ANY(%s) AND source = %s
+                  AND transaction_date = %s AND amount = %s
+                  AND external_id LIKE %s
+                  AND (%s::text IS NULL OR external_id = %s)
+                ORDER BY created_at, id
+                """,
+                (
+                    product_ids,
+                    f"scraper_{item.institution}",
+                    item.transaction_date,
+                    item.amount,
+                    _like_prefix(item.external_id_prefix),
+                    item.external_id,
+                    item.external_id,
+                ),
+            ).fetchall()
+            row = next(
+                (
+                    candidate
+                    for candidate in rows
+                    if candidate[0] not in claimed
+                    and candidate[1] not in protected_external_ids
+                ),
+                None,
+            )
+            if row is None:
+                continue
+            row_id, _, *edits = row
+            claimed.add(row_id)
+            if _carries_user_edits(*edits):
+                kept.append(row_id)
+                logger.warning(
+                    "Superseded transaction %s left in place: it carries user "
+                    "edits (category, notes or transfer pairing)",
+                    row_id,
+                )
+                continue
+            conn.execute("DELETE FROM transactions WHERE id = %s", (row_id,))
+            deleted += 1
+            logger.debug(
+                "Deleted superseded transaction %s (%s match)",
+                row_id,
+                "key" if exact else "date and amount",
+            )
+
+    if deleted or kept:
+        logger.info(
+            "Deleted %d superseded transaction(s); %d skipped for user edits",
+            deleted,
+            len(kept),
+        )
+    return deleted
 
 
 def upsert_product(sp: ScrapedProduct) -> None:

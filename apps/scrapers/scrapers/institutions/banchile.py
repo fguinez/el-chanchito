@@ -11,7 +11,10 @@ transactions leg opens the session, reads products *and* movements, and the
 products leg serves its half from that cache.
 
 Since issue #79 every movement carries its currency, so the USD card and USD
-checking movements land on their own products.
+checking movements land on their own products. Before that, the USD charges in
+the card's unbilled list were stored on the CLP card with their USD figure
+read as pesos; `superseded_transactions` names those rows so the run removes
+them once their USD replacements are written.
 """
 
 import hashlib
@@ -21,12 +24,18 @@ import re
 from datetime import date
 
 from scrapers.backends.banchile_movements import (
+    CLP_CARD_SURFACES,
     BanChileMovement,
     BanChileSessionResult,
     fetch_session,
 )
 from scrapers.backends.banchile_web import _SURFACE_ATTEMPTS, fetch_balances
-from scrapers.base import BaseScraper, ProductScrapeResult, ScrapedTransaction
+from scrapers.base import (
+    BaseScraper,
+    ProductScrapeResult,
+    ScrapedTransaction,
+    SupersededTransaction,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +119,17 @@ def external_id_for(movement: BanChileMovement) -> str:
     return _fingerprint_id(parts)
 
 
+def legacy_external_id_for(movement: BanChileMovement) -> str | None:
+    """The key the CLP-only code stored a USD card movement under, if known.
+
+    Only the unbilled leg was ever read before issue #79, and its key needs
+    nothing but the raw row, so it is reproduced exactly; None otherwise.
+    """
+    if not movement.legacy_fingerprint:
+        return None
+    return _fingerprint_id(movement.legacy_fingerprint)
+
+
 def _fingerprint_id(parts: tuple[str, ...]) -> str:
     raw = "|".join(parts)
     return f"bch_fp_{hashlib.md5(raw.encode()).hexdigest()[:16]}"
@@ -126,6 +146,7 @@ class BanChileScraper(BaseScraper):
         # transactions first: that call opens the session and stashes the
         # products half here for `scrape_products` to serve.
         self._session: BanChileSessionResult | None = None
+        self._superseded: list[SupersededTransaction] = []
 
     def _movement_to_transaction(self, movement: BanChileMovement) -> ScrapedTransaction:
         """Convert a backend movement into our ScrapedTransaction.
@@ -151,6 +172,46 @@ class BanChileScraper(BaseScraper):
             scheduled_month=date(tx_date.year, tx_date.month, 1),
         )
 
+    def _superseded_for(
+        self, movements: list[BanChileMovement], failed_surfaces: tuple[str, ...]
+    ) -> list[SupersededTransaction]:
+        """The CLP-card rows the CLP-only code stored for this scrape's USD charges.
+
+        One per USD card movement: by its exact legacy key when that is
+        reproducible (an unbilled row, or a billed one that replaced it in this
+        scrape), else by date and legacy amount alone. The second form is only
+        offered when both CLP card legs loaded, so every genuine CLP card row
+        of the window is in this scrape and protected by its key.
+        """
+        clp_legs_loaded = not set(CLP_CARD_SURFACES) & set(failed_surfaces)
+        superseded = []
+        for movement in movements:
+            if (
+                movement.product_kind != "credit_card"
+                or movement.currency == "CLP"
+                or movement.legacy_amount is None
+            ):
+                continue
+            external_id = legacy_external_id_for(movement)
+            if external_id is None and not clp_legs_loaded:
+                continue
+            superseded.append(
+                SupersededTransaction(
+                    institution=self.institution,
+                    product_kind="credit_card",
+                    currency="CLP",
+                    transaction_date=movement.transaction_date,
+                    amount=movement.legacy_amount,
+                    external_id=external_id,
+                    external_id_prefix="bch_fp_",
+                )
+            )
+        return superseded
+
+    def superseded_transactions(self) -> list[SupersededTransaction]:
+        """See `_superseded_for`; computed by the last `scrape_transactions`."""
+        return list(self._superseded)
+
     async def scrape_transactions(self) -> list[ScrapedTransaction]:
         """Open the shared session and convert its movements.
 
@@ -160,6 +221,7 @@ class BanChileScraper(BaseScraper):
         the two legs independent the way `run_scraper` expects.
         """
         self._session = None
+        self._superseded = []
         try:
             session = await fetch_session(self.rut, self.password)
         except Exception:
@@ -168,11 +230,16 @@ class BanChileScraper(BaseScraper):
         self._session = session
 
         transactions: list[ScrapedTransaction] = []
+        converted: list[BanChileMovement] = []
         for movement in session.movements:
             try:
                 transactions.append(self._movement_to_transaction(movement))
+                converted.append(movement)
             except Exception:
                 logger.exception("Failed to convert a %s movement", movement.source)
+
+        # Only movements that will be written can replace a stored row.
+        self._superseded = self._superseded_for(converted, session.failed_surfaces)
 
         checking = sum(1 for t in transactions if t.product_kind == "checking")
         usd = sum(1 for t in transactions if t.currency == "USD")

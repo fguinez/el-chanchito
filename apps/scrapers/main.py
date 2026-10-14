@@ -19,6 +19,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from db.connection import close_pool, database_url
 from db.writer import (
+    delete_superseded_transactions,
     finish_scraper_run,
     start_scraper_run,
     upsert_product,
@@ -72,6 +73,18 @@ async def run_scraper(scraper: BaseScraper) -> None:
     except Exception as e:
         logger.exception("Scraper %s: transactions failed", scraper.name)
         errors.append(f"transactions: {e}")
+    else:
+        # Only once the replacements are written; a failure here is a warning,
+        # since the scrape itself succeeded.
+        try:
+            superseded = scraper.superseded_transactions()
+            if superseded:
+                delete_superseded_transactions(
+                    superseded, {t.external_id for t in transactions}
+                )
+        except Exception as e:
+            logger.exception("Scraper %s: superseded-row cleanup failed", scraper.name)
+            warnings.append(f"cleanup: {e}")
 
     try:
         result = await scraper.scrape_products()
