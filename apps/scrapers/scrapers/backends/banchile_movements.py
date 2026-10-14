@@ -329,7 +329,8 @@ def cartola_has_more_pages(payload) -> bool:
     """True when `getCartola` says its window continues past what it returned.
 
     We cannot follow it (see the module docstring), so the caller logs a warning
-    rather than silently truncating.
+    rather than silently truncating. The flag is a string ("N" on every cartola
+    observed), so it is compared rather than taken for truthy.
     """
     if not isinstance(payload, dict):
         return False
@@ -337,7 +338,7 @@ def cartola_has_more_pages(payload) -> bool:
     if not isinstance(pagina, list) or not pagina:
         return False
     first = pagina[0]
-    return isinstance(first, dict) and bool(first.get("masPaginas"))
+    return isinstance(first, dict) and _flag_set(first.get("masPaginas"))
 
 
 def _cartola_dates(raw) -> tuple[Optional[datetime.date], Optional[datetime.date]]:

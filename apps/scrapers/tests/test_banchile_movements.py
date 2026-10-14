@@ -266,6 +266,8 @@ class TestCartolaPaging:
         payload = {"movimientos": [], "pagina": [{"masPaginas": False}]}
         assert cartola_has_more_pages(payload) is False
         assert cartola_has_more_pages({"movimientos": []}) is False
+        assert cartola_has_more_pages({"pagina": [{"masPaginas": "N"}]}) is False
+        assert cartola_has_more_pages({"pagina": [{"masPaginas": "S"}]}) is True
 
 
 class TestParseUnbilled:
