@@ -29,6 +29,14 @@ export function formatDateEs(iso: string): string {
   return new Date(iso).toLocaleDateString("es-CL");
 }
 
+/** Short es-CL date and time for an ISO timestamp. */
+export function formatTimestampEs(iso: string): string {
+  return new Date(iso).toLocaleString("es-CL", {
+    dateStyle: "short",
+    timeStyle: "short",
+  });
+}
+
 /** Short es-CL label for a plain YYYY-MM-DD date; parsed as local time so
  *  the label never shifts a day across timezones. */
 export function formatDayEs(date: string): string {

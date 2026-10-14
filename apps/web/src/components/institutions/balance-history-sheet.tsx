@@ -20,7 +20,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { formatBalance } from "@/components/institutions/shared";
 import type { ProductHistoryPoint } from "@/components/institutions/product-graphs";
-import { formatCLP } from "@/lib/utils";
+import { formatCLP, formatTimestampEs } from "@/lib/utils";
 
 /**
  * "Registros" button that opens every stored balance snapshot, newest first,
@@ -71,10 +71,11 @@ export function BalanceHistorySheet({
               </TableRow>
             </TableHeader>
             <TableBody>
-              {newestFirst.map((p) => (
-                <TableRow key={p.asOf}>
+              {newestFirst.map((p, i) => (
+                <TableRow key={`${p.asOf}-${i}`}>
                   <TableCell className="text-muted-foreground">
-                    {formatSnapshotTime(p.asOf)}
+                    {/* Time too: a product can get several snapshots a day. */}
+                    {formatTimestampEs(p.asOf)}
                   </TableCell>
                   <TableCell className="text-right tabular-nums">
                     {formatBalance(currency, p.balance) ?? "—"}
@@ -92,12 +93,4 @@ export function BalanceHistorySheet({
       </SheetContent>
     </Sheet>
   );
-}
-
-/** Date and time: a product can get several snapshots on the same day. */
-function formatSnapshotTime(iso: string): string {
-  return new Date(iso).toLocaleString("es-CL", {
-    dateStyle: "short",
-    timeStyle: "short",
-  });
 }

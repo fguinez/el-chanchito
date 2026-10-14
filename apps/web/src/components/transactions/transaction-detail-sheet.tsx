@@ -20,7 +20,12 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
-import { cn, formatAmount, formatPlainDateEs } from "@/lib/utils";
+import {
+  cn,
+  formatAmount,
+  formatPlainDateEs,
+  formatTimestampEs,
+} from "@/lib/utils";
 import type { TransactionDetail } from "@/app/api/transactions/[id]/route";
 
 type LoadResult =
@@ -316,12 +321,5 @@ function formatMonthEs(date: string): string {
   return new Date(year, month - 1, 1).toLocaleDateString("es-CL", {
     month: "long",
     year: "numeric",
-  });
-}
-
-function formatTimestampEs(iso: string): string {
-  return new Date(iso).toLocaleString("es-CL", {
-    dateStyle: "short",
-    timeStyle: "short",
   });
 }
