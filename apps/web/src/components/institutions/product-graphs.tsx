@@ -52,6 +52,8 @@ export interface ProductTransaction {
   /** Plain YYYY-MM-DD. */
   transactionDate: string;
   source: string;
+  /** The institution's own operation id, when the source reports one. */
+  externalId: string | null;
 }
 
 export interface ProductHistoryPoint {
