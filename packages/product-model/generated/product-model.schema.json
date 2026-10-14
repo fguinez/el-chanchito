@@ -1299,9 +1299,17 @@
           "title": "Accounting Date"
         },
         "amount": {
-          "description": "Amount in CLP; negative=expense, positive=income.",
-          "title": "Amount",
-          "type": "integer"
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "pattern": "^-?\\d{1,16}(\\.\\d{1,2})?$",
+              "type": "string"
+            }
+          ],
+          "description": "Signed amount in the transaction's currency: negative=expense, positive=income. At most 2 decimals (stored as NUMERIC(18, 2)); CLP amounts are whole numbers and may be sent as integers.",
+          "title": "Amount"
         },
         "category_hint": {
           "anyOf": [

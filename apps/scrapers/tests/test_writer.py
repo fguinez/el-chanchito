@@ -29,6 +29,7 @@ from db.writer import (
     _write_decision,
     upsert_product,
     upsert_transactions,
+    write_transactions,
 )
 from product_model import (
     InvestmentMetrics,
@@ -947,3 +948,62 @@ class TestAdoptionAcrossTheDateShift:
         assert (inserted, len(conn.rows)) == (0, 1)
         assert conn.rows[0]["external_id"] == "bch_ref_200812345678"
         assert conn.rows[0]["accounting_date"] is None
+
+
+class TestWriteTransactionsPersistedKeys:
+    """Which keys a stored row carries once `write_transactions` is done."""
+
+    def test_inserted_matched_and_adopted_keys_are_reported(self, monkeypatch):
+        conn = _FakeTxConn(
+            [
+                _legacy_row("row-1", "bch_op_10000000001", 1, amount=-1),
+                _legacy_row("row-2", "bch_a1b2c3d4e5f60718", 2, amount=-2),
+            ]
+        )
+        _use_tx_conn(monkeypatch, conn)
+
+        result = write_transactions(
+            [
+                _txn("bch_op_10000000001", amount=-1),  # already stored
+                _txn("bch_op_10000000002", amount=-2),  # adopts row-2
+                _txn("bch_op_10000000003", amount=-3),  # inserted
+            ]
+        )
+
+        assert result.inserted == 1
+        assert result.persisted_external_ids == {
+            "bch_op_10000000001",
+            "bch_op_10000000002",
+            "bch_op_10000000003",
+        }
+
+    def test_a_key_left_out_in_favour_of_a_final_row_is_not_reported(self, monkeypatch):
+        conn = _FakeTxConn([_legacy_row("row-1", "bch_op_10000000001", 1)])
+        _use_tx_conn(monkeypatch, conn)
+
+        result = write_transactions([_txn("bch_fp_a1b2c3d4e5f60718")])
+
+        assert result.persisted_external_ids == frozenset()
+
+    def test_a_failed_row_is_not_reported(self, monkeypatch):
+        conn = _FakeTxConn([])
+        _use_tx_conn(monkeypatch, conn)
+        execute = conn.execute
+
+        def failing(sql, params=None):
+            if "INSERT" in sql and params[-1] == "bch_op_10000000002":
+                raise RuntimeError("synthetic failure")
+            return execute(sql, params)
+
+        conn.execute = failing
+
+        result = write_transactions(
+            [_txn("bch_op_10000000001"), _txn("bch_op_10000000002")]
+        )
+
+        assert result.persisted_external_ids == {"bch_op_10000000001"}
+
+    def test_upsert_transactions_still_returns_the_count(self, monkeypatch):
+        _use_tx_conn(monkeypatch, _FakeTxConn([]))
+
+        assert upsert_transactions([_txn("bch_op_10000000001")]) == 1

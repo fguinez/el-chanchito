@@ -2,15 +2,18 @@
 
 import json
 import logging
+from collections.abc import Collection
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 
+from psycopg.pq import TransactionStatus
 from psycopg.types.json import Jsonb
 
 from db.connection import get_pool
 from db.slug import slugify, unique_slug
-from scrapers.base import ScrapedProduct, ScrapedTransaction
+from scrapers.base import ScrapedProduct, ScrapedTransaction, SupersededTransaction
 
 logger = logging.getLogger(__name__)
 
@@ -402,8 +405,35 @@ def _sibling_rows(conn, product_id: str, txn: ScrapedTransaction, source: str) -
     ).fetchall()
 
 
+@dataclass(frozen=True)
+class TransactionWriteResult:
+    """What `write_transactions` did.
+
+    `persisted_external_ids` holds the keys a stored row carries once the batch
+    is committed: inserted, already stored, or adopted onto. It is empty when
+    the batch's database transaction failed, since nothing of it was kept.
+    """
+
+    inserted: int
+    persisted_external_ids: frozenset[str]
+
+
+def _transaction_failed(conn) -> bool:
+    """True when a statement error aborted `conn`'s open transaction."""
+    info = getattr(conn, "info", None)
+    return getattr(info, "transaction_status", None) == TransactionStatus.INERROR
+
+
 def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
     """Insert transactions, skipping duplicates. Returns count of new rows.
+
+    See `write_transactions`, which also reports which keys were persisted.
+    """
+    return write_transactions(transactions).inserted
+
+
+def write_transactions(transactions: list[ScrapedTransaction]) -> TransactionWriteResult:
+    """Insert transactions, skipping duplicates, and report what was persisted.
 
     For institutions that re-key their stored rows (see `_adopts_stored_rows`),
     a movement whose key matches nothing is first offered the stored rows it
@@ -419,10 +449,11 @@ def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
     backfills them.
     """
     if not transactions:
-        return 0
+        return TransactionWriteResult(0, frozenset())
 
     pool = get_pool()
     inserted = 0
+    persisted: set[str] = set()
 
     with pool.connection() as conn:
         products: dict[tuple, str] = {}
@@ -460,6 +491,7 @@ def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
                 ).fetchone()
                 if row:
                     claimed.add(row[0])
+                    persisted.add(txn.external_id)
                     continue
 
                 if _adopts_stored_rows(txn.external_id):
@@ -494,6 +526,7 @@ def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
                             row_id,
                             txn.external_id,
                         )
+                        persisted.add(txn.external_id)
                         continue
                     if action == "keep":
                         logger.warning(
@@ -529,10 +562,181 @@ def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
                 )
                 if cur.rowcount and cur.rowcount > 0:
                     inserted += 1
+                # A conflict means the row is already stored under this key.
+                persisted.add(txn.external_id)
             except Exception:
                 logger.exception("Failed to insert transaction: %s", txn.external_id)
 
-    return inserted
+        if _transaction_failed(conn):
+            # The pool rolls the whole batch back on exit, so nothing above
+            # was kept, whatever the per-row bookkeeping says.
+            logger.error("Transaction batch aborted by a database error; nothing kept")
+            persisted.clear()
+
+    return TransactionWriteResult(inserted, frozenset(persisted))
+
+
+def _like_prefix(prefix: str) -> str:
+    """`prefix` as a LIKE pattern, its wildcards escaped (backslash, as above)."""
+    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"{escaped}%"
+
+
+def _carries_user_edits(is_manually_categorized, is_internal_transfer, notes) -> bool:
+    """True for a row the user touched: categorised, annotated or paired."""
+    return bool(is_manually_categorized or is_internal_transfer or (notes or "").strip())
+
+
+def delete_superseded_transactions(
+    superseded: list[SupersededTransaction],
+    persisted_external_ids: Collection[str],
+    protected_external_ids: Collection[str] = frozenset(),
+) -> int:
+    """Delete the stored rows a scrape has replaced (issue #79). Returns the count.
+
+    Only an item whose `replacement_external_id` is in `persisted_external_ids`
+    (`TransactionWriteResult.persisted_external_ids` of this run's write) is
+    acted on: a twin is never deleted unless its replacement is stored.
+
+    Each `SupersededTransaction` removes at most one row of its institution's
+    (kind, currency) product, one-to-one and oldest first, among the rows its
+    own scraper wrote whose `external_id` starts with `external_id_prefix` and
+    whose date and amount match exactly. With an `external_id`, only the row
+    under that very key qualifies; without one, any such row does. Exact keys
+    are claimed first, so a date-and-amount match can never take a row an
+    exact key names.
+
+    A row whose key is in `protected_external_ids` (this scrape's own keys) is
+    never a candidate: it is a movement the bank still lists, not a leftover.
+    Nor is a row created at or after the moment the item's
+    `created_before_migration` was applied (per `_migrations.applied_at`); an
+    item whose migration is not recorded matches nothing.
+    A matching row the user categorised, annotated or marked as an internal
+    transfer is left in place and logged instead.
+    """
+    replaced = [
+        item for item in superseded if item.replacement_external_id in persisted_external_ids
+    ]
+    if len(replaced) < len(superseded):
+        logger.warning(
+            "%d superseded transaction(s) left in place: their replacement was "
+            "not stored this run",
+            len(superseded) - len(replaced),
+        )
+    superseded = replaced
+    if not superseded:
+        return 0
+
+    pool = get_pool()
+    deleted = 0
+    kept: list = []
+    claimed: set = set()
+    with pool.connection() as conn:
+        products: dict[tuple, list] = {}
+
+        def products_of(item: SupersededTransaction) -> list:
+            key = (item.institution, item.product_kind, item.currency)
+            if key not in products:
+                products[key] = [
+                    row[0]
+                    for row in conn.execute(
+                        """
+                        SELECT p.id FROM products p
+                        JOIN accounts a ON p.account_id = a.id
+                        JOIN institutions i ON a.institution_id = i.id
+                        WHERE i.slug = %s AND p.kind = %s AND p.currency = %s
+                          AND p.external_ref IS NULL
+                        """,
+                        key,
+                    ).fetchall()
+                ]
+            return products[key]
+
+        cutoffs: dict = {}
+
+        def cutoff_of(item: SupersededTransaction):
+            name = item.created_before_migration
+            if name not in cutoffs:
+                row = conn.execute(
+                    "SELECT applied_at FROM _migrations WHERE name = %s", (name,)
+                ).fetchone()
+                cutoffs[name] = row[0] if row else None
+                if cutoffs[name] is None:
+                    logger.warning(
+                        "Migration %s is not recorded; superseded rows bound to "
+                        "it are left in place",
+                        name,
+                    )
+            return cutoffs[name]
+
+        # Exact keys first: they name their row, so a looser match must not
+        # take it from them.
+        ordered = sorted(superseded, key=lambda item: item.external_id is None)
+        for item in ordered:
+            product_ids = products_of(item)
+            cutoff = cutoff_of(item)
+            if not product_ids or cutoff is None:
+                continue
+            exact = item.external_id is not None
+            rows = conn.execute(
+                """
+                SELECT id, external_id, is_manually_categorized,
+                       is_internal_transfer, notes
+                FROM transactions
+                WHERE product_id = ANY(%s) AND source = %s
+                  AND transaction_date = %s AND amount = %s
+                  AND external_id LIKE %s
+                  AND (%s::text IS NULL OR external_id = %s)
+                  AND created_at < %s
+                ORDER BY created_at, id
+                """,
+                (
+                    product_ids,
+                    f"scraper_{item.institution}",
+                    item.transaction_date,
+                    item.amount,
+                    _like_prefix(item.external_id_prefix),
+                    item.external_id,
+                    item.external_id,
+                    cutoff,
+                ),
+            ).fetchall()
+            row = next(
+                (
+                    candidate
+                    for candidate in rows
+                    if candidate[0] not in claimed
+                    and candidate[1] not in protected_external_ids
+                ),
+                None,
+            )
+            if row is None:
+                continue
+            row_id, _, *edits = row
+            claimed.add(row_id)
+            if _carries_user_edits(*edits):
+                kept.append(row_id)
+                logger.warning(
+                    "Superseded transaction %s left in place: it carries user "
+                    "edits (category, notes or transfer pairing)",
+                    row_id,
+                )
+                continue
+            conn.execute("DELETE FROM transactions WHERE id = %s", (row_id,))
+            deleted += 1
+            logger.debug(
+                "Deleted superseded transaction %s (%s match)",
+                row_id,
+                "key" if exact else "date and amount",
+            )
+
+    if deleted or kept:
+        logger.info(
+            "Deleted %d superseded transaction(s); %d skipped for user edits",
+            deleted,
+            len(kept),
+        )
+    return deleted
 
 
 def upsert_product(sp: ScrapedProduct) -> None:

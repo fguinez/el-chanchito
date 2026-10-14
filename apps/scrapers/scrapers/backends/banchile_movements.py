@@ -29,6 +29,17 @@ them is in the movements list itself:
     `totales: true` are summary lines and are dropped before anything else, and
     an all-zero 8-digit suffix means "no reference", not a value.
 
+Issue #79 added the USD side of the same products. The card is one card with
+two currencies: the unbilled list mixes both, and `origenTransaccion == "INT"`
+is the only reliable mark of a row billed in USD (`codigoMonedaOrigen` and
+`montoMonedaOrigen` describe the merchant's currency and report 840 even for a
+CLP figure). The USD statement is a sibling endpoint
+(`estadocuenta/internacional/resumen-por-fecha`) with its own row shape, read
+by the same capture-and-replay strategy as the national one. Every USD amount
+is a Decimal with exact cents and every movement carries its `currency`, which
+is what routes it to the USD product. USD checking movements are not read yet
+(see #82).
+
 Why this is its own module: `banchile_web.py` is 1.6k lines about *balances* and
 its docstring is a map of that surface. Movements are a different read, with
 their own payload shapes and their own hazards, sharing only the session. So
@@ -64,9 +75,11 @@ not establish:
 import asyncio
 import datetime
 import logging
+import math
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Callable, Optional
 
 from scrapers.backends.banchile_web import (
@@ -123,16 +136,32 @@ class BanChileMovement:
     `source` is for logging only. It is deliberately NOT part of any key either:
     a charge crossing from the unbilled to the billed leg must not re-key
     itself, which is exactly the bug issue #56 tracks.
+
+    `currency` routes the movement to its product ("CLP" or "USD"); `amount` is
+    a Decimal, whole for CLP and with exact cents for USD. `legacy_fingerprint`
+    and `legacy_amount` are set only on USD card movements: what the CLP-only
+    code before issue #79 keyed and stored the same row as on the CLP card,
+    which is how those misrouted rows are found and removed. Neither is ever
+    identity.
+
+    `statement_date` is the `fechaFacturacion` a billed row was read from (""
+    on every other leg). It only tells the cleanup which statements a scrape
+    covered and is never identity on its own (the billed fingerprints carry
+    their own copy).
     """
 
     source: str
     product_kind: str
     description: str
-    amount: int
+    amount: Decimal
     transaction_date: datetime.date
     accounting_date: Optional[datetime.date] = None
     operation_id: Optional[str] = None
     fingerprint: tuple[str, ...] = ()
+    currency: str = "CLP"
+    legacy_fingerprint: tuple[str, ...] = ()
+    legacy_amount: Optional[int] = None
+    statement_date: str = ""
 
 
 @dataclass(frozen=True)
@@ -181,6 +210,31 @@ def _number(value) -> Optional[float]:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return float(value)
+
+
+_CENTS = Decimal("0.01")
+
+
+def _usd(value) -> Optional[Decimal]:
+    """A JSON number as a USD Decimal quantized to cents (None if it isn't one).
+
+    Built from the float's shortest repr, so 12.34 is Decimal("12.34") and never
+    its binary expansion; whole and fractional spellings of one figure come out
+    equal and render identically ("12.30").
+    """
+    number = _number(value)
+    if number is None or not math.isfinite(number):
+        return None
+    return Decimal(repr(number)).quantize(_CENTS, rounding=ROUND_HALF_UP)
+
+
+def _legacy_clp_amount(bank_signed: float) -> int:
+    """What the CLP-only code stored for a card row: its own rounding, verbatim.
+
+    Python's `round` is banker's rounding on the float, so 12.5 gives 12; the
+    cleanup of misrouted rows has to reproduce that exactly, never re-derive it.
+    """
+    return -int(round(bank_signed))
 
 
 def _fingerprint_value(value) -> str:
@@ -275,7 +329,8 @@ def cartola_has_more_pages(payload) -> bool:
     """True when `getCartola` says its window continues past what it returned.
 
     We cannot follow it (see the module docstring), so the caller logs a warning
-    rather than silently truncating.
+    rather than silently truncating. The flag is a string ("N" on every cartola
+    observed), so it is compared rather than taken for truthy.
     """
     if not isinstance(payload, dict):
         return False
@@ -283,7 +338,7 @@ def cartola_has_more_pages(payload) -> bool:
     if not isinstance(pagina, list) or not pagina:
         return False
     first = pagina[0]
-    return isinstance(first, dict) and bool(first.get("masPaginas"))
+    return isinstance(first, dict) and _flag_set(first.get("masPaginas"))
 
 
 def _cartola_dates(raw) -> tuple[Optional[datetime.date], Optional[datetime.date]]:
@@ -364,12 +419,34 @@ def parse_cartola_movement(raw, operation_id: Optional[str] = None):
         source="checking",
         product_kind="checking",
         description=_text(raw.get("descripcion")) or "Movimiento",
-        amount=int(amount),
+        amount=Decimal(amount),
         transaction_date=tx_date,
         accounting_date=posted,
         operation_id=operation_id,
         fingerprint=(bank_id, saldo),
     )
+
+
+# The unbilled leg's identity fields, in fingerprint order.
+_UNBILLED_IDENTITY = (
+    "fechaTransaccionString",
+    "fechaAutorizacionString",
+    "horaAutorizacion",
+    "montoCompra",
+    "numeroTarjeta",
+    "codigoComercioTBK",
+)
+
+
+def is_international(raw) -> bool:
+    """True when an unbilled row is billed in USD (`origenTransaccion` "INT").
+
+    The only reliable currency mark on this leg: "NAC" rows are CLP, and the
+    `codigoMonedaOrigen`/`montoMonedaOrigen` pair describes the merchant's own
+    currency (840 was reported on rows whose origin figure was in pesos).
+    Anything but "INT" stays CLP, which is what every row was before #79.
+    """
+    return isinstance(raw, dict) and _text(raw.get("origenTransaccion")).upper() == "INT"
 
 
 def parse_unbilled_movement(raw):
@@ -378,6 +455,12 @@ def parse_unbilled_movement(raw):
     This leg has no id of any kind, so the key is the description-free
     fingerprint below: posting date, authorisation date and time, amount, the
     card's last four and the Transbank merchant code.
+
+    One list holds both currencies (`is_international`). A USD row's
+    `montoCompra` is its billed amount with cents, kept exact and rendered in
+    the fingerprint as a quantized Decimal ("12.30"); a CLP row is unchanged
+    from before issue #79, key included. A USD row also records the key and
+    amount the CLP-only code stored it under, for the misrouted-row cleanup.
 
     Unlike the billed leg, this one SIGNS its amounts: `montoCompra` is positive
     for a charge (spending, so a negative amount for us) and negative for a
@@ -404,24 +487,35 @@ def parse_unbilled_movement(raw):
         or _text(raw.get("descripcionTransaccion"))
         or "Movimiento"
     )
+    clp_fingerprint = tuple(_fingerprint_value(raw.get(key)) for key in _UNBILLED_IDENTITY)
+    if not is_international(raw):
+        return BanChileMovement(
+            source="card_unbilled",
+            product_kind="credit_card",
+            description=description,
+            amount=Decimal(_legacy_clp_amount(monto)),
+            transaction_date=tx_date,
+            operation_id=None,
+            fingerprint=clp_fingerprint,
+        )
+
+    usd = _usd(raw.get("montoCompra"))
+    if usd is None:
+        return None
     return BanChileMovement(
         source="card_unbilled",
         product_kind="credit_card",
         description=description,
-        amount=-int(round(monto)),
+        amount=-usd,
         transaction_date=tx_date,
         operation_id=None,
         fingerprint=tuple(
-            _fingerprint_value(raw.get(key))
-            for key in (
-                "fechaTransaccionString",
-                "fechaAutorizacionString",
-                "horaAutorizacion",
-                "montoCompra",
-                "numeroTarjeta",
-                "codigoComercioTBK",
-            )
+            str(usd) if key == "montoCompra" else value
+            for key, value in zip(_UNBILLED_IDENTITY, clp_fingerprint)
         ),
+        currency="USD",
+        legacy_fingerprint=clp_fingerprint,
+        legacy_amount=_legacy_clp_amount(monto),
     )
 
 
@@ -440,15 +534,20 @@ def parse_unbilled_movements(payload) -> list[BanChileMovement]:
     return movements
 
 
-def billed_reference(raw_reference) -> Optional[str]:
-    """A billed row's `numReferencia`, or None when it isn't one.
+_BARE_DDMM_RE = re.compile(r"^\d{4}$")
 
-    The format is "DDMM NNNNNNNN". A reference whose 8-digit suffix is all
-    zeros is the bank's way of saying there is none (observed on a payment row),
-    so it must never become a key: every such row would share it.
+
+def billed_reference(raw_reference) -> Optional[str]:
+    """A billed row's reference, or None when it isn't one.
+
+    The national format is "DDMM NNNNNNNN" (`numReferencia`) and the USD one
+    "DDMM" + a 23-digit suffix (`numeroDocumento`). A suffix of all zeros, or
+    no suffix at all (a bare "DDMM", which is a posting day and not an id), is
+    the bank's way of saying there is none (observed on payment and commission
+    rows), so it must never become a key: every such row would share it.
     """
     reference = _text(raw_reference)
-    if not reference:
+    if not reference or _BARE_DDMM_RE.match(reference):
         return None
     parts = reference.split()
     suffix = parts[-1] if len(parts) > 1 else reference
@@ -493,9 +592,9 @@ def parse_billed_movement(raw, fecha_facturacion: str = ""):
         return None
 
     if _text(raw.get("grupo")).lower() == "pagos":
-        amount = int(round(abs(monto)))
+        amount = Decimal(int(round(abs(monto))))
     else:
-        amount = -int(round(monto))
+        amount = Decimal(-int(round(monto)))
 
     description = (
         _text(raw.get("descripcion")) or _text(raw.get("comercio")) or "Movimiento"
@@ -513,6 +612,7 @@ def parse_billed_movement(raw, fecha_facturacion: str = ""):
             _fingerprint_value(raw.get("nombreTarjeta")),
             _text(fecha_facturacion),
         ),
+        statement_date=_text(fecha_facturacion),
     )
 
 
@@ -533,6 +633,85 @@ def parse_billed_movements(payload, fecha_facturacion: str = "") -> list[BanChil
         movement = parse_billed_movement(raw, fecha_facturacion)
         if movement is not None:
             movements.append(movement)
+    return movements
+
+
+# The USD statement's row-bearing sections. Each one's `transaccionesTarjetas`
+# is null when the section is empty (it then carries `mensajeSinTransacciones`
+# instead), and `numeroDeTransacciones` does not count the rows, so it is never
+# read.
+_INTERNATIONAL_SECTIONS = ("seccionPagos", "seccionCompras", "seccionComisiones")
+
+
+def parse_international_billed_movement(
+    raw, fecha_facturacion: str = "", section: str = ""
+):
+    """One USD statement row -> a BanChileMovement (or None).
+
+    Unlike the national leg, `montoDolar` is SIGNED from the bank's side, like
+    the unbilled leg's `montoCompra`: purchases positive, payments and credits
+    negative (a commissions row was a credit). So the sign is flipped and
+    neither `grupo` nor the section is read for direction.
+
+    The reference is `numeroDocumento`: purchases carry "DDMM" plus a 23-digit
+    reference, while payments and commissions carry a bare "DDMM" or an
+    all-zero suffix, which `billed_reference` reads as none. The "DDMM" is a
+    posting day, not the transaction's, so no date is ever derived from it.
+    `idMovimiento` and `idComprobante` are session tokens and never identity.
+    The fallback fingerprint is the national one (date, amount, card, statement
+    date) plus the raw `numeroDocumento` and the `section` the row came from:
+    a payment and a credit can share the date, signed amount and card of one
+    statement, and only those two fields (stable within a closed statement)
+    tell them apart.
+    """
+    if not isinstance(raw, dict):
+        return None
+    monto = _number(raw.get("montoDolar"))
+    usd = _usd(raw.get("montoDolar"))
+    if monto is None or usd is None:
+        return None
+    tx_date = _parse_date_ddmmyyyy(_text(raw.get("fechaTransaccionString")))
+    if tx_date is None:
+        return None
+    return BanChileMovement(
+        source="card_billed",
+        product_kind="credit_card",
+        description=_text(raw.get("descripcion")) or "Movimiento",
+        amount=-usd,
+        transaction_date=tx_date,
+        operation_id=billed_reference(raw.get("numeroDocumento")),
+        fingerprint=(
+            _fingerprint_value(raw.get("fechaTransaccionString")),
+            str(usd),
+            _text(raw.get("tituloTarjeta")),
+            _text(fecha_facturacion),
+            _text(raw.get("numeroDocumento")),
+            _text(section),
+        ),
+        currency="USD",
+        legacy_amount=_legacy_clp_amount(monto),
+        statement_date=_text(fecha_facturacion),
+    )
+
+
+def parse_international_billed_movements(
+    payload, fecha_facturacion: str = ""
+) -> list[BanChileMovement]:
+    """Every real row of a USD `resumen-por-fecha` response, summaries dropped."""
+    if not isinstance(payload, dict):
+        return []
+    movements = []
+    for name in _INTERNATIONAL_SECTIONS:
+        seccion = payload.get(name)
+        rows = seccion.get("transaccionesTarjetas") if isinstance(seccion, dict) else None
+        if not isinstance(rows, list):
+            continue
+        for raw in rows:
+            if isinstance(raw, dict) and raw.get("totales"):
+                continue  # a section total, not a movement
+            movement = parse_international_billed_movement(raw, fecha_facturacion, name)
+            if movement is not None:
+                movements.append(movement)
     return movements
 
 
@@ -557,6 +736,37 @@ def statement_dates(payload, limit: int) -> list[str]:
     return dates[:limit]
 
 
+def international_statement_dates(payload, limit: int) -> list[str]:
+    """The newest `limit` USD statement dates from `fechas-facturacion`.
+
+    `listaInternacional` mirrors `listaNacional`, but its flag is spelled "S"
+    rather than "1", so it is compared rather than taken for truthy ("N" is a
+    non-empty string too).
+    """
+    if not isinstance(payload, dict) or limit <= 0:
+        return []
+    lista = payload.get("listaInternacional")
+    if not isinstance(lista, list):
+        return []
+    dates = [
+        _text(entry.get("fechaFacturacion"))
+        for entry in lista
+        if isinstance(entry, dict)
+        and _flag_set(entry.get("existeEstadoCuentaInternacional"))
+        and _text(entry.get("fechaFacturacion"))
+    ]
+    return dates[:limit]
+
+
+def _flag_set(value) -> bool:
+    """A portal yes/no flag: True, 1, or "1", "S", "SI", "Y", "YES", "TRUE" (any case)."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value == 1
+    return _text(value).upper() in {"1", "S", "SI", "Y", "YES", "TRUE"}
+
+
 def drop_unbilled_duplicates(
     movements: list[BanChileMovement],
 ) -> list[BanChileMovement]:
@@ -569,31 +779,52 @@ def drop_unbilled_duplicates(
     the writer would insert two rows, the second of which never gets revisited.
     The billed row carries the bank's own reference, so it is the one to keep.
 
-    Matching is on product kind, date and amount, one-to-one: N unbilled
-    charges are dropped only against N billed ones, so a genuinely repeated
-    same-day charge that is still unbilled survives.
+    Matching is on product kind, currency, date and signed amount, one-to-one:
+    N unbilled charges are dropped only against N billed ones, so a genuinely
+    repeated same-day charge that is still unbilled survives. The currency keeps
+    a USD charge from ever matching a CLP one; the sign matters because an
+    amount-only match paired unrelated USD rows in the observed data (the two
+    USD legs share the date and the signed amount of a charge exactly).
+
+    A dropped USD unbilled row hands its legacy key to the billed row that
+    replaced it, so the misrouted-row cleanup can still match it exactly.
     """
-    billed: dict[tuple, int] = {}
-    for movement in movements:
+    def key_of(movement: BanChileMovement) -> tuple:
+        return (
+            movement.product_kind,
+            movement.currency,
+            movement.transaction_date,
+            movement.amount,
+        )
+
+    billed: dict[tuple, list[int]] = {}
+    for index, movement in enumerate(movements):
         if movement.source == "card_billed":
-            key = (movement.product_kind, movement.transaction_date, movement.amount)
-            billed[key] = billed.get(key, 0) + 1
+            billed.setdefault(key_of(movement), []).append(index)
     if not billed:
         return movements
 
-    kept: list[BanChileMovement] = []
-    dropped = 0
-    for movement in movements:
-        key = (movement.product_kind, movement.transaction_date, movement.amount)
-        if movement.source == "card_unbilled" and billed.get(key):
-            billed[key] -= 1
-            dropped += 1
+    result = list(movements)
+    dropped: set[int] = set()
+    for index, movement in enumerate(movements):
+        if movement.source != "card_unbilled":
             continue
-        kept.append(movement)
+        slots = billed.get(key_of(movement))
+        if not slots:
+            continue
+        twin = slots.pop(0)
+        dropped.add(index)
+        if movement.legacy_fingerprint and not result[twin].legacy_fingerprint:
+            result[twin] = replace(
+                result[twin],
+                legacy_fingerprint=movement.legacy_fingerprint,
+                legacy_amount=movement.legacy_amount,
+            )
+    kept = [movement for index, movement in enumerate(result) if index not in dropped]
     if dropped:
         logger.info(
             "BanChile: %d unbilled charge(s) dropped; already read as billed",
-            dropped,
+            len(dropped),
         )
     return kept
 
@@ -627,7 +858,12 @@ def dedupe_movements(movements: list[BanChileMovement]) -> list[BanChileMovement
     seen: set[tuple] = set()
     unique: list[BanChileMovement] = []
     for movement in movements:
-        key = (movement.source, movement.operation_id, movement.fingerprint)
+        key = (
+            movement.source,
+            movement.currency,
+            movement.operation_id,
+            movement.fingerprint,
+        )
         if key in seen:
             continue
         seen.add(key)
@@ -647,6 +883,7 @@ _DETALLE_GLOSA_PATH = (
 _UNBILLED_FRAGMENT = "movimientos-no-facturados"
 _FECHAS_FACTURACION_FRAGMENT = "estadocuenta/fechas-facturacion"
 _BILLED_FRAGMENT = "estadocuenta/nacional/resumen-por-fecha"
+_BILLED_USD_FRAGMENT = "estadocuenta/internacional/resumen-por-fecha"
 
 _MOVIMIENTOS_ROUTE = "#/movimientos/cuenta/saldos-movimientos"
 _BILLED_ROUTE = "#/tarjeta-credito/consultar/facturados"
@@ -1029,23 +1266,27 @@ def _replay_statement(page, request: dict, fecha: str) -> Optional[dict]:
     return payload
 
 
-def _read_card_billed(page, attempt: int) -> Optional[list[BanChileMovement]]:
-    """Read the newest statements' billed movements (one attempt).
+def _read_billed_leg(
+    page,
+    attempt: int,
+    fragment: str,
+    parse: Callable,
+    dates_of: Callable,
+    label: str,
+) -> Optional[list[BanChileMovement]]:
+    """Read one currency's newest statements (one attempt).
 
     The SPA loads the most recent statement itself when the facturados tab
-    opens; older periods are read by replaying that same request with a
-    different `fechaFacturacion`, taken from `fechas-facturacion`. Only the
-    national (CLP) statement is read: our transaction envelope carries whole
-    CLP amounts, so the international one has nowhere to go (it returned zero
-    rows in every session observed anyway).
+    opens (both currencies' at once, with identical request bodies); older
+    periods are read by replaying that same request with a different
+    `fechaFacturacion`, taken from `fechas-facturacion`.
 
     Returns None when the statement never loaded (worth retrying) and a list
-    once it did, which may legitimately be empty for a period with no national
-    statement.
+    once it did, which may legitimately be empty.
     """
     budget = _budget(_RENDER_TIMEOUTS_MS, attempt)
     with _JsonCapture(page, _FECHAS_FACTURACION_FRAGMENT) as fechas_capture:
-        with _JsonCapture(page, _BILLED_FRAGMENT) as billed_capture:
+        with _JsonCapture(page, fragment) as billed_capture:
             if not _open_card_area(page, attempt):
                 return None
             try:
@@ -1058,17 +1299,16 @@ def _read_card_billed(page, attempt: int) -> Optional[list[BanChileMovement]]:
             payload = _wait_for_payload(page, billed_capture, budget)
             if payload is None:
                 logger.info(
-                    "BanChile: billed card movements did not load (attempt %d)",
-                    attempt + 1,
+                    "BanChile: %s did not load (attempt %d)", label, attempt + 1
                 )
                 return None
             requests = list(billed_capture.requests)
             fechas_payloads = list(fechas_capture.payloads)
 
         loaded = _text((requests[-1]["body"] if requests else {}).get("fechaFacturacion"))
-        movements = parse_billed_movements(payload, loaded)
+        movements = parse(payload, loaded)
 
-        dates = statement_dates(
+        dates = dates_of(
             fechas_payloads[-1] if fechas_payloads else None, _BILLED_STATEMENTS
         )
         for fecha in dates:
@@ -1076,11 +1316,41 @@ def _read_card_billed(page, attempt: int) -> Optional[list[BanChileMovement]]:
                 continue
             older = _replay_statement(page, requests[-1], fecha)
             if older is not None:
-                movements.extend(parse_billed_movements(older, fecha))
+                movements.extend(parse(older, fecha))
 
     movements = dedupe_movements(movements)
-    logger.info("BanChile: %d billed card movements", len(movements))
+    logger.info("BanChile: %d %s", len(movements), label)
     return movements
+
+
+def _read_card_billed(page, attempt: int) -> Optional[list[BanChileMovement]]:
+    """The national (CLP) statements' billed movements (one attempt)."""
+    return _read_billed_leg(
+        page,
+        attempt,
+        _BILLED_FRAGMENT,
+        parse_billed_movements,
+        statement_dates,
+        "billed card movements",
+    )
+
+
+def _read_card_billed_usd(page, attempt: int) -> Optional[list[BanChileMovement]]:
+    """The international (USD) statements' billed movements (one attempt).
+
+    The same statements as the national leg (`listaInternacional` mirrors
+    `listaNacional`), read from the SPA's own `internacional` call and its
+    replays. It is a surface of its own, so a failure here never costs the
+    national leg.
+    """
+    return _read_billed_leg(
+        page,
+        attempt,
+        _BILLED_USD_FRAGMENT,
+        parse_international_billed_movements,
+        international_statement_dates,
+        "billed USD card movements",
+    )
 
 
 # Surface label -> per-attempt reader, in read order. The labels feed
@@ -1089,7 +1359,12 @@ _MOVEMENT_READERS: list[tuple[str, Callable]] = [
     ("movimientos", _read_checking_movements),
     ("tarjeta no facturados", _read_card_unbilled),
     ("tarjeta facturados", _read_card_billed),
+    ("tarjeta facturados USD", _read_card_billed_usd),
 ]
+# The CLP card legs: when both loaded, every CLP card row of the statements the
+# national leg read (and of the unbilled window after them) is in the scrape,
+# which is what makes the date+amount cleanup match safe for those statements.
+CLP_CARD_SURFACES = ("tarjeta no facturados", "tarjeta facturados")
 
 
 def read_movement_surfaces(page) -> tuple[list[BanChileMovement], tuple[str, ...]]:

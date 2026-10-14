@@ -148,11 +148,7 @@ export default function ProductDetailPage() {
 
   const isCreditKind =
     product.kind === "credit_card" || product.kind === "line_of_credit";
-  const showWaterfall =
-    TRANSACTION_KINDS.has(product.kind) &&
-    transactions.length >= 2 &&
-    (product.currentBalance ?? latestBalance) != null;
-  const anchorBalance = product.currentBalance ?? latestBalance ?? 0;
+  const anchorBalance = product.currentBalance ?? latestBalance;
 
   return (
     <div className="space-y-6">
@@ -221,7 +217,7 @@ export default function ProductDetailPage() {
             <CardDescription>Cupo</CardDescription>
             <CardTitle className="text-2xl tabular-nums">
               {cupo != null ? (
-                formatCLP(cupo)
+                formatBalance(product.currency, cupo)
               ) : (
                 <span className="text-muted-foreground">—</span>
               )}
@@ -257,7 +253,7 @@ export default function ProductDetailPage() {
       {product.kind === "investment" && (
         <InvestmentCompositionCard product={product} />
       )}
-      {showWaterfall && (
+      {TRANSACTION_KINDS.has(product.kind) && (
         <TransactionWaterfallCard
           product={product}
           transactions={transactions}

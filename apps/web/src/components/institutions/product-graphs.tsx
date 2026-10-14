@@ -41,7 +41,11 @@ import {
   productLimit,
   type InstitutionProduct,
 } from "@/components/institutions/shared";
-import { cn, formatAxisValue, formatDayEs } from "@/lib/utils";
+import { cn, formatAxisValue } from "@/lib/utils";
+import {
+  buildWaterfallData,
+  type WaterfallDatum,
+} from "@/lib/product-movements";
 import type { ProductMetrics } from "@chanchito/product-model";
 
 export interface ProductTransaction {
@@ -74,8 +78,6 @@ const CREDIT_KINDS = new Set(["credit_card", "line_of_credit"]);
 
 /** Products that can reconstruct a per-movement balance waterfall. */
 export const TRANSACTION_KINDS = new Set<string>([...VALUE_KINDS, ...CREDIT_KINDS]);
-
-const WATERFALL_MAX_BARS = 90;
 
 const COLORS = {
   expense: "#dc2626",
@@ -275,75 +277,6 @@ export function CupoUtilizationCard({
 // Movement waterfall (checking, savings, vista, wallet, credit cards, ...)
 // ---------------------------------------------------------------------------
 
-interface WaterfallDatum {
-  key: string;
-  /** Chart slot (index within the capped, ascending list) so same-day
-   *  transactions get their own bar instead of overlapping. */
-  i: number;
-  date: string;
-  description: string;
-  amount: number;
-  before: number;
-  after: number;
-  base: number;
-  delta: number;
-}
-
-/** Range the reconstructed balance must stay inside to be believable. */
-interface BalanceBounds {
-  min?: number;
-  max?: number;
-}
-
-/** One bar per movement, from the balance before to the balance after, walking
- *  the known transactions backwards from the current balance.
- *
- *  The walk is only as good as the movement history: a credit card exposes just
- *  the current and last billed periods, so charges older than that survive in
- *  the DB while the payments that cleared them never do. Walking past that point
- *  drifts (a card would show more cupo disponible than its own limit), so the
- *  walk stops as soon as the reconstructed balance leaves `bounds` and the chart
- *  keeps only the stretch it can still reconstruct honestly. */
-function buildWaterfallData(
-  transactions: ProductTransaction[],
-  currentBalance: number,
-  bounds: BalanceBounds = {}
-): { rows: WaterfallDatum[]; truncated: boolean } {
-  const ascending = [...transactions].sort((a, b) =>
-    a.transactionDate.localeCompare(b.transactionDate)
-  );
-  const recent = ascending.slice(-WATERFALL_MAX_BARS);
-  const out: WaterfallDatum[] = [];
-  let truncated = false;
-  let bal = currentBalance;
-  for (let i = recent.length - 1; i >= 0; i--) {
-    const t = recent[i];
-    const after = bal;
-    const before = after - t.amount;
-    if (
-      (bounds.min != null && before < bounds.min) ||
-      (bounds.max != null && before > bounds.max)
-    ) {
-      truncated = true;
-      break;
-    }
-    out.push({
-      key: t.id,
-      i: 0, // slot assigned below, once the kept range is known
-      date: formatDayEs(t.transactionDate),
-      description: t.description,
-      amount: t.amount,
-      before,
-      after,
-      base: Math.min(before, after),
-      delta: Math.abs(after - before),
-    });
-    bal = before;
-  }
-  const rows = out.reverse().map((row, i) => ({ ...row, i }));
-  return { rows, truncated: truncated && rows.length < recent.length };
-}
-
 function WaterfallTooltip({
   active,
   payload,
@@ -381,7 +314,9 @@ function WaterfallTooltip({
 }
 
 /** Each known movement as a bar spanning before -> after balance; expenses in
- *  red, income in green, and a blue line tracing the resulting balance. */
+ *  red, income in green, and a blue line tracing the resulting balance. When
+ *  fewer than two bars can be reconstructed the card stays, with a note, so it
+ *  never silently disappears. */
 export function TransactionWaterfallCard({
   product,
   transactions,
@@ -389,20 +324,25 @@ export function TransactionWaterfallCard({
 }: {
   product: InstitutionProduct;
   transactions: ProductTransaction[];
-  currentBalance: number;
+  /** Anchor for the walk back; null when the product has no balance. */
+  currentBalance: number | null;
 }) {
   const yAxis = useYAxisRange();
+  if (transactions.length === 0) return null;
+
   const isCredit = CREDIT_KINDS.has(product.kind);
   const balanceLabel = isCredit ? "Cupo disponible" : "Saldo";
   // A card's cupo disponible can never exceed its limit nor go below zero; a
   // value account has no such bound (an overdraft is legitimately negative).
   const limit = productLimit(product);
-  const { rows: data, truncated } = buildWaterfallData(
-    transactions,
-    currentBalance,
-    isCredit ? { min: 0, max: limit ?? undefined } : {}
-  );
-  if (data.length < 2) return null;
+  const { rows: data, truncated } =
+    currentBalance != null
+      ? buildWaterfallData(
+          transactions,
+          currentBalance,
+          isCredit ? { min: 0, max: limit ?? undefined } : {}
+        )
+      : { rows: [], truncated: false };
 
   return (
     <Card>
@@ -414,73 +354,83 @@ export function TransactionWaterfallCard({
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <InteractiveChart yControl={yAxis} height={360}>
-          <ComposedChart data={data}>
-            <CartesianGrid strokeDasharray="3 3" />
-            <XAxis
-              dataKey="i"
-              fontSize={12}
-              minTickGap={24}
-              tickFormatter={(value: number) => data[value]?.date ?? ""}
-            />
-            <YAxis
-              tickFormatter={formatAxisValue}
-              fontSize={12}
-              {...yAxis.yAxisProps}
-            />
-            <Tooltip
-              content={
-                <WaterfallTooltip
-                  currency={product.currency}
-                  balanceLabel={balanceLabel}
+        {data.length < 2 ? (
+          <p className="text-sm text-muted-foreground">
+            No es posible reconstruir el {balanceLabel.toLowerCase()} antes y
+            después de cada movimiento a partir del saldo reportado. El detalle
+            de cada movimiento está en Transacciones.
+          </p>
+        ) : (
+          <>
+            <InteractiveChart yControl={yAxis} height={360}>
+              <ComposedChart data={data}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis
+                  dataKey="i"
+                  fontSize={12}
+                  minTickGap={24}
+                  tickFormatter={(value: number) => data[value]?.date ?? ""}
                 />
-              }
-            />
-            <Bar
-              dataKey="base"
-              stackId="waterfall"
-              fill="transparent"
-              isAnimationActive={false}
-            />
-            <Bar
-              dataKey="delta"
-              stackId="waterfall"
-              radius={[2, 2, 0, 0]}
-              isAnimationActive={false}
-            >
-              {data.map((d) => (
-                <Cell
-                  key={d.key}
-                  fill={d.amount >= 0 ? COLORS.income : COLORS.expense}
+                <YAxis
+                  tickFormatter={formatAxisValue}
+                  fontSize={12}
+                  {...yAxis.yAxisProps}
                 />
-              ))}
-            </Bar>
-            <Line
-              type="monotone"
-              dataKey="after"
-              stroke={COLORS.balance}
-              strokeWidth={1.5}
-              dot={false}
-              isAnimationActive={false}
-            />
-          </ComposedChart>
-        </InteractiveChart>
-        <div className="mt-2 flex flex-wrap items-center gap-x-6 gap-y-1 text-xs text-muted-foreground">
-          <span className="flex items-center gap-1.5">
-            <span className="h-2.5 w-2.5 rounded-sm bg-red-600" /> Gasto
-          </span>
-          <span className="flex items-center gap-1.5">
-            <span className="h-2.5 w-2.5 rounded-sm bg-green-600" /> Ingreso
-          </span>
-          <span className="flex items-center gap-1.5">
-            <span className="h-0.5 w-4 rounded bg-blue-600" /> {balanceLabel}
-          </span>
-          <span className="ml-auto">
-            {truncated
-              ? "Reconstruido desde el saldo actual hasta donde alcanza el historial de movimientos conocido"
-              : "Reconstruido desde el saldo actual con las transacciones conocidas"}
-          </span>
-        </div>
+                <Tooltip
+                  content={
+                    <WaterfallTooltip
+                      currency={product.currency}
+                      balanceLabel={balanceLabel}
+                    />
+                  }
+                />
+                <Bar
+                  dataKey="base"
+                  stackId="waterfall"
+                  fill="transparent"
+                  isAnimationActive={false}
+                />
+                <Bar
+                  dataKey="delta"
+                  stackId="waterfall"
+                  radius={[2, 2, 0, 0]}
+                  isAnimationActive={false}
+                >
+                  {data.map((d) => (
+                    <Cell
+                      key={d.key}
+                      fill={d.amount >= 0 ? COLORS.income : COLORS.expense}
+                    />
+                  ))}
+                </Bar>
+                <Line
+                  type="monotone"
+                  dataKey="after"
+                  stroke={COLORS.balance}
+                  strokeWidth={1.5}
+                  dot={false}
+                  isAnimationActive={false}
+                />
+              </ComposedChart>
+            </InteractiveChart>
+            <div className="mt-2 flex flex-wrap items-center gap-x-6 gap-y-1 text-xs text-muted-foreground">
+              <span className="flex items-center gap-1.5">
+                <span className="h-2.5 w-2.5 rounded-sm bg-red-600" /> Gasto
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="h-2.5 w-2.5 rounded-sm bg-green-600" /> Ingreso
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="h-0.5 w-4 rounded bg-blue-600" /> {balanceLabel}
+              </span>
+              <span className="ml-auto">
+                {truncated
+                  ? "Reconstruido desde el saldo actual hasta donde alcanza el historial de movimientos conocido"
+                  : "Reconstruido desde el saldo actual con las transacciones conocidas"}
+              </span>
+            </div>
+          </>
+        )}
       </CardContent>
     </Card>
   );

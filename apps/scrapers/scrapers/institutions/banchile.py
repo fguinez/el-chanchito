@@ -9,6 +9,13 @@ movements ourselves (`backends/banchile_movements.py`) and key them on the
 bank's own ids, which also removes the second heavy login per run (#28): the
 transactions leg opens the session, reads products *and* movements, and the
 products leg serves its half from that cache.
+
+Since issue #79 every movement carries its currency, so the USD card
+movements land on their own product (USD checking movements are not read yet;
+see #82). Before that, the USD charges in the card's unbilled list were stored
+on the CLP card with their USD figure read as pesos; `superseded_transactions`
+names those rows so the run removes them once their USD replacements are
+written.
 """
 
 import hashlib
@@ -18,14 +25,24 @@ import re
 from datetime import date
 
 from scrapers.backends.banchile_movements import (
+    CLP_CARD_SURFACES,
     BanChileMovement,
     BanChileSessionResult,
     fetch_session,
 )
 from scrapers.backends.banchile_web import _SURFACE_ATTEMPTS, fetch_balances
-from scrapers.base import BaseScraper, ProductScrapeResult, ScrapedTransaction
+from scrapers.base import (
+    BaseScraper,
+    ProductScrapeResult,
+    ScrapedTransaction,
+    SupersededTransaction,
+)
 
 logger = logging.getLogger(__name__)
+
+# Ships with the currency routing of issue #79 (USD rows need its cents), so a
+# CLP-card row created after it was applied was written by the fixed code.
+_CURRENCY_ROUTING_MIGRATION = "V023__transactions_amount_numeric.sql"
 
 # An operation id is opaque, so it is normalised rather than interpreted: a
 # cosmetic change (padding, a separator, lower case) must not re-key a movement,
@@ -88,13 +105,39 @@ def external_id_for(movement: BanChileMovement) -> str:
           issue #56, since the two card legs share no identity field and no
           mapping rule can bridge them.
         * card, billed without a usable reference: date, amount, card and the
-          statement date.
+          statement date; on the USD leg also the raw `numeroDocumento` and the
+          statement section, since a payment and a credit can share the rest.
+
+    USD movements (issue #79) use the same three forms. A USD billed purchase
+    is ``bch_ref_`` + its `numeroDocumento` ("DDMM" + 23 digits), and a USD
+    fingerprint is hashed with the currency in front (``USD|...``) and its
+    amount as a quantized Decimal, so a USD and a CLP movement can never share
+    a key even if routing ever changed. CLP keys are byte-identical to what
+    they were before the currency existed.
     """
     operation_id = _normalized_id(movement.operation_id)
     if operation_id is not None:
         prefix = "bch_ref_" if movement.source == "card_billed" else "bch_op_"
         return f"{prefix}{operation_id}"
-    raw = "|".join(movement.fingerprint)
+    parts = movement.fingerprint
+    if movement.currency != "CLP":
+        parts = (movement.currency, *parts)
+    return _fingerprint_id(parts)
+
+
+def legacy_external_id_for(movement: BanChileMovement) -> str | None:
+    """The key the CLP-only code stored a USD card movement under, if known.
+
+    Only the unbilled leg was ever read before issue #79, and its key needs
+    nothing but the raw row, so it is reproduced exactly; None otherwise.
+    """
+    if not movement.legacy_fingerprint:
+        return None
+    return _fingerprint_id(movement.legacy_fingerprint)
+
+
+def _fingerprint_id(parts: tuple[str, ...]) -> str:
+    raw = "|".join(parts)
     return f"bch_fp_{hashlib.md5(raw.encode()).hexdigest()[:16]}"
 
 
@@ -109,6 +152,7 @@ class BanChileScraper(BaseScraper):
         # transactions first: that call opens the session and stashes the
         # products half here for `scrape_products` to serve.
         self._session: BanChileSessionResult | None = None
+        self._superseded: list[SupersededTransaction] = []
 
     def _movement_to_transaction(self, movement: BanChileMovement) -> ScrapedTransaction:
         """Convert a backend movement into our ScrapedTransaction.
@@ -127,11 +171,70 @@ class BanChileScraper(BaseScraper):
             product_kind=movement.product_kind,
             description=movement.description,
             amount=movement.amount,
+            currency=movement.currency,
             transaction_date=tx_date,
             accounting_date=movement.accounting_date,
             external_id=external_id_for(movement),
             scheduled_month=date(tx_date.year, tx_date.month, 1),
         )
+
+    def _superseded_for(
+        self, movements: list[BanChileMovement], failed_surfaces: tuple[str, ...]
+    ) -> list[SupersededTransaction]:
+        """The CLP-card rows the CLP-only code stored for this scrape's USD charges.
+
+        One per USD card movement: by its exact legacy key when that is
+        reproducible (an unbilled row, or a billed one that replaced it in this
+        scrape), else by date and legacy amount alone. The second form is only
+        offered for a USD statement row whose statement the national leg also
+        read in this scrape, and only when both CLP card legs loaded: then every
+        genuine CLP card row of that period (and of any later one it could have
+        posted into) is in this scrape and protected by its key. The two legs
+        pick their statements independently, so a USD statement older than
+        every national one read gets no loose match. A national statement is
+        known as read by the rows it returned, so one with no rows offers none
+        either; that only ever leaves a leftover in place. Either form only
+        reaches rows stored before the fixed code shipped, so the cleanup
+        cannot outlive the leftovers it exists for.
+        """
+        loose_statements: set[str] = set()
+        if not set(CLP_CARD_SURFACES) & set(failed_surfaces):
+            loose_statements = {
+                movement.statement_date
+                for movement in movements
+                if movement.source == "card_billed"
+                and movement.currency == "CLP"
+                and movement.statement_date
+            }
+        superseded = []
+        for movement in movements:
+            if (
+                movement.product_kind != "credit_card"
+                or movement.currency == "CLP"
+                or movement.legacy_amount is None
+            ):
+                continue
+            external_id = legacy_external_id_for(movement)
+            if external_id is None and movement.statement_date not in loose_statements:
+                continue
+            superseded.append(
+                SupersededTransaction(
+                    institution=self.institution,
+                    product_kind="credit_card",
+                    currency="CLP",
+                    transaction_date=movement.transaction_date,
+                    amount=movement.legacy_amount,
+                    replacement_external_id=external_id_for(movement),
+                    created_before_migration=_CURRENCY_ROUTING_MIGRATION,
+                    external_id=external_id,
+                    external_id_prefix="bch_fp_",
+                )
+            )
+        return superseded
+
+    def superseded_transactions(self) -> list[SupersededTransaction]:
+        """See `_superseded_for`; computed by the last `scrape_transactions`."""
+        return list(self._superseded)
 
     async def scrape_transactions(self) -> list[ScrapedTransaction]:
         """Open the shared session and convert its movements.
@@ -142,6 +245,7 @@ class BanChileScraper(BaseScraper):
         the two legs independent the way `run_scraper` expects.
         """
         self._session = None
+        self._superseded = []
         try:
             session = await fetch_session(self.rut, self.password)
         except Exception:
@@ -150,17 +254,24 @@ class BanChileScraper(BaseScraper):
         self._session = session
 
         transactions: list[ScrapedTransaction] = []
+        converted: list[BanChileMovement] = []
         for movement in session.movements:
             try:
                 transactions.append(self._movement_to_transaction(movement))
+                converted.append(movement)
             except Exception:
                 logger.exception("Failed to convert a %s movement", movement.source)
 
+        # Only movements that will be written can replace a stored row.
+        self._superseded = self._superseded_for(converted, session.failed_surfaces)
+
         checking = sum(1 for t in transactions if t.product_kind == "checking")
+        usd = sum(1 for t in transactions if t.currency == "USD")
         logger.info(
-            "BanChile: %d checking, %d credit card transactions",
+            "BanChile: %d checking, %d credit card transactions (%d in USD)",
             checking,
             len(transactions) - checking,
+            usd,
         )
         return transactions
 

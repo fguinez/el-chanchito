@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { transactions } from "@/lib/db/schema";
+import { products, transactions } from "@/lib/db/schema";
 import { resolveProductId } from "@/lib/db/resolve";
 import { eq, desc, and } from "drizzle-orm";
 
@@ -29,12 +29,15 @@ export async function GET(request: NextRequest) {
       scheduledMonth: transactions.scheduledMonth,
       source: transactions.source,
       productId: transactions.productId,
+      // `amount` is in this currency; only CLP rows may be summed as pesos.
+      currency: products.currency,
       categoryId: transactions.categoryId,
       isInternalTransfer: transactions.isInternalTransfer,
       notes: transactions.notes,
       createdAt: transactions.createdAt,
     })
     .from(transactions)
+    .innerJoin(products, eq(transactions.productId, products.id))
     .where(conditions.length > 0 ? and(...conditions) : undefined)
     .orderBy(desc(transactions.transactionDate))
     .limit(limit);
