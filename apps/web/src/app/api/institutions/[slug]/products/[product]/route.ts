@@ -39,7 +39,7 @@ export interface ProductTransaction {
   /** Plain YYYY-MM-DD. */
   transactionDate: string;
   source: string;
-  /** The institution's own operation id, when the source reports one. */
+  /** Source dedup key (the institution's operation id for some sources). */
   externalId: string | null;
 }
 
@@ -112,7 +112,11 @@ export async function GET(_request: Request, { params }: Context) {
       })
       .from(transactions)
       .where(eq(transactions.productId, row.productId))
-      .orderBy(desc(transactions.transactionDate))
+      // createdAt breaks same-day ties so the order is stable across loads.
+      .orderBy(
+        desc(transactions.transactionDate),
+        desc(transactions.createdAt)
+      )
       // One extra row tells whether the cap dropped anything.
       .limit(MAX_TRANSACTIONS + 1),
     getClpRates(),

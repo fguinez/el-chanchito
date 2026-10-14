@@ -19,8 +19,9 @@ export function hrefWithSearchParam(
 }
 
 /**
- * The id a transaction list shows: the institution's operation id when the
- * source reported one, otherwise our internal uuid.
+ * The id a transaction list shows: the source dedup key (the institution's
+ * operation id for some sources) when there is one, otherwise our internal
+ * uuid.
  */
 export function transactionDisplayId(txn: {
   id: string;

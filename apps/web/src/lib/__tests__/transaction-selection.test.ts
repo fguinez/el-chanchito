@@ -35,7 +35,7 @@ describe("hrefWithSearchParam", () => {
 });
 
 describe("transactionDisplayId", () => {
-  it("prefers the institution's operation id", () => {
+  it("prefers the source dedup key", () => {
     expect(
       transactionDisplayId({ id: TXN_ID, externalId: "SYNTH-0001" })
     ).toEqual({ value: "SYNTH-0001", external: true });

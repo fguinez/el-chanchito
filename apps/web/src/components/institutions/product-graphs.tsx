@@ -52,7 +52,7 @@ export interface ProductTransaction {
   /** Plain YYYY-MM-DD. */
   transactionDate: string;
   source: string;
-  /** The institution's own operation id, when the source reports one. */
+  /** Source dedup key (the institution's operation id for some sources). */
   externalId: string | null;
 }
 

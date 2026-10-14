@@ -127,7 +127,7 @@ function TransactionsList({
                         )}
                         title={
                           displayId.external
-                            ? displayId.value
+                            ? `ID de origen: ${displayId.value}`
                             : `ID interno: ${displayId.value}`
                         }
                       >
