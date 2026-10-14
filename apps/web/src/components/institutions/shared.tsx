@@ -104,9 +104,8 @@ export const POLL_TIMEOUT_MS = 60000;
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Latest run per institution (slug → status + started_at). `/api/scrapers`
- *  already returns the latest per (method, institution); collapse methods by
- *  keeping the most recent started_at so an institution maps to one entry. */
+/** Latest run per institution (slug → status + started_at), as returned by
+ *  `/api/scrapers`; keeps the most recent started_at should a slug repeat. */
 export async function fetchRunMap(): Promise<Map<string, ScraperRun>> {
   const map = new Map<string, ScraperRun>();
   try {
