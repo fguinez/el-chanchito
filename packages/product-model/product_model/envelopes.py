@@ -7,10 +7,18 @@ time; bank-printed dates travel inside metrics as `reported_as_of`.
 """
 
 import datetime
+import re
 from decimal import Decimal
 from typing import Annotated, Self
 
-from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    WithJsonSchema,
+    field_validator,
+    model_validator,
+)
 
 from .kinds import ProductKind
 from .registry import ProductAttributes, ProductMetrics
@@ -18,6 +26,7 @@ from .registry import ProductAttributes, ProductMetrics
 # What `transactions.amount` (NUMERIC(18, 2)) can hold. pydantic enforces the
 # digits at validation time but leaves them out of the JSON Schema, so the wire
 # contract spells the string form out; a JSON number must fit the same bounds.
+_AMOUNT_PATTERN = r"^-?\d{1,16}(\.\d{1,2})?$"
 TransactionAmount = Annotated[
     Decimal,
     Field(max_digits=18, decimal_places=2),
@@ -25,11 +34,12 @@ TransactionAmount = Annotated[
         {
             "anyOf": [
                 {"type": "number"},
-                {"type": "string", "pattern": r"^-?\d{1,16}(\.\d{1,2})?$"},
+                {"type": "string", "pattern": _AMOUNT_PATTERN},
             ]
         }
     ),
 ]
+_CENT = Decimal("0.01")
 
 
 class ScrapedProduct(BaseModel):
@@ -128,3 +138,28 @@ class ScrapedTransaction(BaseModel):
             "purchases."
         ),
     )
+
+    @field_validator("amount", mode="before")
+    @classmethod
+    def _amount_string_matches_the_wire_pattern(cls, value):
+        """A string amount must be the schema's form: no exponent, sign or spaces."""
+        if isinstance(value, str) and not re.fullmatch(_AMOUNT_PATTERN, value):
+            raise ValueError(f"amount string {value!r} must match {_AMOUNT_PATTERN}")
+        return value
+
+    @model_validator(mode="after")
+    def _amount_fits_its_currency(self) -> Self:
+        """CLP is whole; every amount is stored in one canonical form.
+
+        A CLP amount with a fraction is rejected rather than rounded. After
+        that, CLP is quantized to units and any other currency to cents, so
+        `str(amount)` never shows an exponent ("1E+3") and always agrees with
+        the JSON Schema's string pattern.
+        """
+        if self.currency == "CLP":
+            if self.amount != self.amount.to_integral_value():
+                raise ValueError(f"a CLP amount must be whole, got {self.amount}")
+            self.amount = self.amount.quantize(Decimal(1))
+        else:
+            self.amount = self.amount.quantize(_CENT)
+        return self

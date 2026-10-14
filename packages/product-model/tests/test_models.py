@@ -1,5 +1,6 @@
 """Tests for the per-kind payload models, unions, and ingest envelopes."""
 
+import re
 from datetime import date
 from decimal import Decimal
 
@@ -271,8 +272,8 @@ def test_transaction_keeps_a_separate_posting_date():
     assert txn.accounting_date == date(2026, 8, 24)
 
 
-def _usd_txn(amount) -> ScrapedTransaction:
-    """A synthetic USD card movement; only the amount varies."""
+def _usd_txn(amount, currency="USD") -> ScrapedTransaction:
+    """A synthetic card movement; only the amount (and currency) varies."""
     return ScrapedTransaction(
         institution="banchile",
         product_kind="credit_card",
@@ -280,7 +281,7 @@ def _usd_txn(amount) -> ScrapedTransaction:
         amount=amount,
         transaction_date=date(2026, 8, 21),
         external_id="bch_ref_00000000000",
-        currency="USD",
+        currency=currency,
     )
 
 
@@ -289,7 +290,7 @@ class TestTransactionAmount:
 
     def test_an_integer_validates_to_the_exact_decimal(self):
         """CLP producers keep sending ints; nothing about them changes."""
-        amount = _usd_txn(-999_999).amount
+        amount = _usd_txn(-999_999, currency="CLP").amount
 
         assert isinstance(amount, Decimal)
         assert amount == Decimal("-999999") == -999_999
@@ -323,3 +324,40 @@ class TestTransactionAmount:
         assert {"type": "number"} in prop["anyOf"]
         (string_form,) = [m for m in prop["anyOf"] if m.get("type") == "string"]
         assert string_form["pattern"] == r"^-?\d{1,16}(\.\d{1,2})?$"
+
+    @pytest.mark.parametrize("raw", ["-12.5", -12.5, Decimal("-0.5")])
+    def test_a_clp_fraction_is_rejected_not_rounded(self, raw):
+        with pytest.raises(ValidationError, match="must be whole"):
+            _usd_txn(raw, currency="CLP")
+
+    @pytest.mark.parametrize(
+        "raw, canonical",
+        [
+            (-999_999, "-999999"),
+            (Decimal("-999999.00"), "-999999"),
+            (Decimal("1E+6"), "1000000"),
+        ],
+    )
+    def test_clp_is_canonical_whole_units(self, raw, canonical):
+        assert str(_usd_txn(raw, currency="CLP").amount) == canonical
+
+    @pytest.mark.parametrize(
+        "raw, canonical",
+        [
+            (-12, "-12.00"),
+            ("-1234.5", "-1234.50"),
+            (-1234.56, "-1234.56"),
+            (Decimal("1.2E+3"), "1200.00"),
+            (Decimal("-0.1E-1"), "-0.01"),
+        ],
+    )
+    def test_other_currencies_are_canonical_cents(self, raw, canonical):
+        amount = _usd_txn(raw).amount
+
+        assert str(amount) == canonical
+        assert re.fullmatch(r"^-?\d{1,16}(\.\d{1,2})?$", str(amount))
+
+    @pytest.mark.parametrize("raw", ["1E+3", "+12.30", " 12.30", "12.", ".5", "1,234.56"])
+    def test_a_string_off_the_wire_pattern_is_rejected(self, raw):
+        with pytest.raises(ValidationError):
+            _usd_txn(raw)
