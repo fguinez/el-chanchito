@@ -17,7 +17,6 @@ from scrapers.backends.banchile_movements import (
     _read_card_billed,
     _read_card_billed_usd,
     _read_card_unbilled,
-    _usd_from_text,
     billed_reference,
     cartola_account_number,
     cartola_has_more_pages,
@@ -267,11 +266,6 @@ class TestCartolaPaging:
         payload = {"movimientos": [], "pagina": [{"masPaginas": False}]}
         assert cartola_has_more_pages(payload) is False
         assert cartola_has_more_pages({"movimientos": []}) is False
-
-    def test_the_string_flag_is_compared(self):
-        """"N" is a non-empty string, which is not "more pages"."""
-        assert cartola_has_more_pages({"pagina": [{"masPaginas": "N"}]}) is False
-        assert cartola_has_more_pages({"pagina": [{"masPaginas": "S"}]}) is True
 
 
 class TestParseUnbilled:
@@ -1056,51 +1050,6 @@ class TestUsdDuplicates:
         assert len(dedupe_movements(pair)) == 2
 
 
-class TestUsdCartola:
-    """Row shape unverified (the USD account observed had no movements)."""
-
-    def test_a_usd_cargo_keeps_its_cents(self):
-        movement = parse_cartola_movement(
-            _cartola_row(tipo="cargo", monto="1.234,56"), currency="USD"
-        )
-        assert movement.currency == "USD"
-        assert movement.amount == Decimal("-1234.56")
-        assert movement.product_kind == "checking"
-
-    def test_the_identity_is_the_clp_one(self):
-        row = _cartola_row(monto="1.234,56")
-        assert parse_cartola_movement(row, currency="USD").fingerprint == (
-            row["id"],
-            "2.500.000",
-        )
-
-    def test_the_clp_path_still_rounds_to_whole_pesos(self):
-        movement = parse_cartola_movement(_cartola_row(monto="1.000.000"))
-        assert movement.currency == "CLP"
-        assert movement.amount == 1000000
-
-    def test_amount_formats(self):
-        assert _usd_from_text("1.234,56") == Decimal("1234.56")
-        assert _usd_from_text("1,234.56") == Decimal("1234.56")
-        assert _usd_from_text("1234,56") == Decimal("1234.56")
-        assert _usd_from_text("1234.56") == Decimal("1234.56")
-        assert _usd_from_text("USD 12,3") == Decimal("12.30")
-        assert _usd_from_text("1.234") == Decimal("1234.00")
-        assert _usd_from_text(1234.56) == Decimal("1234.56")
-        assert _usd_from_text("") is None
-        assert _usd_from_text("sin dato") is None
-
-    def test_an_empty_cartola_is_a_reading_not_a_failure(self):
-        """The observed USD account answered with no movements at all."""
-        payload = {"moneda": "USD", "movimientos": [], "pagina": [{"masPaginas": "N"}]}
-
-        found, budget = movements_mod._movements_from_cartola(
-            MagicMock(), payload, 5, "USD"
-        )
-
-        assert (found, budget) == ([], 5)
-
-
 class TestInternationalSurface:
     """The USD statement is its own capture; the national one never sees it."""
 
@@ -1137,7 +1086,7 @@ class TestSurfaceIsolation:
             [
                 ("tarjeta facturados", lambda page, attempt: [clp]),
                 ("tarjeta facturados USD", lambda page, attempt: None),
-                ("movimientos USD", lambda page, attempt: []),
+                ("tarjeta no facturados", lambda page, attempt: []),
             ],
         )
 

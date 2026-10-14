@@ -10,11 +10,12 @@ bank's own ids, which also removes the second heavy login per run (#28): the
 transactions leg opens the session, reads products *and* movements, and the
 products leg serves its half from that cache.
 
-Since issue #79 every movement carries its currency, so the USD card and USD
-checking movements land on their own products. Before that, the USD charges in
-the card's unbilled list were stored on the CLP card with their USD figure
-read as pesos; `superseded_transactions` names those rows so the run removes
-them once their USD replacements are written.
+Since issue #79 every movement carries its currency, so the USD card
+movements land on their own product (USD checking movements are not read yet;
+see the follow-up issue). Before that, the USD charges in the card's unbilled
+list were stored on the CLP card with their USD figure read as pesos;
+`superseded_transactions` names those rows so the run removes them once their
+USD replacements are written.
 """
 
 import hashlib

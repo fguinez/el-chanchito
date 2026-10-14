@@ -571,12 +571,6 @@ class TestSupersededTransactions:
         )
         assert exact.external_id == "bch_fp_109da42d5aba2816"
 
-    def test_a_usd_checking_failure_does_not_block_it(self, monkeypatch):
-        found = self._scrape(
-            monkeypatch, self._movements(), failed=("movimientos USD",)
-        )
-        assert len(found) == 2
-
     def test_none_without_usd_card_movements(self, monkeypatch):
         movements = [parse_unbilled_movement(_unbilled_row())]
         assert self._scrape(monkeypatch, movements) == []

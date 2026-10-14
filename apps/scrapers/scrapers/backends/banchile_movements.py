@@ -35,12 +35,10 @@ is the only reliable mark of a row billed in USD (`codigoMonedaOrigen` and
 `montoMonedaOrigen` describe the merchant's currency and report 840 even for a
 CLP figure). The USD statement is a sibling endpoint
 (`estadocuenta/internacional/resumen-por-fecha`) with its own row shape, read
-by the same capture-and-replay strategy as the national one. The USD checking
-cartola is the same `getCartola` behind the same dialog with USD picked; its
-row shape is unverified, because the account observed had no movements at
-all, so it is parsed with the CLP parser's rules plus a defensive amount
-parser. Every USD amount is a Decimal with exact cents and every movement
-carries its `currency`, which is what routes it to the USD product.
+by the same capture-and-replay strategy as the national one. Every USD amount
+is a Decimal with exact cents and every movement carries its `currency`, which
+is what routes it to the USD product. USD checking movements are not read yet
+(see the follow-up issue).
 
 Why this is its own module: `banchile_web.py` is 1.6k lines about *balances* and
 its docstring is a map of that surface. Movements are a different read, with
@@ -81,7 +79,7 @@ import math
 import re
 import time
 from dataclasses import dataclass, field, replace
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Callable, Optional
 
 from scrapers.backends.banchile_web import (
@@ -224,41 +222,6 @@ def _usd(value) -> Optional[Decimal]:
     return Decimal(repr(number)).quantize(_CENTS, rounding=ROUND_HALF_UP)
 
 
-def _usd_from_text(value) -> Optional[Decimal]:
-    """A USD amount from a JSON number or a formatted string (None if neither).
-
-    For the USD cartola, whose formatting was never observed: accepts
-    "1.234,56", "1,234.56", "1234,56", "1234.56" and the CLP-style "1.234".
-    Whichever of "," and "." comes last is the decimal separator when both
-    appear; a lone "." is a thousands separator only when exactly three digits
-    follow it, as on every CLP figure this portal prints.
-    """
-    if _number(value) is not None:
-        return _usd(value)
-    cleaned = re.sub(r"(?i)USD|US\$|\$|\s", "", _text(value))
-    if not re.search(r"\d", cleaned):
-        return None
-    if "," in cleaned and "." in cleaned:
-        if cleaned.rfind(",") > cleaned.rfind("."):
-            cleaned = cleaned.replace(".", "").replace(",", ".")
-        else:
-            cleaned = cleaned.replace(",", "")
-    elif "," in cleaned:
-        cleaned = cleaned.replace(",", "." if cleaned.count(",") == 1 else "")
-    elif cleaned.count(".") > 1 or (
-        "." in cleaned and len(cleaned.rsplit(".", 1)[-1]) == 3
-    ):
-        cleaned = cleaned.replace(".", "")
-    try:
-        amount = Decimal(cleaned)
-    except InvalidOperation:
-        logger.warning("BanChile: could not parse a USD amount")
-        return None
-    if not amount.is_finite():
-        return None
-    return amount.quantize(_CENTS, rounding=ROUND_HALF_UP)
-
-
 def _legacy_clp_amount(bank_signed: float) -> int:
     """What the CLP-only code stored for a card row: its own rounding, verbatim.
 
@@ -360,8 +323,7 @@ def cartola_has_more_pages(payload) -> bool:
     """True when `getCartola` says its window continues past what it returned.
 
     We cannot follow it (see the module docstring), so the caller logs a warning
-    rather than silently truncating. The flag is a string ("N" was observed on
-    the USD cartola), so it is compared rather than taken for truthy.
+    rather than silently truncating.
     """
     if not isinstance(payload, dict):
         return False
@@ -369,7 +331,7 @@ def cartola_has_more_pages(payload) -> bool:
     if not isinstance(pagina, list) or not pagina:
         return False
     first = pagina[0]
-    return isinstance(first, dict) and _flag_set(first.get("masPaginas"))
+    return isinstance(first, dict) and bool(first.get("masPaginas"))
 
 
 def _cartola_dates(raw) -> tuple[Optional[datetime.date], Optional[datetime.date]]:
@@ -407,9 +369,7 @@ def _cartola_dates(raw) -> tuple[Optional[datetime.date], Optional[datetime.date
     return occurred, posted
 
 
-def parse_cartola_movement(
-    raw, operation_id: Optional[str] = None, currency: str = "CLP"
-):
+def parse_cartola_movement(raw, operation_id: Optional[str] = None):
     """One `getCartola` row -> a BanChileMovement (None when unusable).
 
     `monto` is unsigned and `tipo` carries the direction, so an unrecognised
@@ -418,16 +378,10 @@ def parse_cartola_movement(
     `id` plus `saldo` (the running ledger balance: every consecutive delta in
     the observed window equalled the signed `monto`, every value was distinct,
     and the values were identical across logins).
-
-    `currency` is the account's, as picked in the dialog. A USD `monto` keeps
-    its cents (`_usd_from_text`); a CLP one is whole pesos, exactly as before.
     """
     if not isinstance(raw, dict):
         return None
-    if currency == "CLP":
-        monto = parse_clp(_text(raw.get("monto")))
-    else:
-        monto = _usd_from_text(raw.get("monto"))
+    monto = parse_clp(_text(raw.get("monto")))
     if monto is None:
         return None
     tipo = _text(raw.get("tipo")).lower()
@@ -463,7 +417,6 @@ def parse_cartola_movement(
         accounting_date=posted,
         operation_id=operation_id,
         fingerprint=(bank_id, saldo),
-        currency=currency,
     )
 
 
@@ -928,13 +881,12 @@ _BILLED_ROUTE = "#/tarjeta-credito/consultar/facturados"
 
 # The movements route opens a Material dialog ("Seleccione una cuenta") that
 # defaults to the USD account, and `getCartola` does not fire until it is
-# cleared: pick the currency, pick the account radio, press Aceptar. The
-# options read "(USD)" and "(CLP)", and the radios only list the accounts of
-# the picked currency, unchecked, with ids that change per render.
+# cleared: pick the currency, pick the account radio, press Aceptar.
 _CURRENCY_SELECT_SELECTOR = "mat-select[name=monedas]"
 _CURRENCY_OPTION_SELECTOR = "mat-option"
 _ACCOUNT_RADIO_SELECTOR = "mat-radio-button"
 _MODAL_ACCEPT_SELECTOR = "#modalPrimaryBtn button"
+_CLP_OPTION_RE = re.compile(r"\bCLP\b", re.I)
 
 # Movement surfaces are slower than a balance read (the cartola arrives after a
 # dialog round trip), so they reuse banchile_web's escalating render budgets.
@@ -1063,13 +1015,8 @@ def _post_json(page, url: str, body: dict) -> tuple[int, Optional[dict]]:
 # --- Checking: the cartola behind the account dialog --------------------------
 
 
-def _select_currency(page, currency: str, timeout_ms: int) -> bool:
-    """Open the dialog's currency select and pick `currency` (default is USD).
-
-    USD is picked explicitly too rather than trusted as the default, so both
-    drives go through the same steps.
-    """
-    option_re = re.compile(rf"\b{re.escape(currency)}\b", re.I)
+def _select_clp_currency(page, timeout_ms: int) -> bool:
+    """Open the dialog's currency select and pick CLP (it defaults to USD)."""
     try:
         select = page.locator(_CURRENCY_SELECT_SELECTOR).first
         select.wait_for(state="visible", timeout=timeout_ms)
@@ -1078,7 +1025,7 @@ def _select_currency(page, currency: str, timeout_ms: int) -> bool:
         options = page.locator(_CURRENCY_OPTION_SELECTOR)
         for index in range(options.count()):
             option = options.nth(index)
-            if option_re.search(option.inner_text() or ""):
+            if _CLP_OPTION_RE.search(option.inner_text() or ""):
                 option.click()
                 page.wait_for_timeout(_DIALOG_SETTLE_MS)
                 return True
@@ -1111,10 +1058,8 @@ def _click_account_radio(page, index: int) -> int:
         return 0
 
 
-def _open_cartola(
-    page, index: int, timeout_ms: int, currency: str = "CLP"
-) -> tuple[Optional[dict], int]:
-    """Drive the account dialog for `currency`'s account `index`; capture its cartola.
+def _open_cartola(page, index: int, timeout_ms: int) -> tuple[Optional[dict], int]:
+    """Drive the account dialog for account `index` and capture its cartola.
 
     Returns (payload, account_count). The whole route is re-driven per account
     because no control for re-opening the selector in place was observed; a
@@ -1131,7 +1076,7 @@ def _open_cartola(
         except Exception:
             logger.debug("BanChile: could not route to the movements view", exc_info=True)
             return None, 0
-        if not _select_currency(page, currency, timeout_ms):
+        if not _select_clp_currency(page, timeout_ms):
             return None, 0
         count = _click_account_radio(page, index)
         if not count or index >= count:
@@ -1178,7 +1123,7 @@ def _operation_ids_for(
 
 
 def _movements_from_cartola(
-    page, payload: dict, budget: int, currency: str = "CLP"
+    page, payload: dict, budget: int
 ) -> tuple[list[BanChileMovement], int]:
     """Shape one `getCartola` payload into movements, ids fetched as needed."""
     raw_movements = payload.get("movimientos")
@@ -1192,27 +1137,23 @@ def _movements_from_cartola(
     ids, remaining = _operation_ids_for(page, raw_movements, budget)
     movements = []
     for raw, operation_id in zip(raw_movements, ids):
-        movement = parse_cartola_movement(raw, operation_id, currency)
+        movement = parse_cartola_movement(raw, operation_id)
         if movement is not None:
             movements.append(movement)
     with_id = sum(1 for m in movements if m.operation_id)
     logger.info(
-        "BanChile: %d %s checking movements (%d with an operation id)",
+        "BanChile: %d checking movements (%d with an operation id)",
         len(movements),
-        currency,
         with_id,
     )
     return movements, remaining
 
 
-def _read_checking_movements(
-    page, attempt: int, currency: str = "CLP"
-) -> Optional[list[BanChileMovement]]:
-    """Read every `currency` checking account's cartola (one attempt).
+def _read_checking_movements(page, attempt: int) -> Optional[list[BanChileMovement]]:
+    """Read every CLP checking account's cartola (one attempt).
 
     The dialog lists one radio per account of the chosen currency, and this
-    account holds both a CLP and a USD one, so the currency is picked
-    explicitly first.
+    account also holds a USD one, so the currency is picked explicitly first.
     Accounts are read one dialog drive each: the SPA offers no observed way to
     switch accounts without re-opening the selector, so the route is re-driven
     per index and the results deduped. A re-drive that lands back on an account
@@ -1229,7 +1170,7 @@ def _read_checking_movements(
     accounts = 1
     index = 0
     while index < min(accounts, _MAX_CHECKING_ACCOUNTS):
-        payload, count = _open_cartola(page, index, budget, currency)
+        payload, count = _open_cartola(page, index, budget)
         if count:
             accounts = count
         if payload is None:
@@ -1248,21 +1189,11 @@ def _read_checking_movements(
             break
         seen_accounts.add(account)
         movements, glosa_calls_left = _movements_from_cartola(
-            page, payload, glosa_calls_left, currency
+            page, payload, glosa_calls_left
         )
         collected.extend(movements)
         index += 1
     return dedupe_movements(collected)
-
-
-def _read_usd_checking_movements(page, attempt: int) -> Optional[list[BanChileMovement]]:
-    """The USD checking cartola: the same dialog drive with USD picked.
-
-    Its request and response matched the CLP ones in shape, but the account
-    observed had no movements, so the row shape (cents, composite `id`, the
-    glosa) is unverified; an empty `movimientos` is the normal reading.
-    """
-    return _read_checking_movements(page, attempt, currency="USD")
 
 
 # --- Credit card: the unbilled and billed legs --------------------------------
@@ -1417,7 +1348,6 @@ def _read_card_billed_usd(page, attempt: int) -> Optional[list[BanChileMovement]
 # `BanChileSessionResult.failed_surfaces` and become run warnings.
 _MOVEMENT_READERS: list[tuple[str, Callable]] = [
     ("movimientos", _read_checking_movements),
-    ("movimientos USD", _read_usd_checking_movements),
     ("tarjeta no facturados", _read_card_unbilled),
     ("tarjeta facturados", _read_card_billed),
     ("tarjeta facturados USD", _read_card_billed_usd),
