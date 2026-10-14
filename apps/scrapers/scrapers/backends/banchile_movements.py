@@ -797,7 +797,7 @@ def international_statement_dates(payload, limit: int) -> list[str]:
 
 
 def _flag_set(value) -> bool:
-    """A portal yes/no flag: True, 1, "1", "S", "SI" or "Y" (any case)."""
+    """A portal yes/no flag: True, 1, or "1", "S", "SI", "Y", "YES", "TRUE" (any case)."""
     if isinstance(value, bool):
         return value
     if isinstance(value, int):
