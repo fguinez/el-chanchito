@@ -14,6 +14,7 @@ import pytest
 from product_model import CheckingMetrics
 
 import main as main_mod
+from db.writer import TransactionWriteResult
 from main import run_scraper
 from scrapers.base import (
     BaseScraper,
@@ -65,7 +66,11 @@ def finish(monkeypatch):
     """Patch the DB writer seam; yields the finish_scraper_run mock."""
     mock = MagicMock()
     monkeypatch.setattr(main_mod, "start_scraper_run", MagicMock(return_value="run-1"))
-    monkeypatch.setattr(main_mod, "upsert_transactions", MagicMock(return_value=0))
+    monkeypatch.setattr(
+        main_mod,
+        "write_transactions",
+        MagicMock(return_value=TransactionWriteResult(0, frozenset())),
+    )
     monkeypatch.setattr(main_mod, "upsert_product", MagicMock())
     monkeypatch.setattr(main_mod, "finish_scraper_run", mock)
     monkeypatch.setattr(main_mod, "delete_superseded_transactions", MagicMock())
@@ -132,6 +137,7 @@ _TWIN = SupersededTransaction(
     currency="CLP",
     transaction_date=date(2026, 8, 20),
     amount=-12,
+    replacement_external_id="bch_fp_00000000000000ff",
     external_id_prefix="bch_fp_",
 )
 
@@ -139,20 +145,24 @@ _TWIN = SupersededTransaction(
 class TestSupersededCleanup:
     """Rows a scrape replaced are deleted once its transactions are written."""
 
-    def test_runs_after_the_write(self, finish, monkeypatch):
+    def test_runs_after_the_write_with_what_it_persisted(self, finish, monkeypatch):
         calls = []
+        written = TransactionWriteResult(0, frozenset({"bch_fp_00000000000000ff"}))
         monkeypatch.setattr(
-            main_mod, "upsert_transactions", lambda txns: calls.append("write") or 0
+            main_mod, "write_transactions", lambda txns: calls.append("write") or written
         )
         monkeypatch.setattr(
             main_mod,
             "delete_superseded_transactions",
-            lambda items, keys: calls.append(("delete", items, keys)),
+            lambda items, persisted, keys: calls.append(("delete", items, persisted, keys)),
         )
 
         asyncio.run(run_scraper(_StubScraper(superseded=[_TWIN])))
 
-        assert calls == ["write", ("delete", [_TWIN], set())]
+        assert calls == [
+            "write",
+            ("delete", [_TWIN], written.persisted_external_ids, set()),
+        ]
 
     def test_skipped_when_there_is_nothing_to_delete(self, finish):
         asyncio.run(run_scraper(_StubScraper()))

@@ -23,7 +23,7 @@ from db.writer import (
     finish_scraper_run,
     start_scraper_run,
     upsert_product,
-    upsert_transactions,
+    write_transactions,
 )
 from scrapers.backends.email import get_session as get_email_session
 from scrapers.base import BaseScraper
@@ -69,18 +69,21 @@ async def run_scraper(scraper: BaseScraper) -> None:
     try:
         transactions = await scraper.scrape_transactions()
         n_tx = len(transactions)
-        inserted = upsert_transactions(transactions)
+        written = write_transactions(transactions)
+        inserted = written.inserted
     except Exception as e:
         logger.exception("Scraper %s: transactions failed", scraper.name)
         errors.append(f"transactions: {e}")
     else:
-        # Only once the replacements are written; a failure here is a warning,
-        # since the scrape itself succeeded.
+        # Only rows whose replacement this write stored; a failure here is a
+        # warning, since the scrape itself succeeded.
         try:
             superseded = scraper.superseded_transactions()
             if superseded:
                 delete_superseded_transactions(
-                    superseded, {t.external_id for t in transactions}
+                    superseded,
+                    written.persisted_external_ids,
+                    {t.external_id for t in transactions},
                 )
         except Exception as e:
             logger.exception("Scraper %s: superseded-row cleanup failed", scraper.name)

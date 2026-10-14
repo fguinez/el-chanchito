@@ -203,6 +203,7 @@ class BanChileScraper(BaseScraper):
                     currency="CLP",
                     transaction_date=movement.transaction_date,
                     amount=movement.legacy_amount,
+                    replacement_external_id=external_id_for(movement),
                     external_id=external_id,
                     external_id_prefix="bch_fp_",
                 )

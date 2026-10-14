@@ -2,10 +2,13 @@
 
 import json
 import logging
+from collections.abc import Collection
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 
+from psycopg.pq import TransactionStatus
 from psycopg.types.json import Jsonb
 
 from db.connection import get_pool
@@ -402,8 +405,35 @@ def _sibling_rows(conn, product_id: str, txn: ScrapedTransaction, source: str) -
     ).fetchall()
 
 
+@dataclass(frozen=True)
+class TransactionWriteResult:
+    """What `write_transactions` did.
+
+    `persisted_external_ids` holds the keys a stored row carries once the batch
+    is committed: inserted, already stored, or adopted onto. It is empty when
+    the batch's database transaction failed, since nothing of it was kept.
+    """
+
+    inserted: int
+    persisted_external_ids: frozenset[str]
+
+
+def _transaction_failed(conn) -> bool:
+    """True when a statement error aborted `conn`'s open transaction."""
+    info = getattr(conn, "info", None)
+    return getattr(info, "transaction_status", None) == TransactionStatus.INERROR
+
+
 def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
     """Insert transactions, skipping duplicates. Returns count of new rows.
+
+    See `write_transactions`, which also reports which keys were persisted.
+    """
+    return write_transactions(transactions).inserted
+
+
+def write_transactions(transactions: list[ScrapedTransaction]) -> TransactionWriteResult:
+    """Insert transactions, skipping duplicates, and report what was persisted.
 
     For institutions that re-key their stored rows (see `_adopts_stored_rows`),
     a movement whose key matches nothing is first offered the stored rows it
@@ -419,10 +449,11 @@ def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
     backfills them.
     """
     if not transactions:
-        return 0
+        return TransactionWriteResult(0, frozenset())
 
     pool = get_pool()
     inserted = 0
+    persisted: set[str] = set()
 
     with pool.connection() as conn:
         products: dict[tuple, str] = {}
@@ -460,6 +491,7 @@ def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
                 ).fetchone()
                 if row:
                     claimed.add(row[0])
+                    persisted.add(txn.external_id)
                     continue
 
                 if _adopts_stored_rows(txn.external_id):
@@ -494,6 +526,7 @@ def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
                             row_id,
                             txn.external_id,
                         )
+                        persisted.add(txn.external_id)
                         continue
                     if action == "keep":
                         logger.warning(
@@ -529,10 +562,18 @@ def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
                 )
                 if cur.rowcount and cur.rowcount > 0:
                     inserted += 1
+                # A conflict means the row is already stored under this key.
+                persisted.add(txn.external_id)
             except Exception:
                 logger.exception("Failed to insert transaction: %s", txn.external_id)
 
-    return inserted
+        if _transaction_failed(conn):
+            # The pool rolls the whole batch back on exit, so nothing above
+            # was kept, whatever the per-row bookkeeping says.
+            logger.error("Transaction batch aborted by a database error; nothing kept")
+            persisted.clear()
+
+    return TransactionWriteResult(inserted, frozenset(persisted))
 
 
 def _like_prefix(prefix: str) -> str:
@@ -548,9 +589,14 @@ def _carries_user_edits(is_manually_categorized, is_internal_transfer, notes) ->
 
 def delete_superseded_transactions(
     superseded: list[SupersededTransaction],
-    protected_external_ids: set[str] = frozenset(),
+    persisted_external_ids: Collection[str],
+    protected_external_ids: Collection[str] = frozenset(),
 ) -> int:
     """Delete the stored rows a scrape has replaced (issue #79). Returns the count.
+
+    Only an item whose `replacement_external_id` is in `persisted_external_ids`
+    (`TransactionWriteResult.persisted_external_ids` of this run's write) is
+    acted on: a twin is never deleted unless its replacement is stored.
 
     Each `SupersededTransaction` removes at most one row of its institution's
     (kind, currency) product, one-to-one and oldest first, among the rows its
@@ -565,6 +611,16 @@ def delete_superseded_transactions(
     A matching row the user categorised, annotated or marked as an internal
     transfer is left in place and logged instead.
     """
+    replaced = [
+        item for item in superseded if item.replacement_external_id in persisted_external_ids
+    ]
+    if len(replaced) < len(superseded):
+        logger.warning(
+            "%d superseded transaction(s) left in place: their replacement was "
+            "not stored this run",
+            len(superseded) - len(replaced),
+        )
+    superseded = replaced
     if not superseded:
         return 0
 

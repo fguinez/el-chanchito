@@ -359,10 +359,12 @@ the account observed had no movements) are surfaces of their own. Every
 movement carries its currency, so the writer resolves the USD product, and USD
 amounts keep their cents. Before #79 the unbilled USD charges were stored on
 the CLP card as whole "pesos"; each run deletes those leftovers once their USD
-rows are written (`superseded_transactions` ->
-`db/writer.py::delete_superseded_transactions`): by their exact old key when it
-is reproducible, else by date and old amount, one row per USD charge, and never
-a row the user categorised, annotated or paired.
+rows are stored (`superseded_transactions` ->
+`db/writer.py::delete_superseded_transactions`, gated on the keys
+`write_transactions` reports as persisted, so a rolled-back batch deletes
+nothing): by their exact old key when it is reproducible, else by date and old
+amount, one row per USD charge, and never a row the user categorised, annotated
+or paired.
 
 BCI Lider (Tarjeta Lider Bci, the retailcard.cl card co-branded by BCI) has no
 open-banking API for individuals and isn't covered by `fintself`, and its login

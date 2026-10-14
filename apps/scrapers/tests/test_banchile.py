@@ -544,7 +544,13 @@ class TestSupersededTransactions:
         ]
 
     def test_one_per_usd_card_movement(self, monkeypatch):
-        exact, loose = self._scrape(monkeypatch, self._movements())
+        movements = self._movements()
+        exact, loose = self._scrape(monkeypatch, movements)
+
+        assert [exact.replacement_external_id, loose.replacement_external_id] == [
+            external_id_for(movements[1]),
+            external_id_for(movements[2]),
+        ]
 
         assert (exact.external_id, exact.amount) == ("bch_fp_109da42d5aba2816", -1235)
         assert (loose.external_id, loose.amount) == (None, -12)

@@ -25,6 +25,7 @@ from db.writer import (
     start_scraper_run,
     upsert_product,
     upsert_transactions,
+    write_transactions,
 )
 from product_model import (
     CheckingMetrics,
@@ -379,6 +380,9 @@ class TestSupersededTransactions:
             tx_date=tx_date,
         )
 
+    # The USD row that replaces a twin; persisted unless a test says otherwise.
+    REPLACEMENT = "bch_fp_00000000000000ff"
+
     def _twin(self, amount, external_id=None, tx_date=DAY):
         return SupersededTransaction(
             institution="banchile",
@@ -386,9 +390,13 @@ class TestSupersededTransactions:
             currency="CLP",
             transaction_date=tx_date,
             amount=amount,
+            replacement_external_id=self.REPLACEMENT,
             external_id=external_id,
             external_id_prefix="bch_fp_",
         )
+
+    def _delete(self, twins, protected=frozenset()):
+        return delete_superseded_transactions(twins, {self.REPLACEMENT}, protected)
 
     def _store(self, conn, *external_ids, amount=-12):
         """CLP-card rows in one batch (so none adopts another), oldest first."""
@@ -418,7 +426,7 @@ class TestSupersededTransactions:
             ]
         )
 
-        deleted = delete_superseded_transactions(
+        deleted = self._delete(
             [self._twin(-1235, "bch_fp_000000000000000a")]
         )
 
@@ -428,7 +436,7 @@ class TestSupersededTransactions:
     def test_an_exact_key_still_needs_the_date_and_amount(self, db_conn):
         upsert_transactions([self._card("bch_fp_000000000000000a", -1234)])
 
-        assert delete_superseded_transactions(
+        assert self._delete(
             [self._twin(-1235, "bch_fp_000000000000000a")]
         ) == 0
 
@@ -440,7 +448,7 @@ class TestSupersededTransactions:
             "bch_fp_000000000000000c",
         )
 
-        deleted = delete_superseded_transactions([self._twin(-12), self._twin(-12)])
+        deleted = self._delete([self._twin(-12), self._twin(-12)])
 
         assert deleted == 2
         assert self._keys(db_conn) == ["bch_fp_000000000000000c"]
@@ -449,7 +457,7 @@ class TestSupersededTransactions:
         """A loose match listed first must not take the row a key names."""
         self._store(db_conn, "bch_fp_000000000000000a", "bch_fp_000000000000000b")
 
-        deleted = delete_superseded_transactions(
+        deleted = self._delete(
             [self._twin(-12), self._twin(-12, "bch_fp_000000000000000a")]
         )
 
@@ -467,7 +475,7 @@ class TestSupersededTransactions:
             ]
         )
 
-        assert delete_superseded_transactions([self._twin(-12)]) == 0
+        assert self._delete([self._twin(-12)]) == 0
         assert len(self._keys(db_conn)) == 4
         assert self._keys(db_conn, "USD") == ["bch_fp_000000000000000a"]
 
@@ -475,7 +483,7 @@ class TestSupersededTransactions:
         upsert_transactions(
             [_txn("bch_fp_000000000000000a", institution="tenpo", kind="credit_card", amount=-12)]
         )
-        assert delete_superseded_transactions([self._twin(-12)]) == 0
+        assert self._delete([self._twin(-12)]) == 0
 
     def test_this_scrapes_own_keys_are_protected(self, db_conn):
         """A row the bank still lists is a genuine CLP movement, not a leftover."""
@@ -486,7 +494,7 @@ class TestSupersededTransactions:
             ]
         )
 
-        deleted = delete_superseded_transactions(
+        deleted = self._delete(
             [self._twin(-12)], {"bch_fp_000000000000000a"}
         )
 
@@ -511,14 +519,14 @@ class TestSupersededTransactions:
             ("bch_fp_000000000000000a",),
         )
 
-        assert delete_superseded_transactions([self._twin(-12)]) == 0
+        assert self._delete([self._twin(-12)]) == 0
         assert len(self._keys(db_conn)) == 2
 
     def test_blank_notes_are_not_an_edit(self, db_conn):
         upsert_transactions([self._card("bch_fp_000000000000000a", -12)])
         db_conn.execute("UPDATE transactions SET notes = '  '")
 
-        assert delete_superseded_transactions([self._twin(-12)]) == 1
+        assert self._delete([self._twin(-12)]) == 1
 
     def test_a_misrouted_charge_moves_to_the_usd_card(self, db_conn):
         """End to end: the CLP-only row goes, the USD row with cents stays."""
@@ -531,7 +539,7 @@ class TestSupersededTransactions:
         usd = self._card("bch_fp_00000000000000ff", Decimal("-1234.56"), currency="USD")
         upsert_transactions([usd])
 
-        deleted = delete_superseded_transactions(
+        deleted = self._delete(
             [self._twin(-1235, "bch_fp_000000000000000a")],
             {usd.external_id, "bch_fp_000000000000000b"},
         )
@@ -543,9 +551,59 @@ class TestSupersededTransactions:
             "ON t.product_id = p.id WHERE p.currency = 'USD'"
         ).fetchone() == {"amount": Decimal("-1234.56")}
 
+    def test_a_twin_whose_replacement_was_not_stored_is_kept(self, db_conn):
+        upsert_transactions([self._card("bch_fp_000000000000000a", -12)])
+
+        deleted = delete_superseded_transactions(
+            [self._twin(-12, "bch_fp_000000000000000a")], {"bch_fp_00000000000000ee"}
+        )
+
+        assert deleted == 0
+        assert self._keys(db_conn) == ["bch_fp_000000000000000a"]
+
+    def test_a_batch_a_database_error_rolled_back_deletes_nothing(self, db_conn):
+        """One failing row aborts the batch: the replacement written before it
+        is rolled back too, so its twin must survive."""
+        upsert_transactions([self._card("bch_fp_000000000000000a", -1235)])
+        db_conn.execute(
+            "ALTER TABLE transactions ADD CONSTRAINT synthetic_failure "
+            "CHECK (description <> 'FALLA SINTETICA')"
+        )
+        usd = self._card(self.REPLACEMENT, Decimal("-1234.56"), currency="USD")
+        failing = self._card("bch_fp_00000000000000ee", -999999).model_copy(
+            update={"description": "FALLA SINTETICA"}
+        )
+
+        written = write_transactions([usd, failing])
+        deleted = delete_superseded_transactions(
+            [self._twin(-1235, "bch_fp_000000000000000a")],
+            written.persisted_external_ids,
+            {usd.external_id, failing.external_id},
+        )
+
+        assert written.persisted_external_ids == frozenset()
+        assert deleted == 0
+        assert self._keys(db_conn) == ["bch_fp_000000000000000a"]
+        assert self._keys(db_conn, "USD") == []
+
+    def test_a_stored_replacement_lets_its_twin_go(self, db_conn):
+        upsert_transactions([self._card("bch_fp_000000000000000a", -1235)])
+        usd = self._card(self.REPLACEMENT, Decimal("-1234.56"), currency="USD")
+
+        written = write_transactions([usd])
+        deleted = delete_superseded_transactions(
+            [self._twin(-1235, "bch_fp_000000000000000a")],
+            written.persisted_external_ids,
+            {usd.external_id},
+        )
+
+        assert written.persisted_external_ids == {self.REPLACEMENT}
+        assert deleted == 1
+        assert self._keys(db_conn) == []
+
     def test_nothing_to_do(self, db_conn):
-        assert delete_superseded_transactions([]) == 0
-        assert delete_superseded_transactions([self._twin(-12)]) == 0
+        assert self._delete([]) == 0
+        assert self._delete([self._twin(-12)]) == 0
 
 
 class TestAmountMigration:

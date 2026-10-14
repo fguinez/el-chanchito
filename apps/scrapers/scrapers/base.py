@@ -42,7 +42,8 @@ class SupersededTransaction:
     The scraper describes it and `db.writer.delete_superseded_transactions`
     removes at most one stored row per instance: by `external_id` when the old
     key is reproducible, else by date and amount among the rows whose key
-    starts with `external_id_prefix`. Never part of the ingest contract.
+    starts with `external_id_prefix`, and only once the row that replaces it,
+    `replacement_external_id`, is stored. Never part of the ingest contract.
     """
 
     institution: str
@@ -50,6 +51,7 @@ class SupersededTransaction:
     currency: str
     transaction_date: date
     amount: int
+    replacement_external_id: str
     external_id_prefix: str
     external_id: Optional[str] = None
 
