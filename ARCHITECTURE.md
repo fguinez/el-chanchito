@@ -201,7 +201,7 @@ transactions ──────────┐
   id PK                │      categories
   product_id FK ───────┘        id PK
   description                   name
-  amount (int, CLP)             parent_id FK (self)
+  amount (numeric(18,2))        parent_id FK (self)
   transaction_date              color, icon
   category_id FK ─────────────>
   scheduled_month             category_rules
@@ -270,6 +270,7 @@ scraper_runs                    transfer_date
 | `V012__retire_fintual_aggregate_product.sql` | deactivates the summed Fintual product + drops its snapshots (replaced by per-goal products) |
 | `V013__retire_banchile_summed_inversiones_products.sql` | deactivates the summed BanChile term_deposit + investment products + drops their snapshots (replaced by per-holding products) |
 | `V022__monitor_adjustments.sql` | monitor_adjustments: dated variaciones that shift a monitor's thresholds until month end |
+| `V023__transactions_amount_numeric.sql` | `transactions.amount` integer -> NUMERIC(18, 2) so foreign-currency movements keep their cents; existing values unchanged |
 
 ## Scraper Architecture
 
@@ -381,8 +382,9 @@ one `crypto` product per currency, `units` kept fractional. Transactions cover
 **CLP deposits and withdrawals only**, minus annulled or rejected ones, paged
 through `meta.total_pages` (capped at 20 pages of 50 per direction, with a
 warning past that). Crypto movements
-are deliberately not imported: `transactions.amount` is integer CLP, and a
-crypto movement has no CLP amount unless it is priced at its date, which would
+are deliberately not imported: `transactions.amount` keeps two decimals (too
+few for crypto units), and a crypto movement has no CLP amount unless it is
+priced at its date, which would
 need a historical price source. Crypto value history comes from the balance
 snapshots instead, converted at lib/rates' current tickers like every other
 crypto figure. A non-CLP amount that still reaches the parser is skipped with a

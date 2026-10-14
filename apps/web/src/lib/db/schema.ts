@@ -214,7 +214,14 @@ export const transactions = pgTable(
       .notNull()
       .references(() => products.id),
     description: text("description").notNull(),
-    amount: integer("amount").notNull(),
+    // Signed, in the product's currency (products.currency). NUMERIC(18, 2)
+    // since V023 so foreign-currency movements keep their cents. postgres.js
+    // hands NUMERIC over as a string; mode "number" converts it on every
+    // select of this column, so callers keep getting (and inserting) numbers.
+    // Raw sql`` over the column (e.g. SUM(amount)) bypasses that mapping and
+    // must convert its result itself.
+    amount: numeric("amount", { precision: 18, scale: 2, mode: "number" })
+      .notNull(),
     transactionDate: date("transaction_date").notNull(),
     // When the institution posted the movement, where it reports that apart
     // from when the movement occurred (V019). Nullable: most sources report a

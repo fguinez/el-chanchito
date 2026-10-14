@@ -12,10 +12,13 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID
 
+import psycopg
 import pytest
 from psycopg import sql
+from psycopg.rows import dict_row
 
 from db import writer
+from tests.conftest import apply_migrations
 from db.writer import (
     finish_scraper_run,
     start_scraper_run,
@@ -79,15 +82,18 @@ def _txn(
     kind="wallet",
     tx_date=date(2026, 8, 20),
     accounting_date=None,
+    amount=-999999,
+    currency="CLP",
 ):
     return ScrapedTransaction(
         institution=institution,
         product_kind=kind,
         description="COMPRA SINTETICA",
-        amount=-999999,
+        amount=amount,
         transaction_date=tx_date,
         accounting_date=accounting_date,
         external_id=external_id,
+        currency=currency,
         scheduled_month=date(tx_date.year, tx_date.month, 1),
     )
 
@@ -297,6 +303,55 @@ class TestUpsertTransactions:
                 "accounting_date": date(2026, 8, 24),
             }
         ]
+
+
+class TestAmountMigration:
+    """V023 turns `transactions.amount` from integer into NUMERIC(18, 2)."""
+
+    def test_existing_integer_amounts_keep_their_exact_values(self, unmigrated_db):
+        apply_migrations(unmigrated_db, before="V023")
+        amounts = [-999999, 2500000, 1000000, 0]
+        legacy = [
+            _txn(
+                f"bch_a1b2c3d4e5f6071{n}",
+                institution="banchile",
+                kind="checking",
+                amount=amount,
+            )
+            for n, amount in enumerate(amounts)
+        ]
+        upsert_transactions(legacy)
+
+        apply_migrations(unmigrated_db)
+
+        with psycopg.connect(unmigrated_db, row_factory=dict_row) as conn:
+            column = conn.execute(
+                "SELECT data_type, numeric_precision, numeric_scale "
+                "FROM information_schema.columns "
+                "WHERE table_name = 'transactions' AND column_name = 'amount'"
+            ).fetchone()
+            stored = [
+                row["amount"]
+                for row in conn.execute(
+                    "SELECT amount FROM transactions ORDER BY external_id"
+                )
+            ]
+        assert column == {
+            "data_type": "numeric",
+            "numeric_precision": 18,
+            "numeric_scale": 2,
+        }
+        assert stored == [Decimal(a) for a in amounts]
+        # And an integer from a CLP scraper still finds them: a re-run inserts
+        # nothing, and the legacy rows are adopted onto operation ids.
+        assert upsert_transactions(legacy) == 0
+        operation_id = _txn(
+            "bch_op_12345678901",
+            institution="banchile",
+            kind="checking",
+            amount=-999999,
+        )
+        assert upsert_transactions([operation_id]) == 0
 
 
 class TestSnapshots:
