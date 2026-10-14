@@ -356,15 +356,17 @@ list mixes both currencies and `origenTransaccion == "INT"` marks the USD rows;
 the USD statement (`estadocuenta/internacional/resumen-por-fecha`) is a surface
 of its own. USD checking movements are not read yet (see the follow-up issue).
 Every movement carries its currency, so the writer resolves the USD product,
-and USD amounts keep their cents. Before #79 the unbilled USD charges were stored on
-the CLP card as whole "pesos"; each run deletes those leftovers once their USD
-rows are stored (`superseded_transactions` ->
+and USD amounts keep their cents. Before #79 the unbilled USD charges were
+stored on the CLP card as whole "pesos"; each run deletes those leftovers once
+their USD rows are stored (`superseded_transactions` ->
 `db/writer.py::delete_superseded_transactions`, gated on the keys
 `write_transactions` reports as persisted, so a rolled-back batch deletes
 nothing): by their exact old key when it is reproducible, else by date and old
-amount, one row per USD charge, only among rows created before V023 was applied
-(`_migrations.applied_at`; V023 ships with the fix), and never a row the user
-categorised, annotated or paired.
+amount (only for a USD statement row whose statement the national leg also read
+in that scrape, with both CLP card legs loaded, since the two legs pick their
+statements independently), one row per USD charge, only among rows created
+before V023 was applied (`_migrations.applied_at`; V023 ships with the fix),
+and never a row the user categorised, annotated or paired.
 
 BCI Lider (Tarjeta Lider Bci, the retailcard.cl card co-branded by BCI) has no
 open-banking API for individuals and isn't covered by `fintself`, and its login

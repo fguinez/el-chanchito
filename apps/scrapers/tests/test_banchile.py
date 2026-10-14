@@ -536,11 +536,17 @@ class TestSupersededTransactions:
         asyncio.run(self.scraper.scrape_transactions())
         return self.scraper.superseded_transactions()
 
-    def _movements(self):
+    # A synthetic statement date, read by both card legs unless a test says not.
+    _STATEMENT = "2026-09-05"
+
+    def _movements(self, usd_statement=_STATEMENT):
         return [
             parse_unbilled_movement(_unbilled_row()),
             parse_unbilled_movement(_unbilled_row(monto=1234.56, origen="INT")),
-            *parse_international_billed_movements(_intl_payload([_intl_row(monto=12.5)])),
+            *parse_international_billed_movements(
+                _intl_payload([_intl_row(monto=12.5)]), usd_statement
+            ),
+            *parse_billed_movements(_billed_payload([_billed_row()]), self._STATEMENT),
         ]
 
     def test_one_per_usd_card_movement(self, monkeypatch):
@@ -569,6 +575,24 @@ class TestSupersededTransactions:
         (exact,) = self._scrape(
             monkeypatch, self._movements(), failed=("tarjeta facturados",)
         )
+        assert exact.external_id == "bch_fp_109da42d5aba2816"
+
+    def test_the_loose_match_needs_the_statement_read_on_the_national_leg(
+        self, monkeypatch
+    ):
+        """The legs pick their statements independently: an older USD one,
+        outside every national statement read, has no CLP rows protecting it."""
+        (exact,) = self._scrape(
+            monkeypatch, self._movements(usd_statement="2026-07-05")
+        )
+        assert exact.external_id == "bch_fp_109da42d5aba2816"
+
+    def test_a_national_statement_with_no_rows_offers_no_loose_match(
+        self, monkeypatch
+    ):
+        """Nothing shows that statement was read, so nothing is assumed."""
+        without_national_rows = self._movements()[:3]
+        (exact,) = self._scrape(monkeypatch, without_national_rows)
         assert exact.external_id == "bch_fp_109da42d5aba2816"
 
     def test_none_without_usd_card_movements(self, monkeypatch):

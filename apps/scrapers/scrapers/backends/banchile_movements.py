@@ -143,6 +143,11 @@ class BanChileMovement:
     code before issue #79 keyed and stored the same row as on the CLP card,
     which is how those misrouted rows are found and removed. Neither is ever
     identity.
+
+    `statement_date` is the `fechaFacturacion` a billed row was read from (""
+    on every other leg). It only tells the cleanup which statements a scrape
+    covered and is never identity on its own (the billed fingerprints carry
+    their own copy).
     """
 
     source: str
@@ -156,6 +161,7 @@ class BanChileMovement:
     currency: str = "CLP"
     legacy_fingerprint: tuple[str, ...] = ()
     legacy_amount: Optional[int] = None
+    statement_date: str = ""
 
 
 @dataclass(frozen=True)
@@ -605,6 +611,7 @@ def parse_billed_movement(raw, fecha_facturacion: str = ""):
             _fingerprint_value(raw.get("nombreTarjeta")),
             _text(fecha_facturacion),
         ),
+        statement_date=_text(fecha_facturacion),
     )
 
 
@@ -682,6 +689,7 @@ def parse_international_billed_movement(
         ),
         currency="USD",
         legacy_amount=_legacy_clp_amount(monto),
+        statement_date=_text(fecha_facturacion),
     )
 
 
@@ -1352,8 +1360,9 @@ _MOVEMENT_READERS: list[tuple[str, Callable]] = [
     ("tarjeta facturados", _read_card_billed),
     ("tarjeta facturados USD", _read_card_billed_usd),
 ]
-# The CLP card legs: when both loaded, every CLP card row of their window is in
-# the scrape, which is what makes the date+amount cleanup match safe.
+# The CLP card legs: when both loaded, every CLP card row of the statements the
+# national leg read (and of the unbilled window after them) is in the scrape,
+# which is what makes the date+amount cleanup match safe for those statements.
 CLP_CARD_SURFACES = ("tarjeta no facturados", "tarjeta facturados")
 
 

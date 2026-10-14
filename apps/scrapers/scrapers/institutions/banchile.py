@@ -186,12 +186,26 @@ class BanChileScraper(BaseScraper):
         One per USD card movement: by its exact legacy key when that is
         reproducible (an unbilled row, or a billed one that replaced it in this
         scrape), else by date and legacy amount alone. The second form is only
-        offered when both CLP card legs loaded, so every genuine CLP card row
-        of the window is in this scrape and protected by its key. Either form
-        only reaches rows stored before the fixed code shipped, so the cleanup
+        offered for a USD statement row whose statement the national leg also
+        read in this scrape, and only when both CLP card legs loaded: then every
+        genuine CLP card row of that period (and of any later one it could have
+        posted into) is in this scrape and protected by its key. The two legs
+        pick their statements independently, so a USD statement older than
+        every national one read gets no loose match. A national statement is
+        known as read by the rows it returned, so one with no rows offers none
+        either; that only ever leaves a leftover in place. Either form only
+        reaches rows stored before the fixed code shipped, so the cleanup
         cannot outlive the leftovers it exists for.
         """
-        clp_legs_loaded = not set(CLP_CARD_SURFACES) & set(failed_surfaces)
+        loose_statements: set[str] = set()
+        if not set(CLP_CARD_SURFACES) & set(failed_surfaces):
+            loose_statements = {
+                movement.statement_date
+                for movement in movements
+                if movement.source == "card_billed"
+                and movement.currency == "CLP"
+                and movement.statement_date
+            }
         superseded = []
         for movement in movements:
             if (
@@ -201,7 +215,7 @@ class BanChileScraper(BaseScraper):
             ):
                 continue
             external_id = legacy_external_id_for(movement)
-            if external_id is None and not clp_legs_loaded:
+            if external_id is None and movement.statement_date not in loose_statements:
                 continue
             superseded.append(
                 SupersededTransaction(
