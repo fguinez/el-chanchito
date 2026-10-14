@@ -538,11 +538,15 @@ Transactions are deduplicated via `UNIQUE(product_id, external_id)`:
     composite `id` plus the running `saldo` (unique and stable together, where
     the composite `id` alone collides for same-second batch credits); the
     card's unbilled leg, which has no id at all, uses posting date +
-    authorisation date/time + amount + card last4 + Transbank merchant code.
+    authorisation date/time + amount + card last4 + Transbank merchant code;
+    a billed row without a usable reference uses date + amount + card + the
+    statement date, plus (USD only) the raw `numeroDocumento` and the statement
+    section, since a USD payment and credit can share everything else.
     A USD fingerprint is hashed with the currency in front and its amount as a
     two-decimal string, so it can never equal a CLP one.
-  None of the forms includes a date, the description, the section, or the
-  movement's order or multiplicity within a scrape. Because a movement can
+  None of the forms includes the description or the movement's order or
+  multiplicity within a scrape, and only a closed statement's rows (which
+  never move) carry a date or a section. Because a movement can
   *change* form
   (a checking one acquiring its operation id on a later run, a card charge
   moving from the unbilled leg to the billed one), `upsert_transactions` adopts:

@@ -682,7 +682,9 @@ def parse_billed_movements(payload, fecha_facturacion: str = "") -> list[BanChil
 _INTERNATIONAL_SECTIONS = ("seccionPagos", "seccionCompras", "seccionComisiones")
 
 
-def parse_international_billed_movement(raw, fecha_facturacion: str = ""):
+def parse_international_billed_movement(
+    raw, fecha_facturacion: str = "", section: str = ""
+):
     """One USD statement row -> a BanChileMovement (or None).
 
     Unlike the national leg, `montoDolar` is SIGNED from the bank's side, like
@@ -695,8 +697,11 @@ def parse_international_billed_movement(raw, fecha_facturacion: str = ""):
     all-zero suffix, which `billed_reference` reads as none. The "DDMM" is a
     posting day, not the transaction's, so no date is ever derived from it.
     `idMovimiento` and `idComprobante` are session tokens and never identity.
-    The fallback fingerprint mirrors the national one: date, amount, card and
-    statement date.
+    The fallback fingerprint is the national one (date, amount, card, statement
+    date) plus the raw `numeroDocumento` and the `section` the row came from:
+    a payment and a credit can share the date, signed amount and card of one
+    statement, and only those two fields (stable within a closed statement)
+    tell them apart.
     """
     if not isinstance(raw, dict):
         return None
@@ -719,6 +724,8 @@ def parse_international_billed_movement(raw, fecha_facturacion: str = ""):
             str(usd),
             _text(raw.get("tituloTarjeta")),
             _text(fecha_facturacion),
+            _text(raw.get("numeroDocumento")),
+            _text(section),
         ),
         currency="USD",
         legacy_amount=_legacy_clp_amount(monto),
@@ -740,7 +747,7 @@ def parse_international_billed_movements(
         for raw in rows:
             if isinstance(raw, dict) and raw.get("totales"):
                 continue  # a section total, not a movement
-            movement = parse_international_billed_movement(raw, fecha_facturacion)
+            movement = parse_international_billed_movement(raw, fecha_facturacion, name)
             if movement is not None:
                 movements.append(movement)
     return movements

@@ -37,6 +37,7 @@ from scrapers.backends.banchile_movements import (
     read_movement_surfaces,
     statement_dates,
 )
+from scrapers.institutions.banchile import external_id_for
 
 # --- Synthetic payload builders ------------------------------------------------
 
@@ -924,8 +925,34 @@ class TestInternationalBilled:
             "-1234.56",
             f"****{CARD_LAST4}",
             "2026-08-25",
+            "2008",
+            "seccionPagos",
         )
         assert second.fingerprint[1] == "-12.30"
+        assert second.fingerprint[4] == "2108 00000000"
+
+    def test_a_payment_and_a_credit_alike_in_all_else_both_survive(self):
+        """Same date, signed amount and card, neither with a usable reference."""
+        payload = _intl_payload(
+            pagos=[_intl_row(numero_documento="2008 00000000", monto=-12.3, grupo="pagos")],
+            comisiones=[_intl_row(numero_documento="2008", monto=-12.3)],
+        )
+
+        parsed = dedupe_movements(parse_international_billed_movements(payload, "2026-08-25"))
+
+        assert len(parsed) == 2
+        assert {m.operation_id for m in parsed} == {None}
+        assert len({external_id_for(m) for m in parsed}) == 2
+
+    def test_the_section_tells_apart_rows_with_the_same_document(self):
+        payload = _intl_payload(
+            pagos=[_intl_row(numero_documento="2008", monto=-12.3, grupo="pagos")],
+            comisiones=[_intl_row(numero_documento="2008", monto=-12.3)],
+        )
+
+        parsed = dedupe_movements(parse_international_billed_movements(payload, "2026-08-25"))
+
+        assert [m.fingerprint[5] for m in parsed] == ["seccionPagos", "seccionComisiones"]
 
     def test_no_date_comes_from_the_ddmm_prefix(self):
         row = _intl_row(numero_documento="0101 " + "1" * 23, fecha="20/08/2026")

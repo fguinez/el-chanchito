@@ -100,7 +100,8 @@ def external_id_for(movement: BanChileMovement) -> str:
           issue #56, since the two card legs share no identity field and no
           mapping rule can bridge them.
         * card, billed without a usable reference: date, amount, card and the
-          statement date.
+          statement date; on the USD leg also the raw `numeroDocumento` and the
+          statement section, since a payment and a credit can share the rest.
 
     USD movements (issue #79) use the same three forms. A USD billed purchase
     is ``bch_ref_`` + its `numeroDocumento` ("DDMM" + 23 digits), and a USD
