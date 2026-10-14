@@ -21,7 +21,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useSortableData } from "@/lib/use-sortable-data";
-import { formatCLP } from "@/lib/utils";
+import { formatCLP, formatPlainDateEs } from "@/lib/utils";
 import { CsvImport } from "@/components/dashboard/CsvImport";
 import { TransactionDetailSheet } from "@/components/transactions/transaction-detail-sheet";
 
@@ -296,7 +296,7 @@ function ExpensesView() {
                     }}
                   >
                     <TableCell className="text-sm">
-                      {new Date(txn.transactionDate).toLocaleDateString("es-CL")}
+                      {formatPlainDateEs(txn.transactionDate)}
                     </TableCell>
                     <TableCell>{txn.description}</TableCell>
                     <TableCell>
