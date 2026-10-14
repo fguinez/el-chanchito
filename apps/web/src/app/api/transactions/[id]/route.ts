@@ -9,6 +9,7 @@ import {
   transactions,
 } from "@/lib/db/schema";
 import { UUID_RE } from "@/lib/monitors/validate";
+import type { ProductKind } from "@chanchito/product-model";
 
 // Next 16: dynamic segment params arrive as a Promise on the context arg.
 type Context = { params: Promise<{ id: string }> };
@@ -36,7 +37,7 @@ export interface TransactionDetail {
   product: {
     id: string;
     name: string;
-    kind: string;
+    kind: ProductKind;
     slug: string;
     currency: string;
   };
@@ -84,6 +85,15 @@ export async function GET(_request: Request, { params }: Context) {
     );
   }
 
+  try {
+    return await loadTransactionDetail(id);
+  } catch (error) {
+    console.error("GET /api/transactions/[id] failed:", error);
+    return NextResponse.json({ error: "Internal error" }, { status: 500 });
+  }
+}
+
+async function loadTransactionDetail(id: string) {
   const [row] = await db
     .select(detailColumns)
     .from(transactions)

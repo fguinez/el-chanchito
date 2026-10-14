@@ -1,8 +1,9 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Fake db: every query-builder step returns the same chain, and the final
-// `.limit()` resolves to whatever rows the test queued. No Postgres needed.
-const queuedRows: unknown[][] = [];
+// `.limit()` resolves to whatever rows the test queued (or rejects with a
+// queued Error). No Postgres needed.
+const queuedRows: (unknown[] | Error)[] = [];
 const selectMock = vi.fn();
 
 vi.mock("@/lib/db", () => {
@@ -10,7 +11,10 @@ vi.mock("@/lib/db", () => {
   for (const step of ["from", "innerJoin", "leftJoin", "where"]) {
     chain[step] = () => chain;
   }
-  chain.limit = () => Promise.resolve(queuedRows.shift() ?? []);
+  chain.limit = () => {
+    const next = queuedRows.shift() ?? [];
+    return next instanceof Error ? Promise.reject(next) : Promise.resolve(next);
+  };
   return {
     db: {
       select: (...args: unknown[]) => {
@@ -67,6 +71,10 @@ function call(id: string) {
 beforeEach(() => {
   queuedRows.length = 0;
   selectMock.mockReset();
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 describe("GET /api/transactions/[id]", () => {
@@ -152,5 +160,16 @@ describe("GET /api/transactions/[id]", () => {
     expect(body.accountingDate).toBeNull();
     expect(body.externalId).toBeNull();
     expect(body.notes).toBeNull();
+  });
+
+  it("returns 500 with a generic error when the query fails", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    queuedRows.push(new Error("synthetic connection failure"));
+    const res = await call(TXN_ID);
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "Internal error" });
+    expect(consoleError).toHaveBeenCalledOnce();
   });
 });
