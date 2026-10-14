@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   Card,
   CardContent,
@@ -20,8 +21,9 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useSortableData } from "@/lib/use-sortable-data";
-import { formatCLP } from "@/lib/utils";
+import { formatCLP, formatPlainDateEs } from "@/lib/utils";
 import { CsvImport } from "@/components/dashboard/CsvImport";
+import { TransactionDetailSheet } from "@/components/transactions/transaction-detail-sheet";
 
 interface Transaction {
   id: string;
@@ -35,7 +37,64 @@ interface Transaction {
 
 type TransactionSortKey = "fecha" | "descripcion" | "fuente" | "monto";
 
+/** Query param holding the transaction shown in the detail panel. */
+const TXN_PARAM = "txn";
+
+// useSearchParams needs a Suspense boundary for the static prerender.
 export default function ExpensesPage() {
+  return (
+    <Suspense fallback={<ExpensesSkeleton />}>
+      <ExpensesView />
+    </Suspense>
+  );
+}
+
+/** Static shell for the prerender, before search params are available. */
+function ExpensesSkeleton() {
+  return (
+    <div className="space-y-6" aria-busy="true">
+      <h2 className="text-2xl font-bold">Gastos y Transacciones</h2>
+      <div className="grid gap-4 md:grid-cols-3">
+        {[0, 1, 2].map((i) => (
+          <Card key={i}>
+            <CardHeader className="pb-2">
+              <div className="h-4 w-24 animate-pulse rounded bg-muted" />
+              <div className="h-6 w-32 animate-pulse rounded bg-muted" />
+            </CardHeader>
+          </Card>
+        ))}
+      </div>
+      <Card>
+        <CardContent className="space-y-3">
+          {[0, 1, 2, 3].map((i) => (
+            <div key={i} className="h-5 animate-pulse rounded bg-muted" />
+          ))}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function ExpensesView() {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const selectedTxnId = searchParams.get(TXN_PARAM);
+
+  /** Opens (id) or closes (null) the detail panel, keeping other params. */
+  const selectTransaction = useCallback(
+    (id: string | null) => {
+      const params = new URLSearchParams(searchParams.toString());
+      if (id) params.set(TXN_PARAM, id);
+      else params.delete(TXN_PARAM);
+      const query = params.toString();
+      router.replace(query ? `${pathname}?${query}` : pathname, {
+        scroll: false,
+      });
+    },
+    [router, pathname, searchParams]
+  );
+
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [description, setDescription] = useState("");
   const [amount, setAmount] = useState("");
@@ -246,9 +305,35 @@ export default function ExpensesPage() {
               </TableHeader>
               <TableBody>
                 {sorted.map((txn) => (
-                  <TableRow key={txn.id}>
+                  <TableRow
+                    key={txn.id}
+                    tabIndex={0}
+                    data-state={
+                      txn.id === selectedTxnId ? "selected" : undefined
+                    }
+                    className="cursor-pointer focus-visible:bg-muted/50 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
+                    onClick={(e) => {
+                      // Let users select and copy cell text without opening.
+                      const sel = window.getSelection();
+                      if (
+                        sel?.toString() &&
+                        sel.anchorNode &&
+                        e.currentTarget.contains(sel.anchorNode)
+                      ) {
+                        return;
+                      }
+                      selectTransaction(txn.id);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.target !== e.currentTarget) return;
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        selectTransaction(txn.id);
+                      }
+                    }}
+                  >
                     <TableCell className="text-sm">
-                      {new Date(txn.transactionDate).toLocaleDateString("es-CL")}
+                      {formatPlainDateEs(txn.transactionDate)}
                     </TableCell>
                     <TableCell>{txn.description}</TableCell>
                     <TableCell>
@@ -271,6 +356,11 @@ export default function ExpensesPage() {
           )}
         </CardContent>
       </Card>
+
+      <TransactionDetailSheet
+        transactionId={selectedTxnId}
+        onClose={() => selectTransaction(null)}
+      />
     </div>
   );
 }
