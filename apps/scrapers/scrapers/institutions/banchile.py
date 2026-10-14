@@ -39,6 +39,10 @@ from scrapers.base import (
 
 logger = logging.getLogger(__name__)
 
+# Ships with the currency routing of issue #79 (USD rows need its cents), so a
+# CLP-card row created after it was applied was written by the fixed code.
+_CURRENCY_ROUTING_MIGRATION = "V023__transactions_amount_numeric.sql"
+
 # An operation id is opaque, so it is normalised rather than interpreted: a
 # cosmetic change (padding, a separator, lower case) must not re-key a movement,
 # but the id stays readable in the DB instead of being hashed away.
@@ -182,7 +186,9 @@ class BanChileScraper(BaseScraper):
         reproducible (an unbilled row, or a billed one that replaced it in this
         scrape), else by date and legacy amount alone. The second form is only
         offered when both CLP card legs loaded, so every genuine CLP card row
-        of the window is in this scrape and protected by its key.
+        of the window is in this scrape and protected by its key. Either form
+        only reaches rows stored before the fixed code shipped, so the cleanup
+        cannot outlive the leftovers it exists for.
         """
         clp_legs_loaded = not set(CLP_CARD_SURFACES) & set(failed_surfaces)
         superseded = []
@@ -204,6 +210,7 @@ class BanChileScraper(BaseScraper):
                     transaction_date=movement.transaction_date,
                     amount=movement.legacy_amount,
                     replacement_external_id=external_id_for(movement),
+                    created_before_migration=_CURRENCY_ROUTING_MIGRATION,
                     external_id=external_id,
                     external_id_prefix="bch_fp_",
                 )

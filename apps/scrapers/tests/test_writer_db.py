@@ -382,6 +382,20 @@ class TestSupersededTransactions:
 
     # The USD row that replaces a twin; persisted unless a test says otherwise.
     REPLACEMENT = "bch_fp_00000000000000ff"
+    MIGRATION = "V023__transactions_amount_numeric.sql"
+
+    @pytest.fixture(autouse=True)
+    def _fix_ships_tomorrow(self, db_conn):
+        """Every row a test stores predates the fix unless the test says not."""
+        self._ship_fix(db_conn, "now() + interval '1 day'")
+
+    def _ship_fix(self, conn, when):
+        conn.execute(
+            sql.SQL("UPDATE _migrations SET applied_at = {} WHERE name = %s").format(
+                sql.SQL(when)
+            ),
+            (self.MIGRATION,),
+        )
 
     def _twin(self, amount, external_id=None, tx_date=DAY):
         return SupersededTransaction(
@@ -391,6 +405,7 @@ class TestSupersededTransactions:
             transaction_date=tx_date,
             amount=amount,
             replacement_external_id=self.REPLACEMENT,
+            created_before_migration=self.MIGRATION,
             external_id=external_id,
             external_id_prefix="bch_fp_",
         )
@@ -600,6 +615,35 @@ class TestSupersededTransactions:
         assert written.persisted_external_ids == {self.REPLACEMENT}
         assert deleted == 1
         assert self._keys(db_conn) == []
+
+    def test_rows_stored_after_the_fix_shipped_are_never_deleted(self, db_conn):
+        """Neither by exact key nor by date and amount: the fixed code wrote them."""
+        self._ship_fix(db_conn, "now() - interval '1 day'")
+        upsert_transactions(
+            [
+                self._card("bch_fp_000000000000000a", -12),
+                self._card("bch_fp_000000000000000b", -12),
+            ]
+        )
+
+        deleted = self._delete([self._twin(-12, "bch_fp_000000000000000a"), self._twin(-12)])
+
+        assert deleted == 0
+        assert len(self._keys(db_conn)) == 2
+
+    def test_the_cutoff_splits_older_rows_from_newer_ones(self, db_conn):
+        self._store(db_conn, "bch_fp_000000000000000a", "bch_fp_000000000000000b")
+        # a is two days old and b one day old; the fix shipped in between.
+        self._ship_fix(db_conn, "now() - interval '36 hours'")
+
+        assert self._delete([self._twin(-12), self._twin(-12)]) == 1
+        assert self._keys(db_conn) == ["bch_fp_000000000000000b"]
+
+    def test_an_unrecorded_migration_deletes_nothing(self, db_conn):
+        upsert_transactions([self._card("bch_fp_000000000000000a", -12)])
+        db_conn.execute("DELETE FROM _migrations WHERE name = %s", (self.MIGRATION,))
+
+        assert self._delete([self._twin(-12)]) == 0
 
     def test_nothing_to_do(self, db_conn):
         assert self._delete([]) == 0

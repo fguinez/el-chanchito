@@ -608,6 +608,9 @@ def delete_superseded_transactions(
 
     A row whose key is in `protected_external_ids` (this scrape's own keys) is
     never a candidate: it is a movement the bank still lists, not a leftover.
+    Nor is a row created at or after the moment the item's
+    `created_before_migration` was applied (per `_migrations.applied_at`); an
+    item whose migration is not recorded matches nothing.
     A matching row the user categorised, annotated or marked as an internal
     transfer is left in place and logged instead.
     """
@@ -649,12 +652,30 @@ def delete_superseded_transactions(
                 ]
             return products[key]
 
+        cutoffs: dict = {}
+
+        def cutoff_of(item: SupersededTransaction):
+            name = item.created_before_migration
+            if name not in cutoffs:
+                row = conn.execute(
+                    "SELECT applied_at FROM _migrations WHERE name = %s", (name,)
+                ).fetchone()
+                cutoffs[name] = row[0] if row else None
+                if cutoffs[name] is None:
+                    logger.warning(
+                        "Migration %s is not recorded; superseded rows bound to "
+                        "it are left in place",
+                        name,
+                    )
+            return cutoffs[name]
+
         # Exact keys first: they name their row, so a looser match must not
         # take it from them.
         ordered = sorted(superseded, key=lambda item: item.external_id is None)
         for item in ordered:
             product_ids = products_of(item)
-            if not product_ids:
+            cutoff = cutoff_of(item)
+            if not product_ids or cutoff is None:
                 continue
             exact = item.external_id is not None
             rows = conn.execute(
@@ -666,6 +687,7 @@ def delete_superseded_transactions(
                   AND transaction_date = %s AND amount = %s
                   AND external_id LIKE %s
                   AND (%s::text IS NULL OR external_id = %s)
+                  AND created_at < %s
                 ORDER BY created_at, id
                 """,
                 (
@@ -676,6 +698,7 @@ def delete_superseded_transactions(
                     _like_prefix(item.external_id_prefix),
                     item.external_id,
                     item.external_id,
+                    cutoff,
                 ),
             ).fetchall()
             row = next(

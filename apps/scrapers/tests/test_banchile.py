@@ -562,6 +562,7 @@ class TestSupersededTransactions:
             )
             assert item.external_id_prefix == "bch_fp_"
             assert item.transaction_date == date(2026, 8, 20)
+            assert item.created_before_migration == "V023__transactions_amount_numeric.sql"
 
     def test_the_loose_match_needs_both_clp_card_legs(self, monkeypatch):
         """Otherwise a genuine CLP row of the window might not be protected."""

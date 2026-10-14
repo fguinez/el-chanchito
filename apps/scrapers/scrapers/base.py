@@ -43,7 +43,10 @@ class SupersededTransaction:
     removes at most one stored row per instance: by `external_id` when the old
     key is reproducible, else by date and amount among the rows whose key
     starts with `external_id_prefix`, and only once the row that replaces it,
-    `replacement_external_id`, is stored. Never part of the ingest contract.
+    `replacement_external_id`, is stored. Only rows created before the
+    migration `created_before_migration` was applied qualify: that migration
+    ships with the fix, so a later row cannot be the old version's mistake.
+    Never part of the ingest contract.
     """
 
     institution: str
@@ -52,6 +55,7 @@ class SupersededTransaction:
     transaction_date: date
     amount: int
     replacement_external_id: str
+    created_before_migration: str
     external_id_prefix: str
     external_id: Optional[str] = None
 

@@ -138,6 +138,7 @@ _TWIN = SupersededTransaction(
     transaction_date=date(2026, 8, 20),
     amount=-12,
     replacement_external_id="bch_fp_00000000000000ff",
+    created_before_migration="V023__transactions_amount_numeric.sql",
     external_id_prefix="bch_fp_",
 )
 
