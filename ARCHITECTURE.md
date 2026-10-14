@@ -351,6 +351,19 @@ bounded-retry, non-fatal machinery as the product ones, except that an empty
 reading counts as success there: a card with no unbilled charges is not a
 failed surface.
 
+The USD products get their movements the same way (issue #79): the unbilled
+list mixes both currencies and `origenTransaccion == "INT"` marks the USD rows;
+the USD statement (`estadocuenta/internacional/resumen-por-fecha`) and the USD
+checking cartola (the same dialog with USD picked; its row shape is unverified,
+the account observed had no movements) are surfaces of their own. Every
+movement carries its currency, so the writer resolves the USD product, and USD
+amounts keep their cents. Before #79 the unbilled USD charges were stored on
+the CLP card as whole "pesos"; each run deletes those leftovers once their USD
+rows are written (`superseded_transactions` ->
+`db/writer.py::delete_superseded_transactions`): by their exact old key when it
+is reproducible, else by date and old amount, one row per USD charge, and never
+a row the user categorised, annotated or paired.
+
 BCI Lider (Tarjeta Lider Bci, the retailcard.cl card co-branded by BCI) has no
 open-banking API for individuals and isn't covered by `fintself`, and its login
 sits behind a Cloudflare Turnstile that passes invisibly only for a *genuine*
@@ -519,12 +532,15 @@ Transactions are deduplicated via `UNIQUE(product_id, external_id)`:
     not hashed, so it stays debuggable. An all-zero id is a placeholder, not a
     value.
   - `bch_ref_{numReferencia}`: a billed card row's reference ("DDMM
-    NNNNNNNN"); an all-zero suffix means the bank has none, not a value.
+    NNNNNNNN"; a USD row's `numeroDocumento` is "DDMM" + 23 digits); an
+    all-zero suffix or a bare "DDMM" means the bank has none, not a value.
   - `bch_fp_{md5(fingerprint)[:16]}`: the fallback: checking uses the bank's
     composite `id` plus the running `saldo` (unique and stable together, where
     the composite `id` alone collides for same-second batch credits); the
     card's unbilled leg, which has no id at all, uses posting date +
     authorisation date/time + amount + card last4 + Transbank merchant code.
+    A USD fingerprint is hashed with the currency in front and its amount as a
+    two-decimal string, so it can never equal a CLP one.
   None of the forms includes a date, the description, the section, or the
   movement's order or multiplicity within a scrape. Because a movement can
   *change* form
