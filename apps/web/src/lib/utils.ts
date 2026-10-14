@@ -22,7 +22,7 @@ function isoFractionDigits(currency: string): number | null {
   isoCurrencies ??= new Set(
     typeof Intl.supportedValuesOf === "function"
       ? Intl.supportedValuesOf("currency")
-      : ["USD", "EUR"]
+      : ["USD", "EUR", "GBP"]
   );
   if (!isoCurrencies.has(currency)) return null;
   return (

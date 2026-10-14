@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { formatAmount, formatCLP } from "../utils";
 import { clpTotals } from "../transactions";
 import { formatBalance } from "@/components/institutions/shared";
@@ -28,6 +28,21 @@ describe("formatAmount", () => {
 
   it("formats CLP as whole pesos", () => {
     expect(formatAmount("CLP", -999999)).toBe(formatCLP(-999999));
+  });
+
+  it("still knows the fiat codes in use on a runtime without supportedValuesOf", async () => {
+    const original = Intl.supportedValuesOf;
+    vi.resetModules();
+    // @ts-expect-error: simulating an older runtime
+    Intl.supportedValuesOf = undefined;
+    try {
+      const { formatAmount: fallback } = await import("../utils");
+      expect(fallback("USD", 1000.5)).toBe("1,000.50 USD");
+      expect(fallback("EUR", 1000.5)).toBe("1,000.50 EUR");
+      expect(fallback("GBP", 1000.5)).toBe("1,000.50 GBP");
+    } finally {
+      Intl.supportedValuesOf = original;
+    }
   });
 });
 
