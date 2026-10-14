@@ -1,9 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
 import { Check, Copy } from "lucide-react";
-import { KIND_INFO, type ProductKind } from "@chanchito/product-model";
+import { KIND_INFO } from "@chanchito/product-model";
+import { displayProductName } from "@/components/institutions/shared";
 import {
   Sheet,
   SheetContent,
@@ -39,10 +45,11 @@ export function TransactionDetailSheet({
 
   useEffect(() => {
     if (!transactionId) return;
-    let cancelled = false;
-    fetch(`/api/transactions/${encodeURIComponent(transactionId)}`)
+    const controller = new AbortController();
+    fetch(`/api/transactions/${encodeURIComponent(transactionId)}`, {
+      signal: controller.signal,
+    })
       .then(async (res) => {
-        if (cancelled) return;
         // A malformed id (400) cannot match any transaction either.
         if (res.status === 404 || res.status === 400) {
           setResult({ id: transactionId, status: "not_found" });
@@ -50,14 +57,15 @@ export function TransactionDetailSheet({
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data: TransactionDetail = await res.json();
-        if (!cancelled) setResult({ id: transactionId, status: "ok", data });
+        setResult({ id: transactionId, status: "ok", data });
       })
-      .catch(() => {
-        if (!cancelled) setResult({ id: transactionId, status: "error" });
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          return;
+        }
+        setResult({ id: transactionId, status: "error" });
       });
-    return () => {
-      cancelled = true;
-    };
+    return () => controller.abort();
   }, [transactionId, attempt]);
 
   // While closing, keep showing the last result so the exit animation does
@@ -115,8 +123,8 @@ export function TransactionDetailSheet({
 
 function TransactionDetailBody({ txn }: { txn: TransactionDetail }) {
   const productHref = `/institutions/${txn.institution.slug}/${txn.product.slug}`;
-  const kindLabel =
-    KIND_INFO[txn.product.kind as ProductKind]?.labelEs ?? txn.product.kind;
+  const productName = displayProductName(txn.product, txn.institution.name);
+  const kindLabel = KIND_INFO[txn.product.kind]?.labelEs ?? txn.product.kind;
 
   return (
     <>
@@ -184,11 +192,13 @@ function TransactionDetailBody({ txn }: { txn: TransactionDetail }) {
               href={productHref}
               className="underline-offset-4 hover:underline"
             >
-              {txn.product.name}
+              {productName}
             </Link>
-            <span className="block text-xs text-muted-foreground">
-              {kindLabel}
-            </span>
+            {kindLabel !== productName && (
+              <span className="block text-xs text-muted-foreground">
+                {kindLabel}
+              </span>
+            )}
           </Field>
           <Field label="Fuente">
             <Badge variant="outline">{txn.source}</Badge>
@@ -252,7 +262,19 @@ function Muted({ children }: { children: ReactNode }) {
   return <span className="text-muted-foreground">{children}</span>;
 }
 
+const noSubscribe = () => () => {};
+
+/** Clipboard API exists only in secure contexts; false while server rendering. */
+function useCanCopy(): boolean {
+  return useSyncExternalStore(
+    noSubscribe,
+    () => typeof navigator !== "undefined" && !!navigator.clipboard,
+    () => false
+  );
+}
+
 function CopyableCode({ value, label }: { value: string; label: string }) {
+  const canCopy = useCanCopy();
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
@@ -263,7 +285,7 @@ function CopyableCode({ value, label }: { value: string; label: string }) {
 
   const copy = () => {
     navigator.clipboard
-      ?.writeText(value)
+      .writeText(value)
       .then(() => setCopied(true))
       .catch(() => {});
   };
@@ -271,17 +293,19 @@ function CopyableCode({ value, label }: { value: string; label: string }) {
   return (
     <span className="inline-flex max-w-full items-start gap-1">
       <code className="min-w-0 font-mono text-xs break-all">{value}</code>
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon-xs"
-        className="-mt-0.5 shrink-0"
-        onClick={copy}
-        aria-label={copied ? "Copiado" : `Copiar ${label}`}
-        title={copied ? "Copiado" : "Copiar"}
-      >
-        {copied ? <Check /> : <Copy />}
-      </Button>
+      {canCopy && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          className="-mt-0.5 shrink-0"
+          onClick={copy}
+          aria-label={copied ? "Copiado" : `Copiar ${label}`}
+          title={copied ? "Copiado" : "Copiar"}
+        >
+          {copied ? <Check /> : <Copy />}
+        </Button>
+      )}
     </span>
   );
 }

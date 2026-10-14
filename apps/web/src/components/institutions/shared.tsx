@@ -152,7 +152,7 @@ export function formatBalance(currency: string, value: number | null): string | 
  * otherwise; anything a human named stays untouched.
  */
 export function displayProductName(
-  product: InstitutionProduct,
+  product: Pick<InstitutionProduct, "name" | "kind" | "currency">,
   institutionName: string
 ): string {
   const prefix = `${institutionName} - `;
