@@ -354,7 +354,7 @@ failed surface.
 The USD products get their movements the same way (issue #79): the unbilled
 list mixes both currencies and `origenTransaccion == "INT"` marks the USD rows;
 the USD statement (`estadocuenta/internacional/resumen-por-fecha`) is a surface
-of its own. USD checking movements are not read yet (see the follow-up issue).
+of its own. USD checking movements are not read yet (see #82).
 Every movement carries its currency, so the writer resolves the USD product,
 and USD amounts keep their cents. Before #79 the unbilled USD charges were
 stored on the CLP card as whole "pesos"; each run deletes those leftovers once

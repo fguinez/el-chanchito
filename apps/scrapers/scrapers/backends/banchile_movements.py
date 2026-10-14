@@ -38,7 +38,7 @@ CLP figure). The USD statement is a sibling endpoint
 by the same capture-and-replay strategy as the national one. Every USD amount
 is a Decimal with exact cents and every movement carries its `currency`, which
 is what routes it to the USD product. USD checking movements are not read yet
-(see the follow-up issue).
+(see #82).
 
 Why this is its own module: `banchile_web.py` is 1.6k lines about *balances* and
 its docstring is a map of that surface. Movements are a different read, with

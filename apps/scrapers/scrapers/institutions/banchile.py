@@ -12,7 +12,7 @@ products leg serves its half from that cache.
 
 Since issue #79 every movement carries its currency, so the USD card
 movements land on their own product (USD checking movements are not read yet;
-see the follow-up issue). Before that, the USD charges in the card's unbilled
+see #82). Before that, the USD charges in the card's unbilled
 list were stored on the CLP card with their USD figure read as pesos;
 `superseded_transactions` names those rows so the run removes them once their
 USD replacements are written.
