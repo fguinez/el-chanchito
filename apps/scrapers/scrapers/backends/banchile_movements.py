@@ -275,7 +275,8 @@ def cartola_has_more_pages(payload) -> bool:
     """True when `getCartola` says its window continues past what it returned.
 
     We cannot follow it (see the module docstring), so the caller logs a warning
-    rather than silently truncating.
+    rather than silently truncating. The flag is a string ("N" was observed on
+    the USD cartola), so it is compared rather than taken for truthy.
     """
     if not isinstance(payload, dict):
         return False
@@ -283,7 +284,7 @@ def cartola_has_more_pages(payload) -> bool:
     if not isinstance(pagina, list) or not pagina:
         return False
     first = pagina[0]
-    return isinstance(first, dict) and bool(first.get("masPaginas"))
+    return isinstance(first, dict) and _flag_set(first.get("masPaginas"))
 
 
 def _cartola_dates(raw) -> tuple[Optional[datetime.date], Optional[datetime.date]]:
@@ -555,6 +556,15 @@ def statement_dates(payload, limit: int) -> list[str]:
         and _text(entry.get("fechaFacturacion"))
     ]
     return dates[:limit]
+
+
+def _flag_set(value) -> bool:
+    """A portal yes/no flag: True, 1, "1", "S", "SI" or "Y" (any case)."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value == 1
+    return _text(value).upper() in {"1", "S", "SI", "Y", "YES", "TRUE"}
 
 
 def drop_unbilled_duplicates(

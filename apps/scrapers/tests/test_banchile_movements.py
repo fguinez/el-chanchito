@@ -256,6 +256,11 @@ class TestCartolaPaging:
         assert cartola_has_more_pages(payload) is False
         assert cartola_has_more_pages({"movimientos": []}) is False
 
+    def test_the_string_flag_is_compared(self):
+        """"N" is a non-empty string, which is not "more pages"."""
+        assert cartola_has_more_pages({"pagina": [{"masPaginas": "N"}]}) is False
+        assert cartola_has_more_pages({"pagina": [{"masPaginas": "S"}]}) is True
+
 
 class TestParseUnbilled:
     def test_charge_is_negative(self):
