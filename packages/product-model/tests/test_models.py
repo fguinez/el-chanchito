@@ -1,6 +1,7 @@
 """Tests for the per-kind payload models, unions, and ingest envelopes."""
 
 from datetime import date
+from decimal import Decimal
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
@@ -268,3 +269,57 @@ def test_transaction_keeps_a_separate_posting_date():
 
     assert txn.transaction_date == date(2026, 8, 21)
     assert txn.accounting_date == date(2026, 8, 24)
+
+
+def _usd_txn(amount) -> ScrapedTransaction:
+    """A synthetic USD card movement; only the amount varies."""
+    return ScrapedTransaction(
+        institution="banchile",
+        product_kind="credit_card",
+        description="COMPRA SINTETICA USD",
+        amount=amount,
+        transaction_date=date(2026, 8, 21),
+        external_id="bch_ref_00000000000",
+        currency="USD",
+    )
+
+
+class TestTransactionAmount:
+    """`amount` is a Decimal that fits NUMERIC(18, 2) (issue #79)."""
+
+    def test_an_integer_validates_to_the_exact_decimal(self):
+        """CLP producers keep sending ints; nothing about them changes."""
+        amount = _usd_txn(-999_999).amount
+
+        assert isinstance(amount, Decimal)
+        assert amount == Decimal("-999999") == -999_999
+        assert str(amount) == "-999999"
+        assert hash(amount) == hash(-999_999)
+
+    @pytest.mark.parametrize("raw", ["-1234.56", -1234.56, Decimal("-1234.56")])
+    def test_cents_are_kept(self, raw):
+        """USD 1.234,56 keeps its cents whether it arrives as str, float or Decimal."""
+        assert _usd_txn(raw).amount == Decimal("-1234.56")
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "1234.567",  # a third decimal does not fit the column
+            0.1 + 0.2,  # float noise is rejected, never silently rounded
+            10**16,  # 17 integer digits
+            "NaN",
+            float("inf"),
+            True,
+        ],
+        ids=["three-decimals", "float-noise", "too-large", "nan", "inf", "bool"],
+    )
+    def test_amounts_the_column_cannot_hold_are_rejected(self, raw):
+        with pytest.raises(ValidationError):
+            _usd_txn(raw)
+
+    def test_the_json_schema_describes_both_wire_forms(self):
+        prop = ScrapedTransaction.model_json_schema()["properties"]["amount"]
+
+        assert {"type": "number"} in prop["anyOf"]
+        (string_form,) = [m for m in prop["anyOf"] if m.get("type") == "string"]
+        assert string_form["pattern"] == r"^-?\d{1,16}(\.\d{1,2})?$"

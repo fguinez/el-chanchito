@@ -305,6 +305,59 @@ class TestUpsertTransactions:
         ]
 
 
+class TestDecimalAmounts:
+    """Amounts with cents, stored in NUMERIC(18, 2) since V023 (issue #79)."""
+
+    def test_a_usd_amount_keeps_its_cents_on_the_usd_product(self, db_conn):
+        """USD 1.234,56 round-trips exactly and lands on the USD product."""
+        upsert_transactions(
+            [
+                _txn(
+                    "bch_ref_00000000001",
+                    institution="banchile",
+                    kind="credit_card",
+                    amount=Decimal("-1234.56"),
+                    currency="USD",
+                )
+            ]
+        )
+
+        row = db_conn.execute(
+            "SELECT t.amount, p.currency FROM transactions t "
+            "JOIN products p ON t.product_id = p.id"
+        ).fetchone()
+        assert row == {"amount": Decimal("-1234.56"), "currency": "USD"}
+
+    def test_a_whole_amount_reads_back_equal_to_the_int_it_was_sent_as(
+        self, db_conn
+    ):
+        upsert_transactions([_txn("email_mach_0001", amount=2500000)])
+
+        amount = db_conn.execute("SELECT amount FROM transactions").fetchone()["amount"]
+        assert amount == Decimal("2500000.00") == 2500000
+
+    def test_a_decimal_amount_is_adopted_like_an_integer_one(self, db_conn):
+        """The adoption lookup compares `amount = %s` with a Decimal parameter."""
+        legacy = dict(
+            institution="banchile",
+            kind="credit_card",
+            amount=Decimal("-1234.56"),
+            currency="USD",
+            tx_date=date(2026, 8, 21),
+        )
+        upsert_transactions([_txn("bch_fp_a1b2c3d4e5f60718", **legacy)])
+
+        inserted = upsert_transactions([_txn("bch_ref_00000000001", **legacy)])
+
+        rows = db_conn.execute(
+            "SELECT external_id, amount FROM transactions"
+        ).fetchall()
+        assert inserted == 0
+        assert rows == [
+            {"external_id": "bch_ref_00000000001", "amount": Decimal("-1234.56")}
+        ]
+
+
 class TestAmountMigration:
     """V023 turns `transactions.amount` from integer into NUMERIC(18, 2)."""
 

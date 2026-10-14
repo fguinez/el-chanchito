@@ -7,12 +7,29 @@ time; bank-printed dates travel inside metrics as `reported_as_of`.
 """
 
 import datetime
-from typing import Self
+from decimal import Decimal
+from typing import Annotated, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema, model_validator
 
 from .kinds import ProductKind
 from .registry import ProductAttributes, ProductMetrics
+
+# What `transactions.amount` (NUMERIC(18, 2)) can hold. pydantic enforces the
+# digits at validation time but leaves them out of the JSON Schema, so the wire
+# contract spells the string form out; a JSON number must fit the same bounds.
+TransactionAmount = Annotated[
+    Decimal,
+    Field(max_digits=18, decimal_places=2),
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {"type": "number"},
+                {"type": "string", "pattern": r"^-?\d{1,16}(\.\d{1,2})?$"},
+            ]
+        }
+    ),
+]
 
 
 class ScrapedProduct(BaseModel):
@@ -80,8 +97,12 @@ class ScrapedTransaction(BaseModel):
         description="Kind of the product the transaction belongs to, e.g. 'checking'."
     )
     description: str = Field(description="Human-readable transaction description.")
-    amount: int = Field(
-        description="Amount in CLP; negative=expense, positive=income."
+    amount: TransactionAmount = Field(
+        description=(
+            "Signed amount in the transaction's currency: negative=expense, "
+            "positive=income. At most 2 decimals (stored as NUMERIC(18, 2)); "
+            "CLP amounts are whole numbers and may be sent as integers."
+        ),
     )
     transaction_date: datetime.date = Field(
         description="Date the transaction occurred."
