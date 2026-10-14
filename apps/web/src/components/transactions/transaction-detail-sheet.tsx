@@ -50,6 +50,7 @@ export function TransactionDetailSheet({
       signal: controller.signal,
     })
       .then(async (res) => {
+        if (controller.signal.aborted) return;
         // A malformed id (400) cannot match any transaction either.
         if (res.status === 404 || res.status === 400) {
           setResult({ id: transactionId, status: "not_found" });
@@ -57,12 +58,11 @@ export function TransactionDetailSheet({
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data: TransactionDetail = await res.json();
+        if (controller.signal.aborted) return;
         setResult({ id: transactionId, status: "ok", data });
       })
-      .catch((error: unknown) => {
-        if (error instanceof DOMException && error.name === "AbortError") {
-          return;
-        }
+      .catch(() => {
+        if (controller.signal.aborted) return;
         setResult({ id: transactionId, status: "error" });
       });
     return () => controller.abort();

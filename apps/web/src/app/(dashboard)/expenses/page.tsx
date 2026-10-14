@@ -312,10 +312,16 @@ function ExpensesView() {
                       txn.id === selectedTxnId ? "selected" : undefined
                     }
                     className="cursor-pointer focus-visible:bg-muted/50 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
-                    aria-label={`Ver detalle: ${txn.description}`}
-                    onClick={() => {
+                    onClick={(e) => {
                       // Let users select and copy cell text without opening.
-                      if (window.getSelection()?.toString()) return;
+                      const sel = window.getSelection();
+                      if (
+                        sel?.toString() &&
+                        sel.anchorNode &&
+                        e.currentTarget.contains(sel.anchorNode)
+                      ) {
+                        return;
+                      }
                       selectTransaction(txn.id);
                     }}
                     onKeyDown={(e) => {
