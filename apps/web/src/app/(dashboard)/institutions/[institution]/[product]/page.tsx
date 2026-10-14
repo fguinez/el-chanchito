@@ -221,7 +221,7 @@ export default function ProductDetailPage() {
             <CardDescription>Cupo</CardDescription>
             <CardTitle className="text-2xl tabular-nums">
               {cupo != null ? (
-                formatCLP(cupo)
+                formatBalance(product.currency, cupo)
               ) : (
                 <span className="text-muted-foreground">—</span>
               )}

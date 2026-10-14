@@ -20,7 +20,8 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useSortableData } from "@/lib/use-sortable-data";
-import { formatCLP, formatPlainDateEs } from "@/lib/utils";
+import { formatAmount, formatCLP, formatPlainDateEs } from "@/lib/utils";
+import { clpTotals } from "@/lib/transactions";
 import { CsvImport } from "@/components/dashboard/CsvImport";
 import { TransactionDetailSheet } from "@/components/transactions/transaction-detail-sheet";
 import { useSelectedTransaction } from "@/components/transactions/use-selected-transaction";
@@ -32,6 +33,8 @@ interface Transaction {
   transactionDate: string;
   scheduledMonth: string | null;
   source: string;
+  /** Currency of the transaction's product; `amount` is in it. */
+  currency: string;
   notes: string | null;
 }
 
@@ -122,12 +125,12 @@ function ExpensesView() {
     }
   };
 
-  const totalExpenses = transactions
-    .filter((t) => t.amount < 0)
-    .reduce((sum, t) => sum + t.amount, 0);
-  const totalIncome = transactions
-    .filter((t) => t.amount > 0)
-    .reduce((sum, t) => sum + t.amount, 0);
+  // Peso totals over CLP rows only: a USD amount is not pesos.
+  const {
+    expenses: totalExpenses,
+    income: totalIncome,
+    otherCurrencyCount,
+  } = clpTotals(transactions);
 
   const getValue = useCallback(
     (txn: Transaction, key: TransactionSortKey): string | number | null => {
@@ -180,6 +183,13 @@ function ExpensesView() {
           </CardHeader>
         </Card>
       </div>
+      {otherCurrencyCount > 0 && (
+        <p className="text-sm text-muted-foreground">
+          {otherCurrencyCount === 1
+            ? "1 movimiento en otra moneda no se suma a estos totales."
+            : `${otherCurrencyCount} movimientos en otras monedas no se suman a estos totales.`}
+        </p>
+      )}
 
       {/* Add transaction form */}
       <Card>
@@ -302,7 +312,7 @@ function ExpensesView() {
                       }`}
                     >
                       {txn.amount < 0 ? "-" : "+"}
-                      {formatCLP(Math.abs(txn.amount))}
+                      {formatAmount(txn.currency, Math.abs(txn.amount))}
                     </TableCell>
                   </TableRow>
                 ))}
