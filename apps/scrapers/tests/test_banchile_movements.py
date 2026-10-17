@@ -1918,6 +1918,30 @@ class TestDialogSteps:
 
         assert "stale cartola (moneda CLP)" in caplog.text
 
+    def test_a_stale_cartola_costs_a_short_grace_not_the_budget(self):
+        page = _FakeDialogPage(cartolas={"CLP": {"movimientos": [_cartola_row()]}})
+        assert len(movements_mod._read_checking_movements(page, attempt=0)) == 1
+        page.accept_answers_remembered = True
+        started = _CLOCK.now
+
+        assert _read_usd_dialog(page) is None
+
+        budget = movements_mod._RENDER_TIMEOUTS_MS[0] / 1000
+        assert _CLOCK.now - started < budget
+
+    def test_a_reopened_account_already_read_is_warned_about(self, caplog):
+        """The dialog hands back account 1 at radio 2: stop, keep what was read."""
+        page = _FakeDialogPage(
+            radios={"CLP": [_CLP_RADIO, "Cuenta Vista 00-000-00000-03 (CLP)"]},
+            cartolas={"CLP": [{"movimientos": [_cartola_row()]}] * 2},
+        )
+
+        with caplog.at_level("WARNING", logger=movements_mod.__name__):
+            found = movements_mod._read_checking_movements(page, attempt=0)
+
+        assert len(found) == 1
+        assert "re-opened an account already read at radio 2 of 2" in caplog.text
+
     def test_the_usd_radio_is_found_by_its_label_not_its_position(self):
         page = _FakeDialogPage(radios={"USD": [_CLP_RADIO, _USD_RADIO]})
 

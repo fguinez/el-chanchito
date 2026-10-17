@@ -1022,7 +1022,7 @@ def cartola_mismatch(
         return f"stale cartola (moneda {moneda})"
     account = cartola_account_number(payload)
     if account and account in read_accounts:
-        return "stale cartola (an account already read)"
+        return _STALE_ACCOUNT
     return ""
 
 
@@ -1094,6 +1094,9 @@ _DIALOG_OPEN_WAIT_MS = 5_000
 _REOPEN_CLICKS = 3
 # Before Aceptar: how long an automatic cartola still in flight may take.
 _IN_FLIGHT_WAIT_MS = 10_000
+# After Aceptar: once only stale cartolas have come, how much longer to wait
+# for the right one before giving up (the full budget would cost 30-60 s).
+_STALE_GRACE_MS = 8_000
 # Leaving the movements view: how long the dashboard gets to render its card
 # shortcut (the next surface's first click), and the pause once it has.
 _HOME_READY_MS = 15_000
@@ -1251,7 +1254,9 @@ def _wait_for_cartola(
 
     Payloads that `cartola_mismatch` rejects are skipped and the wait goes on,
     so a late automatic fetch of the remembered account cannot stand in for
-    the one Aceptar asked for. A mismatched payload is never returned.
+    the one Aceptar asked for. A mismatched payload is never returned. Once
+    one has been seen the wait only lasts `_STALE_GRACE_MS` more: the SPA has
+    answered, just not with the account asked for.
     """
     deadline = time.monotonic() + timeout_ms / 1000
     checked = 0
@@ -1265,6 +1270,8 @@ def _wait_for_cartola(
             if not mismatch:
                 return payload, ""
             logger.debug("BanChile: skipping a captured cartola: %s", mismatch)
+            if not stale:
+                deadline = min(deadline, time.monotonic() + _STALE_GRACE_MS / 1000)
             stale = mismatch
         if not _on_portal(page):
             return None, "left the portal"
@@ -1299,6 +1306,7 @@ def _post_json(page, url: str, body: dict) -> tuple[int, Optional[dict]]:
 _STEP_OK = "ok"
 _STEP_ABSENT = "absent"  # the dialog has nothing in this currency
 _STEP_FAILED = "failed"
+_STALE_ACCOUNT = "stale cartola (an account already read)"
 
 
 @dataclass(frozen=True)
@@ -1323,6 +1331,8 @@ class _CartolaDrive:
     payload: Optional[dict] = None
     accounts: int = 0
     no_account: bool = False
+    # The dialog answered with an account this attempt already read.
+    repeated_account: bool = False
 
 
 def matching_option_index(option_texts: list[str], currency: str) -> Optional[int]:
@@ -1664,7 +1674,10 @@ def _open_cartola(
             page, capture, timeout_ms, currency, read_accounts
         )
         if payload is None:
-            return _drive_failed(currency, "cartola wait", reason, index, attempt, pick.count)
+            failed = _drive_failed(
+                currency, "cartola wait", reason, index, attempt, pick.count
+            )
+            return replace(failed, repeated_account=reason == _STALE_ACCOUNT)
         return _CartolaDrive(payload=payload, accounts=pick.count)
 
 
@@ -1789,20 +1802,18 @@ def _read_checking_accounts(
             accounts = drive.accounts
         payload = drive.payload
         if payload is None:
+            if drive.repeated_account:
+                logger.warning(
+                    "BanChile: the account dialog re-opened an account already "
+                    "read at radio %d of %d; stopping (the remaining accounts' "
+                    "movements were not read)",
+                    index + 1,
+                    accounts,
+                )
             if index == 0:
                 return None
             break
-        account = cartola_account_number(payload)
-        if account and account in seen_accounts:
-            logger.warning(
-                "BanChile: the account dialog re-opened an account already read "
-                "at radio %d of %d; stopping (the remaining accounts' movements "
-                "were not read)",
-                index + 1,
-                accounts,
-            )
-            break
-        seen_accounts.add(account)
+        seen_accounts.add(cartola_account_number(payload))
         movements, glosa_calls_left = _movements_from_cartola(
             page, payload, glosa_calls_left, currency
         )
