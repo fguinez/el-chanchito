@@ -38,11 +38,17 @@ function LegCell({ leg }: { leg: Leg }) {
   const productHref = `/institutions/${leg.institutionSlug}/${leg.productSlug}`;
   return (
     <>
-      <Link href={productHref} className="hover:underline">
-        <span className="block text-xs text-muted-foreground">
+      {/* TableCell is whitespace-nowrap, so the width cap and truncation
+          live on these blocks, not on the cell. */}
+      <Link
+        href={productHref}
+        className="block max-w-48 min-w-0 hover:underline sm:max-w-64"
+        title={`${leg.institutionName} · ${leg.productName}`}
+      >
+        <span className="block truncate text-xs text-muted-foreground">
           {leg.institutionName}
         </span>
-        {leg.productName}
+        <span className="block truncate">{leg.productName}</span>
       </Link>
       {leg.transactionId === null ? (
         <span className="mt-1 block text-xs text-muted-foreground">
@@ -51,11 +57,11 @@ function LegCell({ leg }: { leg: Leg }) {
       ) : (
         <Link
           href={hrefWithSearchParam(productHref, "", TXN_PARAM, leg.transactionId)}
-          className="mt-1 flex items-center gap-1 text-xs text-muted-foreground hover:underline"
-          title={leg.description}
+          className="mt-1 flex max-w-48 min-w-0 items-center gap-1 text-xs text-muted-foreground hover:underline sm:max-w-64"
+          title={`${formatPlainDateEs(leg.date)} · ${leg.description}`}
         >
           <Link2 className="h-3 w-3 shrink-0" />
-          <span className="truncate">
+          <span className="min-w-0 truncate">
             {formatPlainDateEs(leg.date)} · {leg.description}
           </span>
         </Link>
@@ -242,17 +248,17 @@ export function TransferSuggestionsCard({
               const options = perSource.get(s.source.transactionId) ?? 1;
               return (
                 <TableRow key={s.id}>
-                  <TableCell className="max-w-64">
+                  <TableCell>
                     <LegCell leg={s.source} />
                   </TableCell>
-                  <TableCell className="max-w-64">
+                  <TableCell>
                     <LegCell leg={s.target} />
                   </TableCell>
                   <TableCell className="text-right font-medium">
                     {formatCLP(s.amount)}
                   </TableCell>
-                  <TableCell className="max-w-80">
-                    <div className="flex flex-wrap gap-1">
+                  <TableCell>
+                    <div className="flex max-w-56 min-w-0 flex-wrap gap-1 whitespace-normal sm:max-w-80">
                       {s.evidence.map((item) => (
                         <Badge
                           key={item}
@@ -263,7 +269,7 @@ export function TransferSuggestionsCard({
                         </Badge>
                       ))}
                     </div>
-                    <span className="mt-1 block text-xs text-muted-foreground">
+                    <span className="mt-1 block max-w-56 text-xs whitespace-normal text-muted-foreground sm:max-w-80">
                       Puntaje {s.score}
                       {options > 1 && ` · una de ${options} opciones para este cargo`}
                     </span>
@@ -287,7 +293,7 @@ export function TransferSuggestionsCard({
                       </Button>
                     </div>
                     {errors[s.id] && (
-                      <p className="mt-1 text-xs text-destructive">
+                      <p className="mt-1 max-w-48 text-xs whitespace-normal text-destructive">
                         {errors[s.id]}
                       </p>
                     )}
