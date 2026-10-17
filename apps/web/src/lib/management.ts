@@ -135,7 +135,9 @@ function optionalText(
 // ---------------------------------------------------------------------------
 
 export type ProductPatch = {
-  name?: string;
+  /** A new display name, or null to reset it to the product's default name
+   *  (`products.default_name`, the name the scrapers give it). */
+  name?: string | null;
   slug?: string;
   parentProductId?: string | null;
   isActive?: boolean;
@@ -159,7 +161,8 @@ const PRODUCT_READ_ONLY: Record<string, string> = {
 };
 
 /**
- * Validate a product PATCH body. The slug is canonicalized with the same
+ * Validate a product PATCH body. `name: null` asks for the default name back
+ * (a blank string is still refused). The slug is canonicalized with the same
  * rules as generated slugs (so "Cuenta Ahorro" becomes "cuenta-ahorro");
  * uniqueness is checked later, against the institution's products.
  */
@@ -171,7 +174,9 @@ export function validateProductPatch(
   const checked = parsed.value;
   const out: ProductPatch = {};
 
-  if (checked.name !== undefined) {
+  if (checked.name === null) {
+    out.name = null;
+  } else if (checked.name !== undefined) {
     const name = requiredText(checked.name, "name", PRODUCT_NAME_MAX);
     if (!name.ok) return name;
     out.name = name.value;
@@ -239,6 +244,15 @@ export interface ProductRuleRow {
   currentBalance: string | number | null;
 }
 
+/** The product being edited: its rule row plus the name a reset restores. */
+export interface ProductEditRow extends ProductRuleRow {
+  defaultName: string;
+}
+
+/** The columns a product PATCH writes: a reset is already resolved to the
+ *  default name. */
+export type ProductChanges = Omit<ProductPatch, "name"> & { name?: string };
+
 /**
  * True when making `parentId` the parent of `productId` would close a loop,
  * i.e. `productId` already sits on `parentId`'s ancestor chain. A loop that
@@ -264,6 +278,7 @@ export function createsParentCycle(
  * institution (retired ghosts included, since they keep their slugs
  * reserved), and return only the columns that actually change.
  *
+ * - `name: null` resets the name to the product's default name.
  * - Deactivating a product with no balance is refused: inactive + no balance
  *   is exactly the retired-ghost shape (lib/retired-products), which the UI
  *   hides everywhere, so the product would vanish with no way to reactivate
@@ -273,13 +288,13 @@ export function createsParentCycle(
  *   product itself, and must not turn the parent links into a loop.
  */
 export function planProductUpdate(
-  product: ProductRuleRow,
+  product: ProductEditRow,
   patch: ProductPatch,
   institutionProducts: readonly ProductRuleRow[]
-): ManagementResult<ProductPatch> {
-  const changes: ProductPatch = {};
+): ManagementResult<ProductChanges> {
+  const changes: ProductChanges = {};
 
-  if (patch.name !== undefined) changes.name = patch.name;
+  if (patch.name !== undefined) changes.name = patch.name ?? product.defaultName;
 
   if (patch.isActive !== undefined && patch.isActive !== product.isActive) {
     if (!patch.isActive && product.currentBalance == null) {

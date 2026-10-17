@@ -728,8 +728,9 @@ the writer refreshes on every scrape. The management routes follow that
 split, with their rules in `lib/management.ts`:
 
 - `PATCH /api/institutions/{slug}/products/{product}` edits `name`, `slug`,
-  `parent_product_id`, `is_active` and `display_order`. Kind, currency and
-  external_ref are refused, since changing them would fork the product on its
+  `parent_product_id`, `is_active` and `display_order`; `name: null` copies
+  `default_name` back, so the name follows the scrapers again. Kind,
+  currency and external_ref are refused, since changing them would fork the product on its
   next scrape. A new slug is canonicalized with the generated-slug rules and
   must be free across the institution (retired products included); the
   `(account_id, slug)` index backstops a scraper minting the same slug

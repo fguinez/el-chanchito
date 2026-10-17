@@ -32,6 +32,8 @@ export interface ApiProduct {
   parentProductId: string | null;
   kind: ProductKind;
   name: string;
+  /** The scrapers' name for the product; `name` equals it until renamed. */
+  defaultName: string;
   slug: string;
   currency: string;
   currentBalance: number | null;
@@ -97,6 +99,7 @@ const institutionSelect = {
   parentProductId: products.parentProductId,
   kind: products.kind,
   productName: products.name,
+  productDefaultName: products.defaultName,
   productSlug: products.slug,
   currency: products.currency,
   currentBalance: products.currentBalance,
@@ -171,6 +174,7 @@ function buildInstitutions(
       parentProductId: row.parentProductId,
       kind: row.kind,
       name: row.productName,
+      defaultName: row.productDefaultName,
       slug: row.productSlug,
       currency: row.currency,
       currentBalance: balance,

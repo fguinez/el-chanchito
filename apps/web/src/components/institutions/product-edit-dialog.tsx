@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Pencil } from "lucide-react";
+import { Pencil, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
@@ -68,6 +68,12 @@ function parentOptionLabel(
   return extras.length > 0 ? `${name} (${extras.join(" · ")})` : name;
 }
 
+/** The name field's starting value: empty while the product uses its default
+ *  name, so the default shows as the placeholder instead. */
+function nameInputValue(product: InstitutionProduct): string {
+  return product.name === product.defaultName ? "" : product.name;
+}
+
 /**
  * "Editar" button + dialog for one product: display name, parent product,
  * display order and active flag in one form, and the slug in a separate one,
@@ -86,7 +92,7 @@ export function ProductEditDialog({
   const [open, setOpen] = useState(false);
   const [siblings, setSiblings] = useState<InstitutionProduct[] | null>(null);
 
-  const [name, setName] = useState(product.name);
+  const [name, setName] = useState(nameInputValue(product));
   const [parentId, setParentId] = useState(product.parentProductId ?? "");
   const [displayOrder, setDisplayOrder] = useState(String(product.displayOrder));
   const [isActive, setIsActive] = useState(product.isActive);
@@ -103,7 +109,7 @@ export function ProductEditDialog({
     setOpen(next);
     if (!next) return;
     // Start every opening from the product as it is now.
-    setName(product.name);
+    setName(nameInputValue(product));
     setParentId(product.parentProductId ?? "");
     setDisplayOrder(String(product.displayOrder));
     setIsActive(product.isActive);
@@ -131,16 +137,15 @@ export function ProductEditDialog({
     product.parentProductId != null &&
     !parentOptions.some((p) => p.id === product.parentProductId);
 
-  const shownAs = displayProductName({ ...product, name: name.trim() }, institution.name);
+  const defaultLabel = displayProductName(
+    { ...product, name: product.defaultName },
+    institution.name
+  );
   const cannotDeactivate = product.isActive && product.currentBalance == null;
 
   async function saveDetails(event: React.FormEvent) {
     event.preventDefault();
     const trimmed = name.trim();
-    if (!trimmed) {
-      setDetailsError("El nombre es obligatorio");
-      return;
-    }
     const order = Number(displayOrder);
     if (
       !displayOrder.trim() ||
@@ -152,7 +157,12 @@ export function ProductEditDialog({
     }
 
     const body: Record<string, unknown> = {};
-    if (trimmed !== product.name) body.name = trimmed;
+    // An empty field means the default name: `null` asks the API to reset.
+    if (!trimmed) {
+      if (product.name !== product.defaultName) body.name = null;
+    } else if (trimmed !== product.name) {
+      body.name = trimmed;
+    }
     if ((parentId || null) !== product.parentProductId) {
       body.parentProductId = parentId || null;
     }
@@ -228,19 +238,32 @@ export function ProductEditDialog({
             <label htmlFor="product-name" className="text-sm font-medium">
               Nombre
             </label>
-            <Input
-              id="product-name"
-              value={name}
-              maxLength={PRODUCT_NAME_MAX}
-              onChange={(e) => setName(e.target.value)}
-            />
-            {name.trim() && shownAs !== name.trim() && (
-              <p className="text-xs text-muted-foreground">
-                Se muestra como “{shownAs}”.
-              </p>
-            )}
+            <div className="relative">
+              <Input
+                id="product-name"
+                value={name}
+                placeholder={defaultLabel}
+                maxLength={PRODUCT_NAME_MAX}
+                className={name ? "pr-28" : undefined}
+                onChange={(e) => setName(e.target.value)}
+              />
+              {name && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="xs"
+                  className="absolute top-1/2 right-1.5 -translate-y-1/2 text-muted-foreground"
+                  title="Volver al nombre por defecto"
+                  onClick={() => setName("")}
+                >
+                  <RotateCcw />
+                  Restablecer
+                </Button>
+              )}
+            </div>
             <p className="text-xs text-muted-foreground">
-              Cambiar el nombre no cambia el slug ni la URL.
+              Vacío usa el nombre por defecto. Cambiar el nombre no cambia el
+              slug ni la URL.
             </p>
           </div>
 

@@ -90,6 +90,7 @@ export async function GET(_request: Request, { params }: Context) {
       parentProductId: products.parentProductId,
       kind: products.kind,
       productName: products.name,
+      productDefaultName: products.defaultName,
       productSlug: products.slug,
       currency: products.currency,
       currentBalance: products.currentBalance,
@@ -207,6 +208,7 @@ export async function GET(_request: Request, { params }: Context) {
       parentProductId: row.parentProductId,
       kind: row.kind,
       name: row.productName,
+      defaultName: row.productDefaultName,
       slug: row.productSlug,
       currency: row.currency,
       currentBalance,
@@ -266,7 +268,9 @@ async function loadParent(parentId: string): Promise<ProductParent | null> {
 /**
  * PATCH /api/institutions/[slug]/products/[product]: edit a product's display
  * metadata: `name`, `slug`, `parentProductId`, `isActive`, `displayOrder`
- * (see lib/management for the rules). A rename never touches the slug; a new
+ * (see lib/management for the rules). `name: null` resets the name to the
+ * product's `defaultName` (the scrapers' name, which it then follows again on
+ * later scrapes); a blank string is a 400. A rename never touches the slug; a new
  * slug moves the product's page URL, while monitors keep working since they
  * reference products by uuid. Returns the product's new identity; 400 for a
  * bad body, 404 for an unknown or retired product, 409 for a taken slug or a
@@ -304,6 +308,7 @@ export async function PATCH(request: NextRequest, { params }: Context) {
         .select({
           id: products.id,
           slug: products.slug,
+          defaultName: products.defaultName,
           parentProductId: products.parentProductId,
           isActive: products.isActive,
           currentBalance: products.currentBalance,
@@ -345,6 +350,7 @@ export async function PATCH(request: NextRequest, { params }: Context) {
           id: products.id,
           slug: products.slug,
           name: products.name,
+          defaultName: products.defaultName,
           parentProductId: products.parentProductId,
           isActive: products.isActive,
           displayOrder: products.displayOrder,

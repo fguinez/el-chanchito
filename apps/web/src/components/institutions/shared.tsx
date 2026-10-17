@@ -44,6 +44,8 @@ export interface InstitutionProduct {
   parentProductId: string | null;
   kind: ProductKind;
   name: string;
+  /** The scrapers' name for the product; `name` equals it until renamed. */
+  defaultName: string;
   slug: string;
   currency: string;
   currentBalance: number | null;

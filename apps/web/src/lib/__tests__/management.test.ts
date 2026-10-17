@@ -7,7 +7,7 @@ import {
   validateInstitutionPatch,
   validateProductPatch,
   type ManagementResult,
-  type ProductRuleRow,
+  type ProductEditRow,
 } from "@/lib/management";
 
 // All figures and identifiers below are synthetic (see the repo's personal
@@ -18,31 +18,35 @@ const LINE_ID = "33333333-3333-4333-8333-333333333333";
 const GHOST_ID = "44444444-4444-4444-8444-444444444444";
 const OTHER_INSTITUTION_ID = "99999999-9999-4999-8999-999999999999";
 
-const checking: ProductRuleRow = {
+const checking: ProductEditRow = {
   id: CHECKING_ID,
   slug: "cuenta-corriente",
+  defaultName: "Banco Sintetico - checking",
   parentProductId: null,
   isActive: true,
   currentBalance: "2500000.00000000",
 };
-const debit: ProductRuleRow = {
+const debit: ProductEditRow = {
   id: DEBIT_ID,
   slug: "tarjeta-de-debito",
+  defaultName: "Banco Sintetico - debit_card",
   parentProductId: CHECKING_ID,
   isActive: true,
   currentBalance: null,
 };
-const line: ProductRuleRow = {
+const line: ProductEditRow = {
   id: LINE_ID,
   slug: "linea-de-credito",
+  defaultName: "Banco Sintetico - line_of_credit",
   parentProductId: null,
   isActive: true,
   currentBalance: "1000000.00000000",
 };
 // A retired roll-up: inactive, balance stripped. Keeps its slug reserved.
-const ghost: ProductRuleRow = {
+const ghost: ProductEditRow = {
   id: GHOST_ID,
   slug: "inversiones",
+  defaultName: "Banco Sintetico - investment",
   parentProductId: null,
   isActive: false,
   currentBalance: null,
@@ -85,6 +89,11 @@ describe("validateProductPatch", () => {
     expect(value.slug).toBe("cuenta-ahorro-nunoa");
   });
 
+  it("accepts a null name as a reset to the default name", () => {
+    const value = expectValue(validateProductPatch({ name: null }));
+    expect(value).toEqual({ name: null });
+  });
+
   it("accepts null to clear the parent", () => {
     const value = expectValue(validateProductPatch({ parentProductId: null }));
     expect(value).toEqual({ parentProductId: null });
@@ -107,6 +116,7 @@ describe("validateProductPatch", () => {
     ["an empty body", {}, undefined],
     ["an unknown field", { nickname: "x" }, "nickname"],
     ["a blank name", { name: "   " }, "name"],
+    ["an empty name", { name: "" }, "name"],
     ["a non-string name", { name: 42 }, "name"],
     ["an overlong name", { name: "x".repeat(121) }, "name"],
     ["a slug with nothing keepable", { slug: "***" }, "slug"],
@@ -128,6 +138,13 @@ describe("planProductUpdate", () => {
       planProductUpdate(checking, { name: "Cuenta Corriente" }, institutionProducts)
     );
     expect(changes).toEqual({ name: "Cuenta Corriente" });
+  });
+
+  it("resets a null name to the product's default name", () => {
+    const changes = expectValue(
+      planProductUpdate(checking, { name: null }, institutionProducts)
+    );
+    expect(changes).toEqual({ name: "Banco Sintetico - checking" });
   });
 
   it("drops fields that already hold the requested value", () => {
