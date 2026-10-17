@@ -102,10 +102,11 @@ export default function HistoryPage() {
         body: JSON.stringify({ id }),
       });
       if (!res.ok) throw new Error("failed");
-      loadSnapshots();
     } catch {
       setActionError("No se pudo eliminar el registro histórico.");
     }
+    // Reload either way: a 404 means the row is already gone (another tab).
+    loadSnapshots();
   };
 
   const chartData = snapshots.map((s) => ({
