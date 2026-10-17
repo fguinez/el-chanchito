@@ -456,6 +456,16 @@ describe("PATCH /api/transactions/[id] field edits", () => {
     });
   });
 
+  it("preserves cents on a non-CLP amount (does not force an integer)", async () => {
+    queuedRows.push([{ id: TXN_ID }], [joinedRow()], []);
+    const res = await patch(TXN_ID, { amount: -1234.56 });
+    expect(res.status).toBe(200);
+    expect(setMock).toHaveBeenCalledWith({
+      amount: -1234.56,
+      updatedAt: expect.any(Date),
+    });
+  });
+
   it("marks a non-null categoryId as manually categorized", async () => {
     queuedRows.push([{ id: TXN_ID }], [joinedRow()], []);
     const res = await patch(TXN_ID, { categoryId: CATEGORY_ID });

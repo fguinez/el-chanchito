@@ -57,8 +57,12 @@ export function TransactionEditForm({
       setError("Revisa la descripción y el monto");
       return;
     }
-    const signedAmount =
-      (isExpense ? -1 : 1) * Math.abs(Math.round(parsedAmount));
+    // CLP rows are whole pesos; other currencies (USD, V023) keep their cents.
+    const magnitude =
+      txn.product.currency === "CLP"
+        ? Math.round(Math.abs(parsedAmount))
+        : Math.round(Math.abs(parsedAmount) * 100) / 100;
+    const signedAmount = (isExpense ? -1 : 1) * magnitude;
 
     // Only the fields that changed, so an unchanged category is not re-marked.
     const body: Record<string, unknown> = {};
