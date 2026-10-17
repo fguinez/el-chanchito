@@ -1611,6 +1611,31 @@ class TestDialogSteps:
         assert _read_usd_dialog(page) == []
         assert (page.reopen_clicks, page.chosen, page.picked) == (1, "USD", 0)
 
+    def test_no_account_leaves_no_panel_open(self):
+        """The currency panel stayed open behind a no-account return live."""
+        page = _FakeDialogPage(options=("(CLP)",))
+
+        assert _read_usd_dialog(page) == []
+        assert (page.select_open, page.dialog_open, page.on_movements) == (
+            False,
+            False,
+            False,
+        )
+
+    @pytest.mark.parametrize(
+        "page_kwargs",
+        [{}, {"accept_fails_for": {"USD"}}, {"cartola_fires": False}],
+        ids=["read", "accept-failed", "cartola-wait-failed"],
+    )
+    def test_every_usd_outcome_leaves_the_page_on_home(self, page_kwargs):
+        """The card legs start from the dashboard and must find it uncovered."""
+        page = _FakeDialogPage(**page_kwargs)
+
+        _read_usd_dialog(page)
+
+        assert not (page.select_open or page.dialog_open or page.on_movements)
+        assert page.url == banchile_web_mod._PORTAL_HOME
+
     def test_the_usd_radio_is_found_by_its_label_not_its_position(self):
         page = _FakeDialogPage(radios={"USD": [_CLP_RADIO, _USD_RADIO]})
 

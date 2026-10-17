@@ -1352,6 +1352,24 @@ def _click_account_radio(
         return _RadioPick(0, _STEP_FAILED, f"account radio raised {type(error).__name__}")
 
 
+def _leave_movements_view(page) -> None:
+    """Close whatever the dialog left open and return to the portal home.
+
+    A drive can stop with the currency panel or the modal still open (no
+    option for the currency, a failed step), and either would cover the next
+    surface's first click; the card legs also start from the dashboard. Escape
+    closes the panel, then the modal; it is harmless when nothing is open.
+    """
+    for _ in range(2):
+        try:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(_DIALOG_SETTLE_MS // 3)
+        except Exception:
+            logger.debug("BanChile: could not press Escape on the dialog", exc_info=True)
+            break
+    _recover_to_home(page)
+
+
 def _drive_failed(
     currency: str, step: str, reason: str, index: int, attempt: int, accounts: int = 0
 ) -> _CartolaDrive:
@@ -1510,6 +1528,17 @@ def _read_checking_movements(
     currency the customer holds no account in is an empty list too, so a
     customer without a USD account never sees a `partial` run for it.
     """
+    try:
+        return _read_checking_accounts(page, attempt, currency)
+    finally:
+        # Whatever happened, leave no overlay behind for the next surface.
+        _leave_movements_view(page)
+
+
+def _read_checking_accounts(
+    page, attempt: int, currency: str
+) -> Optional[list[BanChileMovement]]:
+    """`_read_checking_movements`' account loop, before the page is cleaned up."""
     budget = _budget(_RENDER_TIMEOUTS_MS, attempt)
     collected: list[BanChileMovement] = []
     seen_accounts: set[str] = set()
