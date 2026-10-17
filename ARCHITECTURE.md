@@ -281,6 +281,11 @@ scraper_runs                    transfer_date
 
 ## Scraper Architecture
 
+Adding an institution? A step-by-step guide (the acquisition technique
+ladder, an integration checklist, templates and a personal-data scan) lives in
+`.claude/skills/new-institution-scraper/`: start at its `SKILL.md`, which reads
+as plain Markdown and also works as a Claude Code skill.
+
 Scrapers are split into **agnostic backends** (how we scrape) and
 **institution scrapers** (what we scrape):
 
