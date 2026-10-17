@@ -463,4 +463,70 @@ describe.skipIf(!ADMIN_URL)("transfer suggestions (real PostgreSQL)", () => {
       autoLinked: [],
     });
   });
+
+  it("does not recreate a confirmed pair once its transfer is deleted", async () => {
+    await giveFeedlessProductsAFeed();
+    await seedSameDayPair();
+    const confirmed = await lib.confirmTransferSuggestion({
+      sourceTransactionId: ids.payDebit,
+      targetTransactionId: ids.payCredit,
+      targetProductId: null,
+    });
+    if (!confirmed.ok) throw new Error("confirm failed");
+
+    await transfersLib.deleteTransfer(confirmed.transferId);
+
+    // The saved pattern lifts the pair well past the bar; the dismissal wins.
+    expect(await lib.autoLinkSuggestions(TODAY)).toEqual({
+      suggestions: [],
+      autoLinked: [],
+    });
+  });
+
+  it("dismisses the pair a manual transfer lets go when its links are edited", async () => {
+    await giveFeedlessProductsAFeed();
+    await seedSameDayPair();
+    const confirmed = await lib.confirmTransferSuggestion({
+      sourceTransactionId: ids.payDebit,
+      targetTransactionId: ids.payCredit,
+      targetProductId: null,
+    });
+    if (!confirmed.ok) throw new Error("confirm failed");
+
+    const { db } = await import("@/lib/db");
+    await db.transaction((tx) =>
+      transfersLib.applyTransferLinks(tx, confirmed.transferId, {
+        toTransactionId: null,
+      })
+    );
+
+    const dismissed = await sql`
+      SELECT source_transaction_id, target_transaction_id
+      FROM dismissed_transfer_suggestions`;
+    expect(dismissed).toEqual([
+      { source_transaction_id: ids.payDebit, target_transaction_id: ids.payCredit },
+    ]);
+    expect((await lib.autoLinkSuggestions(TODAY)).autoLinked).toEqual([]);
+  });
+
+  it("will not auto-confirm a pair dismissed after the load picked it", async () => {
+    await seedSameDayPair();
+    await lib.dismissTransferSuggestion({
+      sourceTransactionId: ids.payDebit,
+      targetTransactionId: ids.payCredit,
+    });
+
+    const outcome = await lib.confirmTransferSuggestion(
+      {
+        sourceTransactionId: ids.payDebit,
+        targetTransactionId: ids.payCredit,
+        targetProductId: null,
+      },
+      { auto: true }
+    );
+
+    expect(outcome).toMatchObject({ ok: false, status: 409 });
+    const [count] = await sql`SELECT count(*)::int AS n FROM internal_transfers`;
+    expect(count.n).toBe(0);
+  });
 });

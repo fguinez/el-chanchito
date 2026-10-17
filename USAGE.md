@@ -514,9 +514,10 @@ one-sided suggestion, stays a manual choice, and one-sided suggestions are
 never linked on their own. The transfer is flagged `auto_linked` and shows an
 **Automática** badge in the transfer lists and the transaction detail panel.
 An automatic link saves no pattern, so it never pushes the next one past the
-bar. **Deshacer vínculo** (the undo arrow in the lists) deletes the transfer
-and dismisses that pair, so it is not linked again; editing its links by hand
-also dismisses the original pair and makes the transfer an ordinary one.
+bar. **Deshacer vínculo** (the undo arrow in the lists) deletes the transfer.
+Deleting any transfer that linked both rows, automatic or not, dismisses that
+pair so it is not linked again; editing a transfer's links by hand dismisses
+the pair it had too, and makes an automatic transfer an ordinary one.
 
 **Descartar** remembers the dismissal in `dismissed_transfer_suggestions`, so
 the suggestion does not come back. A dismissed pair is that exact pair of
