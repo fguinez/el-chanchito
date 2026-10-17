@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { checkTransferEndpoints, parseNewTransfer } from "@/lib/transfers";
+import { createTransferSchema } from "@/lib/api/schemas";
+import { checkTransferEndpoints } from "@/lib/transfers";
 
 // All figures and identifiers below are synthetic (see the repo's personal
 // data policy): fake uuids, fake CLP amounts.
@@ -19,9 +20,9 @@ function body(overrides: Record<string, unknown> = {}) {
   };
 }
 
-describe("parseNewTransfer", () => {
+describe("createTransferSchema", () => {
   it("accepts a complete body and normalizes it", () => {
-    const result = parseNewTransfer(
+    const result = createTransferSchema.safeParse(
       body({
         description: "  Aporte al fondo ",
         amount: 999999.6,
@@ -31,8 +32,8 @@ describe("parseNewTransfer", () => {
     );
 
     expect(result).toEqual({
-      ok: true,
-      value: {
+      success: true,
+      data: {
         description: "Aporte al fondo",
         amount: 1000000,
         fromProductId: CHECKING_ID,
@@ -44,7 +45,7 @@ describe("parseNewTransfer", () => {
   });
 
   it("accepts the legacy fromAccountId/toAccountId aliases", () => {
-    const result = parseNewTransfer(
+    const result = createTransferSchema.safeParse(
       body({
         fromProductId: undefined,
         toProductId: undefined,
@@ -54,8 +55,8 @@ describe("parseNewTransfer", () => {
     );
 
     expect(result).toMatchObject({
-      ok: true,
-      value: { fromProductId: CHECKING_ID, toProductId: FUND_ID },
+      success: true,
+      data: { fromProductId: CHECKING_ID, toProductId: FUND_ID },
     });
   });
 
@@ -79,13 +80,14 @@ describe("parseNewTransfer", () => {
     ["a non-ISO date", { transferDate: "15-09-2026" }, "transferDate"],
     ["non-string notes", { notes: 42 }, "notes"],
   ])("rejects %s", (_, overrides, field) => {
-    const result = parseNewTransfer(body(overrides));
+    const result = createTransferSchema.safeParse(body(overrides));
 
-    expect(result).toMatchObject({ ok: false, status: 400, field });
+    expect(result.success).toBe(false);
+    expect(result.error?.issues[0].path).toEqual([field]);
   });
 
   it("rejects a body that is not an object", () => {
-    expect(parseNewTransfer(null)).toMatchObject({ ok: false, status: 400 });
+    expect(createTransferSchema.safeParse(null).success).toBe(false);
   });
 });
 

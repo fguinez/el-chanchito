@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { asc } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { monitors } from "@/lib/db/schema";
-import { getClpRates } from "@/lib/rates";
+import { getRateBook } from "@/lib/rate-book";
 import { evaluateMonitor } from "@/lib/monitors/evaluate";
 import {
   loadAdjustmentsByMonitor,
@@ -16,6 +16,7 @@ import {
   referencedProductIds,
   type SparklinePoint,
 } from "@/lib/monitors/serialize";
+import { readJsonBody } from "@/lib/api/validation";
 
 /**
  * GET /api/monitors: every monitor with its display-form expressions and
@@ -28,7 +29,7 @@ export async function GET() {
   try {
     const [catalog, rates, rows, adjustments] = await Promise.all([
       loadProductCatalog(),
-      getClpRates(),
+      getRateBook(),
       db.select().from(monitors).orderBy(asc(monitors.createdAt)),
       loadAdjustmentsByMonitor(),
     ]);
@@ -74,12 +75,9 @@ export async function GET() {
  *  uuid-ref form and persist normalized to uuid-ref form. */
 export async function POST(request: NextRequest) {
   try {
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-    }
+    const read = await readJsonBody(request);
+    if (!read.ok) return read.response;
+    const body = read.body;
 
     const catalog = await loadProductCatalog();
     const result = validateMonitorInput(body, catalog);
@@ -92,7 +90,7 @@ export async function POST(request: NextRequest) {
 
     const [created] = await db.insert(monitors).values(result.value).returning();
 
-    const rates = await getClpRates();
+    const rates = await getRateBook();
     const evaluation = evaluateMonitor(created, {
       date: new Date(),
       products: catalog.byId,

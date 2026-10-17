@@ -1,8 +1,10 @@
 services:
   postgres:
     image: postgres:16-alpine
+    # Loopback only: the password defaults to a public value, so a LAN peer
+    # must never reach this port. The other services use the compose network.
     ports:
-      - "${POSTGRES_PORT:-5435}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5435}:5432"
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-finance}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-finance}
@@ -40,8 +42,10 @@ services:
     build:
       context: .
       dockerfile: apps/web/Dockerfile
+    # Loopback by default; set DASHBOARD_HOST=0.0.0.0 (or a LAN/VPN address)
+    # to reach it from another device (see USAGE.md > Reaching the dashboard).
     ports:
-      - "3000:3000"
+      - "${DASHBOARD_HOST:-127.0.0.1}:3000:3000"
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-finance}:${POSTGRES_PASSWORD:-finance}@postgres:5432/${POSTGRES_DB:-finance}
       # Internal-only control endpoint on the scraper service (see below).
@@ -79,12 +83,33 @@ services:
       # Cached Fintual web session (see `make fintual-login`); persisted in the
       # scraper_state volume so 2FA isn't re-triggered on every container start.
       FINTUAL_SESSION_FILE: ${FINTUAL_SESSION_FILE:-/data/fintual_session.json}
+      # Cached Banco de Chile web session, in the same volume so a restart
+      # doesn't force a fresh login (the bank throttles bursts of them).
+      BANCHILE_SESSION_FILE: ${BANCHILE_SESSION_FILE:-/data/banchile_session.json}
+      # Minimum minutes between full Banco de Chile logins, which also gates
+      # manual refreshes (empty = default 10).
+      BANCHILE_LOGIN_COOLDOWN_MINUTES: ${BANCHILE_LOGIN_COOLDOWN_MINUTES:-}
       # On-demand refresh: the web app POSTs to this port to trigger a scrape.
       SCRAPER_CONTROL_PORT: ${SCRAPER_CONTROL_PORT:-8080}
+      # All interfaces inside the container so `web` can reach it over the
+      # compose network (the service defaults to loopback outside Compose).
+      SCRAPER_CONTROL_HOST: 0.0.0.0
     # `expose` (not `ports`) keeps the control endpoint on the private compose
-    # network only — it's an unauthenticated trigger, never publish it (see #23).
+    # network only: it's an unauthenticated trigger, never publish it (see #23).
     expose:
       - "8080"
+    # GET /health answers 503 once the scheduler's heartbeat job has stopped
+    # running (a wedged event loop), which marks the container unhealthy.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/health' % os.environ['SCRAPER_CONTROL_PORT'], timeout=5)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     volumes:
       - scraper_state:/data
     depends_on:

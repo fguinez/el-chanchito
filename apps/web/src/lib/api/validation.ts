@@ -1,0 +1,131 @@
+// Request validation for the API routes: read a JSON body or the query
+// string, check it against a zod schema, and turn any failure into a 400 the
+// route returns as is. Failures share the monitors API's `{ error, field }`
+// shape and add every issue under `issues`.
+//
+// Every JSON body is read through `readJsonBody`, which refuses anything not
+// labelled `application/json` with a 415. That label is what makes a browser
+// preflight a cross-origin write: a form post or a `text/plain` fetch skips
+// the preflight, so accepting one would let any page write to the API.
+
+import { NextResponse, type NextRequest } from "next/server";
+import { z } from "zod";
+
+/** One schema failure; `path` uses the `rows[0].amount` form ("" for the root). */
+export interface ApiIssue {
+  path: string;
+  message: string;
+}
+
+/** Validated data, or the 400 response to return instead. */
+export type ParseResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; response: NextResponse };
+
+/** `["rows", 0, "amount"]` -> `rows[0].amount`. */
+export function formatPath(path: readonly PropertyKey[]): string {
+  return path.reduce<string>((out, key) => {
+    if (typeof key === "number") return `${out}[${key}]`;
+    return out ? `${out}.${String(key)}` : String(key);
+  }, "");
+}
+
+/** 400 `{ error, field?, issues }`; `error` names the first failing field so
+ *  it reads on its own in a toast or a curl session. */
+export function validationErrorResponse(error: z.ZodError): NextResponse {
+  const issues: ApiIssue[] = error.issues.map((issue) => ({
+    path: formatPath(issue.path),
+    message: issue.message,
+  }));
+  const first = issues[0] ?? { path: "", message: "Invalid request" };
+  return NextResponse.json(
+    {
+      error: first.path ? `${first.path}: ${first.message}` : first.message,
+      field: first.path || undefined,
+      issues,
+    },
+    { status: 400 }
+  );
+}
+
+/** The 400 body for a hand-checked failure, in the same `{ error, field, issues }`
+ *  shape as a schema failure. */
+export function failureBody({ error, field }: { error: string; field?: string }) {
+  return { error, field, issues: [{ path: field ?? "", message: error }] };
+}
+
+function check<S extends z.ZodType>(
+  schema: S,
+  input: unknown
+): ParseResult<z.output<S>> {
+  const parsed = schema.safeParse(input);
+  if (!parsed.success) {
+    return { ok: false, response: validationErrorResponse(parsed.error) };
+  }
+  return { ok: true, data: parsed.data };
+}
+
+/** `application/json`, parameters (`; charset=utf-8`) allowed. */
+export function isJsonContentType(raw: string | null | undefined): boolean {
+  if (!raw) return false;
+  return raw.split(";")[0].trim().toLowerCase() === "application/json";
+}
+
+/** 415 for a body that is not labelled JSON, or `null` when it is. */
+export function requireJsonContentType(
+  request: Pick<Request, "headers">,
+  init?: ResponseInit
+): NextResponse | null {
+  if (isJsonContentType(request.headers.get("content-type"))) return null;
+  return NextResponse.json(
+    { error: "Content-Type must be application/json" },
+    { ...init, status: 415 }
+  );
+}
+
+/** Read a JSON body: 415 unless it is labelled JSON, 400 if it is empty or
+ *  malformed. */
+export async function readJsonBody(
+  request: Request
+): Promise<{ ok: true; body: unknown } | { ok: false; response: NextResponse }> {
+  const unsupported = requireJsonContentType(request);
+  if (unsupported) return { ok: false, response: unsupported };
+  try {
+    return { ok: true, body: await request.json() };
+  } catch {
+    return {
+      ok: false,
+      response: NextResponse.json({ error: "Invalid JSON body" }, { status: 400 }),
+    };
+  }
+}
+
+/** Read the JSON body and check it; see `readJsonBody` for the 415 and 400. */
+export async function parseJsonBody<S extends z.ZodType>(
+  request: Request,
+  schema: S
+): Promise<ParseResult<z.output<S>>> {
+  const read = await readJsonBody(request);
+  if (!read.ok) return read;
+  return check(schema, read.body);
+}
+
+/** Check the query string; a repeated key keeps its last value. */
+export function parseSearchParams<S extends z.ZodType>(
+  params: URLSearchParams,
+  schema: S
+): ParseResult<z.output<S>> {
+  return check(schema, Object.fromEntries(params));
+}
+
+/** A route handler that only ever runs on a body that passed `schema`. */
+export function withJsonBody<S extends z.ZodType>(
+  schema: S,
+  handler: (body: z.output<S>, request: NextRequest) => Promise<Response>
+): (request: NextRequest) => Promise<Response> {
+  return async (request) => {
+    const parsed = await parseJsonBody(request, schema);
+    if (!parsed.ok) return parsed.response;
+    return handler(parsed.data, request);
+  };
+}

@@ -23,7 +23,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { SELECT_CLASS } from "@/components/ui/native-select";
 import { useSortableData } from "@/lib/use-sortable-data";
-import { formatCLP, formatPlainDateEs } from "@/lib/utils";
+import { formatCLP, formatPlainDateEs, parseNumberInput } from "@/lib/utils";
 import { TRANSFER_CURRENCY, type TransferProductRef } from "@/lib/transfers";
 import { Trash2, Check } from "lucide-react";
 
@@ -179,7 +179,8 @@ export default function TransfersPage() {
     !sameProduct;
 
   const handleAdd = async () => {
-    if (!canAdd) return;
+    const parsedAmount = parseNumberInput(amount);
+    if (!canAdd || parsedAmount === null) return;
     setSaving(true);
     setError(null);
     try {
@@ -188,7 +189,7 @@ export default function TransfersPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           description,
-          amount: parseInt(amount),
+          amount: Math.round(parsedAmount),
           fromProductId,
           toProductId,
           transferDate,

@@ -101,3 +101,32 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* Enter/exit motion for the Sheet primitive (components/ui/sheet.tsx). */
+@theme {
+  --animate-overlay-in: overlay-in 200ms ease-out;
+  --animate-overlay-out: overlay-out 150ms ease-in;
+  --animate-sheet-in-right: sheet-in-right 250ms ease-out;
+  --animate-sheet-out-right: sheet-out-right 200ms ease-in;
+  --animate-sheet-in-left: sheet-in-left 250ms ease-out;
+  --animate-sheet-out-left: sheet-out-left 200ms ease-in;
+
+  @keyframes overlay-in {
+    from { opacity: 0; }
+  }
+  @keyframes overlay-out {
+    to { opacity: 0; }
+  }
+  @keyframes sheet-in-right {
+    from { transform: translateX(100%); }
+  }
+  @keyframes sheet-out-right {
+    to { transform: translateX(100%); }
+  }
+  @keyframes sheet-in-left {
+    from { transform: translateX(-100%); }
+  }
+  @keyframes sheet-out-left {
+    to { transform: translateX(-100%); }
+  }
+}

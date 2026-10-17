@@ -37,6 +37,7 @@ from scrapers.base import (
     ScrapedProduct,
     ScrapedTransaction,
 )
+from scrapers.retry import send_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -183,13 +184,21 @@ class FintualScraper(BaseScraper):
         # Fintual doesn't expose individual buy/sell transactions via API.
         return []
 
+    async def _get_goals(self, client: httpx.AsyncClient) -> httpx.Response:
+        """GET /api/goals, retrying transient failures. A 401 is returned, not
+        retried: it means the session expired, which the caller handles."""
+        return await send_with_retry(
+            lambda: client.get(GOALS_URL, headers={"Accept": "application/json"}),
+            label="Fintual GET /api/goals",
+        )
+
     async def scrape_products(self) -> ProductScrapeResult:
         async with httpx.AsyncClient(
             timeout=30.0, follow_redirects=True, headers=self._base_headers()
         ) as client:
             await self._ensure_session(client)
 
-            resp = await client.get(GOALS_URL, headers={"Accept": "application/json"})
+            resp = await self._get_goals(client)
             if resp.status_code == 401:
                 # Session expired: refresh it once (auto when the account is our
                 # mailbox, otherwise surface the manual-login error).
@@ -197,9 +206,7 @@ class FintualScraper(BaseScraper):
                 if self._can_auto_login:
                     await self.login(self._email_code_provider)
                     self._load_session(client)
-                    resp = await client.get(
-                        GOALS_URL, headers={"Accept": "application/json"}
-                    )
+                    resp = await self._get_goals(client)
                 else:
                     raise FintualSessionError(
                         "Fintual session expired. Run `make fintual-login` to sign in again."

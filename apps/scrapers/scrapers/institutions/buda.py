@@ -5,9 +5,10 @@ Auth: HMAC-SHA384 signing.
   Headers: X-SBTC-APIKEY, X-SBTC-NONCE, X-SBTC-SIGNATURE
 
 Balances cover every wallet, one `crypto` product per currency. Transactions
-cover CLP deposits and withdrawals only: `transactions.amount` is integer CLP,
-and a crypto movement has no CLP amount without a price at its date, so crypto
-value history comes from the balance snapshots instead (issue #3).
+cover CLP deposits and withdrawals only: `transactions.amount` keeps two
+decimals (too few for crypto units) and a crypto movement has no CLP amount
+without a price at its date, so crypto value history comes from the balance
+snapshots instead (issue #3).
 """
 
 import base64
@@ -30,6 +31,7 @@ from scrapers.base import (
     ScrapedProduct,
     ScrapedTransaction,
 )
+from scrapers.retry import send_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +149,14 @@ class BudaScraper(BaseScraper):
             "X-SBTC-SIGNATURE": signature,
         }
 
+    async def _get(self, client: httpx.AsyncClient, path: str) -> httpx.Response:
+        """Signed GET with bounded retries; each attempt is re-signed, since
+        Buda rejects a nonce it has already seen."""
+        return await send_with_retry(
+            lambda: client.get(f"{BUDA_BASE}{path}", headers=self._sign("GET", path)),
+            label=f"Buda GET {path}",
+        )
+
     async def _pages(
         self, client: httpx.AsyncClient, tx_type: str
     ) -> AsyncIterator[list[dict]]:
@@ -161,8 +171,11 @@ class BudaScraper(BaseScraper):
                 f"/api/v2/currencies/{currency}/{tx_type}.json"
                 f"?per={PAGE_SIZE}&page={page}"
             )
-            resp = await client.get(
-                f"{BUDA_BASE}{path}", headers=self._sign("GET", path)
+            resp = await send_with_retry(
+                lambda p=path: client.get(
+                    f"{BUDA_BASE}{p}", headers=self._sign("GET", p)
+                ),
+                label=f"Buda GET {path}",
             )
             resp.raise_for_status()
             data = resp.json()
@@ -202,11 +215,8 @@ class BudaScraper(BaseScraper):
 
     async def scrape_products(self) -> ProductScrapeResult:
         """Fetch all currency balances as crypto products."""
-        path = "/api/v2/balances.json"
-        headers = self._sign("GET", path)
-
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(f"{BUDA_BASE}{path}", headers=headers)
+            resp = await self._get(client, "/api/v2/balances.json")
             resp.raise_for_status()
 
             products: list[ScrapedProduct] = []

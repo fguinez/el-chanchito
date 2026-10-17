@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import {
   accounts,
@@ -8,9 +8,14 @@ import {
 } from "@/lib/db/schema";
 import { alias } from "drizzle-orm/pg-core";
 import { eq, desc, inArray } from "drizzle-orm";
+import { failureBody, withJsonBody } from "@/lib/api/validation";
+import {
+  createTransferSchema,
+  idSchema,
+  updateTransferSchema,
+} from "@/lib/api/schemas";
 import {
   checkTransferEndpoints,
-  parseNewTransfer,
   type TransferProductRef,
 } from "@/lib/transfers";
 
@@ -83,49 +88,31 @@ export async function GET() {
  * products. Both `fromProductId` and `toProductId` are required; only legacy
  * rows lack them.
  */
-export async function POST(request: NextRequest) {
-  const parsed = parseNewTransfer(await request.json().catch(() => null));
-  if (!parsed.ok) {
-    return NextResponse.json(
-      { error: parsed.error, field: parsed.field },
-      { status: parsed.status }
-    );
-  }
-  const input = parsed.value;
-
+export const POST = withJsonBody(createTransferSchema, async (input) => {
   const found = await db
     .select({ id: products.id, currency: products.currency })
     .from(products)
     .where(inArray(products.id, [input.fromProductId, input.toProductId]));
   const endpoints = checkTransferEndpoints(input, found);
   if (!endpoints.ok) {
-    return NextResponse.json(
-      { error: endpoints.error, field: endpoints.field },
-      { status: endpoints.status }
-    );
+    return NextResponse.json(failureBody(endpoints), {
+      status: endpoints.status,
+    });
   }
 
   const [created] = await db.insert(internalTransfers).values(input).returning();
 
   return NextResponse.json(created, { status: 201 });
-}
+});
 
 /** PUT /api/transfers — update transfer status */
-export async function PUT(request: NextRequest) {
-  const body = await request.json();
+export const PUT = withJsonBody(updateTransferSchema, async (body) => {
   const { id, status, notes } = body;
-
-  if (!id) {
-    return NextResponse.json({ error: "Missing id" }, { status: 400 });
-  }
-
-  const updates: Record<string, unknown> = { updatedAt: new Date() };
-  if (status) updates.status = status;
-  if (notes !== undefined) updates.notes = notes;
 
   const [updated] = await db
     .update(internalTransfers)
-    .set(updates)
+    // Drizzle skips undefined keys, so an absent status or notes stays as is.
+    .set({ status, notes, updatedAt: new Date() })
     .where(eq(internalTransfers.id, id))
     .returning();
 
@@ -134,16 +121,10 @@ export async function PUT(request: NextRequest) {
   }
 
   return NextResponse.json(updated);
-}
+});
 
 /** DELETE /api/transfers — delete a transfer */
-export async function DELETE(request: NextRequest) {
-  const { id } = await request.json();
-
-  if (!id) {
-    return NextResponse.json({ error: "Missing id" }, { status: 400 });
-  }
-
+export const DELETE = withJsonBody(idSchema, async ({ id }) => {
   await db.delete(internalTransfers).where(eq(internalTransfers.id, id));
   return NextResponse.json({ ok: true });
-}
+});
