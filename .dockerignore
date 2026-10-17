@@ -22,3 +22,16 @@ dump_*.sql
 **/.venv
 **/__pycache__
 **/.pytest_cache
+**/.mypy_cache
+**/coverage
+**/*.pyc
+**/*.log
+**/.DS_Store
+
+# Agent and editor state: local settings, transcripts and memory.
+**/.claude
+**/.agents/*local*
+**/.gemini
+**/.cursor
+**/.idea
+**/.vscode

@@ -9,11 +9,13 @@ from threading import Thread
 
 import pytest
 
+import main
 from main import (
     _HEARTBEAT_STALE_SECONDS,
     _REFRESH_COOLDOWNS,
     Heartbeat,
     _make_control_handler,
+    _start_control_server,
 )
 from scrapers.backends import banchile_web
 
@@ -312,3 +314,72 @@ class TestRefreshCooldown:
 
 def test_banchile_is_gated_by_the_backend():
     assert _REFRESH_COOLDOWNS == {"banchile": banchile_web.login_cooldown_retry_after}
+
+
+@pytest.fixture
+def start_server(monkeypatch):
+    """Start the real control server on an ephemeral port; yield a launcher."""
+    servers = []
+    monkeypatch.setenv("SCRAPER_CONTROL_PORT", "0")
+
+    def start():
+        server = _start_control_server(FakeScheduler(["buda"]), {"buda"}, Heartbeat())
+        servers.append(server)
+        return server
+
+    yield start
+    for server in servers:
+        server.shutdown()
+        server.server_close()
+
+
+class TestControlServerBindHost:
+    """The unauthenticated trigger listens on loopback unless told otherwise."""
+
+    def test_binds_loopback_by_default(self, start_server, monkeypatch):
+        """With SCRAPER_CONTROL_HOST unset, no LAN peer can reach the trigger."""
+        monkeypatch.delenv("SCRAPER_CONTROL_HOST", raising=False)
+
+        server = start_server()
+
+        assert server.server_address[0] == "127.0.0.1"
+
+    def test_empty_host_falls_back_to_loopback(self, start_server, monkeypatch):
+        """An empty value (e.g. `SCRAPER_CONTROL_HOST=` in .env) is not 0.0.0.0."""
+        monkeypatch.setenv("SCRAPER_CONTROL_HOST", "")
+
+        server = start_server()
+
+        assert server.server_address[0] == "127.0.0.1"
+
+    def test_binds_the_configured_host(self, monkeypatch):
+        """Compose sets 0.0.0.0 so the web container can reach it.
+
+        The server class is faked: really binding a wildcard address would pop
+        up the macOS firewall prompt on every test run.
+        """
+        bound = []
+
+        class FakeServer:
+            def __init__(self, address, handler):
+                bound.append(address)
+
+            def serve_forever(self):
+                pass
+
+        monkeypatch.setattr(main, "ThreadingHTTPServer", FakeServer)
+        monkeypatch.setenv("SCRAPER_CONTROL_PORT", "8080")
+        monkeypatch.setenv("SCRAPER_CONTROL_HOST", "0.0.0.0")
+
+        _start_control_server(FakeScheduler(["buda"]), {"buda"}, Heartbeat())
+
+        assert bound == [("0.0.0.0", 8080)]
+
+    def test_stays_disabled_without_a_port(self, monkeypatch):
+        """No SCRAPER_CONTROL_PORT means no server, whatever the host."""
+        monkeypatch.delenv("SCRAPER_CONTROL_PORT", raising=False)
+        monkeypatch.setenv("SCRAPER_CONTROL_HOST", "0.0.0.0")
+
+        server = _start_control_server(FakeScheduler(["buda"]), {"buda"}, Heartbeat())
+
+        assert server is None

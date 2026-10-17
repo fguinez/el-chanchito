@@ -2,6 +2,11 @@
 // string, check it against a zod schema, and turn any failure into a 400 the
 // route returns as is. Failures share the monitors API's `{ error, field }`
 // shape and add every issue under `issues`.
+//
+// Every JSON body is read through `readJsonBody`, which refuses anything not
+// labelled `application/json` with a 415. That label is what makes a browser
+// preflight a cross-origin write: a form post or a `text/plain` fetch skips
+// the preflight, so accepting one would let any page write to the API.
 
 import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
@@ -54,21 +59,49 @@ function check<S extends z.ZodType>(
   return { ok: true, data: parsed.data };
 }
 
-/** Read the JSON body and check it; an empty or malformed body is a 400 too. */
-export async function parseJsonBody<S extends z.ZodType>(
-  request: Request,
-  schema: S
-): Promise<ParseResult<z.output<S>>> {
-  let body: unknown;
+/** `application/json`, parameters (`; charset=utf-8`) allowed. */
+export function isJsonContentType(raw: string | null | undefined): boolean {
+  if (!raw) return false;
+  return raw.split(";")[0].trim().toLowerCase() === "application/json";
+}
+
+/** 415 for a body that is not labelled JSON, or `null` when it is. */
+export function requireJsonContentType(
+  request: Pick<Request, "headers">,
+  init?: ResponseInit
+): NextResponse | null {
+  if (isJsonContentType(request.headers.get("content-type"))) return null;
+  return NextResponse.json(
+    { error: "Content-Type must be application/json" },
+    { ...init, status: 415 }
+  );
+}
+
+/** Read a JSON body: 415 unless it is labelled JSON, 400 if it is empty or
+ *  malformed. */
+export async function readJsonBody(
+  request: Request
+): Promise<{ ok: true; body: unknown } | { ok: false; response: NextResponse }> {
+  const unsupported = requireJsonContentType(request);
+  if (unsupported) return { ok: false, response: unsupported };
   try {
-    body = await request.json();
+    return { ok: true, body: await request.json() };
   } catch {
     return {
       ok: false,
       response: NextResponse.json({ error: "Invalid JSON body" }, { status: 400 }),
     };
   }
-  return check(schema, body);
+}
+
+/** Read the JSON body and check it; see `readJsonBody` for the 415 and 400. */
+export async function parseJsonBody<S extends z.ZodType>(
+  request: Request,
+  schema: S
+): Promise<ParseResult<z.output<S>>> {
+  const read = await readJsonBody(request);
+  if (!read.ok) return read;
+  return check(schema, read.body);
 }
 
 /** Check the query string; a repeated key keeps its last value. */

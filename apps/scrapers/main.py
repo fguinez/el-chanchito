@@ -419,24 +419,27 @@ def _start_control_server(
     """Start the internal HTTP control server when SCRAPER_CONTROL_PORT is set.
 
     This is an unauthenticated trigger meant to be reachable only from the
-    dashboard over the private container network (or localhost in host-dev).
-    Never publish the port publicly — see issue #23.
+    dashboard, so it binds SCRAPER_CONTROL_HOST, loopback by default (host-dev).
+    Docker Compose sets 0.0.0.0 so the web container can reach it over the
+    private compose network, which never publishes the port (see issue #23).
     """
     port = os.environ.get("SCRAPER_CONTROL_PORT")
     if not port:
         return None
 
+    host = os.environ.get("SCRAPER_CONTROL_HOST") or "127.0.0.1"
     handler = _make_control_handler(
         scheduler, scraper_keys, heartbeat, _REFRESH_COOLDOWNS
     )
-    server = ThreadingHTTPServer(("0.0.0.0", int(port)), handler)
+    server = ThreadingHTTPServer((host, int(port)), handler)
     thread = threading.Thread(
         target=server.serve_forever, name="scraper-control", daemon=True
     )
     thread.start()
     logger.info(
-        "Control server listening on :%s "
+        "Control server listening on %s:%s "
         "(POST /refresh[/{slug}], GET /scrapers, GET /health)",
+        host,
         port,
     )
     return server

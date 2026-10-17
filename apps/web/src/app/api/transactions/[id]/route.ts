@@ -16,6 +16,7 @@ import {
   validateLocationInput,
   type TransactionLocation,
 } from "@/lib/transaction-location";
+import { readJsonBody } from "@/lib/api/validation";
 
 // Next 16: dynamic segment params arrive as a Promise on the context arg.
 type Context = { params: Promise<{ id: string }> };
@@ -186,12 +187,9 @@ export async function PATCH(request: NextRequest, { params }: Context) {
     );
   }
 
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-  }
+  const read = await readJsonBody(request);
+  if (!read.ok) return read.response;
+  const body = read.body;
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return NextResponse.json(
       { error: "Body must be a JSON object" },
