@@ -84,6 +84,7 @@
         ┌────────────────────────────────────┐
         │         ScrapedTransaction         │
         │         ScrapedProduct             │
+        │         ScrapedExchangeRate        │
         │   (pydantic envelopes from         │
         │    packages/product-model)         │
         └──────────────┬─────────────────────┘
@@ -93,6 +94,7 @@
         │  DB Writer                         │
         │  - upsert_transactions()           │
         │  - upsert_product()                │
+        │  - upsert_exchange_rate()          │
         │  - start/finish_scraper_run()      │
         │  - ON CONFLICT DO NOTHING (dedup)  │
         └──────────────┬─────────────────────┘
@@ -256,7 +258,25 @@ scraper_runs                    transfer_date
   status
   transactions_imported
   error_message
+
+
+exchange_rates (V024)
+  id PK
+  institution_id FK (cascade)
+  product_id FK (cascade; NULL = institution-wide)
+  base_currency, quote_currency ('CLP')
+  rate NUMERIC(20,8), > 0     -- quote units per 1 base
+  source                      -- Spanish UI label
+  reported_as_of              -- date the institution prints, if any
+  observed_at                 -- last scrape that read it
+  UNIQUE (institution_id, COALESCE(product_id, nil uuid),
+          base_currency, quote_currency)
 ```
+
+`exchange_rates` holds the latest rate an institution applies, one row per
+scope and currency pair (no history): scrapers write it through
+`upsert_exchange_rate`, and the dashboard prefers a product's row over its
+institution's over the market reference when it converts that product.
 
 ## Migrations
 
@@ -277,6 +297,7 @@ scraper_runs                    transfer_date
 | `V013__retire_banchile_summed_inversiones_products.sql` | deactivates the summed BanChile term_deposit + investment products + drops their snapshots (replaced by per-holding products) |
 | `V022__monitor_adjustments.sql` | monitor_adjustments: dated variaciones that shift a monitor's thresholds until month end |
 | `V023__transactions_amount_numeric.sql` | `transactions.amount` integer -> NUMERIC(18, 2) so foreign-currency movements keep their cents; existing values unchanged |
+| `V024__exchange_rates.sql` | exchange_rates: the latest scraped rate per institution or product and currency pair |
 | `V025__transactions_location.sql` | optional transaction location: name, city, country, a range-checked lat/lng pair, and `location_is_manual`; no backfill |
 
 ## Scraper Architecture
@@ -292,12 +313,14 @@ Scrapers are split into **agnostic backends** (how we scrape) and
 ```
 apps/scrapers/scrapers/
   base.py                  # BaseScraper; re-exports the ScrapedProduct /
-                           # ScrapedTransaction envelopes from product_model
+                           # ScrapedTransaction / ScrapedExchangeRate
+                           # envelopes from product_model
   backends/
     email.py               # ImapSession (shared login + NOOP keepalive),
                            # EmailPattern, fetch_transactions_for_pattern
     banchile_web.py        # own BdC Playwright login -> fetch_balances()
     banchile_movements.py  # BdC movements + the shared session -> fetch_session()
+    banchile_fx.py         # BdC USD card exchange rate (fetch-only surface)
     bci_lider_web.py       # real Chrome over CDP -> scrape_card() / save_login_session()
   institutions/
     mach.py  mercadopago.py  tenpo.py       -> consume backends/email
@@ -338,6 +361,21 @@ parsing stays unusable on the final attempt, the depósitos/fondos surfaces
 fall back to a single summed roll-up per kind (the listing header total),
 shaped like the products issue #36 retired; the DB writer keeps the roll-up
 and per-holding representations mutually exclusive so neither double-counts.
+
+One more surface reads the rate the bank bills the USD card's debt at
+(`banchile_fx.py`, "tipo de cambio"): the "Tipo de cambio" of the international
+card payment page, which is neither lib/rates' market reference nor the
+observed dollar of the home's indicators. It is fetch-only and runs between the
+product and movement surfaces: one in-page script GETs the product selector,
+builds the body of the payment page's display call
+(`tarjeta-credito-digital/pago/calcular-pago-internacional`) from it and POSTs
+it, returning only the rate, its date and a status code, so the customer's
+name, RUT and card id never reach Python, logs or warnings. It never routes to
+the payment pages or calls a payment endpoint. The rate becomes a
+product-scoped `ScrapedExchangeRate` for the USD card, carried on
+`BanChileSessionResult.exchange_rates` (not merged into the products); a read
+that never yields a usable rate is a failed surface like the others. The
+balance-only fallback does not read it.
 
 BanChile is also the only source that reports two dates per movement, so
 `transactions` carries both (V019): `transaction_date` is when the movement
@@ -456,6 +494,7 @@ class BaseScraper(ABC):
     institution: str                             # "mach" | "banchile" | "buda" | ...
     scrape_transactions() -> list[ScrapedTransaction]
     scrape_products() -> ProductScrapeResult     # products + non-fatal warnings
+                                                 # + exchange rates read
 ```
 
 Both `method` and `institution` are stored per `scraper_runs` row, and
@@ -474,6 +513,18 @@ currency becomes its own `crypto` product. `upsert_product`
 shallow-merges `attributes`, always refreshes
 `products.current_balance`/`metrics`/`balance_as_of`, and appends a
 `product_snapshots` history row only when the metrics payload changed.
+
+`ScrapedExchangeRate` is the third envelope: a rate an institution applies
+(`base_currency` priced in `quote_currency`, CLP by default), scoped to one of
+its products through a `ProductRef` (kind, currency, external_ref) or
+institution-wide (`product` = None), with a Spanish `source` label and the
+`reported_as_of` date the institution prints. `run_scraper` writes a leg's
+`exchange_rates` after its products with `upsert_exchange_rate`, which looks the
+product up by the same identity rule but never creates anything: a rate naming
+an unknown institution or product raises `UnresolvedRateScope` and becomes a
+run warning (`partial`), as does a failed write. A re-scrape updates the row in
+place and moves `observed_at`, the "last read" the dashboard's staleness
+warning compares with today.
 
 | Institution | Method | Source | Auth | Schedule |
 |---|---|---|---|---|
@@ -537,7 +588,8 @@ products table per family), `generated/product-model.schema.json`
 with placement rationale). A codegen drift test under `make test-py`
 regenerates to a temp dir and diffs against the committed output, so the
 artifacts can't silently fall behind the registry. The `ScrapedProduct` /
-`ScrapedTransaction` envelopes are that wire contract in motion: today they
+`ScrapedTransaction` / `ScrapedExchangeRate` envelopes are that wire contract
+in motion: today they
 travel in-process from scraper to `db/writer.py`, and the plan is to put the
 same validation behind a REST ingest API so non-Python scrapers can submit
 data without direct DB access.
