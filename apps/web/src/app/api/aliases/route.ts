@@ -1,14 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import { asc, desc } from "drizzle-orm";
+import { asc, desc, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { descriptionAliases } from "@/lib/db/schema";
 import { failureBody, validateAliasInput } from "@/lib/aliases";
 import { readJsonBody } from "@/lib/api/validation";
 
 /**
- * GET /api/aliases: every alias in the order it applies (priority desc, oldest
- * first on ties, then id). Returns `{ id, matchDescription, matchType, alias,
- * priority, createdAt, updatedAt }` rows.
+ * GET /api/aliases: every alias in the order it applies (conditional first,
+ * then priority desc, oldest first on ties, then id). Returns `{ id, matchDescription, matchType, alias,
+ * priority, amountMin, amountMax, currency, createdAt, updatedAt }` rows.
  */
 export async function GET() {
   try {
@@ -16,6 +16,11 @@ export async function GET() {
       .select()
       .from(descriptionAliases)
       .orderBy(
+        desc(
+          sql`(${descriptionAliases.amountMin} IS NOT NULL
+            OR ${descriptionAliases.amountMax} IS NOT NULL
+            OR ${descriptionAliases.currency} IS NOT NULL)`
+        ),
         desc(descriptionAliases.priority),
         asc(descriptionAliases.createdAt),
         asc(descriptionAliases.id)
@@ -28,7 +33,8 @@ export async function GET() {
 }
 
 /** POST /api/aliases: create an alias `{ matchDescription, alias, matchType?,
- *  priority? }`. Resolved live (V035), so it relabels matching rows right away
+ *  priority?, amountMin?, amountMax?, currency? }`. An amount bound (V036)
+ *  requires a currency. Resolved live, so it relabels matching rows right away
  *  with no backfill. */
 export async function POST(request: NextRequest) {
   try {

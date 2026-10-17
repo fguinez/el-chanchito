@@ -24,6 +24,13 @@ export const ALIAS_MAX_LENGTH = 200;
 // shared form helpers (parsePriority, PRIORITY_ERROR) apply unchanged.
 export const ALIAS_PRIORITY_MIN = RULE_PRIORITY_MIN;
 export const ALIAS_PRIORITY_MAX = RULE_PRIORITY_MAX;
+// Amount bounds stay in the same magnitude as lib/api/schemas' moneyAmount, so
+// `n * 100` stays an exact integer and the value sits far above any real figure.
+export const AMOUNT_BOUND_LIMIT = 1e13;
+// A currency code is short; the DB column is TEXT (no enum) so any currency a
+// product carries (CLP, USD, EUR, BTC, ...) is accepted, scoped by the CHECK in
+// V036, not by a hard-coded list. 12 chars covers ISO codes and crypto tickers.
+export const CURRENCY_MAX_LENGTH = 12;
 
 /** An alias write, validated and normalized. */
 export type NormalizedAliasInput = {
@@ -31,6 +38,10 @@ export type NormalizedAliasInput = {
   matchType: MatchType;
   alias: string;
   priority: number;
+  // Optional amount condition (V036). null = unbounded on that side / no scope.
+  amountMin: number | null;
+  amountMax: number | null;
+  currency: string | null;
 };
 
 function fail(error: string, field?: string): ValidationFailure {
@@ -100,6 +111,94 @@ function normalizePriority(raw: unknown): ValidationResult<number> {
   return { ok: true, value: raw };
 }
 
+/** One amount bound: null (and absent/blank) passes as "no bound"; otherwise a
+ *  finite number rounded to 2 decimals (the NUMERIC(18,2) column) and within
+ *  +/- AMOUNT_BOUND_LIMIT. Accepts a JSON number (POST/PATCH body) or a numeric
+ *  string (preview query param), so writes and the preview share one check. The
+ *  `field` names the offending bound (amountMin/amountMax) in the error. */
+export function normalizeAmountBound(
+  raw: unknown,
+  field = "amount"
+): ValidationResult<number | null> {
+  if (raw === undefined || raw === null) return { ok: true, value: null };
+  let num: number;
+  if (typeof raw === "number") {
+    num = raw;
+  } else if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (trimmed === "") return { ok: true, value: null };
+    num = Number(trimmed);
+  } else {
+    return fail(`Field '${field}' must be a number or null`, field);
+  }
+  if (!Number.isFinite(num)) {
+    return fail(`Field '${field}' must be a finite number`, field);
+  }
+  const rounded = Math.round(num * 100) / 100;
+  if (rounded < -AMOUNT_BOUND_LIMIT || rounded > AMOUNT_BOUND_LIMIT) {
+    return fail(
+      `Field '${field}' must be between ${-AMOUNT_BOUND_LIMIT} and ${AMOUNT_BOUND_LIMIT}`,
+      field
+    );
+  }
+  return { ok: true, value: rounded };
+}
+
+/** A currency scope: null (and absent/blank) passes; otherwise a trimmed,
+ *  uppercased, non-empty code of at most CURRENCY_MAX_LENGTH characters. Not
+ *  restricted to a fixed list: the column is TEXT and products carry many
+ *  currencies; V036's CHECK only requires one to be present when a bound is. */
+export function normalizeCurrency(
+  raw: unknown,
+  field = "currency"
+): ValidationResult<string | null> {
+  if (raw === undefined || raw === null) return { ok: true, value: null };
+  if (typeof raw !== "string") {
+    return fail(`Field '${field}' must be a string or null`, field);
+  }
+  const value = raw.trim().toUpperCase();
+  if (value === "") return { ok: true, value: null };
+  if (value.length > CURRENCY_MAX_LENGTH) {
+    return fail(
+      `Field '${field}' must be at most ${CURRENCY_MAX_LENGTH} characters`,
+      field
+    );
+  }
+  return { ok: true, value };
+}
+
+/**
+ * Cross-field check for a COMPLETE amount condition (CREATE, or a PATCH merged
+ * over the stored row). Returns a failure, or null when the condition holds:
+ *   - both bounds present and amountMin > amountMax -> fail on 'amountMax'.
+ *   - any bound present and no currency -> fail on 'currency'.
+ * It mirrors V036's two CHECK constraints, so the API answers a friendly 400
+ * instead of letting the write hit a DB CHECK 500.
+ */
+export function amountConditionError(input: {
+  amountMin: number | null;
+  amountMax: number | null;
+  currency: string | null;
+}): ValidationFailure | null {
+  const { amountMin, amountMax, currency } = input;
+  if (amountMin !== null && amountMax !== null && amountMin > amountMax) {
+    return fail(
+      "'amountMax' must be greater than or equal to 'amountMin'",
+      "amountMax"
+    );
+  }
+  if (
+    (amountMin !== null || amountMax !== null) &&
+    (currency === null || currency === "")
+  ) {
+    return fail(
+      "'currency' is required when an amount condition is set",
+      "currency"
+    );
+  }
+  return null;
+}
+
 /**
  * Validate and normalize an alias write. Create mode (default) requires
  * `matchDescription` and `alias`, defaults `matchType` to 'exact' and
@@ -157,10 +256,59 @@ export function validateAliasInput(
     out.priority = 0;
   }
 
+  if (body.amountMin !== undefined) {
+    const amountMin = normalizeAmountBound(body.amountMin, "amountMin");
+    if (!amountMin.ok) return amountMin;
+    out.amountMin = amountMin.value;
+  } else if (!partial) {
+    out.amountMin = null;
+  }
+
+  if (body.amountMax !== undefined) {
+    const amountMax = normalizeAmountBound(body.amountMax, "amountMax");
+    if (!amountMax.ok) return amountMax;
+    out.amountMax = amountMax.value;
+  } else if (!partial) {
+    out.amountMax = null;
+  }
+
+  if (body.currency !== undefined) {
+    const currency = normalizeCurrency(body.currency);
+    if (!currency.ok) return currency;
+    out.currency = currency.value;
+  } else if (!partial) {
+    out.currency = null;
+  }
+
   if (partial && Object.keys(out).length === 0) {
     return fail(
-      "Request body must include at least one of: matchDescription, matchType, alias, priority"
+      "Request body must include at least one of: matchDescription, matchType, " +
+        "alias, priority, amountMin, amountMax, currency"
     );
   }
+
+  if (partial) {
+    // The row is incomplete here: the full currency-requires-a-bound check waits
+    // for the PATCH route to merge with the stored row (amountConditionError).
+    // Only the order of two bounds BOTH present in the patch is safe to check.
+    if (
+      out.amountMin != null &&
+      out.amountMax != null &&
+      out.amountMin > out.amountMax
+    ) {
+      return fail(
+        "'amountMax' must be greater than or equal to 'amountMin'",
+        "amountMax"
+      );
+    }
+  } else {
+    const conditionError = amountConditionError({
+      amountMin: out.amountMin ?? null,
+      amountMax: out.amountMax ?? null,
+      currency: out.currency ?? null,
+    });
+    if (conditionError) return conditionError;
+  }
+
   return { ok: true, value: out };
 }

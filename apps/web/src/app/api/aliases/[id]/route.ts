@@ -2,15 +2,22 @@ import { NextRequest, NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { descriptionAliases } from "@/lib/db/schema";
-import { UUID_RE, failureBody, validateAliasInput } from "@/lib/aliases";
+import {
+  UUID_RE,
+  amountConditionError,
+  failureBody,
+  validateAliasInput,
+} from "@/lib/aliases";
 import { readJsonBody } from "@/lib/api/validation";
 
 // Next 16: dynamic segment params arrive as a Promise on the context arg.
 type Context = { params: Promise<{ id: string }> };
 
 /** PATCH /api/aliases/[id]: partial update `{ matchDescription?, matchType?,
- *  alias?, priority? }`. Resolved live, so the change shows up everywhere at
- *  once with no backfill. */
+ *  alias?, priority?, amountMin?, amountMax?, currency? }`. The amount condition
+ *  is checked against the MERGED row (patch over the stored values), so a bound
+ *  without a currency answers a friendly 400 instead of a DB CHECK 500.
+ *  Resolved live, so the change shows up everywhere at once with no backfill. */
 export async function PATCH(request: NextRequest, { params }: Context) {
   try {
     const { id } = await params;
@@ -28,11 +35,32 @@ export async function PATCH(request: NextRequest, { params }: Context) {
     }
 
     const [existing] = await db
-      .select({ id: descriptionAliases.id })
+      .select({
+        id: descriptionAliases.id,
+        amountMin: descriptionAliases.amountMin,
+        amountMax: descriptionAliases.amountMax,
+        currency: descriptionAliases.currency,
+      })
       .from(descriptionAliases)
       .where(eq(descriptionAliases.id, id));
     if (!existing) {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+
+    // Validate the amount condition against the MERGED row, so clearing or
+    // setting one field cannot leave a bound without a currency (V036 CHECK).
+    const patch = result.value;
+    const conditionError = amountConditionError({
+      amountMin:
+        patch.amountMin !== undefined ? patch.amountMin : existing.amountMin,
+      amountMax:
+        patch.amountMax !== undefined ? patch.amountMax : existing.amountMax,
+      currency: patch.currency !== undefined ? patch.currency : existing.currency,
+    });
+    if (conditionError) {
+      return NextResponse.json(failureBody(conditionError), {
+        status: conditionError.status,
+      });
     }
 
     const [updated] = await db
