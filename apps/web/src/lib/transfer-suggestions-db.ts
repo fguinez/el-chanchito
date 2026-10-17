@@ -61,6 +61,7 @@ import {
 } from "@/lib/transfer-suggestions";
 import { TRANSFER_CURRENCY, checkTransferEndpoints, shiftDay } from "@/lib/transfers";
 import { applyTransferLinks, hasFeed, linkFieldOfViolation } from "@/lib/transfers-db";
+import { notDeleted } from "@/lib/db/transactions";
 
 // ---------------------------------------------------------------------------
 // Shared conditions
@@ -126,6 +127,8 @@ function legColumns(
     institutionName: institution.name,
     institutionSlug: institution.slug,
     date: txn.transactionDate,
+    // The suggestion leg shows the raw scraped description for now; the V034
+    // custom override is out of Phase 1's transfer scope.
     description: txn.description,
     amount: txn.amount,
     currency: product.currency,
@@ -553,7 +556,7 @@ async function confirmIn(
     })
     .from(transactions)
     // A soft-deleted row (V033) cannot take part in a transfer.
-    .where(and(inArray(transactions.id, ids), isNull(transactions.deletedAt)))
+    .where(and(inArray(transactions.id, ids), notDeleted))
     // Held until commit, as applyTransferLinks does: a row deleted mid-confirm
     // would otherwise fail the FK as a 500.
     .for("key share");
@@ -854,7 +857,7 @@ export async function dismissTransferSuggestion(
     .select({ id: transactions.id, amount: transactions.amount })
     .from(transactions)
     // A soft-deleted row (V033) is not a suggestion to dismiss.
-    .where(and(inArray(transactions.id, ids), isNull(transactions.deletedAt)));
+    .where(and(inArray(transactions.id, ids), notDeleted));
   const byId = new Map(found.map((row) => [row.id, row]));
   const source = byId.get(input.sourceTransactionId);
   if (!source) {

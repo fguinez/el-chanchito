@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { and, asc, count, desc, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, asc, count, desc, isNotNull, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { categories, categoryRules, transactions } from "@/lib/db/schema";
+import { notDeleted } from "@/lib/db/transactions";
 import { failureBody, validateCategoryInput } from "@/lib/categories";
 import { readJsonBody } from "@/lib/api/validation";
 
@@ -26,12 +27,7 @@ export async function GET() {
         .select({ categoryId: transactions.categoryId, n: count() })
         .from(transactions)
         // Soft-deleted rows (V033) are not counted against their category.
-        .where(
-          and(
-            isNotNull(transactions.categoryId),
-            isNull(transactions.deletedAt)
-          )
-        )
+        .where(and(isNotNull(transactions.categoryId), notDeleted))
         .groupBy(transactions.categoryId),
     ]);
 

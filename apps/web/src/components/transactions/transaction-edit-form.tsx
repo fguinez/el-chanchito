@@ -35,7 +35,12 @@ export function TransactionEditForm({
   // Products of any currency so the row's own product is always selectable.
   const { institutions } = useActiveProducts();
 
-  const [description, setDescription] = useState(txn.description);
+  // A scraped row (it has an external id) keeps the bank's `description`
+  // immutable; the box edits the one-time custom override instead (V034).
+  const scraped = txn.externalId !== null && txn.externalId !== "";
+  const [description, setDescription] = useState(
+    scraped ? (txn.customDescription ?? "") : txn.description
+  );
   const [amount, setAmount] = useState(String(Math.abs(txn.amount)));
   const [isExpense, setIsExpense] = useState(txn.amount < 0);
   const [transactionDate, setTransactionDate] = useState(txn.transactionDate);
@@ -53,7 +58,9 @@ export function TransactionEditForm({
 
   const save = async () => {
     const parsedAmount = parseNumberInput(amount);
-    if (!description.trim() || parsedAmount === null) {
+    // A scraped row may leave the box empty (that clears the custom override and
+    // restores the bank's text); a manual row still needs a description.
+    if ((!scraped && !description.trim()) || parsedAmount === null) {
       setError("Revisa la descripción y el monto");
       return;
     }
@@ -66,7 +73,16 @@ export function TransactionEditForm({
 
     // Only the fields that changed, so an unchanged category is not re-marked.
     const body: Record<string, unknown> = {};
-    if (description.trim() !== txn.description) body.description = description.trim();
+    const trimmedDescription = description.trim();
+    if (scraped) {
+      // Send the override only when it changed; empty clears it (null) so the
+      // row falls back to the bank's original. Never touch `description`.
+      if (trimmedDescription !== (txn.customDescription ?? "")) {
+        body.customDescription = trimmedDescription || null;
+      }
+    } else if (trimmedDescription !== txn.description) {
+      body.description = trimmedDescription;
+    }
     if (signedAmount !== txn.amount) body.amount = signedAmount;
     if (transactionDate !== txn.transactionDate)
       body.transactionDate = transactionDate;
@@ -111,12 +127,18 @@ export function TransactionEditForm({
     <div className="space-y-3">
       <div>
         <label className="mb-1 block text-sm text-muted-foreground">
-          Descripción
+          {scraped ? "Descripción personalizada" : "Descripción"}
         </label>
         <Input
           value={description}
           onChange={(e) => setDescription(e.target.value)}
+          placeholder={scraped ? txn.description : undefined}
         />
+        {scraped && (
+          <p className="mt-1 text-xs text-muted-foreground">
+            Deja vacío para usar la descripción original del banco.
+          </p>
+        )}
       </div>
 
       <div className="flex items-end gap-2">

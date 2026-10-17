@@ -171,6 +171,27 @@ export function TransactionDetailSheet({
   );
 }
 
+/** The row carries a non-empty one-time override (V034). */
+function hasCustomDescription(txn: TransactionDetail): boolean {
+  return txn.customDescription !== null && txn.customDescription !== "";
+}
+
+/** The row came from a scraper or import (it has an external id), so its
+ *  `description` is the stable scraped text an alias can key on (V035). */
+function isScraped(txn: TransactionDetail): boolean {
+  return txn.externalId !== null && txn.externalId !== "";
+}
+
+/** Whether to surface the scraped original: a custom override is in effect, or
+ *  a scraped row has one set (even if it happens to read the same). */
+function showOriginalDescription(txn: TransactionDetail): boolean {
+  const scraped = txn.externalId !== null && txn.externalId !== "";
+  return (
+    txn.description !== txn.displayDescription ||
+    (scraped && hasCustomDescription(txn))
+  );
+}
+
 function TransactionDetailBody({
   txn,
   onLocationSaved,
@@ -194,7 +215,7 @@ function TransactionDetailBody({
     <>
       <SheetHeader className="border-b">
         <SheetTitle className="text-lg leading-snug break-words">
-          {txn.description}
+          {txn.displayDescription}
         </SheetTitle>
         <p
           className={cn(
@@ -237,6 +258,26 @@ function TransactionDetailBody({
           )}
           {!editing && (
           <>
+          {showOriginalDescription(txn) && (
+            <Field label="Descripción original">
+              <span className="inline-flex flex-wrap items-center gap-2">
+                {txn.description}
+                {hasCustomDescription(txn) && (
+                  <Badge variant="secondary">personalizada</Badge>
+                )}
+              </span>
+            </Field>
+          )}
+          {isScraped(txn) && (
+            <Link
+              href={`/aliases?matchDescription=${encodeURIComponent(
+                txn.description
+              )}&matchType=exact`}
+              className="block text-xs text-muted-foreground underline-offset-4 hover:underline"
+            >
+              Crear alias para esta descripción
+            </Link>
+          )}
           <Field label="Fecha de transacción">
             {formatPlainDateEs(txn.transactionDate)}
           </Field>

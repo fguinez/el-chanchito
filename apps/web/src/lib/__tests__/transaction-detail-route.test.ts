@@ -89,6 +89,8 @@ function joinedRow(overrides: Record<string, unknown> = {}) {
     productId: PRODUCT_ID,
     categoryId: CATEGORY_ID,
     description: "Compra de prueba",
+    customDescription: null,
+    displayDescription: "Compra de prueba",
     amount: -999999,
     transactionDate: "2026-01-15",
     accountingDate: "2026-01-16",
@@ -174,6 +176,8 @@ describe("GET /api/transactions/[id]", () => {
       productId: PRODUCT_ID,
       categoryId: CATEGORY_ID,
       description: "Compra de prueba",
+      customDescription: null,
+      displayDescription: "Compra de prueba",
       amount: -999999,
       transactionDate: "2026-01-15",
       accountingDate: "2026-01-16",
@@ -324,6 +328,8 @@ describe("PATCH /api/transactions/[id]", () => {
     ["a non-object body", [1], undefined],
     ["an empty body", {}, undefined],
     ["a blank description", { description: "   " }, "description"],
+    ["a blank customDescription", { customDescription: "   " }, "customDescription"],
+    ["a non-string customDescription", { customDescription: 123 }, "customDescription"],
     ["a malformed categoryId", { categoryId: "nope" }, "categoryId"],
     ["a malformed productId", { productId: "nope" }, "productId"],
     ["a non-object location", { location: "Ciudad Ficticia" }, "location"],
@@ -422,22 +428,84 @@ describe("GET /api/transactions/[id] excludes soft-deleted rows", () => {
 });
 
 describe("PATCH /api/transactions/[id] field edits", () => {
-  it("edits description and returns the full refreshed detail", async () => {
-    // update.returning, then the detail + link reads of loadTransactionDetail.
-    queuedRows.push([{ id: TXN_ID }], [joinedRow({ description: "Nueva" })], []);
+  it("redirects a scraped row's description edit to the custom override", async () => {
+    // preload externalId, update.returning, then the detail + link reads.
+    queuedRows.push(
+      [{ externalId: "SYNTH-0001" }],
+      [{ id: TXN_ID }],
+      [joinedRow({ customDescription: "Nueva", displayDescription: "Nueva" })],
+      []
+    );
     const res = await patch(TXN_ID, { description: "  Nueva  " });
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.description).toBe("Nueva");
+    // The scraped text stays immutable; the display resolves to the override.
+    expect(body.description).toBe("Compra de prueba");
+    expect(body.customDescription).toBe("Nueva");
+    expect(body.displayDescription).toBe("Nueva");
     expect(body.id).toBe(TXN_ID);
     expect(setMock).toHaveBeenCalledWith({
-      description: "Nueva",
+      customDescription: "Nueva",
       updatedAt: expect.any(Date),
     });
     // The update itself is guarded against editing a soft-deleted row.
     const sql = updateWhereSql(0).toLowerCase();
     expect(sql).toContain("deleted_at");
     expect(sql).toContain("is null");
+  });
+
+  it("writes description directly on a manual row (no external id)", async () => {
+    // preload externalId (null => manual), update.returning, detail, link.
+    queuedRows.push(
+      [{ externalId: null }],
+      [{ id: TXN_ID }],
+      [joinedRow({ externalId: null, description: "Nueva" })],
+      []
+    );
+    const res = await patch(TXN_ID, { description: "  Nueva  " });
+    expect(res.status).toBe(200);
+    expect(setMock).toHaveBeenCalledWith({
+      description: "Nueva",
+      updatedAt: expect.any(Date),
+    });
+  });
+
+  it("sets the custom override from customDescription on a scraped row", async () => {
+    queuedRows.push(
+      [{ externalId: "SYNTH-0001" }],
+      [{ id: TXN_ID }],
+      [joinedRow({ customDescription: "Mi alias", displayDescription: "Mi alias" })],
+      []
+    );
+    const res = await patch(TXN_ID, { customDescription: "Mi alias" });
+    expect(res.status).toBe(200);
+    expect(setMock).toHaveBeenCalledWith({
+      customDescription: "Mi alias",
+      updatedAt: expect.any(Date),
+    });
+  });
+
+  it("clears the custom override with customDescription null", async () => {
+    queuedRows.push(
+      [{ externalId: "SYNTH-0001" }],
+      [{ id: TXN_ID }],
+      [joinedRow()],
+      []
+    );
+    const res = await patch(TXN_ID, { customDescription: null });
+    expect(res.status).toBe(200);
+    expect(setMock).toHaveBeenCalledWith({
+      customDescription: null,
+      updatedAt: expect.any(Date),
+    });
+  });
+
+  it("does not preload external id for a non-description edit", async () => {
+    // Only loadTransactionDetail's two reads; no preload select for an amount.
+    queuedRows.push([{ id: TXN_ID }], [joinedRow()], []);
+    const res = await patch(TXN_ID, { amount: 2500000 });
+    expect(res.status).toBe(200);
+    expect(selectMock).toHaveBeenCalledTimes(2);
   });
 
   it("edits amount, date and scheduledMonth together", async () => {
@@ -497,7 +565,8 @@ describe("PATCH /api/transactions/[id] field edits", () => {
   });
 
   it("strips unknown keys instead of rejecting them", async () => {
-    queuedRows.push([{ id: TXN_ID }], [joinedRow()], []);
+    // A manual row (externalId null): the description edit stays on description.
+    queuedRows.push([{ externalId: null }], [{ id: TXN_ID }], [joinedRow()], []);
     const res = await patch(TXN_ID, { description: "X", nope: "ignored" });
     expect(res.status).toBe(200);
     const values = setMock.mock.calls[0][0] as Record<string, unknown>;

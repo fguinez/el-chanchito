@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { products, transactions } from "@/lib/db/schema";
 import { resolveProductId } from "@/lib/db/resolve";
-import { eq, desc, and, isNull } from "drizzle-orm";
+import { displayDescription, notDeleted } from "@/lib/db/transactions";
+import { eq, desc, and } from "drizzle-orm";
 import { parseSearchParams, withJsonBody } from "@/lib/api/validation";
 import {
   createTransactionSchema,
@@ -25,7 +26,7 @@ export async function GET(request: NextRequest) {
   const productId = query.data.productId ?? query.data.accountId;
 
   // Soft-deleted rows (V033) never appear in any dashboard list.
-  const conditions = [isNull(transactions.deletedAt)];
+  const conditions = [notDeleted];
   if (month) {
     conditions.push(eq(transactions.scheduledMonth, month));
   }
@@ -36,7 +37,8 @@ export async function GET(request: NextRequest) {
   const rows = await db
     .select({
       id: transactions.id,
-      description: transactions.description,
+      // Show the custom override when set, else the scraped text (V034).
+      description: displayDescription,
       amount: transactions.amount,
       transactionDate: transactions.transactionDate,
       scheduledMonth: transactions.scheduledMonth,
