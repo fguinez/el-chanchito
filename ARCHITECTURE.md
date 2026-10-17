@@ -52,8 +52,8 @@
 │  │                                                           │  │
 │  │  ┌─────────┐ ┌──────┐ ┌───────────┐ ┌───────────────────┐ │  │
 │  │  │ Fintual │ │ Buda │ │ BanChile  │ │ MACH / MP / Tenpo │ │  │
-│  │  │  (6h)   │ │ (1h) │ │ BCI Lider │ │  shared IMAP 30m  │ │  │
-│  │  │         │ │      │ │ Santander │ │                   │ │  │
+│  │  │  (6h)   │ │Skipo │ │ BCI Lider │ │  shared IMAP 30m  │ │  │
+│  │  │         │ │ (1h) │ │ Santander │ │                   │ │  │
 │  │  │         │ │      │ │   (24h)   │ │                   │ │  │
 │  │  └────┬────┘ └──┬───┘ └─────┬─────┘ └─────────┬─────────┘ │  │
 │  │       │         │           │                 │           │  │
@@ -79,7 +79,7 @@
              ▼             ▼             ▼
         ┌──────────┐ ┌───────────┐ ┌───────────┐
         │ Fintual  │ │ BanChile  │ │   MACH    │
-        │   Buda   │ │ BCI Lider │ │ MP, Tenpo │
+        │Buda Skipo│ │ BCI Lider │ │ MP, Tenpo │
         │  (APIs)  │ │ Santander │ │  (IMAP)   │
         │          │ │ (browser) │ │           │
         └────┬─────┘ └─────┬─────┘ └─────┬─────┘
@@ -194,6 +194,10 @@ most specific first:
 2. **institution**: a row of the product's institution with `product_id` NULL;
 3. **provider**: `getClpRates()`, open.er-api fiat FX pivoted to CLP plus
    Buda's tickers for crypto, cached in memory for 5 minutes.
+
+Skipo's scraper fills the institution level for the coins it holds: it
+reads each coin's indicative SELL price in CLP from Skipo on every run, so a
+coin Buda's tickers don't cover still converts.
 
 `exchange_rates` (V024) holds the rates institutions publish themselves (a
 bank's "Tipo de cambio" for its card), read by their scrapers: one current
@@ -402,6 +406,7 @@ the same function over the rows that are still uncategorized.
 | `V025__transactions_location.sql` | optional transaction location: name, city, country, a range-checked lat/lng pair, and `location_is_manual`; no backfill |
 | `V028__internal_transfer_transaction_links.sql` | internal_transfers gain `from_transaction_id` / `to_transaction_id`: nullable, unique FKs (ON DELETE SET NULL) to the scraped rows a transfer accounts for; no backfill |
 | `V029__seed_santander_institution.sql` | seeds the Banco Santander institution row (upsert, so it also fixes a row the writer auto-created) |
+| `V030__seed_skipo_institution.sql` | seeds the `skipo` institution (display name, kind, site) |
 
 ## Scraper Architecture
 
@@ -431,7 +436,7 @@ apps/scrapers/scrapers/
     banchile.py                              -> banchile_movements (one login: tx + balances)
     bci_lider.py                             -> bci_lider_web (one CDP drive: tx + balances)
     santander.py                             -> santander_web (one headless login: tx + balance)
-    buda.py  fintual.py                      -> self-contained (HTTP APIs)
+    buda.py  fintual.py  skipo.py            -> self-contained (HTTP APIs)
 ```
 
 BanChile drives **one self-contained Playwright session per run** (issue #57,
@@ -629,6 +634,25 @@ attach to the CLP balance product. That product stays `crypto` rather than
 `units` figure already converts 1:1. V020 deleted the crypto movements the old
 scraper had truncated and stored on it as pesos.
 
+Skipo reads its official REST API (`api.skipo.com/v2`) with a personal
+read-only key sent as a bearer token; every call is a GET. The products leg
+classifies symbols through the asset catalog and reads the balances: CLP
+becomes the singleton `wallet` product (reported even at zero), each
+crypto or stablecoin row one `crypto` product per symbol, like Buda, also at
+zero units so a sold-out coin stops counting (a coin the response leaves out
+can't be zeroed; an "absent means zero" writer rule is a follow-up shared
+with Buda). Fiat other than CLP, tokenized stocks and unclassified symbols
+are left out and counted in a run warning. Each held coin is priced with
+`/v2/markets/{SYMBOL}-CLP/price?side=SELL` (the price a holding would
+liquidate at), which becomes an institution-wide `ScrapedExchangeRate` dated
+by its `pricedAt`; a coin without a CLP market or a readable price only gets
+a counted warning. The transactions leg reads only the CLP ledger, which
+without a date range returns the whole history newest first, paged (capped
+at 50 pages of 100): DEPOSIT and BUY (a coin sold for pesos) are
+money in, WITHDRAWAL and SELL (pesos spent on a coin) money out. Coin ledgers
+are skipped for Buda's reason. A 401 or 403 fails the leg with the HTTP status
+and the API's problem code, never the key.
+
 **Balance conventions & net worth** are registry-driven: each kind's `role`
 (asset/liability/none) and `balance_convention` (value/available/owed/units)
 live in `packages/product-model` — see `packages/product-model/PRODUCTS.md`
@@ -731,6 +755,7 @@ place (see [Exchange rates](#exchange-rates)).
 |---|---|---|---|---|
 | `fintual` | `http_api` | REST API (`/api/goals`) | Web session + e-mail 2FA (cached; `make fintual-login`) | 6h |
 | `buda` | `http_api` | REST API | HMAC-SHA384 signed requests | 1h |
+| `skipo` | `http_api` | REST API (`/v2`) | Read-only API key (bearer) | 1h |
 | `banchile` | `web` | Browser (Playwright: `banchile_web` + `banchile_movements`) | RUT + password | 24h |
 | `mach` | `email` | IMAP (Gmail) | Shared IMAP session | 30m |
 | `mercadopago` | `email` | IMAP (Gmail) | Shared IMAP session | 30m |
@@ -836,6 +861,7 @@ Transactions are deduplicated via `UNIQUE(product_id, external_id)`:
 
 - Fintual: no transactions (balance-only)
 - Buda: `buda_{deposit/withdrawal_id}` (CLP movements only)
+- Skipo: `skipo_{ledger_entry_id}` (CLP ledger only)
 - BanChile: the bank's own operation id where the portal exposes one, else a
   description-free fingerprint (issue #57). Three forms, each greppable:
   - `bch_op_{transaccionId}`: a checking movement's "ID Transacción", read
@@ -1158,8 +1184,8 @@ el-chanchito/
 │       ├── scrapers/
 │       │   ├── backends/             # email, banchile_web, banchile_movements, bci_lider_web,
 │       │   │                         #   santander_web
-│       │   └── institutions/         # 8 scrapers: banchile, bci_lider, buda, fintual,
-│       │                             #   mach, mercadopago, santander, tenpo
+│       │   └── institutions/         # 9 scrapers: banchile, bci_lider, buda, fintual,
+│       │                             #   mach, mercadopago, santander, skipo, tenpo
 │       ├── db/                       # Connection pool + writer + slug
 │       ├── tests/                    # pytest (conftest.py: per-test DB fixtures)
 │       ├── main.py                   # Entry point + scheduler + control endpoint
@@ -1170,7 +1196,7 @@ el-chanchito/
 │
 ├── packages/
 │   ├── db-schema/                    # Shared SQL migrations
-│   │   ├── migrations/               # V001 through V025, V027 through V029
+│   │   ├── migrations/               # V001 through V025, V027 through V030
 │   │   └── migrate.mjs               # Migration runner
 │   └── product-model/                # Product-kind registry (pydantic v2)
 │       ├── product_model/            # kinds, attributes, metrics, display, envelopes

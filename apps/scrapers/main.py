@@ -41,6 +41,7 @@ from scrapers.institutions import (
     MachScraper,
     MercadoPagoScraper,
     SantanderScraper,
+    SkipoScraper,
     TenpoScraper,
 )
 
@@ -218,6 +219,10 @@ def build_scrapers() -> dict[str, BaseScraper]:
         scrapers["buda"] = BudaScraper()
         logger.info("Buda scraper enabled")
 
+    if os.environ.get("SKIPO_API_KEY"):
+        scrapers["skipo"] = SkipoScraper()
+        logger.info("Skipo scraper enabled")
+
     if os.environ.get("BANCHILE_RUT") and os.environ.get("BANCHILE_PASSWORD"):
         scrapers["banchile"] = BanChileScraper()
         logger.info("BanChile scraper enabled")
@@ -260,6 +265,7 @@ _EMAIL_INTERVAL_MINUTES = 30
 _SCHEDULES: dict[str, dict] = {
     "fintual":      {"hours": 6,  "label": "Fintual API (every 6h)"},
     "buda":         {"hours": 1,  "label": "Buda API (every 1h)"},
+    "skipo":        {"hours": 1,  "label": "Skipo API (every 1h)"},
     "banchile":     {"hours": 24, "label": "BanChile (daily)"},
     "bci_lider":    {"hours": 24, "label": "BCI Lider (daily)"},
     "santander":    {"hours": 24, "label": "Santander (daily)"},

@@ -8,7 +8,8 @@ drives its own Playwright login for both legs
 the BCI Lider scraper consumes `scrapers.backends.bci_lider_web` (a real Chrome driven
 over CDP) for both legs, and the Santander scraper consumes
 `scrapers.backends.santander_web` (a headless login whose data comes from the
-SPA's own JSON) for both legs. Buda and Fintual are self-contained (HTTP APIs).
+SPA's own JSON) for both legs. Buda, Fintual and Skipo are self-contained
+(HTTP APIs).
 """
 
 from scrapers.institutions.banchile import BanChileScraper
@@ -18,6 +19,7 @@ from scrapers.institutions.fintual import FintualScraper
 from scrapers.institutions.mach import MachScraper
 from scrapers.institutions.mercadopago import MercadoPagoScraper
 from scrapers.institutions.santander import SantanderScraper
+from scrapers.institutions.skipo import SkipoScraper
 from scrapers.institutions.tenpo import TenpoScraper
 
 __all__ = [
@@ -28,5 +30,6 @@ __all__ = [
     "MachScraper",
     "MercadoPagoScraper",
     "SantanderScraper",
+    "SkipoScraper",
     "TenpoScraper",
 ]
