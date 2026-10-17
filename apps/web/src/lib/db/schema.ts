@@ -238,6 +238,23 @@ export const transactions = pgTable(
       .notNull()
       .default(false),
     notes: text("notes"),
+    // Optional location (V025), every column independent; the coordinates are
+    // set together or not at all. Scrapers only fill NULL columns, and never
+    // touch a row whose location the user set or cleared (locationIsManual).
+    locationName: text("location_name"),
+    locationCity: text("location_city"),
+    locationCountry: text("location_country"),
+    locationLatitude: numeric("location_latitude", {
+      precision: 9,
+      scale: 6,
+      mode: "number",
+    }),
+    locationLongitude: numeric("location_longitude", {
+      precision: 9,
+      scale: 6,
+      mode: "number",
+    }),
+    locationIsManual: boolean("location_is_manual").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

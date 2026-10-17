@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // queued Error). No Postgres needed.
 const queuedRows: (unknown[] | Error)[] = [];
 const selectMock = vi.fn();
+const setMock = vi.fn();
 
 vi.mock("@/lib/db", () => {
   const chain: Record<string, unknown> = {};
@@ -15,17 +16,33 @@ vi.mock("@/lib/db", () => {
     const next = queuedRows.shift() ?? [];
     return next instanceof Error ? Promise.reject(next) : Promise.resolve(next);
   };
+  // PATCH: update(table).set(values).where(...).returning(...) resolves to the
+  // next queued rows, like `.limit()` above.
+  const updateChain: Record<string, unknown> = {
+    set: (values: unknown) => {
+      setMock(values);
+      return updateChain;
+    },
+    where: () => updateChain,
+    returning: () => {
+      const next = queuedRows.shift() ?? [];
+      return next instanceof Error
+        ? Promise.reject(next)
+        : Promise.resolve(next);
+    },
+  };
   return {
     db: {
       select: (...args: unknown[]) => {
         selectMock(...args);
         return chain;
       },
+      update: () => updateChain,
     },
   };
 });
 
-const { GET } = await import("@/app/api/transactions/[id]/route");
+const { GET, PATCH } = await import("@/app/api/transactions/[id]/route");
 
 // Synthetic fixtures only: fake ids, descriptions and amounts.
 const TXN_ID = "00000000-0000-4000-8000-000000000001";
@@ -48,6 +65,12 @@ function joinedRow(overrides: Record<string, unknown> = {}) {
     isInternalTransfer: false,
     isManuallyCategorized: true,
     notes: "Nota de prueba",
+    locationName: null,
+    locationCity: null,
+    locationCountry: null,
+    locationLatitude: null,
+    locationLongitude: null,
+    locationIsManual: false,
     createdAt: new Date("2026-01-15T12:00:00.000Z"),
     updatedAt: new Date("2026-01-16T12:00:00.000Z"),
     productName: "Cuenta de prueba",
@@ -71,6 +94,7 @@ function call(id: string) {
 beforeEach(() => {
   queuedRows.length = 0;
   selectMock.mockReset();
+  setMock.mockReset();
 });
 
 afterEach(() => {
@@ -123,6 +147,8 @@ describe("GET /api/transactions/[id]", () => {
       isInternalTransfer: false,
       isManuallyCategorized: true,
       notes: "Nota de prueba",
+      location: null,
+      locationIsManual: false,
       createdAt: "2026-01-15T12:00:00.000Z",
       updatedAt: "2026-01-16T12:00:00.000Z",
       product: {
@@ -171,5 +197,149 @@ describe("GET /api/transactions/[id]", () => {
     expect(res.status).toBe(500);
     expect(await res.json()).toEqual({ error: "Internal error" });
     expect(consoleError).toHaveBeenCalledOnce();
+  });
+});
+
+describe("GET /api/transactions/[id] location", () => {
+  it("returns the stored location fields (synthetic place)", async () => {
+    queuedRows.push([
+      joinedRow({
+        locationName: "Tienda Ficticia",
+        locationCity: "Ciudad Ficticia",
+        locationCountry: "XX",
+        locationLatitude: -33,
+        locationLongitude: -70,
+        locationIsManual: true,
+      }),
+    ]);
+    const body = await (await call(TXN_ID)).json();
+    expect(body.location).toEqual({
+      name: "Tienda Ficticia",
+      city: "Ciudad Ficticia",
+      country: "XX",
+      latitude: -33,
+      longitude: -70,
+    });
+    expect(body.locationIsManual).toBe(true);
+  });
+
+  it("returns a partial location with the other fields null", async () => {
+    queuedRows.push([joinedRow({ locationCity: "Ciudad Ficticia" })]);
+    const body = await (await call(TXN_ID)).json();
+    expect(body.location).toEqual({
+      name: null,
+      city: "Ciudad Ficticia",
+      country: null,
+      latitude: null,
+      longitude: null,
+    });
+  });
+});
+
+function patch(id: string, body: unknown) {
+  return PATCH(
+    new Request(`https://dashboard.example/api/transactions/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    }) as never,
+    { params: Promise.resolve({ id }) }
+  );
+}
+
+describe("PATCH /api/transactions/[id]", () => {
+  it("rejects a malformed id before writing", async () => {
+    const res = await patch("not-a-uuid", { location: null });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: expect.any(String), field: "id" });
+    expect(setMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["invalid JSON", "{", undefined],
+    ["a non-object body", [1], undefined],
+    ["a missing location", {}, "location"],
+    ["another field", { location: null, notes: "x" }, "notes"],
+    ["a non-object location", { location: "Ciudad Ficticia" }, "location"],
+    ["an unknown location key", { location: { street: "x" } }, "location.street"],
+    ["a non-string city", { location: { city: 7 } }, "location.city"],
+    ["an overlong name", { location: { name: "x".repeat(201) } }, "location.name"],
+    ["a latitude out of range", { location: { latitude: 90.5, longitude: 0 } }, "location.latitude"],
+    ["a longitude out of range", { location: { latitude: 0, longitude: -181 } }, "location.longitude"],
+    ["a string coordinate", { location: { latitude: "-33", longitude: -70 } }, "location.latitude"],
+    ["a latitude alone", { location: { latitude: -33 } }, "location.longitude"],
+    ["a longitude alone", { location: { longitude: -70 } }, "location.latitude"],
+  ])("rejects %s with 400", async (_name, body, field) => {
+    const res = await patch(TXN_ID, body);
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.error).toEqual(expect.any(String));
+    expect(json.field).toBe(field);
+    expect(setMock).not.toHaveBeenCalled();
+  });
+
+  it("stores a trimmed location and marks it manual", async () => {
+    queuedRows.push([{ id: TXN_ID }]);
+    const res = await patch(TXN_ID, {
+      location: {
+        name: "  Tienda Ficticia ",
+        city: "Ciudad Ficticia",
+        country: " ",
+        latitude: -33.0000004,
+        longitude: -70,
+      },
+    });
+    expect(res.status).toBe(200);
+    const location = {
+      name: "Tienda Ficticia",
+      city: "Ciudad Ficticia",
+      country: null,
+      latitude: -33,
+      longitude: -70,
+    };
+    expect(await res.json()).toEqual({ location, locationIsManual: true });
+    expect(setMock).toHaveBeenCalledWith({
+      locationName: "Tienda Ficticia",
+      locationCity: "Ciudad Ficticia",
+      locationCountry: null,
+      locationLatitude: -33,
+      locationLongitude: -70,
+      locationIsManual: true,
+      updatedAt: expect.any(Date),
+    });
+  });
+
+  it("clears the location with null, still marking it manual", async () => {
+    queuedRows.push([{ id: TXN_ID }]);
+    const res = await patch(TXN_ID, { location: null });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ location: null, locationIsManual: true });
+    expect(setMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        locationName: null,
+        locationLatitude: null,
+        locationIsManual: true,
+      })
+    );
+  });
+
+  it("treats an all-blank location as a clear", async () => {
+    queuedRows.push([{ id: TXN_ID }]);
+    const res = await patch(TXN_ID, { location: { city: " ", name: "" } });
+    expect(await res.json()).toEqual({ location: null, locationIsManual: true });
+  });
+
+  it("returns 404 for an unknown id", async () => {
+    queuedRows.push([]);
+    const res = await patch(TXN_ID, { location: { city: "Ciudad Ficticia" } });
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 500 when the update fails", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    queuedRows.push(new Error("synthetic connection failure"));
+    const res = await patch(TXN_ID, { location: null });
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "Internal error" });
   });
 });
