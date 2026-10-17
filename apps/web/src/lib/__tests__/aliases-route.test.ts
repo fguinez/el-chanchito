@@ -230,6 +230,30 @@ describe("PATCH /api/aliases/[id]", () => {
     expect(argOf(queryOf("update"), "set")).toMatchObject({ amountMin: 1000000 });
   });
 
+  it("rejects a merged bound order that puts the minimum above the stored maximum (400)", async () => {
+    // Stored row has only a maximum; the patch sets a higher minimum, so the
+    // MERGED range is inverted. Caught before the write, not by a DB CHECK 500.
+    fake.respondWith((query) => {
+      if (query.op === "select") {
+        return [
+          { id: ALIAS_ID, amountMin: null, amountMax: 1000000, currency: "CLP" },
+        ];
+      }
+      return [];
+    });
+
+    const res = await PATCH(
+      jsonRequest(`https://dashboard.example/api/aliases/${ALIAS_ID}`, "PATCH", {
+        amountMin: 2500000,
+      }),
+      { params: Promise.resolve({ id: ALIAS_ID }) }
+    );
+
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toMatchObject({ field: "amountMax" });
+    expect(fake.queries.some((q) => q.op === "update")).toBe(false);
+  });
+
   it("answers 404 for an unknown id and never updates", async () => {
     fake.respondWith(() => []); // the existence select finds nothing
 
