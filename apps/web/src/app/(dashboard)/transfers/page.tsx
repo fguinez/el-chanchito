@@ -181,8 +181,9 @@ export default function TransfersPage() {
     loadTransfers();
   }, []);
 
-  // Any change to the transfers can change the suggestions (a deleted or
-  // unlinked transfer frees its rows), so both lists reload together.
+  // Deleting a transfer or changing its links can free rows for the
+  // suggestions, so those reload both lists; adding a transfer or resolving
+  // one by hand links nothing and reloads only the transfers.
   const [suggestionsKey, setSuggestionsKey] = useState(0);
   const refreshAll = () => {
     loadTransfers();
@@ -268,7 +269,7 @@ export default function TransfersPage() {
       setDescription("");
       setAmount("");
       setNotes("");
-      refreshAll();
+      loadTransfers();
     } catch {
       setError("No se pudo registrar el movimiento");
     } finally {
@@ -282,7 +283,7 @@ export default function TransfersPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id, status: "resolved" }),
     });
-    refreshAll();
+    loadTransfers();
   };
 
   const handleDelete = async (id: string) => {
