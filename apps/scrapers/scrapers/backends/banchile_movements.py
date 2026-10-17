@@ -84,23 +84,22 @@ from typing import Callable, Optional
 
 from scrapers.backends.banchile_fx import read_exchange_rate_surface
 from scrapers.backends.banchile_web import (
-    DEFAULT_TIMEOUT,
     _CARD_LINK_SELECTORS,
     _CARD_LINK_TIMEOUTS_MS,
     _PORTAL_HOST,
     _RENDER_TIMEOUTS_MS,
+    _authenticated_session,
     _budget,
     _click_first,
     _dismiss_popup,
     _ensure_on_portal,
     _launch_browser,
-    _login,
-    _new_context,
     _on_portal,
     _parse_date_ddmmyyyy,
     _read_all_surfaces,
     _read_surface_with_retries,
     _recover_to_home,
+    _refuse_a_certain_login,
     parse_clp,
 )
 from scrapers.base import ScrapedExchangeRate, ScrapedProduct, TransactionLocation
@@ -1478,16 +1477,13 @@ def _session_sync(rut: str, password: str, headless: bool) -> BanChileSessionRes
     """One login, every read (issue #28); see `read_session` for the order."""
     from playwright.sync_api import sync_playwright  # lazy: keeps tests browser-free
 
+    _refuse_a_certain_login()
     with sync_playwright() as playwright:
         browser = _launch_browser(playwright, headless)
         try:
-            context = _new_context(browser)
-            page = context.new_page()
-            page.set_default_timeout(DEFAULT_TIMEOUT)
-
-            _login(page, rut, password)
-            _dismiss_popup(page)
-            return read_session(page)
+            with _authenticated_session(browser, rut, password) as page:
+                _dismiss_popup(page)
+                return read_session(page)
         finally:
             browser.close()
 

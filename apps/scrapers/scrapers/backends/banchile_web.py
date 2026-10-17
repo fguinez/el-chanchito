@@ -28,11 +28,18 @@ endpoint later without touching the mapping.
 
 import asyncio
 import datetime
+import json
 import logging
+import math
+import os
 import re
+import tempfile
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Callable, Optional
+from pathlib import Path
+from typing import Callable, Iterator, Optional
 
 from product_model import (
     CheckingMetrics,
@@ -127,6 +134,10 @@ _POPUP_CLOSE_SELECTORS = [
 
 class BanChileWebError(RuntimeError):
     """Raised when the BdC web session can't log in or reach the balance."""
+
+
+class LoginCooldownError(BanChileWebError):
+    """A full login was skipped: the last attempt is still inside the cooldown."""
 
 
 @dataclass(frozen=True)
@@ -1163,18 +1174,20 @@ def _launch_browser(playwright, headless: bool):
         return playwright.chromium.launch(headless=headless)
 
 
-def _new_context(browser):
+def _new_context(browser, storage_state: Optional[dict] = None):
     """Build the anti-detection browser context both BdC sessions use.
 
     Extracted so the shared products + movements session
     (`backends/banchile_movements.py::_session_sync`, issue #57) opens exactly
-    the same context this module's balance-only session does.
+    the same context this module's balance-only session does. `storage_state`
+    restores a cached session into it (see `_authenticated_session`).
     """
     context = browser.new_context(
         user_agent=USER_AGENT,
         viewport=VIEWPORT,
         locale=LOCALE,
         timezone_id=TIMEZONE_ID,
+        storage_state=storage_state,
     )
     context.add_init_script(
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
@@ -1664,20 +1677,237 @@ def _read_all_surfaces(page) -> BalanceFetchResult:
     return BalanceFetchResult(products=balances, failed_surfaces=tuple(failed))
 
 
+# --- Session cache (issue #28) ------------------------------------------------
+# BdC throttles repeated logins, so the authenticated context's `storage_state`
+# (cookies + localStorage) is cached and restored on the next run; see
+# ARCHITECTURE.md. The file is a secret.
+
+# apps/scrapers/, resolved from this file so cwd doesn't matter.
+_APP_DIR = Path(__file__).resolve().parents[2]
+_DEFAULT_SESSION_FILE = _APP_DIR / ".banchile_session.json"
+# A hit is the checking widget rendering, so it gets the dashboard's first
+# render budget.
+_SESSION_CHECK_TIMEOUT_MS = 30_000
+
+
+def _session_file() -> Path:
+    return Path(os.environ.get("BANCHILE_SESSION_FILE") or _DEFAULT_SESSION_FILE)
+
+
+def _load_session_state(path: Path) -> tuple[Optional[dict], str]:
+    """The cached storage state, or None plus why it can't be used."""
+    try:
+        state = json.loads(path.read_text())
+    except FileNotFoundError:
+        return None, "no session file"
+    except OSError:
+        return None, "unreadable session file"
+    except ValueError:  # bad JSON or a bad encoding
+        return None, "corrupt session file"
+    if not isinstance(state, dict):
+        return None, "corrupt session file"
+    return state, ""
+
+
+def _save_session(context, path: Path) -> None:
+    """Persist `context`'s storage state to `path`; best-effort, never raises.
+
+    Written to a fresh same-directory `mkstemp` file (0o600, created
+    exclusively) and swapped in with `os.replace`, so the secret is never
+    readable by others and a crash can't leave a half-written cache.
+    """
+    tmp = None
+    try:
+        payload = json.dumps(context.storage_state())
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(payload)
+        os.replace(tmp, path)
+    except Exception as exc:
+        logger.warning(
+            "BanChile: could not save the session cache (%s)", type(exc).__name__
+        )
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def _discard_session(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        logger.warning("BanChile: could not delete the stale session cache")
+
+
+def _restored_session_live(page) -> bool:
+    """One portal-home navigation, then a bounded wait for authenticated data.
+
+    `_LOGIN_SUCCESS_JS` is too weak here: its URL clause already holds while the
+    SPA sits on the portal home before bouncing an expired session to the login
+    page. A hit needs the checking widget, which only renders from an
+    authenticated XHR, with the tab still on the portal host; leaving the host
+    is an early miss.
+    """
+    page.goto(_PORTAL_HOME, timeout=LOGIN_TIMEOUT, wait_until="domcontentloaded")
+    deadline = time.monotonic() + _SESSION_CHECK_TIMEOUT_MS / 1000
+    while _on_portal(page):
+        if _read_checking(page) is not None:
+            return True
+        if time.monotonic() >= deadline:
+            break
+        page.wait_for_timeout(1000)
+    return False
+
+
+def _restore_session(browser, state: dict):
+    """(context, page, "") for a live restored session, else (None, None, reason)."""
+    context = None
+    try:
+        context = _new_context(browser, storage_state=state)
+        page = context.new_page()
+        page.set_default_timeout(DEFAULT_TIMEOUT)
+        if _restored_session_live(page):
+            return context, page, ""
+        reason = "restored session is not logged in"
+    except Exception as exc:
+        reason = f"restore failed: {type(exc).__name__}"
+    if context is not None:
+        try:
+            context.close()
+        except Exception:
+            pass
+    return None, None, reason
+
+
+# --- Login cooldown (issue #28) -----------------------------------------------
+# At most one full RUT + password login per window, whatever triggered the run:
+# a failed attempt counts too, since a quick retry is what the bank throttles.
+_LOGIN_COOLDOWN_ENV = "BANCHILE_LOGIN_COOLDOWN_MINUTES"
+_DEFAULT_LOGIN_COOLDOWN_MINUTES = 10
+
+# `time.monotonic()` of the last attempt, in process memory. Claimed from the
+# scrape's executor thread and read from the control server's.
+_login_attempt_lock = threading.Lock()
+_last_login_attempt: Optional[float] = None
+
+
+def _login_cooldown_seconds() -> float:
+    """`BANCHILE_LOGIN_COOLDOWN_MINUTES` in seconds (default 10; 0 disables).
+
+    Checked in seconds: `1e307` minutes is finite but overflows once converted.
+    """
+    raw = os.environ.get(_LOGIN_COOLDOWN_ENV, "").strip()
+    try:
+        seconds = (float(raw) if raw else _DEFAULT_LOGIN_COOLDOWN_MINUTES) * 60
+    except ValueError:
+        seconds = math.nan
+    if not (math.isfinite(seconds) and seconds >= 0):
+        logger.warning(
+            "Ignoring %s=%r (expected minutes >= 0); using %s",
+            _LOGIN_COOLDOWN_ENV,
+            raw,
+            _DEFAULT_LOGIN_COOLDOWN_MINUTES,
+        )
+        seconds = _DEFAULT_LOGIN_COOLDOWN_MINUTES * 60
+    return seconds
+
+
+def _cooldown_left(last_attempt: Optional[float], now: float) -> Optional[float]:
+    if last_attempt is None:
+        return None
+    remaining = last_attempt + _login_cooldown_seconds() - now
+    return remaining if remaining > 0 else None
+
+
+def _cooldown_error(remaining: float) -> LoginCooldownError:
+    # No `;`: callers join run warnings with it.
+    return LoginCooldownError(
+        "full login skipped to avoid the bank's login throttling "
+        f"(allowed again in {math.ceil(remaining)}s)"
+    )
+
+
+def _claim_login_attempt() -> None:
+    """Record a full login attempt now, or raise `LoginCooldownError` if the
+    last one is still inside the window. Atomic, so concurrent runs can't both
+    pass."""
+    global _last_login_attempt
+    with _login_attempt_lock:
+        now = time.monotonic()
+        remaining = _cooldown_left(_last_login_attempt, now)
+        if remaining is not None:
+            raise _cooldown_error(remaining)
+        _last_login_attempt = now
+
+
+def login_cooldown_retry_after(now: Optional[float] = None) -> Optional[float]:
+    """Seconds until a run may start, or None if it may start now.
+
+    Refused only when the run would certainly need a full login inside the
+    window: an attempt in it and no cached session file to try (a dead session
+    is a miss the gate then refuses). Used by the control server for manual
+    triggers and by both sessions before launching Chromium. `now` is a
+    `time.monotonic()` value, for tests.
+    """
+    with _login_attempt_lock:
+        last_attempt = _last_login_attempt
+    remaining = _cooldown_left(last_attempt, time.monotonic() if now is None else now)
+    if remaining is None or os.path.isfile(_session_file()):
+        return None
+    return remaining
+
+
+def _refuse_a_certain_login() -> None:
+    """Raise `LoginCooldownError` before any browser work when the run would
+    certainly need a full login inside the window."""
+    remaining = login_cooldown_retry_after()
+    if remaining is not None:
+        raise _cooldown_error(remaining)
+
+
+@contextmanager
+def _authenticated_session(browser, rut: str, password: str) -> Iterator:
+    """Yield a logged-in portal page, reusing the cached session when it is live.
+
+    Shared by `_scrape_sync` and `banchile_movements._session_sync`. Any cache
+    problem is a miss: the file is deleted and, unless the login cooldown
+    refuses it (`LoginCooldownError`), `_login` runs in a fresh context, raising
+    on failure as before. The state is saved after authenticating and again
+    after the caller's reads, to keep rotated cookies.
+    """
+    path = _session_file()
+    state, reason = _load_session_state(path)
+    context = page = None
+    if state is not None:
+        context, page, reason = _restore_session(browser, state)
+    if page is not None:
+        logger.info("BanChile session reused")
+    else:
+        logger.info("BanChile session cache miss (%s)", reason)
+        _discard_session(path)
+        context = _new_context(browser)
+        page = context.new_page()
+        page.set_default_timeout(DEFAULT_TIMEOUT)
+        _claim_login_attempt()
+        _login(page, rut, password)
+    _save_session(context, path)
+    yield page
+    _save_session(context, path)
+
+
 def _scrape_sync(rut: str, password: str, headless: bool) -> BalanceFetchResult:
     """Synchronous Playwright flow (runs in a worker thread, no event loop)."""
     from playwright.sync_api import sync_playwright  # lazy: keeps tests browser-free
 
+    _refuse_a_certain_login()
     with sync_playwright() as playwright:
         browser = _launch_browser(playwright, headless)
         try:
-            context = _new_context(browser)
-            page = context.new_page()
-            page.set_default_timeout(DEFAULT_TIMEOUT)
-
-            _login(page, rut, password)
-            _dismiss_popup(page)
-            return _read_all_surfaces(page)
+            with _authenticated_session(browser, rut, password) as page:
+                _dismiss_popup(page)
+                return _read_all_surfaces(page)
         finally:
             browser.close()
 
