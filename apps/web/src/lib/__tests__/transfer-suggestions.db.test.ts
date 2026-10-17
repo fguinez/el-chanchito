@@ -2,13 +2,15 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import postgres from "postgres";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 // The suggestions SQL against a real PostgreSQL. Runs only with
 // TEST_DATABASE_URL naming a disposable server (`make test-db-up` starts one;
 // the database in the URL is only the maintenance connection): the suite
 // creates its own chanchito_test_* database, applies every migration with
 // migrate.mjs, and drops it at the end. Without the variable it is skipped.
+// Every test starts from the same products and no transactions, and seeds
+// the rows it needs.
 //
 // Every name, description, date and amount is synthetic (see the repo's
 // personal data policy): fake products at fake institutions, $ 1.000.000,
@@ -25,7 +27,7 @@ describe.skipIf(!ADMIN_URL)("transfer suggestions (real PostgreSQL)", () => {
   let admin: ReturnType<typeof postgres>;
   let sql: ReturnType<typeof postgres>;
   let lib: Suggestions;
-  const ids: Record<string, string> = {};
+  let ids: Record<string, string>;
 
   async function txn(
     key: string,
@@ -41,18 +43,18 @@ describe.skipIf(!ADMIN_URL)("transfer suggestions (real PostgreSQL)", () => {
     ids[key] = row.id;
   }
 
-  beforeAll(async () => {
-    admin = postgres(ADMIN_URL as string, { max: 1 });
-    await admin.unsafe(`CREATE DATABASE ${dbName}`);
-    const url = new URL(ADMIN_URL as string);
-    url.pathname = `/${dbName}`;
-    execFileSync(process.execPath, [MIGRATE], {
-      env: { ...process.env, DATABASE_URL: url.toString() },
-      stdio: "ignore",
-    });
-    process.env.DATABASE_URL = url.toString();
-    sql = postgres(url.toString(), { max: 1 });
+  /** A snapshot at local noon of `day`, so its local date is `day` in any
+   *  time zone the suite runs in. */
+  async function snapshot(productKey: string, day: string, balance: number) {
+    const [y, m, d] = day.split("-").map(Number);
+    const asOf = new Date(y, m - 1, d, 12).toISOString();
+    await sql`
+      INSERT INTO product_snapshots (product_id, balance, as_of)
+      VALUES (${ids[productKey]}, ${balance}, ${asOf})`;
+  }
 
+  async function seedProducts() {
+    ids = {};
     const [user] = await sql`INSERT INTO users (name) VALUES ('Usuario de prueba') RETURNING id`;
     const institution = async (slug: string, name: string) => {
       const [row] = await sql`
@@ -79,40 +81,30 @@ describe.skipIf(!ADMIN_URL)("transfer suggestions (real PostgreSQL)", () => {
     await product("checking", bank, "checking", "Cuenta corriente 00-000-00000-01");
     await product("card", bank, "credit_card", "Tarjeta 1234");
     await product("usd", bank, "checking", "Cuenta USD 00-000-00000-02", "USD");
+    await product("bankDeposit", bank, "term_deposit", "Depósito Plazo Uno");
     await product("fund", funds, "investment", "Fondo Ahorro Viaje");
+  }
 
-    // A pair, one day apart.
-    await txn("payDebit", "checking", "2026-09-15", -1_000_000, "Pago TC 1234");
-    await txn("payCredit", "card", "2026-09-16", 1_000_000, "Pago recibido");
-    // A pair the user dismissed.
-    await txn("dismissedDebit", "checking", "2026-09-10", -999_999, "Traspaso a terceros");
-    await txn("dismissedCredit", "card", "2026-09-10", 999_999, "Abono");
-    await sql`
-      INSERT INTO dismissed_transfer_suggestions (source_transaction_id, target_transaction_id)
-      VALUES (${ids.dismissedDebit}, ${ids.dismissedCredit})`;
-    // A pair whose debit a transfer already links.
-    await txn("linkedDebit", "checking", "2026-09-12", -2_500_000, "Traspaso");
-    await txn("linkedCredit", "card", "2026-09-12", 2_500_000, "Abono");
-    await sql`
-      INSERT INTO internal_transfers (description, amount, from_product_id, to_product_id, transfer_date, from_transaction_id)
-      VALUES ('Traspaso', 2500000, ${ids.checking}, ${ids.card}, '2026-09-12', ${ids.linkedDebit})`;
-    // Seven days apart: outside the window.
-    await txn("farDebit", "checking", "2026-09-01", -1_234, "Traspaso");
-    await txn("farCredit", "card", "2026-09-08", 1_234, "Abono");
-    // Both legs on the same product.
-    await txn("sameDebit", "checking", "2026-09-20", -5_000, "Compra");
-    await txn("sameCredit", "checking", "2026-09-20", 5_000, "Compra devuelta");
-    // Older than the lookback.
-    await txn("oldDebit", "checking", "2026-05-01", -7_000, "Traspaso");
-    await txn("oldCredit", "card", "2026-05-01", 7_000, "Abono");
-    // A debit naming the fund, whose balance rose by about as much.
-    await txn("fundDebit", "checking", "2026-09-22", -500_000, "Transf a Fondo Ahorro Viaje");
-    await sql`
-      INSERT INTO product_snapshots (product_id, balance, as_of) VALUES
-        (${ids.fund}, 1000000, '2026-09-20T12:00:00-03:00'),
-        (${ids.fund}, 1500500, '2026-09-23T12:00:00-03:00')`;
-
+  beforeAll(async () => {
+    admin = postgres(ADMIN_URL as string, { max: 1 });
+    await admin.unsafe(`CREATE DATABASE ${dbName}`);
+    const url = new URL(ADMIN_URL as string);
+    url.pathname = `/${dbName}`;
+    execFileSync(process.execPath, [MIGRATE], {
+      env: { ...process.env, DATABASE_URL: url.toString() },
+      stdio: "ignore",
+    });
+    process.env.DATABASE_URL = url.toString();
+    sql = postgres(url.toString(), { max: 1, onnotice: () => {} });
     lib = await import("@/lib/transfer-suggestions-db");
+  });
+
+  beforeEach(async () => {
+    await sql`
+      TRUNCATE dismissed_transfer_suggestions, confirmed_transfer_patterns,
+        internal_transfers, product_snapshots, transactions, products, accounts,
+        institutions, users CASCADE`;
+    await seedProducts();
   });
 
   afterAll(async () => {
@@ -123,7 +115,10 @@ describe.skipIf(!ADMIN_URL)("transfer suggestions (real PostgreSQL)", () => {
     }
   });
 
-  function keyOf(suggestion: { source: { transactionId: string }; target: { transactionId: string | null; productId: string } }) {
+  function keyOf(suggestion: {
+    source: { transactionId: string };
+    target: { transactionId: string | null; productId: string };
+  }) {
     const name = (id: string | null) =>
       Object.keys(ids).find((key) => ids[key] === id) ?? id;
     return `${name(suggestion.source.transactionId)}>${name(
@@ -131,34 +126,129 @@ describe.skipIf(!ADMIN_URL)("transfer suggestions (real PostgreSQL)", () => {
     )}`;
   }
 
-  it("lists only the open pairs and the one-sided match", async () => {
+  async function listed() {
+    return (await lib.loadTransferSuggestions(TODAY)).map(keyOf).sort();
+  }
+
+  /** A card payment from checking, one day apart. */
+  async function seedPair() {
+    await txn("payDebit", "checking", "2026-09-15", -1_000_000, "Pago TC 1234");
+    await txn("payCredit", "card", "2026-09-16", 1_000_000, "Pago recibido");
+  }
+
+  /** Keeps the feedless products out of a pair test: a row far outside the
+   *  lookback gives each a transaction feed. */
+  async function giveFeedlessProductsAFeed() {
+    await txn("oldDeposit", "bankDeposit", "2025-01-01", 1, "Saldo inicial");
+    await txn("oldFund", "fund", "2025-01-01", 1, "Saldo inicial");
+  }
+
+  it("lists an open pair with its evidence", async () => {
+    await giveFeedlessProductsAFeed();
+    await seedPair();
+
     const suggestions = await lib.loadTransferSuggestions(TODAY);
 
-    expect(suggestions.map(keyOf).sort()).toEqual(
-      ["fundDebit>fund", "payDebit>payCredit"].sort()
-    );
-  });
-
-  it("explains the pair and backs the one-sided match with the balance", async () => {
-    const suggestions = await lib.loadTransferSuggestions(TODAY);
-    const pair = suggestions.find((s) => s.kind === "pair");
-    const oneSided = suggestions.find((s) => s.kind === "one_sided");
-
-    expect(pair).toMatchObject({
+    expect(suggestions.map(keyOf)).toEqual(["payDebit>payCredit"]);
+    expect(suggestions[0]).toMatchObject({
+      kind: "pair",
       amount: 1_000_000,
       source: { productName: "Cuenta corriente 00-000-00000-01", date: "2026-09-15" },
       target: { productName: "Tarjeta 1234", amount: 1_000_000 },
       evidence: ["Mismo monto", "1 día de diferencia", "Glosa 'Pago TC 1234'"],
     });
-    expect(oneSided).toMatchObject({
+  });
+
+  it.each([
+    [
+      "a dismissed pair",
+      async () => {
+        await sql`
+          INSERT INTO dismissed_transfer_suggestions (source_transaction_id, target_transaction_id)
+          VALUES (${ids.payDebit}, ${ids.payCredit})`;
+      },
+    ],
+    [
+      "a debit a transfer links",
+      async () => {
+        await sql`
+          INSERT INTO internal_transfers (description, amount, from_product_id, to_product_id, transfer_date, from_transaction_id)
+          VALUES ('Pago TC', 1000000, ${ids.checking}, ${ids.card}, '2026-09-15', ${ids.payDebit})`;
+      },
+    ],
+    [
+      "a credit a transfer links",
+      async () => {
+        await sql`
+          INSERT INTO internal_transfers (description, amount, from_product_id, to_product_id, transfer_date, to_transaction_id)
+          VALUES ('Pago TC', 1000000, ${ids.checking}, ${ids.card}, '2026-09-15', ${ids.payCredit})`;
+      },
+    ],
+    [
+      "a row flagged without a link",
+      async () => {
+        await sql`
+          UPDATE transactions SET is_internal_transfer = true WHERE id = ${ids.payCredit}`;
+      },
+    ],
+  ])("leaves out %s", async (_, arrange) => {
+    await giveFeedlessProductsAFeed();
+    await seedPair();
+    await arrange();
+
+    expect(await listed()).toEqual([]);
+  });
+
+  it.each([
+    ["seven days apart", "checking", "2026-09-01", "card", "2026-09-08"],
+    ["on the same product", "checking", "2026-09-20", "checking", "2026-09-20"],
+    ["older than the lookback", "checking", "2026-05-01", "card", "2026-05-01"],
+    ["in another currency", "usd", "2026-09-20", "card", "2026-09-20"],
+  ])("leaves out a pair %s", async (_, fromKey, fromDate, toKey, toDate) => {
+    await giveFeedlessProductsAFeed();
+    await txn("debit", fromKey, fromDate, -999_999, "Traspaso");
+    await txn("credit", toKey, toDate, 999_999, "Abono");
+
+    expect(await listed()).toEqual([]);
+  });
+
+  it("matches a debit naming a feedless product, backed by its balance", async () => {
+    await txn("fundDebit", "checking", "2026-09-22", -1_000_000, "Transf a Fondo Ahorro Viaje");
+    await snapshot("fund", "2026-09-20", 2_500_000);
+    await snapshot("fund", "2026-09-23", 3_500_500);
+
+    const suggestions = await lib.loadTransferSuggestions(TODAY);
+
+    expect(suggestions.map(keyOf)).toEqual(["fundDebit>fund"]);
+    expect(suggestions[0]).toMatchObject({
       kind: "one_sided",
       matchedName: "Fondo Ahorro Viaje",
-      balanceMatch: { date: "2026-09-23", delta: 500_500 },
+      matchedBy: "product",
+      balanceMatch: { date: "2026-09-23", delta: 1_000_500 },
       target: { productName: "Fondo Ahorro Viaje", transactionId: null },
     });
   });
 
+  it("matches the institution name only for a debit at another institution", async () => {
+    // Another institution: "Fondos de Prueba" names the fund's institution.
+    await txn("elsewhere", "checking", "2026-09-22", -999_999, "Pago a Fondos de Prueba");
+    // The deposit's own institution: "Banco de Prueba" in a Banco de Prueba row.
+    await txn("sameBank", "checking", "2026-09-23", -999_999, "Banco de Prueba cargo");
+
+    const suggestions = await lib.loadTransferSuggestions(TODAY);
+
+    expect(suggestions.map(keyOf)).toEqual(["elsewhere>fund"]);
+    expect(suggestions[0]).toMatchObject({
+      matchedName: "Fondos de Prueba",
+      matchedBy: "institution",
+      institutionSiblings: 0,
+    });
+  });
+
   it("confirms a pair: a resolved transfer, flagged rows and a pattern", async () => {
+    await giveFeedlessProductsAFeed();
+    await seedPair();
+
     const outcome = await lib.confirmTransferSuggestion({
       sourceTransactionId: ids.payDebit,
       targetTransactionId: ids.payCredit,
@@ -167,75 +257,60 @@ describe.skipIf(!ADMIN_URL)("transfer suggestions (real PostgreSQL)", () => {
 
     expect(outcome.ok).toBe(true);
     const [transfer] = await sql`
-      SELECT amount, status, transfer_date::text AS date, from_transaction_id, to_transaction_id
+      SELECT amount, status, transfer_date::text AS date, to_transaction_id
       FROM internal_transfers WHERE from_transaction_id = ${ids.payDebit}`;
-    expect(transfer).toMatchObject({
+    expect(transfer).toEqual({
       amount: 1_000_000,
       status: "resolved",
       date: "2026-09-15",
       to_transaction_id: ids.payCredit,
     });
-    const flagged = await sql`
+    const [flagged] = await sql`
       SELECT count(*)::int AS n FROM transactions
       WHERE id IN (${ids.payDebit}, ${ids.payCredit}) AND is_internal_transfer`;
-    expect(flagged[0].n).toBe(2);
-    const patterns = await lib.loadConfirmedPatterns();
-    expect(patterns).toEqual([
+    expect(flagged.n).toBe(2);
+    expect(await lib.loadConfirmedPatterns()).toEqual([
       { sourceProductId: ids.checking, targetProductId: ids.card, descriptionPrefix: "pago tc" },
     ]);
-    const after = await lib.loadTransferSuggestions(TODAY);
-    expect(after.map(keyOf)).toEqual(["fundDebit>fund"]);
+    expect(await listed()).toEqual([]);
   });
 
   it("answers 409 when the pair is confirmed twice", async () => {
-    const outcome = await lib.confirmTransferSuggestion({
+    await seedPair();
+    const input = {
       sourceTransactionId: ids.payDebit,
       targetTransactionId: ids.payCredit,
       targetProductId: null,
-    });
+    };
+    await lib.confirmTransferSuggestion(input);
+
+    const outcome = await lib.confirmTransferSuggestion(input);
 
     expect(outcome).toMatchObject({ ok: false, status: 409, field: "sourceTransactionId" });
   });
 
-  it("refuses a one-sided target with a transaction feed and writes nothing", async () => {
-    const before = await sql`SELECT count(*)::int AS n FROM internal_transfers`;
+  it.each([
+    ["a product with a transaction feed", "card"],
+    ["a product in another currency", "usd"],
+  ])("refuses a one-sided target that is %s, writing nothing", async (_, target) => {
+    await txn("fundDebit", "checking", "2026-09-22", -1_000_000, "Transf a Fondo Ahorro Viaje");
+    await txn("cardRow", "card", "2026-09-01", -999_999, "Compra");
+    await txn("usdRow", "usd", "2026-09-01", -1, "Comisión");
 
     const outcome = await lib.confirmTransferSuggestion({
       sourceTransactionId: ids.fundDebit,
       targetTransactionId: null,
-      targetProductId: ids.card,
+      targetProductId: ids[target],
     });
 
     expect(outcome).toMatchObject({ ok: false, status: 400, field: "targetProductId" });
-    const after = await sql`SELECT count(*)::int AS n FROM internal_transfers`;
-    expect(after[0].n).toBe(before[0].n);
-  });
-
-  it("refuses a target product in another currency", async () => {
-    const outcome = await lib.confirmTransferSuggestion({
-      sourceTransactionId: ids.fundDebit,
-      targetTransactionId: null,
-      targetProductId: ids.usd,
-    });
-
-    expect(outcome).toMatchObject({ ok: false, status: 400, field: "targetProductId" });
-  });
-
-  it("dismisses a one-sided suggestion idempotently", async () => {
-    const input = { sourceTransactionId: ids.fundDebit, targetTransactionId: null };
-
-    await lib.dismissTransferSuggestion(input);
-    const again = await lib.dismissTransferSuggestion(input);
-
-    expect(again).toEqual({ ok: true });
-    const rows = await sql`
-      SELECT count(*)::int AS n FROM dismissed_transfer_suggestions
-      WHERE source_transaction_id = ${ids.fundDebit}`;
-    expect(rows[0].n).toBe(1);
-    expect(await lib.loadTransferSuggestions(TODAY)).toEqual([]);
+    const [count] = await sql`SELECT count(*)::int AS n FROM internal_transfers`;
+    expect(count.n).toBe(0);
   });
 
   it("confirms a one-sided suggestion with only the source linked", async () => {
+    await txn("fundDebit", "checking", "2026-09-22", -1_000_000, "Transf a Fondo Ahorro Viaje");
+
     const outcome = await lib.confirmTransferSuggestion({
       sourceTransactionId: ids.fundDebit,
       targetTransactionId: null,
@@ -251,5 +326,20 @@ describe.skipIf(!ADMIN_URL)("transfer suggestions (real PostgreSQL)", () => {
       to_product_id: ids.fund,
       to_transaction_id: null,
     });
+  });
+
+  it("dismisses a one-sided suggestion idempotently", async () => {
+    await txn("fundDebit", "checking", "2026-09-22", -1_000_000, "Transf a Fondo Ahorro Viaje");
+    const input = { sourceTransactionId: ids.fundDebit, targetTransactionId: null };
+
+    await lib.dismissTransferSuggestion(input);
+    const again = await lib.dismissTransferSuggestion(input);
+
+    expect(again).toEqual({ ok: true });
+    const [count] = await sql`
+      SELECT count(*)::int AS n FROM dismissed_transfer_suggestions
+      WHERE source_transaction_id = ${ids.fundDebit}`;
+    expect(count.n).toBe(1);
+    expect(await listed()).toEqual([]);
   });
 });
