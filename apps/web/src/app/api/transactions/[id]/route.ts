@@ -300,73 +300,70 @@ export async function PATCH(request: NextRequest, { params }: Context) {
 
   const update: TransactionUpdate = { updatedAt: new Date() };
 
-  // A `description` or `customDescription` edit needs the row's external_id to
-  // route it (V034): a scraped row keeps `description` immutable. Only these
-  // bodies preload it, so an unrelated edit keeps its current query sequence.
-  if (body.description !== undefined || body.customDescription !== undefined) {
-    const [row] = await db
-      .select({ externalId: transactions.externalId })
-      .from(transactions)
-      .where(and(eq(transactions.id, id), notDeleted))
-      .limit(1);
-    if (!row) {
-      return NextResponse.json(
-        { error: "Transaction not found" },
-        { status: 404 }
-      );
-    }
-    if (body.customDescription !== undefined) {
-      // An explicit override wins over a `description` edit, and null clears it
-      // (restoring the scraped/manual original).
-      update.customDescription = body.customDescription;
-    } else if (body.description !== undefined) {
-      const scraped = row.externalId !== null && row.externalId !== "";
-      if (scraped) {
-        // The scraped text stays as it is; the edit lands on the override.
-        update.customDescription = body.description;
-      } else {
-        update.description = body.description;
+  try {
+    // A `description` or `customDescription` edit needs the row's external_id to
+    // route it (V034): a scraped row keeps `description` immutable. Only these
+    // bodies preload it, so an unrelated edit keeps its current query sequence.
+    if (body.description !== undefined || body.customDescription !== undefined) {
+      const [row] = await db
+        .select({ externalId: transactions.externalId })
+        .from(transactions)
+        .where(and(eq(transactions.id, id), notDeleted))
+        .limit(1);
+      if (!row) {
+        return NextResponse.json(
+          { error: "Transaction not found" },
+          { status: 404 }
+        );
+      }
+      if (body.customDescription !== undefined) {
+        update.customDescription = body.customDescription;
+      } else if (body.description !== undefined) {
+        const scraped = row.externalId !== null && row.externalId !== "";
+        if (scraped) {
+          update.customDescription = body.description;
+        } else {
+          update.description = body.description;
+        }
       }
     }
-  }
 
-  if (body.amount !== undefined) update.amount = body.amount;
-  if (body.transactionDate !== undefined)
-    update.transactionDate = body.transactionDate;
-  if (body.scheduledMonth !== undefined)
-    update.scheduledMonth = body.scheduledMonth;
-  if (body.isInternalTransfer !== undefined)
-    update.isInternalTransfer = body.isInternalTransfer;
-  if (body.productId !== undefined) update.productId = body.productId;
-  if ("categoryId" in body) {
-    update.categoryId = body.categoryId ?? null;
-    // A deliberate category choice is manual, so the backfill leaves it alone.
-    // Clearing it (null) does not flip the flag back: the user may be about to
-    // recategorize, and the backfill only fills rows that have no category.
-    if (body.categoryId) update.isManuallyCategorized = true;
-  }
-
-  const locationInBody = "location" in body;
-  let location: TransactionLocation | null = null;
-  if (locationInBody) {
-    const result = validateLocationInput(body.location);
-    if (!result.ok) {
-      return NextResponse.json(
-        { error: result.error, field: result.field },
-        { status: result.status }
-      );
+    if (body.amount !== undefined) update.amount = body.amount;
+    if (body.transactionDate !== undefined)
+      update.transactionDate = body.transactionDate;
+    if (body.scheduledMonth !== undefined)
+      update.scheduledMonth = body.scheduledMonth;
+    if (body.isInternalTransfer !== undefined)
+      update.isInternalTransfer = body.isInternalTransfer;
+    if (body.productId !== undefined) update.productId = body.productId;
+    if ("categoryId" in body) {
+      update.categoryId = body.categoryId ?? null;
+      // A deliberate category choice is manual, so the backfill leaves it
+      // alone. Clearing it (null) does not flip the flag back: the user may be
+      // about to recategorize, and the backfill only fills rows with no
+      // category.
+      if (body.categoryId) update.isManuallyCategorized = true;
     }
-    location = result.value;
-    Object.assign(update, locationToColumns(location));
-    update.locationIsManual = true;
-  }
 
-  // A location-only body keeps the lightweight response the panel's location
-  // field consumes; any other field means the caller wants the full row back.
-  const locationOnly =
-    locationInBody && Object.keys(body).length === 1;
+    const locationInBody = "location" in body;
+    let location: TransactionLocation | null = null;
+    if (locationInBody) {
+      const result = validateLocationInput(body.location);
+      if (!result.ok) {
+        return NextResponse.json(
+          { error: result.error, field: result.field },
+          { status: result.status }
+        );
+      }
+      location = result.value;
+      Object.assign(update, locationToColumns(location));
+      update.locationIsManual = true;
+    }
 
-  try {
+    // A location-only body keeps the lightweight response the panel's location
+    // field consumes; any other field means the caller wants the full row back.
+    const locationOnly = locationInBody && Object.keys(body).length === 1;
+
     const [updated] = await db
       .update(transactions)
       .set(update)
