@@ -115,6 +115,8 @@ export const createTransactionSchema = z.object({
   productId: rowId.nullish(),
   /** Legacy alias for `productId`. */
   accountId: rowId.nullish(),
+  /** Checked by validateLocationInput, as PATCH /api/transactions/[id] does. */
+  location: z.unknown().optional(),
 });
 
 /** POST /api/transfers. `from*`/`to*AccountId` are legacy aliases. */

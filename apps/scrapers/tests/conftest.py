@@ -35,10 +35,13 @@ _MIGRATIONS_TABLE = """
 """
 
 
+_DB_FIXTURES = {"db_conn", "unmigrated_db"}
+
+
 def pytest_collection_modifyitems(items):
     """Mark every test that uses the database, so `-m "not db"` deselects them."""
     for item in items:
-        if "db_conn" in getattr(item, "fixturenames", ()):
+        if _DB_FIXTURES & set(getattr(item, "fixturenames", ())):
             item.add_marker(pytest.mark.db)
 
 
@@ -64,15 +67,25 @@ def _drop_database(dsn: str, name: str) -> None:
         )
 
 
-def _apply_migrations(dsn: str) -> None:
-    """Apply every migration in order, one transaction each, like migrate.mjs."""
+def apply_migrations(dsn: str, before: str | None = None) -> None:
+    """Apply the pending migrations in order, one transaction each, like
+    migrate.mjs. `before` stops at the first file whose name sorts at or after
+    it (e.g. "V023"), so a test can stage data under an older schema."""
     paths = sorted(MIGRATIONS_DIR.glob("*.sql"))
     if not paths:
         raise FileNotFoundError(f"No migrations found in {MIGRATIONS_DIR}")
+    if before is not None:
+        paths = [path for path in paths if path.name < before]
     with psycopg.connect(dsn) as conn:
         conn.execute(_MIGRATIONS_TABLE)
         conn.commit()
+        applied = {
+            row[0] for row in conn.execute("SELECT name FROM _migrations")
+        }
+        conn.commit()
         for path in paths:
+            if path.name in applied:
+                continue
             with conn.transaction():
                 conn.execute(path.read_text(encoding="utf-8"))
                 conn.execute(
@@ -107,7 +120,7 @@ def _template_db():
     try:
         # The connection is closed on return: TEMPLATE refuses a source
         # database that has other sessions.
-        _apply_migrations(make_conninfo(dsn, dbname=name))
+        apply_migrations(make_conninfo(dsn, dbname=name))
         yield dsn, name
     finally:
         _drop_database(dsn, name)
@@ -131,6 +144,26 @@ def db_conn(_template_db, monkeypatch):
             test_dsn, autocommit=True, row_factory=dict_row
         ) as conn:
             yield conn
+    finally:
+        connection.close_pool()
+        _drop_database(dsn, name)
+
+
+@pytest.fixture
+def unmigrated_db(_template_db, monkeypatch):
+    """DSN of a fresh, EMPTY database for tests of a migration itself.
+
+    The test applies migrations with `apply_migrations(dsn, before=...)`, stages
+    rows, then applies the rest. `DATABASE_URL` points at it as in `db_conn`.
+    """
+    dsn, _ = _template_db
+    name = f"chanchito_test_{uuid4().hex[:12]}"
+    _create_database(dsn, name)
+    test_dsn = make_conninfo(dsn, dbname=name)
+    try:
+        connection.close_pool()
+        monkeypatch.setenv("DATABASE_URL", test_dsn)
+        yield test_dsn
     finally:
         connection.close_pool()
         _drop_database(dsn, name)

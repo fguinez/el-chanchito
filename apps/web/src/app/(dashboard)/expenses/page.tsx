@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import {
   Card,
   CardContent,
@@ -20,8 +20,17 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useSortableData } from "@/lib/use-sortable-data";
-import { formatCLP, parseNumberInput } from "@/lib/utils";
+import {
+  formatAmount,
+  formatCLP,
+  formatPlainDateEs,
+  parseNumberInput,
+} from "@/lib/utils";
+import { clpTotals } from "@/lib/transactions";
 import { CsvImport } from "@/components/dashboard/CsvImport";
+import { TransactionDetailSheet } from "@/components/transactions/transaction-detail-sheet";
+import { useSelectedTransaction } from "@/components/transactions/use-selected-transaction";
+import { LOCATION_TEXT_MAX_LENGTH } from "@/lib/transaction-location";
 
 interface Transaction {
   id: string;
@@ -30,14 +39,55 @@ interface Transaction {
   transactionDate: string;
   scheduledMonth: string | null;
   source: string;
+  /** Currency of the transaction's product; `amount` is in it. */
+  currency: string;
   notes: string | null;
 }
 
 type TransactionSortKey = "fecha" | "descripcion" | "fuente" | "monto";
 
+// useSearchParams needs a Suspense boundary for the static prerender.
 export default function ExpensesPage() {
+  return (
+    <Suspense fallback={<ExpensesSkeleton />}>
+      <ExpensesView />
+    </Suspense>
+  );
+}
+
+/** Static shell for the prerender, before search params are available. */
+function ExpensesSkeleton() {
+  return (
+    <div className="space-y-6" aria-busy="true">
+      <h2 className="text-2xl font-bold">Gastos y Transacciones</h2>
+      <div className="grid gap-4 md:grid-cols-3">
+        {[0, 1, 2].map((i) => (
+          <Card key={i}>
+            <CardHeader className="pb-2">
+              <div className="h-4 w-24 animate-pulse rounded bg-muted" />
+              <div className="h-6 w-32 animate-pulse rounded bg-muted" />
+            </CardHeader>
+          </Card>
+        ))}
+      </div>
+      <Card>
+        <CardContent className="space-y-3">
+          {[0, 1, 2, 3].map((i) => (
+            <div key={i} className="h-5 animate-pulse rounded bg-muted" />
+          ))}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function ExpensesView() {
+  const { selectedTxnId, selectTransaction, rowProps } =
+    useSelectedTransaction();
+
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [description, setDescription] = useState("");
+  const [place, setPlace] = useState("");
   const [amount, setAmount] = useState("");
   const [transactionDate, setTransactionDate] = useState(
     new Date().toISOString().split("T")[0]
@@ -70,11 +120,14 @@ export default function ExpensesPage() {
           description,
           amount: -Math.abs(Math.round(parsedAmount)), // expenses are negative
           transactionDate,
+          // Optional; the detail panel edits the rest of the location.
+          ...(place.trim() && { location: { name: place } }),
         }),
       });
 
       if (res.ok) {
         setDescription("");
+        setPlace("");
         setAmount("");
         loadTransactions();
       }
@@ -83,12 +136,12 @@ export default function ExpensesPage() {
     }
   };
 
-  const totalExpenses = transactions
-    .filter((t) => t.amount < 0)
-    .reduce((sum, t) => sum + t.amount, 0);
-  const totalIncome = transactions
-    .filter((t) => t.amount > 0)
-    .reduce((sum, t) => sum + t.amount, 0);
+  // Peso totals over CLP rows only: a USD amount is not pesos.
+  const {
+    expenses: totalExpenses,
+    income: totalIncome,
+    otherCurrencyCount,
+  } = clpTotals(transactions);
 
   const getValue = useCallback(
     (txn: Transaction, key: TransactionSortKey): string | number | null => {
@@ -141,6 +194,13 @@ export default function ExpensesPage() {
           </CardHeader>
         </Card>
       </div>
+      {otherCurrencyCount > 0 && (
+        <p className="text-sm text-muted-foreground">
+          {otherCurrencyCount === 1
+            ? "1 movimiento en otra moneda no se suma a estos totales."
+            : `${otherCurrencyCount} movimientos en otras monedas no se suman a estos totales.`}
+        </p>
+      )}
 
       {/* Add transaction form */}
       <Card>
@@ -161,6 +221,17 @@ export default function ExpensesPage() {
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
                 placeholder="Ej: Supermercado"
+              />
+            </div>
+            <div className="w-44">
+              <label className="mb-1 block text-sm text-muted-foreground">
+                Lugar (opcional)
+              </label>
+              <Input
+                value={place}
+                onChange={(e) => setPlace(e.target.value)}
+                placeholder="Ej: Tienda de ejemplo"
+                maxLength={LOCATION_TEXT_MAX_LENGTH}
               />
             </div>
             <div className="w-36">
@@ -247,9 +318,9 @@ export default function ExpensesPage() {
               </TableHeader>
               <TableBody>
                 {sorted.map((txn) => (
-                  <TableRow key={txn.id}>
+                  <TableRow key={txn.id} {...rowProps(txn.id)}>
                     <TableCell className="text-sm">
-                      {new Date(txn.transactionDate).toLocaleDateString("es-CL")}
+                      {formatPlainDateEs(txn.transactionDate)}
                     </TableCell>
                     <TableCell>{txn.description}</TableCell>
                     <TableCell>
@@ -263,7 +334,7 @@ export default function ExpensesPage() {
                       }`}
                     >
                       {txn.amount < 0 ? "-" : "+"}
-                      {formatCLP(Math.abs(txn.amount))}
+                      {formatAmount(txn.currency, Math.abs(txn.amount))}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -272,6 +343,11 @@ export default function ExpensesPage() {
           )}
         </CardContent>
       </Card>
+
+      <TransactionDetailSheet
+        transactionId={selectedTxnId}
+        onClose={() => selectTransaction(null)}
+      />
     </div>
   );
 }

@@ -10,6 +10,7 @@ personal-data policy).
 import asyncio
 import os
 from datetime import date
+from decimal import Decimal
 
 os.environ.setdefault("BANCHILE_RUT", "test")
 os.environ.setdefault("BANCHILE_PASSWORD", "test")
@@ -22,12 +23,17 @@ from scrapers.backends.banchile_movements import (
     operation_id_from_glosa,
     parse_billed_movements,
     parse_cartola_movement,
+    parse_international_billed_movements,
     parse_unbilled_movement,
 )
 from scrapers.backends.banchile_web import BalanceFetchResult
-from scrapers.base import ScrapedProduct
+from scrapers.base import ScrapedProduct, TransactionLocation
 from scrapers.institutions import banchile as banchile_mod
-from scrapers.institutions.banchile import BanChileScraper
+from scrapers.institutions.banchile import (
+    BanChileScraper,
+    external_id_for,
+    legacy_external_id_for,
+)
 
 ACCOUNT = "00-000-00000-01"
 CARD_LAST4 = "1234"
@@ -55,8 +61,11 @@ def _cartola_row(
     }
 
 
-def _unbilled_row(monto=999999, comercio="COMERCIO SINTETICO", tbk="000000000001"):
+def _unbilled_row(
+    monto=999999, comercio="COMERCIO SINTETICO", tbk="000000000001", origen="NAC"
+):
     return {
+        "origenTransaccion": origen,
         "fechaTransaccionString": "20/08/2026",
         "fechaAutorizacionString": "20/08/2026",
         "horaAutorizacion": "12:41:33",
@@ -414,3 +423,198 @@ class TestScrapeProducts:
 
         assert result.products == []
         assert result.warnings == ["BanChile: product scrape crashed: login failed"]
+
+
+# --- Issue #79: currency routing, identity and the misrouted rows -------------
+
+
+def _intl_payload(rows, section="seccionCompras"):
+    return {section: {"transaccionesTarjetas": rows}}
+
+
+def _intl_row(numero_documento="2008 " + "1" * 23, monto=1234.56, **extra):
+    """A synthetic USD statement row."""
+    return {
+        "numeroDocumento": numero_documento,
+        "fechaTransaccionString": "20/08/2026",
+        "descripcion": "COMERCIO SINTETICO",
+        "montoDolar": monto,
+        "tituloTarjeta": f"****{CARD_LAST4}",
+        "totales": False,
+        "grupo": "generico",
+        **extra,
+    }
+
+
+class TestClpKeysAreUnchanged:
+    """Pinned with the code as it was before the currency existed (issue #79).
+
+    Existing rows are keyed on these, so a CLP movement must never re-key.
+    """
+
+    def test_checking(self):
+        assert external_id_for(parse_cartola_movement(_cartola_row())) == (
+            "bch_fp_9d6fd81f7f7ea522"
+        )
+        assert external_id_for(
+            parse_cartola_movement(_cartola_row(), "12345678901")
+        ) == "bch_op_12345678901"
+
+    def test_unbilled(self):
+        assert external_id_for(parse_unbilled_movement(_unbilled_row(monto=999999.0))) == (
+            "bch_fp_1197be75ceed32e2"
+        )
+        assert external_id_for(
+            parse_unbilled_movement(_unbilled_row(monto=-2500000.0))
+        ) == "bch_fp_9532482b5aba64d1"
+
+    def test_billed(self):
+        def key(row):
+            return external_id_for(
+                parse_billed_movements(_billed_payload([row]), "2026-08-25")[0]
+            )
+
+        assert key(_billed_row()) == "bch_ref_200812345678"
+        assert key(
+            _billed_row(referencia="2008 00000000", monto=2500000, grupo="pagos")
+        ) == "bch_fp_1c5496267f26cc60"
+
+
+class TestUsdMapping:
+    def setup_method(self):
+        self.scraper = BanChileScraper()
+
+    def test_a_usd_charge_reaches_the_usd_product(self):
+        txn = self.scraper._movement_to_transaction(
+            parse_unbilled_movement(_unbilled_row(monto=1234.56, origen="INT"))
+        )
+        assert txn.currency == "USD"
+        assert txn.amount == Decimal("-1234.56")
+        assert txn.product_kind == "credit_card"
+
+    def test_clp_transactions_stay_clp(self):
+        txn = self.scraper._movement_to_transaction(
+            parse_unbilled_movement(_unbilled_row())
+        )
+        assert (txn.currency, txn.amount) == ("CLP", -999999)
+
+    def test_a_usd_key_never_equals_a_clp_one(self):
+        """Even for one row read under both currencies, the keys differ."""
+        clp = parse_unbilled_movement(_unbilled_row(monto=12.0))
+        usd = parse_unbilled_movement(_unbilled_row(monto=12.0, origen="INT"))
+        assert external_id_for(clp) != external_id_for(usd)
+        assert external_id_for(usd).startswith("bch_fp_")
+
+    def test_a_usd_statement_location_reaches_the_transaction(self):
+        """V025: `ciudadComercio` and `pais` ride onto the USD card's row."""
+        (movement,) = parse_international_billed_movements(
+            _intl_payload(
+                [_intl_row(ciudadComercio=" CIUDAD SINTETICA ", pais="PAIS SINTETICO")]
+            )
+        )
+
+        txn = self.scraper._movement_to_transaction(movement)
+
+        assert (txn.currency, txn.product_kind) == ("USD", "credit_card")
+        assert txn.location == TransactionLocation(
+            city="CIUDAD SINTETICA", country="PAIS SINTETICO"
+        )
+
+    def test_a_row_without_location_maps_to_none(self):
+        (movement,) = parse_international_billed_movements(_intl_payload([_intl_row()]))
+        assert self.scraper._movement_to_transaction(movement).location is None
+
+    def test_a_usd_purchase_is_keyed_on_its_reference(self):
+        (movement,) = parse_international_billed_movements(_intl_payload([_intl_row()]))
+        assert external_id_for(movement) == "bch_ref_2008" + "1" * 23
+
+    def test_the_legacy_key_is_what_the_clp_only_code_stored(self):
+        """Pinned with that code: the same synthetic row read as CLP."""
+        movement = parse_unbilled_movement(_unbilled_row(monto=1234.56, origen="INT"))
+        assert legacy_external_id_for(movement) == "bch_fp_109da42d5aba2816"
+        assert movement.legacy_amount == -1235
+
+        half = parse_unbilled_movement(_unbilled_row(monto=12.5, origen="INT"))
+        assert legacy_external_id_for(half) == "bch_fp_b2074085fb82a9a7"
+        assert half.legacy_amount == -12
+
+    def test_clp_movements_have_no_legacy_key(self):
+        assert legacy_external_id_for(parse_unbilled_movement(_unbilled_row())) is None
+
+
+class TestSupersededTransactions:
+    """Which CLP-card rows a scrape names as the old twins of its USD charges."""
+
+    def setup_method(self):
+        self.scraper = BanChileScraper()
+
+    def _scrape(self, monkeypatch, movements, failed=()):
+        async def fake_fetch(rut, password):
+            return BanChileSessionResult(movements=movements, failed_surfaces=failed)
+
+        monkeypatch.setattr(banchile_mod, "fetch_session", fake_fetch)
+        asyncio.run(self.scraper.scrape_transactions())
+        return self.scraper.superseded_transactions()
+
+    # A synthetic statement date, read by both card legs unless a test says not.
+    _STATEMENT = "2026-09-05"
+
+    def _movements(self, usd_statement=_STATEMENT):
+        return [
+            parse_unbilled_movement(_unbilled_row()),
+            parse_unbilled_movement(_unbilled_row(monto=1234.56, origen="INT")),
+            *parse_international_billed_movements(
+                _intl_payload([_intl_row(monto=12.5)]), usd_statement
+            ),
+            *parse_billed_movements(_billed_payload([_billed_row()]), self._STATEMENT),
+        ]
+
+    def test_one_per_usd_card_movement(self, monkeypatch):
+        movements = self._movements()
+        exact, loose = self._scrape(monkeypatch, movements)
+
+        assert [exact.replacement_external_id, loose.replacement_external_id] == [
+            external_id_for(movements[1]),
+            external_id_for(movements[2]),
+        ]
+
+        assert (exact.external_id, exact.amount) == ("bch_fp_109da42d5aba2816", -1235)
+        assert (loose.external_id, loose.amount) == (None, -12)
+        for item in (exact, loose):
+            assert (item.institution, item.product_kind, item.currency) == (
+                "banchile",
+                "credit_card",
+                "CLP",
+            )
+            assert item.external_id_prefix == "bch_fp_"
+            assert item.transaction_date == date(2026, 8, 20)
+            assert item.created_before_migration == "V023__transactions_amount_numeric.sql"
+
+    def test_the_loose_match_needs_both_clp_card_legs(self, monkeypatch):
+        """Otherwise a genuine CLP row of the window might not be protected."""
+        (exact,) = self._scrape(
+            monkeypatch, self._movements(), failed=("tarjeta facturados",)
+        )
+        assert exact.external_id == "bch_fp_109da42d5aba2816"
+
+    def test_the_loose_match_needs_the_statement_read_on_the_national_leg(
+        self, monkeypatch
+    ):
+        """The legs pick their statements independently: an older USD one,
+        outside every national statement read, has no CLP rows protecting it."""
+        (exact,) = self._scrape(
+            monkeypatch, self._movements(usd_statement="2026-07-05")
+        )
+        assert exact.external_id == "bch_fp_109da42d5aba2816"
+
+    def test_a_national_statement_with_no_rows_offers_no_loose_match(
+        self, monkeypatch
+    ):
+        """Nothing shows that statement was read, so nothing is assumed."""
+        without_national_rows = self._movements()[:3]
+        (exact,) = self._scrape(monkeypatch, without_national_rows)
+        assert exact.external_id == "bch_fp_109da42d5aba2816"
+
+    def test_none_without_usd_card_movements(self, monkeypatch):
+        movements = [parse_unbilled_movement(_unbilled_row())]
+        assert self._scrape(monkeypatch, movements) == []

@@ -214,7 +214,14 @@ export const transactions = pgTable(
       .notNull()
       .references(() => products.id),
     description: text("description").notNull(),
-    amount: integer("amount").notNull(),
+    // Signed, in the product's currency (products.currency). NUMERIC(18, 2)
+    // since V023 so foreign-currency movements keep their cents. postgres.js
+    // hands NUMERIC over as a string; mode "number" converts it on every
+    // select of this column, so callers keep getting (and inserting) numbers.
+    // Raw sql`` over the column (e.g. SUM(amount)) bypasses that mapping and
+    // must convert its result itself.
+    amount: numeric("amount", { precision: 18, scale: 2, mode: "number" })
+      .notNull(),
     transactionDate: date("transaction_date").notNull(),
     // When the institution posted the movement, where it reports that apart
     // from when the movement occurred (V019). Nullable: most sources report a
@@ -231,6 +238,23 @@ export const transactions = pgTable(
       .notNull()
       .default(false),
     notes: text("notes"),
+    // Optional location (V025), every column independent; the coordinates are
+    // set together or not at all. Scrapers only fill NULL columns, and never
+    // touch a row whose location the user set or cleared (locationIsManual).
+    locationName: text("location_name"),
+    locationCity: text("location_city"),
+    locationCountry: text("location_country"),
+    locationLatitude: numeric("location_latitude", {
+      precision: 9,
+      scale: 6,
+      mode: "number",
+    }),
+    locationLongitude: numeric("location_longitude", {
+      precision: 9,
+      scale: 6,
+      mode: "number",
+    }),
+    locationIsManual: boolean("location_is_manual").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
