@@ -132,17 +132,48 @@ export const createTransactionSchema = z.object({
   location: z.unknown().optional(),
 });
 
-/** POST /api/transfers. `from*`/`to*AccountId` are legacy aliases. */
-export const createTransferSchema = z.object({
-  description: requiredText,
-  amount: clpAmount,
-  transferDate: isoDate,
-  notes,
-  fromProductId: rowId.nullish(),
-  fromAccountId: rowId.nullish(),
-  toProductId: rowId.nullish(),
-  toAccountId: rowId.nullish(),
-});
+/** POST /api/transfers: money between two distinct products, both required.
+ *  `from*`/`to*AccountId` are legacy aliases; ids come out lowercased, as
+ *  Postgres returns them. */
+export const createTransferSchema = z
+  .object({
+    description: requiredText,
+    amount: clpAmount.pipe(z.number().positive()),
+    transferDate: isoDate,
+    notes,
+    fromProductId: rowId.nullish(),
+    fromAccountId: rowId.nullish(),
+    toProductId: rowId.nullish(),
+    toAccountId: rowId.nullish(),
+  })
+  .transform((body, ctx) => {
+    const fromProductId = (body.fromProductId ?? body.fromAccountId)?.toLowerCase();
+    const toProductId = (body.toProductId ?? body.toAccountId)?.toLowerCase();
+    if (!fromProductId || !toProductId) {
+      ctx.addIssue({
+        code: "custom",
+        message: "Expected a product id",
+        path: [fromProductId ? "toProductId" : "fromProductId"],
+      });
+      return z.NEVER;
+    }
+    if (fromProductId === toProductId) {
+      ctx.addIssue({
+        code: "custom",
+        message: "Source and target products must differ",
+        path: ["toProductId"],
+      });
+      return z.NEVER;
+    }
+    return {
+      description: body.description,
+      amount: body.amount,
+      fromProductId,
+      toProductId,
+      transferDate: body.transferDate,
+      notes: body.notes?.trim() || null,
+    };
+  });
 
 /** PUT /api/transfers: status and/or notes (null clears them), by id. */
 export const updateTransferSchema = z.object({

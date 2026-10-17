@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import {
   Card,
   CardContent,
@@ -20,8 +21,10 @@ import { SortableTableHead } from "@/components/ui/sortable-table-head";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { SELECT_CLASS } from "@/components/ui/native-select";
 import { useSortableData } from "@/lib/use-sortable-data";
-import { formatCLP, cn, parseNumberInput } from "@/lib/utils";
+import { formatCLP, formatPlainDateEs, parseNumberInput } from "@/lib/utils";
+import { TRANSFER_CURRENCY, type TransferProductRef } from "@/lib/transfers";
 import { Trash2, Check } from "lucide-react";
 
 interface InternalTransfer {
@@ -30,20 +33,101 @@ interface InternalTransfer {
   amount: number;
   fromProductId: string | null;
   toProductId: string | null;
+  fromProduct: TransferProductRef | null;
+  toProduct: TransferProductRef | null;
   transferDate: string;
   status: string;
   notes: string | null;
 }
 
+// Picker data, built from GET /api/institutions (active CLP products only).
+interface PickerInstitution {
+  slug: string;
+  name: string;
+  products: { id: string; name: string }[];
+}
+interface InstitutionsResponse {
+  institutions: {
+    slug: string;
+    name: string;
+    products: {
+      id: string;
+      name: string;
+      currency: string;
+      isActive: boolean;
+    }[];
+  }[];
+}
+
 type TransferSortKey =
   | "fecha"
   | "descripcion"
+  | "desde"
+  | "hacia"
   | "monto"
   | "notas"
   | "estado";
 
+function productLabel(p: TransferProductRef | null): string | null {
+  return p ? `${p.institutionName} · ${p.name}` : null;
+}
+
+/** A transfer endpoint, linked to its product page; "-" on legacy rows. */
+function ProductCell({ product }: { product: TransferProductRef | null }) {
+  if (!product) return <span className="text-muted-foreground">-</span>;
+  return (
+    <Link
+      href={`/institutions/${product.institutionSlug}/${product.slug}`}
+      className="hover:underline"
+    >
+      <span className="block text-xs text-muted-foreground">
+        {product.institutionName}
+      </span>
+      {product.name}
+    </Link>
+  );
+}
+
+function ProductSelect({
+  label,
+  value,
+  onChange,
+  institutions,
+}: {
+  label: string;
+  value: string;
+  onChange: (id: string) => void;
+  institutions: PickerInstitution[];
+}) {
+  return (
+    <div>
+      <label className="mb-1 block text-sm text-muted-foreground">{label}</label>
+      <select
+        className={SELECT_CLASS}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+      >
+        <option value="">Selecciona un producto</option>
+        {institutions.map((inst) => (
+          <optgroup key={inst.slug} label={inst.name}>
+            {inst.products.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </optgroup>
+        ))}
+      </select>
+    </div>
+  );
+}
+
 export default function TransfersPage() {
   const [transfers, setTransfers] = useState<InternalTransfer[]>([]);
+  const [institutions, setInstitutions] = useState<PickerInstitution[]>([]);
+  const [pickerError, setPickerError] = useState(false);
+  const [fromProductId, setFromProductId] = useState("");
+  const [toProductId, setToProductId] = useState("");
   const [description, setDescription] = useState("");
   const [amount, setAmount] = useState("");
   const [transferDate, setTransferDate] = useState(
@@ -51,6 +135,7 @@ export default function TransfersPage() {
   );
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const loadTransfers = () => {
     fetch("/api/transfers")
@@ -63,10 +148,41 @@ export default function TransfersPage() {
     loadTransfers();
   }, []);
 
+  useEffect(() => {
+    fetch("/api/institutions")
+      .then((res) => {
+        if (!res.ok) throw new Error("failed");
+        return res.json();
+      })
+      .then((data: InstitutionsResponse) => {
+        setInstitutions(
+          data.institutions
+            .map((inst) => ({
+              slug: inst.slug,
+              name: inst.name,
+              products: inst.products
+                .filter((p) => p.isActive && p.currency === TRANSFER_CURRENCY)
+                .map((p) => ({ id: p.id, name: p.name })),
+            }))
+            .filter((inst) => inst.products.length > 0)
+        );
+      })
+      .catch(() => setPickerError(true));
+  }, []);
+
+  const sameProduct = fromProductId !== "" && fromProductId === toProductId;
+  const canAdd =
+    !!description &&
+    !!amount &&
+    !!fromProductId &&
+    !!toProductId &&
+    !sameProduct;
+
   const handleAdd = async () => {
     const parsedAmount = parseNumberInput(amount);
-    if (!description || parsedAmount === null) return;
+    if (!canAdd || parsedAmount === null) return;
     setSaving(true);
+    setError(null);
     try {
       const res = await fetch("/api/transfers", {
         method: "POST",
@@ -74,16 +190,23 @@ export default function TransfersPage() {
         body: JSON.stringify({
           description,
           amount: Math.round(parsedAmount),
+          fromProductId,
+          toProductId,
           transferDate,
           notes: notes || null,
         }),
       });
-      if (res.ok) {
-        setDescription("");
-        setAmount("");
-        setNotes("");
-        loadTransfers();
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        setError(data?.error ?? "No se pudo registrar el movimiento");
+        return;
       }
+      setDescription("");
+      setAmount("");
+      setNotes("");
+      loadTransfers();
+    } catch {
+      setError("No se pudo registrar el movimiento");
     } finally {
       setSaving(false);
     }
@@ -120,6 +243,10 @@ export default function TransfersPage() {
           return t.transferDate; // ISO strings sort correctly as strings.
         case "descripcion":
           return t.description;
+        case "desde":
+          return productLabel(t.fromProduct);
+        case "hacia":
+          return productLabel(t.toProduct);
         case "monto":
           return t.amount;
         case "notas":
@@ -174,10 +301,24 @@ export default function TransfersPage() {
         <CardHeader>
           <CardTitle>Registrar movimiento</CardTitle>
           <CardDescription>
-            Autoprestamos y movimientos entre cuentas propias
+            Autoprestamos y movimientos entre productos propios (en CLP)
           </CardDescription>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-3">
+          <div className="grid gap-3 md:grid-cols-2">
+            <ProductSelect
+              label="Desde"
+              value={fromProductId}
+              onChange={setFromProductId}
+              institutions={institutions}
+            />
+            <ProductSelect
+              label="Hacia"
+              value={toProductId}
+              onChange={setToProductId}
+              institutions={institutions}
+            />
+          </div>
           <div className="flex items-end gap-3">
             <div className="flex-1">
               <label className="mb-1 block text-sm text-muted-foreground">
@@ -210,17 +351,27 @@ export default function TransfersPage() {
                 onChange={(e) => setTransferDate(e.target.value)}
               />
             </div>
-            <Button onClick={handleAdd} disabled={saving}>
+            <Button onClick={handleAdd} disabled={saving || !canAdd}>
               {saving ? "..." : "Agregar"}
             </Button>
           </div>
-          <div className="mt-2">
-            <Input
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              placeholder="Notas (opcional)"
-            />
-          </div>
+          <Input
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            placeholder="Notas (opcional)"
+          />
+          {pickerError && (
+            <p className="text-sm text-destructive">
+              No se pudieron cargar los productos; recarga la pagina.
+            </p>
+          )}
+          {(sameProduct || error) && (
+            <p className="text-sm text-destructive">
+              {sameProduct
+                ? "El origen y el destino deben ser productos distintos."
+                : error}
+            </p>
+          )}
         </CardContent>
       </Card>
 
@@ -264,6 +415,28 @@ export default function TransfersPage() {
                     onSort={handlePendingSort}
                   />
                   <SortableTableHead
+                    label="Desde"
+                    columnKey="desde"
+                    active={pendingSort?.key === "desde"}
+                    direction={
+                      pendingSort?.key === "desde"
+                        ? pendingSort.direction
+                        : undefined
+                    }
+                    onSort={handlePendingSort}
+                  />
+                  <SortableTableHead
+                    label="Hacia"
+                    columnKey="hacia"
+                    active={pendingSort?.key === "hacia"}
+                    direction={
+                      pendingSort?.key === "hacia"
+                        ? pendingSort.direction
+                        : undefined
+                    }
+                    onSort={handlePendingSort}
+                  />
+                  <SortableTableHead
                     label="Monto"
                     columnKey="monto"
                     align="right"
@@ -293,9 +466,15 @@ export default function TransfersPage() {
                 {pendingSorted.map((t) => (
                   <TableRow key={t.id}>
                     <TableCell className="whitespace-nowrap">
-                      {new Date(t.transferDate).toLocaleDateString("es-CL")}
+                      {formatPlainDateEs(t.transferDate)}
                     </TableCell>
                     <TableCell>{t.description}</TableCell>
+                    <TableCell>
+                      <ProductCell product={t.fromProduct} />
+                    </TableCell>
+                    <TableCell>
+                      <ProductCell product={t.toProduct} />
+                    </TableCell>
                     <TableCell className="text-right font-medium">
                       {formatCLP(t.amount)}
                     </TableCell>
@@ -361,6 +540,28 @@ export default function TransfersPage() {
                     onSort={handleResolvedSort}
                   />
                   <SortableTableHead
+                    label="Desde"
+                    columnKey="desde"
+                    active={resolvedSort?.key === "desde"}
+                    direction={
+                      resolvedSort?.key === "desde"
+                        ? resolvedSort.direction
+                        : undefined
+                    }
+                    onSort={handleResolvedSort}
+                  />
+                  <SortableTableHead
+                    label="Hacia"
+                    columnKey="hacia"
+                    active={resolvedSort?.key === "hacia"}
+                    direction={
+                      resolvedSort?.key === "hacia"
+                        ? resolvedSort.direction
+                        : undefined
+                    }
+                    onSort={handleResolvedSort}
+                  />
+                  <SortableTableHead
                     label="Monto"
                     columnKey="monto"
                     align="right"
@@ -390,9 +591,15 @@ export default function TransfersPage() {
                 {resolvedSorted.map((t) => (
                   <TableRow key={t.id} className="opacity-60">
                     <TableCell className="whitespace-nowrap">
-                      {new Date(t.transferDate).toLocaleDateString("es-CL")}
+                      {formatPlainDateEs(t.transferDate)}
                     </TableCell>
                     <TableCell>{t.description}</TableCell>
+                    <TableCell>
+                      <ProductCell product={t.fromProduct} />
+                    </TableCell>
+                    <TableCell>
+                      <ProductCell product={t.toProduct} />
+                    </TableCell>
                     <TableCell className="text-right">
                       {formatCLP(t.amount)}
                     </TableCell>

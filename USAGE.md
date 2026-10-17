@@ -142,7 +142,7 @@ For the email parser, you need a Gmail App Password (not your regular password):
 | **Gastos** | `/expenses` | Transaction list, manual entry form, CSV import |
 | **Categorías** | `/categories` | Categories and keyword rules for automatic categorization |
 | **Gastos Fijos** | `/fixed` | Monthly fixed expenses with shared ratio (69%) |
-| **Transferencias** | `/transfers` | Internal money movements (pending/resolved) |
+| **Transferencias** | `/transfers` | Internal money movements between two of your CLP products (pending/resolved) |
 | **Instituciones** | `/institutions` | Every institution and its products with balances; edit institutions, accounts and products from their detail pages |
 | **Configuracion** | `/settings` | Budget parameters, income split calculator, monthly reset |
 
@@ -467,7 +467,7 @@ All API routes are under `/api/`:
 | PATCH/DELETE | `/api/categories/rules/[id]` | Update or delete a rule |
 | GET | `/api/categories/rules/preview` | Transactions a keyword would match (`?keyword=`) |
 | GET/POST/PUT/DELETE | `/api/fixed-expenses` | Fixed expenses CRUD |
-| GET/POST/PUT/DELETE | `/api/transfers` | Internal transfers |
+| GET/POST/PUT/DELETE | `/api/transfers` | Internal transfers (POST needs distinct CLP `fromProductId` + `toProductId`) |
 | GET/POST/DELETE | `/api/wealth` | Net-worth series (GET); backdate a legacy snapshot before the derived series starts (POST); delete a legacy snapshot (DELETE) |
 | POST | `/api/auth/login` | Exchange `DASHBOARD_PASSWORD` for a session cookie |
 | POST | `/api/auth/logout` | Clear the session cookie (public) |

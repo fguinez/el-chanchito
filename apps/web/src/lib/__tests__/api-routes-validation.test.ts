@@ -520,28 +520,60 @@ describe("GET /api/transactions", () => {
 });
 
 describe("POST /api/transfers", () => {
-  it("accepts a zero amount and the legacy account aliases", async () => {
+  const TARGET_ID = "44444444-4444-4444-8444-444444444444";
+
+  it("accepts the legacy account aliases once both products hold CLP", async () => {
+    fake.respondWith((query) =>
+      query.op === "select"
+        ? [
+            { id: PRODUCT_ID, currency: "CLP" },
+            { id: TARGET_ID, currency: "CLP" },
+          ]
+        : [{ id: ROW_ID, ...(argOf(query, "values") as object) }]
+    );
+
     const response = await transfers.POST(
       jsonRequest("POST", {
         description: "Traspaso de prueba",
-        amount: 0,
+        amount: 2_500_000,
         transferDate: "2026-03-05",
         fromAccountId: PRODUCT_ID,
+        toAccountId: TARGET_ID,
       })
     );
 
     expect(response.status).toBe(201);
     expect(argOf(onlyQuery("insert"), "values")).toMatchObject({
-      amount: 0,
+      amount: 2_500_000,
       fromProductId: PRODUCT_ID,
-      toProductId: null,
+      toProductId: TARGET_ID,
       notes: null,
     });
+  });
+
+  it("answers 400 with issues to an unknown product, without inserting", async () => {
+    const response = await transfers.POST(
+      jsonRequest("POST", {
+        description: "Traspaso de prueba",
+        amount: 2_500_000,
+        transferDate: "2026-03-05",
+        fromProductId: PRODUCT_ID,
+        toProductId: TARGET_ID,
+      })
+    );
+
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.field).toBe("fromProductId");
+    expect(body.issues.length).toBeGreaterThan(0);
+    expect(fake.queries.map((query) => query.op)).toEqual(["select"]);
   });
 
   it.each([
     [{ description: "Traspaso de prueba", amount: 2_500_000 }, "transferDate"],
     [{ description: "Traspaso de prueba", amount: 2_500_000, transferDate: "2026-03-05", toProductId: "x" }, "toProductId"],
+    [{ description: "Traspaso de prueba", amount: 0, transferDate: "2026-03-05", fromProductId: PRODUCT_ID, toProductId: TARGET_ID }, "amount"],
+    [{ description: "Traspaso de prueba", amount: 2_500_000, transferDate: "2026-03-05", fromProductId: PRODUCT_ID }, "toProductId"],
   ])("rejects %j on %s", async (body, field) => {
     await expectRejected(await transfers.POST(jsonRequest("POST", body)), field);
   });
