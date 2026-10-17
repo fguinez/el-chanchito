@@ -492,14 +492,16 @@ def _write_transaction(
     product_id: str,
     claimed: set,
     incoming_ids: set[str],
-) -> str:
+) -> tuple[str, str | None]:
     """Store one scraped transaction and say what became of it.
 
-    Returns "inserted" for a new row, "stored" when its key already holds a
-    row (found, adopted, or taken by a concurrent insert) and "kept" when a
-    stored row with a bank id keeps the movement out (see `_claim_decision`).
-    A movement already stored under its key is only claimed; one that adopts a
-    stored row (see `write_transactions`) re-keys it in place.
+    Returns the outcome and the stored row it claims, if any. The outcome is
+    "inserted" for a new row, "stored" when its key already holds a row
+    (found, adopted, or taken by a concurrent insert) and "kept" when a stored
+    row with a bank id keeps the movement out (see `_claim_decision`). A
+    movement already stored under its key is only claimed; one that adopts a
+    stored row (see `write_transactions`) re-keys it in place. `claimed` is
+    only read: the caller records the claim once this row's block commits.
     """
     source = f"scraper_{txn.institution}"
     row = conn.execute(
@@ -508,9 +510,8 @@ def _write_transaction(
         (product_id, txn.external_id),
     ).fetchone()
     if row:
-        claimed.add(row[0])
         _fill_location(conn, row[0], txn.location)
-        return "stored"
+        return "stored", row[0]
 
     if _adopts_stored_rows(txn.external_id):
         action, row_id = _claim_decision(
@@ -519,8 +520,6 @@ def _write_transaction(
             claimed,
             incoming_ids,
         )
-        if action != "insert":
-            claimed.add(row_id)
         if action == "rekey":
             # The dates move with the key: a legacy row is sitting under its
             # posting date, and leaving it there would show the movement on the
@@ -544,7 +543,7 @@ def _write_transaction(
                 row_id,
                 txn.external_id,
             )
-            return "stored"
+            return "stored", row_id
         if action == "keep":
             logger.warning(
                 "Transaction %s (%s, %s) has no bank id this run and "
@@ -555,7 +554,7 @@ def _write_transaction(
                 txn.amount,
                 row_id,
             )
-            return "kept"
+            return "kept", row_id
 
     cur = conn.execute(
         """
@@ -582,7 +581,7 @@ def _write_transaction(
         ),
     )
     # A conflict means the row is already stored under this key.
-    return "inserted" if cur.rowcount and cur.rowcount > 0 else "stored"
+    return ("inserted" if cur.rowcount and cur.rowcount > 0 else "stored"), None
 
 
 @dataclass(frozen=True)
@@ -682,7 +681,7 @@ def write_transactions(transactions: list[ScrapedTransaction]) -> TransactionWri
                 continue
             try:
                 with conn.transaction():
-                    outcome = _write_transaction(
+                    outcome, claim = _write_transaction(
                         conn, txn, product_id, claimed, incoming.get(product_id, set())
                     )
             except Exception:
@@ -691,6 +690,8 @@ def write_transactions(transactions: list[ScrapedTransaction]) -> TransactionWri
                 failed += 1
                 logger.exception("Failed to insert transaction: %s", txn.external_id)
                 continue
+            if claim is not None:
+                claimed.add(claim)
             if outcome != "kept":
                 persisted.add(txn.external_id)
             if outcome == "inserted":

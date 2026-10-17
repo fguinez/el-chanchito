@@ -586,8 +586,8 @@ class _FakeTxConn:
 
     Rows are dicts; `created_at` is the insertion order, which is what the real
     query orders by. `_resolve_product` is monkeypatched, so only the
-    transaction queries reach here. An INSERT of an id in `fail_on` raises and,
-    like Postgres, aborts the transaction: every statement after it fails
+    transaction queries reach here. An INSERT of, or re-key onto, an id in
+    `fail_on` raises and, like Postgres, aborts the transaction: every statement after it fails
     until a `transaction()` block rolls back past it. An INSERT of an id in
     `drop_on` drops the connection once; each `pool.connection()` checkout is
     a fresh connection over the same rows.
@@ -649,6 +649,9 @@ class _FakeTxConn:
             return _FakeCursor([(row["id"], row["external_id"]) for row in hits])
         if "UPDATE transactions SET external_id" in q:
             external_id, tx_date, accounting_date, month, row_id = p
+            if external_id in self.fail_on:
+                self.aborted = True
+                raise RuntimeError("could not serialize access")
             for row in self.rows:
                 if row["id"] == row_id:
                     row.update(
@@ -857,6 +860,22 @@ class TestUpsertTransactionsIsolation:
             "bch_op_12345678902",
             "bch_op_12345678903",
         ]
+
+    def test_a_failed_re_key_leaves_its_row_free_to_adopt(self, monkeypatch):
+        """A rolled-back re-key does not claim the row: the next matching
+        movement adopts it instead of inserting a duplicate."""
+        conn = _FakeTxConn(
+            [_legacy_row("row-1", "bch_a1b2c3d4e5f60718", 1)],
+            fail_on={"bch_op_12345678901"},
+        )
+        _use_tx_conn(monkeypatch, conn)
+
+        result = write_transactions(
+            [_txn("bch_op_12345678901"), _txn("bch_op_12345678902")]
+        )
+
+        assert (result.inserted, result.failed) == (0, 1)
+        assert [row["external_id"] for row in conn.rows] == ["bch_op_12345678902"]
 
 
 class TestUpsertTransactionsAdoption:
