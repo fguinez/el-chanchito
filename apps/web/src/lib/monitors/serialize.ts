@@ -4,7 +4,7 @@
 // the routes fetch, these shape.
 
 import { METRIC_FIELDS } from "@chanchito/product-model";
-import type { ClpRates } from "@/lib/rates";
+import type { RateBook } from "@/lib/rates";
 import {
   ExprError,
   collectRefs,
@@ -109,7 +109,7 @@ export function referencedProductIds(def: MonitorDefinition): string[] {
 export type ReplayWindowOptions = {
   snapshots: SnapshotRow[];
   products: Map<string, ProductInfo>;
-  rates: ClpRates;
+  rates: RateBook;
   now: Date;
 };
 

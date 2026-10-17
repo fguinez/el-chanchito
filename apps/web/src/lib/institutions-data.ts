@@ -14,7 +14,14 @@ import {
   type ProductMetrics,
 } from "@/lib/db/schema";
 import { asc, eq, type SQL } from "drizzle-orm";
-import { getClpRates, toClp, type ClpRates } from "@/lib/rates";
+import {
+  rateInfoFor,
+  ratesFor,
+  toClp,
+  type RateBook,
+  type RateInfo,
+} from "@/lib/rates";
+import { getRateBook } from "@/lib/rate-book";
 import { assetClp, debtClp } from "@/lib/networth";
 import { isRetiredGhost } from "@/lib/retired-products";
 
@@ -29,6 +36,8 @@ export interface ApiProduct {
   currency: string;
   currentBalance: number | null;
   currentBalanceClp: number | null;
+  /** The rate behind currentBalanceClp; null for CLP or unconvertible. */
+  exchangeRate: RateInfo | null;
   balanceAsOf: string | null;
   externalRef: string | null;
   attributes: ProductAttributes | Record<string, never>;
@@ -115,7 +124,8 @@ type InstitutionRow = Awaited<ReturnType<typeof loadInstitutionRows>>[number];
 
 function buildInstitutions(
   rows: InstitutionRow[],
-  rates: ClpRates
+  book: RateBook,
+  now: Date
 ): Map<string, ApiInstitution> {
   const byInstitution = new Map<string, ApiInstitution>();
 
@@ -150,6 +160,7 @@ function buildInstitutions(
     // numeric columns come back as strings from postgres-js
     const balance =
       row.currentBalance != null ? Number(row.currentBalance) : null;
+    const target = { productId: row.productId, institutionSlug: row.slug };
 
     institution.products.push({
       id: row.productId,
@@ -162,7 +173,14 @@ function buildInstitutions(
       currency: row.currency,
       currentBalance: balance,
       currentBalanceClp:
-        balance != null ? toClp(row.currency, balance, rates) : null,
+        balance != null
+          ? toClp(row.currency, balance, ratesFor(book, target))
+          : null,
+      exchangeRate: rateInfoFor(
+        book,
+        { ...target, currency: row.currency },
+        now
+      ),
       balanceAsOf: row.balanceAsOf ? row.balanceAsOf.toISOString() : null,
       externalRef: row.externalRef,
       attributes: row.attributes,
@@ -174,10 +192,12 @@ function buildInstitutions(
   return byInstitution;
 }
 
-/** Per-institution subtotals: holdings by currency + CLP net-worth total. */
+/** Per-institution subtotals: holdings by currency + CLP net-worth total,
+ *  each product converted with its own rates (see lib/rates ratesFor). */
 export function computeSubtotals(
   products: ApiProduct[],
-  rates: ClpRates
+  institutionSlug: string,
+  book: RateBook
 ): InstitutionSubtotals {
   const byCurrency = new Map<string, number>();
   let patrimonioClp = 0;
@@ -198,6 +218,7 @@ export function computeSubtotals(
       );
     }
 
+    const rates = ratesFor(book, { productId: p.id, institutionSlug });
     const a = assetClp(p.kind, p.currentBalance, p.currency, rates);
     const d = debtClp(
       p.kind,
@@ -227,28 +248,28 @@ export function computeSubtotals(
  * underneath and per-institution subtotals (holdings by currency + a
  * CLP-converted net-worth total). Institutions with no products are omitted
  * (the inner joins drop them). Foreign/crypto balances are converted to CLP
- * with Buda's public tickers (see lib/rates).
+ * with the institution's own rate when its scraper stored one, else with the
+ * provider rates (see lib/rates).
  */
 export async function queryInstitutions(): Promise<{
   institutions: ApiInstitution[];
   totals: InstitutionTotals;
 }> {
-  const [rows, rates] = await Promise.all([
+  const [rows, book] = await Promise.all([
     loadInstitutionRows(),
-    getClpRates(),
+    getRateBook(),
   ]);
 
   let patrimonioClpTotal = 0;
   let deudaClpTotal = 0;
 
-  const institutions = [...buildInstitutions(rows, rates).values()].map(
-    (inst) => {
-      inst.subtotals = computeSubtotals(inst.products, rates);
-      patrimonioClpTotal += inst.subtotals.patrimonioClp ?? 0;
-      deudaClpTotal += inst.subtotals.deudaClp ?? 0;
-      return inst;
-    }
-  );
+  const built = buildInstitutions(rows, book, new Date());
+  const institutions = [...built.values()].map((inst) => {
+    inst.subtotals = computeSubtotals(inst.products, inst.slug, book);
+    patrimonioClpTotal += inst.subtotals.patrimonioClp ?? 0;
+    deudaClpTotal += inst.subtotals.deudaClp ?? 0;
+    return inst;
+  });
 
   return {
     institutions,
@@ -264,12 +285,18 @@ export async function queryInstitutions(): Promise<{
 export async function queryInstitutionBySlug(
   slug: string
 ): Promise<ApiInstitution | null> {
-  const [rows, rates] = await Promise.all([
+  const [rows, book] = await Promise.all([
     loadInstitutionRows(eq(institutions.slug, slug)),
-    getClpRates(),
+    getRateBook(),
   ]);
-  const institution = buildInstitutions(rows, rates).values().next().value;
+  const institution = buildInstitutions(rows, book, new Date())
+    .values()
+    .next().value;
   if (!institution) return null;
-  institution.subtotals = computeSubtotals(institution.products, rates);
+  institution.subtotals = computeSubtotals(
+    institution.products,
+    institution.slug,
+    book
+  );
   return institution;
 }

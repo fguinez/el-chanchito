@@ -11,7 +11,8 @@ import {
 } from "@/lib/db/schema";
 import { eq, asc } from "drizzle-orm";
 import { calcWealthMetrics } from "@/lib/budget-engine";
-import { getClpRates } from "@/lib/rates";
+import { ratesFor } from "@/lib/rates";
+import { getRateBook } from "@/lib/rate-book";
 import { assetClp, debtClp } from "@/lib/networth";
 import { formatLocalDate } from "@/lib/monitors/history";
 
@@ -44,13 +45,15 @@ function snapshotMetrics(
  * derives from each snapshot's *own* metrics (the limit/owed as observed on
  * that date), not from today's product row.
  *
- * Foreign/crypto balances are converted to CLP with current Buda tickers (see
- * lib/networth). Note: only *current* rates are available, so historical
- * points are valued at today's prices — acceptable while the computed series is
- * short; storing per-date rates would be the fix once history accumulates.
+ * Foreign/crypto balances are converted to CLP with each product's current
+ * rate: its institution's own when scraped, else the provider's (see
+ * lib/rates and lib/networth). Note: only *current* rates are available, so
+ * historical points are valued at today's prices: acceptable while the
+ * computed series is short; storing per-date rates would be the fix once
+ * history accumulates.
  */
 export async function GET() {
-  const rates = await getClpRates();
+  const book = await getRateBook();
 
   const legacy = await db
     .select()
@@ -122,7 +125,8 @@ export async function GET() {
     let mercadopagoBalance: number | null = null;
     let banchileSavings: number | null = null;
 
-    for (const p of latestByProduct.values()) {
+    for (const [productId, p] of latestByProduct) {
+      const rates = ratesFor(book, { productId, institutionSlug: p.slug });
       patrimonio += assetClp(p.kind, p.balance, p.currency, rates) ?? 0;
       deuda += debtClp(p.kind, p.balance, p.metrics, p.currency, rates) ?? 0;
       // These component columns are CLP-denominated products (informational).

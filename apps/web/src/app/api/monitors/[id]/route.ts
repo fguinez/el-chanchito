@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { monitors } from "@/lib/db/schema";
-import { getClpRates } from "@/lib/rates";
+import { getRateBook } from "@/lib/rate-book";
 import { evaluateMonitor } from "@/lib/monitors/evaluate";
 import { replayHistory } from "@/lib/monitors/history";
 import {
@@ -60,7 +60,7 @@ export async function GET(request: NextRequest, { params }: Context) {
 
     const [catalog, rates, adjustments] = await Promise.all([
       loadProductCatalog(),
-      getClpRates(),
+      getRateBook(),
       loadMonitorAdjustments(id),
     ]);
     const def = { ...row, adjustments };
@@ -127,7 +127,7 @@ export async function PUT(request: NextRequest, { params }: Context) {
     }
 
     const [rates, adjustments] = await Promise.all([
-      getClpRates(),
+      getRateBook(),
       loadMonitorAdjustments(id),
     ]);
     const evaluation = evaluateMonitor(
