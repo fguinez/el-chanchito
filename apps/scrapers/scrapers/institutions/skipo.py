@@ -52,7 +52,7 @@ import logging
 import os
 import re
 from collections.abc import AsyncIterator
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -82,7 +82,10 @@ CRYPTO_KIND = "crypto"
 CLP = "CLP"
 ID_PREFIX = "skipo_"
 PAGE_SIZE = 100
-# 5000 ledger entries; past that the older ones are left out, with a warning.
+# Without startDate/endDate the ledger returns the whole history (verified
+# live: both echo back null, and an early startDate gives the same totalItems),
+# newest first. So the cap keeps the newest 5000 entries; past it the older ones
+# are left out, with a warning.
 MAX_PAGES = 50
 # The asset catalog is small (dozens of symbols); this only bounds the loop.
 MAX_ASSET_PAGES = 10
@@ -101,8 +104,9 @@ _LEDGER_DESCRIPTIONS = {
 }
 _SUBTYPE_DESCRIPTIONS = {"INTERNAL_EARN_DISTRIBUTION": "Skipo rendimiento"}
 
-# A problem `code` is a short snake_case token; anything else in that field is
-# dropped rather than copied into an error message.
+# A problem `code` is a short snake_case token (verified live, e.g.
+# `validation_error`, `unprocessable`); anything else in that field is dropped
+# rather than copied into an error message.
 _PROBLEM_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _RATE_QUANTUM = Decimal("0.00000001")
 # `exchange_rates.rate` is NUMERIC(20, 8): at most 12 integer digits.
@@ -133,14 +137,18 @@ def _to_clp(raw: Any) -> int | None:
     value = _decimal(raw)
     if value is None:
         return None
-    return int(value.quantize(Decimal(1), rounding=ROUND_HALF_UP))
+    try:
+        return int(value.quantize(Decimal(1), rounding=ROUND_HALF_UP))
+    except InvalidOperation:
+        # More whole digits than the decimal context holds: no real amount.
+        return None
 
 
 def _local_date(raw: Any) -> date | None:
     """The Santiago calendar date of an ISO-8601 timestamp, or None.
 
     Converted before taking the date, or an evening movement in UTC lands on
-    the next day.
+    the next day. A timestamp without an offset is read as UTC.
     """
     if not isinstance(raw, str) or not raw:
         return None
@@ -149,7 +157,7 @@ def _local_date(raw: Any) -> date | None:
     except ValueError:
         return None
     if moment.tzinfo is None:
-        return moment.date()
+        moment = moment.replace(tzinfo=timezone.utc)
     return moment.astimezone(LOCAL_TZ).date()
 
 
@@ -273,6 +281,22 @@ def _parse_balances(
     return products, warnings
 
 
+def _rate(raw: Any) -> Decimal | None:
+    """A rate `exchange_rates.rate` can hold, rounded half up to 8 decimals; else None.
+
+    The bound is checked before rounding: quantizing a value with more digits
+    than the decimal context holds raises instead of rounding.
+    """
+    value = _decimal(raw)
+    if value is None or not 0 < value < _MAX_RATE:
+        return None
+    try:
+        rate = value.quantize(_RATE_QUANTUM, rounding=ROUND_HALF_UP)
+    except InvalidOperation:
+        return None
+    return rate if rate > 0 else None
+
+
 def _exchange_rates(rows: list[dict], classes: dict[str, str]) -> list[ScrapedExchangeRate]:
     """CLP per unit of each held coin, from its CLP-valued balance.
 
@@ -299,8 +323,8 @@ def _exchange_rates(rows: list[dict], classes: dict[str, str]) -> list[ScrapedEx
         if frozen or pending:
             logger.info("Skipo %s has frozen or pending units; no rate derived", symbol)
             continue
-        rate = (value / balance).quantize(_RATE_QUANTUM, rounding=ROUND_HALF_UP)
-        if not 0 < rate < _MAX_RATE:
+        rate = _rate(value / balance)
+        if rate is None:
             continue
         try:
             rates.append(
@@ -353,16 +377,22 @@ def _parse_ledger_entry(entry: dict) -> ScrapedTransaction | None:
 
     sub_type = str(entry.get("subType") or "").upper()
     description = _SUBTYPE_DESCRIPTIONS.get(sub_type) or _LEDGER_DESCRIPTIONS[entry_type]
-    return ScrapedTransaction(
-        institution="skipo",
-        product_kind=WALLET_KIND,
-        currency=CLP,
-        description=description,
-        amount=sign * abs(pesos),
-        transaction_date=tx_date,
-        external_id=f"{ID_PREFIX}{entry_id}",
-        scheduled_month=date(tx_date.year, tx_date.month, 1),
-    )
+    try:
+        return ScrapedTransaction(
+            institution="skipo",
+            product_kind=WALLET_KIND,
+            currency=CLP,
+            description=description,
+            amount=sign * abs(pesos),
+            transaction_date=tx_date,
+            external_id=f"{ID_PREFIX}{entry_id}",
+            scheduled_month=date(tx_date.year, tx_date.month, 1),
+        )
+    except ValueError:
+        # pydantic's ValidationError is a ValueError: an amount past what
+        # `transactions.amount` holds, say. One bad row never fails the leg.
+        logger.warning("Skipo ledger entry %s doesn't fit a transaction, skipping", entry_id)
+        return None
 
 
 class SkipoScraper(BaseScraper):
@@ -376,7 +406,6 @@ class SkipoScraper(BaseScraper):
         self._warnings: list[str] = []
 
     def _client(self) -> httpx.AsyncClient:
-        """The one place the HTTP client is built, so tests can swap its transport."""
         return httpx.AsyncClient(
             base_url=SKIPO_BASE,
             timeout=30.0,
@@ -474,8 +503,9 @@ class SkipoScraper(BaseScraper):
             except (httpx.HTTPError, SkipoApiError) as e:
                 if not pages_read:
                     raise
-                logger.warning("Skipo: ledger stopped early, keeping what was read: %s", e)
-                self._warnings.append(f"Skipo: CLP ledger stopped early ({e})")
+                reason = str(e) or type(e).__name__
+                logger.warning("Skipo: ledger stopped early, keeping what was read: %s", reason)
+                self._warnings.append(f"Skipo: CLP ledger stopped early ({reason})")
         logger.info("Skipo: %d transactions", len(transactions))
         return transactions
 

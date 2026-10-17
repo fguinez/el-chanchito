@@ -27,6 +27,7 @@ from scrapers.institutions.skipo import (
     _local_date,
     _parse_balances,
     _parse_ledger_entry,
+    _rate,
     _to_clp,
 )
 
@@ -215,6 +216,8 @@ class TestToClp:
             pytest.param(None, None, id="none"),
             pytest.param(True, None, id="bool"),
             pytest.param("NaN", None, id="not-finite"),
+            pytest.param("1" + "0" * 40, None, id="more-digits-than-the-context"),
+            pytest.param("1e100", None, id="huge-exponent"),
         ],
     )
     def test_parses_decimal_strings(self, raw, expected):
@@ -230,6 +233,10 @@ class TestLocalDate:
     def test_keeps_an_explicit_offset(self):
         """A timestamp with an offset is converted, not read as UTC."""
         assert _local_date("2026-01-15T23:30:00-03:00") == date(2026, 1, 15)
+
+    def test_naive_timestamp_is_read_as_utc(self):
+        """A timestamp without an offset is UTC, then converted to Santiago."""
+        assert _local_date("2026-01-16T02:30:00") == date(2026, 1, 15)
 
     def test_unreadable_is_none(self):
         """Garbage yields None rather than today's date."""
@@ -295,6 +302,7 @@ class TestParseBalances:
             pytest.param(_balance("NVDAX", balance="0.12345678"), "tokenized stock", id="stock"),
             pytest.param(_balance("ZZZ", balance="0.12345678"), "unknown asset class", id="unknown-class"),
             pytest.param(_balance("BTC", balance="lots"), "unreadable", id="unreadable-balance"),
+            pytest.param(_balance("CLP", balance="1e100"), "unreadable", id="clp-past-whole-pesos"),
             pytest.param(_balance("", balance="1"), "unreadable", id="no-symbol"),
         ],
     )
@@ -358,6 +366,25 @@ class TestExchangeRates:
         classes = {**_CLASSES, "1INCH": "CRYPTO"}
 
         assert _exchange_rates([_balance("1INCH", balance="1", pref="999999")], classes) == []
+
+
+class TestRate:
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            pytest.param("65000000.123456789", Decimal("65000000.12345679"), id="rounds-half-up"),
+            pytest.param("0.000000004", None, id="rounds-to-zero"),
+            pytest.param("1000000000000", None, id="past-numeric-20-8"),
+            pytest.param("1" + "0" * 40, None, id="more-digits-than-the-context"),
+            pytest.param(Decimal(1) / Decimal(3) * Decimal("1e30"), None, id="huge-quotient"),
+            pytest.param("0", None, id="zero"),
+            pytest.param("-1", None, id="negative"),
+            pytest.param("abc", None, id="unreadable"),
+        ],
+    )
+    def test_bounds_before_rounding(self, raw, expected):
+        """Only rates `exchange_rates.rate` can hold come back, and nothing raises."""
+        assert _rate(raw) == expected
 
 
 class TestParseLedgerEntry:
@@ -428,6 +455,8 @@ class TestParseLedgerEntry:
             pytest.param({"amount": "abc", "total": None}, id="unreadable-amount"),
             pytest.param({"createdAt": ""}, id="no-date"),
             pytest.param({"assetSymbol": "BTC"}, id="not-clp"),
+            pytest.param({"amount": "1" + "0" * 20, "total": None}, id="amount-past-the-column"),
+            pytest.param({"amount": "1" + "0" * 40, "total": None}, id="amount-past-the-context"),
         ],
     )
     def test_skips_unusable_rows_with_a_warning(self, overrides, caplog):
@@ -602,6 +631,24 @@ class TestScrapeTransactions:
         result = asyncio.run(self.scraper.scrape_products())
 
         assert result.warnings == []
+
+    def test_later_page_timeout_names_the_error(self, monkeypatch):
+        """An exception with no message still leaves a readable warning."""
+        fake = _Skipo(ledger={1: [_entry(1)], 2: [_entry(2)]})
+        handler = fake.handler
+
+        def timeout_on_page_two(request):
+            if request.url.params.get("page") == "2":
+                raise httpx.ReadTimeout("")
+            return handler(request)
+
+        fake.handler = timeout_on_page_two
+        _install(monkeypatch, fake)
+
+        asyncio.run(self.scraper.scrape_transactions())
+        result = asyncio.run(self.scraper.scrape_products())
+
+        assert "Skipo: CLP ledger stopped early (ReadTimeout)" in result.warnings
 
     def test_first_page_failure_fails_the_leg(self, monkeypatch):
         """With nothing read the leg raises instead of returning []."""
