@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Card,
@@ -23,9 +23,15 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { SELECT_CLASS } from "@/components/ui/native-select";
 import { useSortableData } from "@/lib/use-sortable-data";
-import { formatCLP, formatPlainDateEs, parseNumberInput } from "@/lib/utils";
-import { TRANSFER_CURRENCY, type TransferProductRef } from "@/lib/transfers";
-import { Trash2, Check } from "lucide-react";
+import { cn, formatCLP, formatPlainDateEs, parseNumberInput } from "@/lib/utils";
+import {
+  TRANSFER_CURRENCY,
+  type TransferLinkedTransaction,
+  type TransferProductRef,
+} from "@/lib/transfers";
+import { hrefWithSearchParam, TXN_PARAM } from "@/lib/transaction-selection";
+import { TransferLinksDialog } from "@/components/transfers/transfer-links-dialog";
+import { Trash2, Check, Link2 } from "lucide-react";
 
 interface InternalTransfer {
   id: string;
@@ -35,6 +41,11 @@ interface InternalTransfer {
   toProductId: string | null;
   fromProduct: TransferProductRef | null;
   toProduct: TransferProductRef | null;
+  /** The scraped rows this transfer accounts for (null = unlinked). */
+  fromTransactionId: string | null;
+  toTransactionId: string | null;
+  fromTransaction: TransferLinkedTransaction | null;
+  toTransaction: TransferLinkedTransaction | null;
   transferDate: string;
   status: string;
   notes: string | null;
@@ -72,19 +83,40 @@ function productLabel(p: TransferProductRef | null): string | null {
   return p ? `${p.institutionName} · ${p.name}` : null;
 }
 
-/** A transfer endpoint, linked to its product page; "-" on legacy rows. */
-function ProductCell({ product }: { product: TransferProductRef | null }) {
+/** A transfer endpoint, linked to its product page ("-" on legacy rows), and
+ *  under it the transaction it links, which opens in the product's detail
+ *  panel. */
+function ProductCell({
+  product,
+  transaction,
+}: {
+  product: TransferProductRef | null;
+  transaction: TransferLinkedTransaction | null;
+}) {
   if (!product) return <span className="text-muted-foreground">-</span>;
+  const productHref = `/institutions/${product.institutionSlug}/${product.slug}`;
   return (
-    <Link
-      href={`/institutions/${product.institutionSlug}/${product.slug}`}
-      className="hover:underline"
-    >
-      <span className="block text-xs text-muted-foreground">
-        {product.institutionName}
-      </span>
-      {product.name}
-    </Link>
+    <>
+      <Link href={productHref} className="hover:underline">
+        <span className="block text-xs text-muted-foreground">
+          {product.institutionName}
+        </span>
+        {product.name}
+      </Link>
+      {transaction && (
+        <Link
+          href={hrefWithSearchParam(productHref, "", TXN_PARAM, transaction.id)}
+          className="mt-1 flex items-center gap-1 text-xs text-muted-foreground hover:underline"
+          title={transaction.description}
+        >
+          <Link2 className="h-3 w-3 shrink-0" />
+          <span className="truncate">
+            {formatPlainDateEs(transaction.transactionDate)} ·{" "}
+            {transaction.description}
+          </span>
+        </Link>
+      )}
+    </>
   );
 }
 
@@ -147,6 +179,29 @@ export default function TransfersPage() {
   useEffect(() => {
     loadTransfers();
   }, []);
+
+  // A `#transfer-<id>` link (from the transaction detail panel) names a row
+  // that only exists once the list has loaded: scroll to it then, once, and
+  // highlight it briefly.
+  const [highlightId, setHighlightId] = useState<string | null>(null);
+  const scrolledToHash = useRef(false);
+  useEffect(() => {
+    if (scrolledToHash.current || transfers.length === 0) return;
+    const hash = window.location.hash.slice(1);
+    if (!hash.startsWith("transfer-")) return;
+    const row = document.getElementById(hash);
+    if (!row) return;
+    scrolledToHash.current = true;
+    row.scrollIntoView({ block: "center" });
+    const id = hash.slice("transfer-".length);
+    // Deferred so the highlight is not a synchronous setState in the effect.
+    const show = window.setTimeout(() => setHighlightId(id), 0);
+    const hide = window.setTimeout(() => setHighlightId(null), 2500);
+    return () => {
+      window.clearTimeout(show);
+      window.clearTimeout(hide);
+    };
+  }, [transfers]);
 
   useEffect(() => {
     fetch("/api/institutions")
@@ -380,7 +435,10 @@ export default function TransfersPage() {
         <CardHeader>
           <CardTitle>Pendientes</CardTitle>
           <CardDescription>
-            Movimientos que deben ser devueltos o regularizados
+            Movimientos que deben ser devueltos o regularizados. Vincula el
+            cargo y el abono que importaron los scrapers y el movimiento se
+            resuelve solo; si un lado no tiene transacciones, márcalo como
+            resuelto a mano
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -459,21 +517,34 @@ export default function TransfersPage() {
                     }
                     onSort={handlePendingSort}
                   />
-                  <TableHead className="w-24"></TableHead>
+                  <TableHead className="w-36"></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {pendingSorted.map((t) => (
-                  <TableRow key={t.id}>
+                  <TableRow
+                    key={t.id}
+                    id={`transfer-${t.id}`}
+                    className={cn(
+                      "transition-colors",
+                      highlightId === t.id && "bg-muted"
+                    )}
+                  >
                     <TableCell className="whitespace-nowrap">
                       {formatPlainDateEs(t.transferDate)}
                     </TableCell>
                     <TableCell>{t.description}</TableCell>
                     <TableCell>
-                      <ProductCell product={t.fromProduct} />
+                      <ProductCell
+                        product={t.fromProduct}
+                        transaction={t.fromTransaction}
+                      />
                     </TableCell>
                     <TableCell>
-                      <ProductCell product={t.toProduct} />
+                      <ProductCell
+                        product={t.toProduct}
+                        transaction={t.toTransaction}
+                      />
                     </TableCell>
                     <TableCell className="text-right font-medium">
                       {formatCLP(t.amount)}
@@ -482,7 +553,11 @@ export default function TransfersPage() {
                       {t.notes || "-"}
                     </TableCell>
                     <TableCell>
-                      <div className="flex gap-1">
+                      <div className="flex items-center gap-1">
+                        <TransferLinksDialog
+                          transfer={t}
+                          onSaved={loadTransfers}
+                        />
                         <button
                           onClick={() => handleResolve(t.id)}
                           className="text-muted-foreground hover:text-green-600"
@@ -584,21 +659,34 @@ export default function TransfersPage() {
                     }
                     onSort={handleResolvedSort}
                   />
-                  <TableHead className="w-10"></TableHead>
+                  <TableHead className="w-28"></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {resolvedSorted.map((t) => (
-                  <TableRow key={t.id} className="opacity-60">
+                  <TableRow
+                    key={t.id}
+                    id={`transfer-${t.id}`}
+                    className={cn(
+                      "opacity-60 transition-colors",
+                      highlightId === t.id && "bg-muted opacity-100"
+                    )}
+                  >
                     <TableCell className="whitespace-nowrap">
                       {formatPlainDateEs(t.transferDate)}
                     </TableCell>
                     <TableCell>{t.description}</TableCell>
                     <TableCell>
-                      <ProductCell product={t.fromProduct} />
+                      <ProductCell
+                        product={t.fromProduct}
+                        transaction={t.fromTransaction}
+                      />
                     </TableCell>
                     <TableCell>
-                      <ProductCell product={t.toProduct} />
+                      <ProductCell
+                        product={t.toProduct}
+                        transaction={t.toTransaction}
+                      />
                     </TableCell>
                     <TableCell className="text-right">
                       {formatCLP(t.amount)}
@@ -609,12 +697,19 @@ export default function TransfersPage() {
                       </Badge>
                     </TableCell>
                     <TableCell>
-                      <button
-                        onClick={() => handleDelete(t.id)}
-                        className="text-muted-foreground hover:text-destructive"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
+                      <div className="flex items-center gap-1">
+                        <TransferLinksDialog
+                          transfer={t}
+                          onSaved={loadTransfers}
+                        />
+                        <button
+                          onClick={() => handleDelete(t.id)}
+                          className="text-muted-foreground hover:text-destructive"
+                          title="Eliminar"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}

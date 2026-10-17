@@ -207,7 +207,25 @@ function TransactionDetailBody({
             </span>
           </Field>
           <Field label="Transferencia interna">
-            {txn.isInternalTransfer ? "Sí" : "No"}
+            {txn.transfer ? (
+              <>
+                <Link
+                  href={`/transfers#transfer-${txn.transfer.id}`}
+                  className="underline-offset-4 hover:underline"
+                >
+                  {txn.transfer.description}
+                </Link>
+                <span className="block text-xs text-muted-foreground">
+                  {txn.transfer.side === "from" ? "Salida" : "Entrada"} ·{" "}
+                  {formatPlainDateEs(txn.transfer.transferDate)} ·{" "}
+                  {txn.transfer.status === "resolved" ? "Resuelta" : "Pendiente"}
+                </span>
+              </>
+            ) : txn.isInternalTransfer ? (
+              "Sí"
+            ) : (
+              "No"
+            )}
           </Field>
           <TransactionLocationField
             key={txn.id}

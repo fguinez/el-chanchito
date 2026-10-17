@@ -1,12 +1,22 @@
 import { describe, it, expect } from "vitest";
-import { createTransferSchema } from "@/lib/api/schemas";
-import { checkTransferEndpoints } from "@/lib/transfers";
+import { createTransferSchema, transferLinksSchema } from "@/lib/api/schemas";
+import {
+  candidateWindow,
+  checkTransferEndpoints,
+  checkTransferLink,
+  findLinkClash,
+  transferIsAccountedFor,
+} from "@/lib/transfers";
 
 // All figures and identifiers below are synthetic (see the repo's personal
 // data policy): fake uuids, fake CLP amounts.
 const CHECKING_ID = "11111111-1111-4111-8111-11111111111a";
 const FUND_ID = "22222222-2222-4222-8222-22222222222b";
 const USD_ID = "33333333-3333-4333-8333-33333333333c";
+const TRANSFER_ID = "44444444-4444-4444-8444-44444444444d";
+const OTHER_TRANSFER_ID = "55555555-5555-4555-8555-55555555555e";
+const DEBIT_ID = "66666666-6666-4666-8666-66666666666f";
+const CREDIT_ID = "77777777-7777-4777-8777-777777777770";
 
 /** A valid create body; tests override single fields. */
 function body(overrides: Record<string, unknown> = {}) {
@@ -121,5 +131,137 @@ describe("checkTransferEndpoints", () => {
     );
 
     expect(result).toMatchObject({ ok: false, field: "fromProductId" });
+  });
+});
+
+describe("transferLinksSchema", () => {
+  it("lowercases ids and keeps null and omitted apart", () => {
+    expect(
+      transferLinksSchema.parse({ fromTransactionId: DEBIT_ID.toUpperCase(), toTransactionId: null })
+    ).toEqual({ fromTransactionId: DEBIT_ID, toTransactionId: null });
+    expect(transferLinksSchema.parse({ toTransactionId: CREDIT_ID })).toEqual({
+      toTransactionId: CREDIT_ID,
+    });
+  });
+
+  it("needs at least one side", () => {
+    expect(transferLinksSchema.safeParse({}).success).toBe(false);
+  });
+});
+
+describe("checkTransferLink", () => {
+  const transfer = {
+    id: TRANSFER_ID,
+    amount: 1000000,
+    fromProductId: CHECKING_ID,
+    toProductId: FUND_ID,
+    fromTransactionId: null,
+    toTransactionId: null,
+  };
+  const debit = { id: DEBIT_ID, productId: CHECKING_ID, amount: -1000000 };
+  const credit = { id: CREDIT_ID, productId: FUND_ID, amount: 1000000 };
+
+  it("accepts the outgoing source row and the incoming target row", () => {
+    expect(checkTransferLink(transfer, "from", debit).ok).toBe(true);
+    expect(checkTransferLink(transfer, "to", credit).ok).toBe(true);
+  });
+
+  it.each([
+    ["an unknown row", "from", undefined],
+    ["a row on the other product", "from", { ...debit, productId: FUND_ID }],
+    ["an incoming source row", "from", { ...debit, amount: 1000000 }],
+    ["an outgoing target row", "to", { ...credit, amount: -1000000 }],
+    ["a row off by a fee", "from", { ...debit, amount: -1000300 }],
+    ["a smaller row", "to", { ...credit, amount: 999999 }],
+  ] as const)("refuses %s", (_, side, txn) => {
+    const result = checkTransferLink(transfer, side, txn);
+
+    expect(result).toMatchObject({
+      ok: false,
+      field: side === "from" ? "fromTransactionId" : "toTransactionId",
+    });
+  });
+
+  it("explains a mismatch in Spanish, for the Vincular dialog", () => {
+    expect(
+      checkTransferLink(transfer, "from", { ...debit, amount: -1000300 })
+    ).toMatchObject({
+      error: "El monto de la transacción no coincide exactamente con el del movimiento",
+    });
+  });
+
+  it("refuses a side the transfer has no product for", () => {
+    const legacy = { ...transfer, toProductId: null };
+
+    expect(checkTransferLink(legacy, "to", credit)).toMatchObject({
+      ok: false,
+      field: "toTransactionId",
+    });
+  });
+});
+
+describe("findLinkClash", () => {
+  it("names the side whose row another transfer holds", () => {
+    const clash = findLinkClash(TRANSFER_ID, { from: DEBIT_ID, to: CREDIT_ID }, [
+      { id: OTHER_TRANSFER_ID, fromTransactionId: null, toTransactionId: CREDIT_ID },
+    ]);
+
+    expect(clash).toMatchObject({ field: "toTransactionId" });
+  });
+
+  it("ignores the transfer's own links", () => {
+    const clash = findLinkClash(TRANSFER_ID, { from: DEBIT_ID }, [
+      { id: TRANSFER_ID, fromTransactionId: DEBIT_ID, toTransactionId: null },
+    ]);
+
+    expect(clash).toBeNull();
+  });
+});
+
+describe("transferIsAccountedFor", () => {
+  const sides = { fromProductId: CHECKING_ID, toProductId: FUND_ID };
+
+  it("needs every side with a feed linked", () => {
+    const feeds = new Set([CHECKING_ID, FUND_ID]);
+
+    expect(
+      transferIsAccountedFor(
+        { ...sides, fromTransactionId: DEBIT_ID, toTransactionId: null },
+        feeds
+      )
+    ).toBe(false);
+    expect(
+      transferIsAccountedFor(
+        { ...sides, fromTransactionId: DEBIT_ID, toTransactionId: CREDIT_ID },
+        feeds
+      )
+    ).toBe(true);
+  });
+
+  it("lets a feedless side stay unlinked", () => {
+    expect(
+      transferIsAccountedFor(
+        { ...sides, fromTransactionId: DEBIT_ID, toTransactionId: null },
+        new Set([CHECKING_ID])
+      )
+    ).toBe(true);
+  });
+
+  it("never resolves a transfer with nothing linked", () => {
+    expect(
+      transferIsAccountedFor(
+        { ...sides, fromTransactionId: null, toTransactionId: null },
+        new Set()
+      )
+    ).toBe(false);
+  });
+});
+
+describe("candidateWindow", () => {
+  it("spans five days around the transfer, across month ends", () => {
+    expect(candidateWindow("2026-03-02")).toEqual({
+      from: "2026-02-25",
+      to: "2026-03-07",
+    });
   });
 });

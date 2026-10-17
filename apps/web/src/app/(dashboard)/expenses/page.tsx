@@ -41,6 +41,8 @@ interface Transaction {
   source: string;
   /** Currency of the transaction's product; `amount` is in it. */
   currency: string;
+  /** Linked to an internal transfer: listed, but left out of the totals. */
+  isInternalTransfer: boolean;
   notes: string | null;
 }
 
@@ -136,11 +138,13 @@ function ExpensesView() {
     }
   };
 
-  // Peso totals over CLP rows only: a USD amount is not pesos.
+  // Peso totals over CLP rows only: a USD amount is not pesos. Rows an
+  // internal transfer links are the user's money changing product: skipped.
   const {
     expenses: totalExpenses,
     income: totalIncome,
     otherCurrencyCount,
+    internalTransferCount,
   } = clpTotals(transactions);
 
   const getValue = useCallback(
@@ -199,6 +203,13 @@ function ExpensesView() {
           {otherCurrencyCount === 1
             ? "1 movimiento en otra moneda no se suma a estos totales."
             : `${otherCurrencyCount} movimientos en otras monedas no se suman a estos totales.`}
+        </p>
+      )}
+      {internalTransferCount > 0 && (
+        <p className="text-sm text-muted-foreground">
+          {internalTransferCount === 1
+            ? "1 transferencia interna no se suma a estos totales."
+            : `${internalTransferCount} transferencias internas no se suman a estos totales.`}
         </p>
       )}
 
@@ -322,7 +333,14 @@ function ExpensesView() {
                     <TableCell className="text-sm">
                       {formatPlainDateEs(txn.transactionDate)}
                     </TableCell>
-                    <TableCell>{txn.description}</TableCell>
+                    <TableCell>
+                      {txn.description}
+                      {txn.isInternalTransfer && (
+                        <Badge variant="secondary" className="ml-2 text-xs">
+                          Transferencia interna
+                        </Badge>
+                      )}
+                    </TableCell>
                     <TableCell>
                       <Badge variant="outline" className="text-xs">
                         {txn.source}
@@ -330,7 +348,11 @@ function ExpensesView() {
                     </TableCell>
                     <TableCell
                       className={`text-right font-medium ${
-                        txn.amount < 0 ? "text-red-600" : "text-green-600"
+                        txn.isInternalTransfer
+                          ? "text-muted-foreground"
+                          : txn.amount < 0
+                            ? "text-red-600"
+                            : "text-green-600"
                       }`}
                     >
                       {txn.amount < 0 ? "-" : "+"}
