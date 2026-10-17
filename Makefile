@@ -87,7 +87,7 @@ dev: ## Start the full local stack: postgres + scrapers (with on-demand refresh)
 
 dev-web: ## Start only the Next.js dev server (assumes postgres is already up)
 	DATABASE_URL=$${DATABASE_URL:-postgres://finance:finance@localhost:5435/finance} \
-		pnpm --filter @chanchito/web dev
+		pnpm --filter @chanchito/web dev --hostname $${DASHBOARD_HOST:-127.0.0.1}
 
 build: ## Build the dashboard for production
 	pnpm --filter @chanchito/web build
@@ -133,7 +133,7 @@ scrapers-once: ## Run all scrapers once and exit
 		SCRAPER_MODE=once \
 		../../.venv/bin/python main.py
 
-scrapers-start: ## Start scrapers on schedule (long-running, control endpoint on :8080)
+scrapers-start: ## Start scrapers on schedule (long-running, control endpoint on 127.0.0.1:8080)
 	@. ./scripts/load-secrets.sh && cd apps/scrapers && \
 		DATABASE_URL=$${DATABASE_URL:-postgres://finance:finance@localhost:5435/finance} \
 		SCRAPER_MODE=scheduled \

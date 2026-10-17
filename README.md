@@ -36,6 +36,8 @@ make dev               # PostgreSQL (port 5435) + migrations + scrapers + dashbo
 
 The dashboard runs at `http://localhost:3000`: **Inicio** lists the monitors that need attention and the latest scraper runs, **Monitores** every monitor with its history chart and variaciones, **Historial** the net-worth timeline, **Instituciones** every scraped product with an on-demand refresh button, and **Gastos**, **Gastos Fijos** and **Transferencias** the transactions, recurring expenses and internal transfers.
 
+Every port listens on loopback only (`127.0.0.1`), so nothing is reachable from your network; to open the dashboard from your phone, set `DASHBOARD_HOST` (see [USAGE.md](USAGE.md#reaching-the-dashboard-from-another-device)).
+
 `make dev` already runs the scraper service. To run the scrapers without the dashboard (not alongside `make dev`: both bind the control port `:8080`):
 
 ```bash
