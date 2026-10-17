@@ -1428,10 +1428,14 @@ def _open_dialog(page, capture: "_JsonCapture", timeout_ms: int) -> _StepResult:
         logger.debug("BanChile: the remembered cartola did not arrive; clicking anyway")
     page.wait_for_timeout(_DIALOG_SETTLE_MS)
     clicks = 0
-    while clicks < _REOPEN_CLICKS and _ms_left(deadline) > 0:
+    # The first click always happens, even if settling used up the budget; a
+    # click that hangs only costs one retry's share, so the retries still run.
+    while clicks < _REOPEN_CLICKS and (clicks == 0 or _ms_left(deadline) > 0):
         clicks += 1
         try:
-            _reopen_button(page).click(timeout=max(1_000, _ms_left(deadline)))
+            _reopen_button(page).click(
+                timeout=max(1_000, min(_DIALOG_OPEN_WAIT_MS, _ms_left(deadline)))
+            )
         except Exception:
             logger.debug("BanChile: reopen click %d raised", clicks, exc_info=True)
             page.wait_for_timeout(_DIALOG_SETTLE_MS)

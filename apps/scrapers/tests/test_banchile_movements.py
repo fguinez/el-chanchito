@@ -1509,7 +1509,7 @@ class _DialogLocator:
         elif self.selector == movements_mod._MODAL_ACCEPT_SELECTOR:
             page.accept()
         elif self.selector == _REOPEN:
-            page.click_reopen()
+            page.click_reopen(kwargs.get("timeout", 0))
         elif self.selector in banchile_web_mod._CARD_LINK_SELECTORS:
             page.card_clicks.append(page.home_rendered())
         else:
@@ -1576,6 +1576,7 @@ class _FakeDialogPage:
         payload_moneda=True,
         button_needs_fetch=True,
         accept_response_polls=1,
+        reopen_click_raises=0,
     ):
         self.url = "https://portalpersonas.bancochile.cl/mibancochile-web/#/home"
         self.options = options
@@ -1616,6 +1617,7 @@ class _FakeDialogPage:
         self.button_needs_fetch = button_needs_fetch
         self.auto_request = None
         self.accept_response_polls = accept_response_polls
+        self.reopen_click_raises = reopen_click_raises
         self.handlers = {}
         self.keyboard = _FakeKeyboard(self)
 
@@ -1690,8 +1692,12 @@ class _FakeDialogPage:
             self.auto_fetch_in = None
             self.fire_cartola(*self.auto_request)
 
-    def click_reopen(self):
+    def click_reopen(self, timeout_ms=0):
         self.reopen_clicks += 1
+        if self.reopen_click_raises:
+            self.reopen_click_raises -= 1
+            _CLOCK.now += timeout_ms / 1000  # a click that times out burns it all
+            raise RuntimeError("synthetic click timeout")
         settled = self.auto_fetch_in is None or not self.button_needs_fetch
         if not settled or self.polls_since_route < self.reopen_ready_polls:
             self.ignored_reopen_clicks += 1  # the view is still rendering
@@ -1858,6 +1864,21 @@ class TestDialogSteps:
         page = _remembered_page(dialog_delay_polls=4)
 
         assert _read_usd_dialog(page) == []
+        assert page.reopen_clicks == 1
+
+    def test_a_reopen_click_that_times_out_is_retried(self):
+        page = _remembered_page(reopen_click_raises=2)
+
+        assert _read_usd_dialog(page) == []
+        assert page.reopen_clicks == 3
+
+    def test_the_button_is_clicked_even_when_settling_used_the_budget(self):
+        page = _FakeDialogPage(remembered=True)
+        page.on_movements = True
+        with movements_mod._JsonCapture(page, movements_mod._CARTOLA_FRAGMENT) as capture:
+            result = movements_mod._open_dialog(page, capture, timeout_ms=1_000)
+
+        assert result.status == movements_mod._STEP_OK
         assert page.reopen_clicks == 1
 
     def test_a_button_that_never_opens_the_dialog_fails_the_step(self, caplog):
