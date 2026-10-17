@@ -132,6 +132,27 @@ export const createTransactionSchema = z.object({
   location: z.unknown().optional(),
 });
 
+/** PATCH /api/transactions/[id]: a non-empty subset of a transaction's
+ *  editable fields (the id comes from the URL). `categoryId` null clears the
+ *  category; `scheduledMonth` null unassigns the budget month. `location` is
+ *  passed through untouched and checked by validateLocationInput in the route,
+ *  as POST /api/transactions does. */
+export const updateTransactionSchema = z
+  .object({
+    description: requiredText,
+    amount: clpAmount,
+    transactionDate: isoDate,
+    categoryId: rowId.nullable(),
+    scheduledMonth: month.nullable(),
+    isInternalTransfer: z.boolean(),
+    productId: rowId,
+    location: z.unknown(),
+  })
+  .partial()
+  .refine((body) => Object.keys(body).length > 0, {
+    error: "No updatable fields provided",
+  });
+
 /** POST /api/transfers: money between two distinct products, both required.
  *  `from*`/`to*AccountId` are legacy aliases; ids come out lowercased, as
  *  Postgres returns them. */
