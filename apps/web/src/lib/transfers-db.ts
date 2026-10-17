@@ -77,7 +77,7 @@ function linkedTransaction(
 
 /** Whether the product has at least one stored transaction: the stand-in for
  *  "has a transaction feed" until the registry declares it per kind. */
-function hasFeed(productId: AnyPgColumn) {
+export function hasFeed(productId: AnyPgColumn) {
   return sql<boolean>`exists (select 1 from ${transactions} where ${transactions.productId} = ${productId})`;
 }
 

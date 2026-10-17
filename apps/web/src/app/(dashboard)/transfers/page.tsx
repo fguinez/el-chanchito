@@ -31,6 +31,7 @@ import {
 } from "@/lib/transfers";
 import { hrefWithSearchParam, TXN_PARAM } from "@/lib/transaction-selection";
 import { TransferLinksDialog } from "@/components/transfers/transfer-links-dialog";
+import { TransferSuggestionsCard } from "@/components/transfers/transfer-suggestions-card";
 import { Trash2, Check, Link2 } from "lucide-react";
 
 interface InternalTransfer {
@@ -180,6 +181,15 @@ export default function TransfersPage() {
     loadTransfers();
   }, []);
 
+  // Deleting a transfer or changing its links can free rows for the
+  // suggestions, so those reload both lists; adding a transfer or resolving
+  // one by hand links nothing and reloads only the transfers.
+  const [suggestionsKey, setSuggestionsKey] = useState(0);
+  const refreshAll = () => {
+    loadTransfers();
+    setSuggestionsKey((n) => n + 1);
+  };
+
   // A `#transfer-<id>` link (from the transaction detail panel) names a row
   // that only exists once the list has loaded: scroll to it then, once, and
   // highlight it briefly.
@@ -282,7 +292,7 @@ export default function TransfersPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id }),
     });
-    loadTransfers();
+    refreshAll();
   };
 
   const pending = transfers.filter((t) => t.status === "pending");
@@ -430,6 +440,12 @@ export default function TransfersPage() {
         </CardContent>
       </Card>
 
+      {/* Suggested transfers (hidden when there are none) */}
+      <TransferSuggestionsCard
+        reloadKey={suggestionsKey}
+        onConfirmed={loadTransfers}
+      />
+
       {/* Pending transfers */}
       <Card>
         <CardHeader>
@@ -556,7 +572,7 @@ export default function TransfersPage() {
                       <div className="flex items-center gap-1">
                         <TransferLinksDialog
                           transfer={t}
-                          onSaved={loadTransfers}
+                          onSaved={refreshAll}
                         />
                         <button
                           onClick={() => handleResolve(t.id)}
@@ -700,7 +716,7 @@ export default function TransfersPage() {
                       <div className="flex items-center gap-1">
                         <TransferLinksDialog
                           transfer={t}
-                          onSaved={loadTransfers}
+                          onSaved={refreshAll}
                         />
                         <button
                           onClick={() => handleDelete(t.id)}
