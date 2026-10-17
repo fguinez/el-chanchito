@@ -94,7 +94,9 @@ from scrapers.backends.banchile_fx import read_exchange_rate_surface
 from scrapers.backends.banchile_web import (
     _CARD_LINK_SELECTORS,
     _CARD_LINK_TIMEOUTS_MS,
+    _INNER_TEXT_JS,
     _PORTAL_HOST,
+    _PRODUCT_ROWS,
     _RENDER_TIMEOUTS_MS,
     _authenticated_session,
     _budget,
@@ -1097,10 +1099,11 @@ _IN_FLIGHT_WAIT_MS = 10_000
 # After Aceptar: once only stale cartolas have come, how much longer to wait
 # for the right one before giving up (the full budget would cost 30-60 s).
 _STALE_GRACE_MS = 8_000
-# Leaving the movements view: how long the dashboard gets to render its card
-# shortcut (the next surface's first click), and the pause once it has.
-_HOME_READY_MS = 15_000
-_HOME_SETTLE_MS = 1_500
+# Before a card leg clicks the dashboard shortcut: how long the dashboard gets
+# to render, and the pause once it had to be waited for.
+_DASHBOARD_READY_MS = 15_000
+_DASHBOARD_SETTLE_MS = 1_500
+_DASHBOARD_POLL_MS = 500
 _CURRENCY_OPTION_SELECTOR = "mat-option"
 _ACCOUNT_RADIO_SELECTOR = "mat-radio-button"
 _MODAL_ACCEPT_SELECTOR = "#modalPrimaryBtn button"
@@ -1543,49 +1546,74 @@ def _click_account_radio(
         return _RadioPick(0, _STEP_FAILED, f"account radio raised {type(error).__name__}")
 
 
-def _card_shortcut_visible(page) -> bool:
-    return any(_visible_now(page, selector) for selector in _CARD_LINK_SELECTORS)
-
-
 def _leave_movements_view(page) -> None:
-    """Close whatever the dialog left open and hand over a rendered dashboard.
+    """Close whatever the dialog left open and return to the portal home.
 
     A drive can stop with the currency panel or the modal still open (no
     option for the currency, a failed step), and either would cover the next
     surface's first click. Escape closes the panel, then the modal; it is
-    harmless when nothing is open.
-
-    Then home. From the movements view that is a hash-only change: the call
-    returns at once and the dashboard renders afterwards, and the card legs,
-    which run next, click its shortcut straight away. A click on a dashboard
-    still rendering is lost (the unbilled leg then waits out its whole first
-    attempt), so this waits for the shortcut and lets the dashboard settle.
-    If it never shows, the page is reloaded once (a real navigation; the
-    session survives it) and the post-login popup dismissed. Bounded either
-    way, and a customer with no card simply costs the wait.
+    harmless when nothing is open. Cheap on purpose: it runs after every
+    checking attempt, and waiting for the dashboard is `_wait_for_dashboard`'s
+    job, once, right before the card legs need it. Never raises: it runs in a
+    `finally` and must not replace a successful read with an exception.
     """
-    for _ in range(2):
-        try:
+    try:
+        for _ in range(2):
             page.keyboard.press("Escape")
             page.wait_for_timeout(_DIALOG_SETTLE_MS // 3)
-        except Exception:
-            logger.debug("BanChile: could not press Escape on the dialog", exc_info=True)
-            break
-    _recover_to_home(page)
-    if not _wait_until(page, lambda: _card_shortcut_visible(page), _HOME_READY_MS):
-        logger.info(
-            "BanChile: the dashboard did not render after the movements view; reloading"
-        )
-        try:
-            page.reload(wait_until="domcontentloaded")
-        except Exception:
-            logger.debug("BanChile: reloading the dashboard failed", exc_info=True)
+    except Exception:
+        logger.debug("BanChile: could not press Escape on the dialog", exc_info=True)
+    try:
+        _recover_to_home(page)
+    except Exception:
+        logger.debug("BanChile: could not return home after the dialog", exc_info=True)
+
+
+_CHECKING_ROW_RE = dict(_PRODUCT_ROWS)["checking"]
+
+
+def dashboard_rendered(text: Optional[str]) -> bool:
+    """True when `text` is the rendered "Mis Productos" dashboard.
+
+    Its checking row is the signal (every customer here has the account, card
+    or not), and the movements view must be gone: right after a hash-only
+    return home the old view is still on screen, and its "SELECCIONAR OTRA
+    CUENTA" cartola carries balance labels of its own.
+    """
+    if not text or _REOPEN_DIALOG_NAME_RE.search(text):
+        return False
+    return bool(_CHECKING_ROW_RE.search(text))
+
+
+def _page_text(page) -> str:
+    try:
+        text = page.evaluate(_INNER_TEXT_JS)
+    except Exception:
+        return ""
+    return text if isinstance(text, str) else ""
+
+
+def _wait_for_dashboard(page) -> None:
+    """On the home route, wait (bounded) for the dashboard before clicking it.
+
+    Going home from another view is a hash-only change: the URL changes at
+    once and the dashboard renders afterwards, and a click on it while it
+    still renders is lost (the unbilled leg then waited out its whole first
+    attempt). When it had to be waited for, it also gets a moment to settle.
+    Off the home route (the card legs after the first, already on the card
+    page) this costs nothing.
+    """
+    if not (page.url or "").endswith("#/home"):
+        return
+    if dashboard_rendered(_page_text(page)):
+        return
+    deadline = time.monotonic() + _DASHBOARD_READY_MS / 1000
+    while time.monotonic() < deadline:
+        page.wait_for_timeout(_DASHBOARD_POLL_MS)
+        if dashboard_rendered(_page_text(page)):
+            page.wait_for_timeout(_DASHBOARD_SETTLE_MS)
             return
-        _dismiss_popup(page)
-        if not _wait_until(page, lambda: _card_shortcut_visible(page), _HOME_READY_MS):
-            logger.info("BanChile: no card shortcut on the dashboard after a reload")
-            return
-    page.wait_for_timeout(_HOME_SETTLE_MS)
+    logger.info("BanChile: the dashboard did not render in time; trying anyway")
 
 
 def _drive_failed(
@@ -1842,10 +1870,12 @@ def _open_card_area(page, attempt: int) -> bool:
 
     Reuses banchile_web's `_CARD_LINK_SELECTORS`: the dashboard is littered with
     marketing "Tarjeta de Crédito" links pointing at the public site, so only
-    the "SALDOS Y MOV.TARJETAS" shortcut is safe to click.
+    the "SALDOS Y MOV.TARJETAS" shortcut is safe to click. The dashboard is
+    waited for first (`_wait_for_dashboard`).
     """
     if not _ensure_on_portal(page):
         return False
+    _wait_for_dashboard(page)
     if not _click_first(
         page, _CARD_LINK_SELECTORS, timeout=_budget(_CARD_LINK_TIMEOUTS_MS, attempt)
     ):

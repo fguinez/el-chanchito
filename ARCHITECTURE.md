@@ -554,7 +554,9 @@ route shows its cartola directly, so later drives reopen the dialog with the
 "SELECCIONAR OTRA CUENTA" button once that view has settled, and skip the
 remembered account's automatic `getCartola`: a payload whose `moneda` or account
 is not the drive's is never read); the card's unbilled movements, which the SPA
-loads when the card page opens (the checking reads hand it a rendered dashboard); and the card's billed statements, the newest two,
+loads when the card page opens (from home it first waits, bounded, for the
+dashboard's checking row: a click on a dashboard still rendering is lost); and
+the card's billed statements, the newest two,
 read by replaying the SPA's own statement request with a different
 `fechaFacturacion`. Only calls whose body is fully known are composed (the
 per-movement `cartola/detalle-glosa` that carries the operation id, spaced and
@@ -575,8 +577,9 @@ of its own, and so is the USD checking cartola (issue #82: the same dialog with
 USD picked and the account radio found by its "(USD)" label). A customer with
 no USD account (no "(USD)" option in the currency list) reads as an empty list
 rather than a failed surface, a USD dialog that fails after offering the option
-(no "(USD)" radio, Aceptar, the cartola wait) fails only that surface, and every dialog step logs which
-one failed and why. The USD cartola's row shape is pending live verification
+(no "(USD)" radio, Aceptar, the cartola wait) fails only that surface, and
+every dialog step logs which one failed and why. The USD cartola's row shape
+is pending live verification
 (the account observed had no movements), so its amounts are parsed defensively
 (numbers or strings, cents kept).
 Every movement carries its currency, so the writer resolves the USD product,

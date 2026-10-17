@@ -477,6 +477,12 @@ class _FakeLocator:
         self.page.fire_card_response()
 
 
+# Synthetic page texts: the dashboard's checking row, and the movements view of
+# a remembered account (which a hash-only return home leaves on screen a while).
+_DASHBOARD_TEXT = "Mis Productos\nCuenta Corriente\nDisponible $ 1.000.000"
+_CARTOLA_VIEW_TEXT = "Consultar Cuentas\nSELECCIONAR OTRA CUENTA\nSaldo Disponible $ 2.500.000"
+
+
 class _FakeCardPage:
     """The card page: clicking the shortcut makes the SPA load its movements."""
 
@@ -503,7 +509,7 @@ class _FakeCardPage:
         return _FakeLocator(self, "SALDOS Y MOV.TARJETAS" in selector)
 
     def evaluate(self, script, arg=None):
-        return ""
+        return _DASHBOARD_TEXT if script == banchile_web_mod._INNER_TEXT_JS else ""
 
     def wait_for_timeout(self, ms):
         return None
@@ -1504,6 +1510,8 @@ class _DialogLocator:
             page.accept()
         elif self.selector == _REOPEN:
             page.click_reopen()
+        elif self.selector in banchile_web_mod._CARD_LINK_SELECTORS:
+            page.card_clicks.append(page.home_rendered())
         else:
             raise RuntimeError("not clickable")
 
@@ -1565,7 +1573,6 @@ class _FakeDialogPage:
         reopen_ready_polls=0,
         dialog_delay_polls=0,
         home_render_polls=2,
-        home_needs_reload=False,
         payload_moneda=True,
         button_needs_fetch=True,
         accept_response_polls=1,
@@ -1598,14 +1605,13 @@ class _FakeDialogPage:
         self.auto_fetch_in = None
         self.dialog_opens_in = None
         self.ignored_reopen_clicks = 0
-        # Home is a hash-only change: overlays survive it, and the dashboard
-        # (with its card shortcut) renders `home_render_polls` waits later, or
-        # only after a reload when `home_needs_reload`.
+        # Home is a hash-only change: overlays survive it, the old view stays
+        # on screen, and the dashboard (with its card shortcut) renders
+        # `home_render_polls` waits later. Card clicks record whether it had.
         self.home_render_polls = home_render_polls
-        self.home_needs_reload = home_needs_reload
         self.home_renders_in = None
         self.on_home = True
-        self.reloads = 0
+        self.card_clicks = []
         self.payload_moneda = payload_moneda
         self.button_needs_fetch = button_needs_fetch
         self.auto_request = None
@@ -1657,6 +1663,8 @@ class _FakeDialogPage:
         return _DialogLocator(self, selector)
 
     def evaluate(self, script, arg=None):
+        if script == banchile_web_mod._INNER_TEXT_JS:
+            return _DASHBOARD_TEXT if self.home_rendered() else _CARTOLA_VIEW_TEXT
         if arg == movements_mod._MOVIMIENTOS_ROUTE:
             self.on_movements = True
             self.on_home = False
@@ -1720,7 +1728,7 @@ class _FakeDialogPage:
             self.fire_cartola(currency, picked, request)
 
     def home_rendered(self):
-        return self.on_home and self.home_renders_in is None and not self.home_needs_reload
+        return self.on_home and self.home_renders_in is None
 
     def goto(self, url, **kwargs):
         self.url = url
@@ -1730,12 +1738,6 @@ class _FakeDialogPage:
         self.on_home = url.endswith("#/home")
         self.home_renders_in = self.home_render_polls if self.home_render_polls else None
 
-    def reload(self, **kwargs):
-        self.reloads += 1
-        self.home_needs_reload = False
-        self.dialog_open = self.select_open = False
-        self.goto(self.url)
-
 
 def _remembered_page(**kwargs):
     """A page whose SPA already remembers the (synthetic) CLP account."""
@@ -1743,6 +1745,12 @@ def _remembered_page(**kwargs):
     page.remembered = True
     page.remembered_as = ("CLP", 0)
     return page
+
+
+def _drive_returning_usd_rows(page, index, *args, **kwargs):
+    return movements_mod._CartolaDrive(
+        payload={"moneda": "USD", "movimientos": [_usd_cartola_row()]}, accounts=1
+    )
 
 
 def _read_usd_dialog(page, attempt=0):
@@ -1864,22 +1872,61 @@ class TestDialogSteps:
             "did not open the dialog after 3 click(s)"
         ) in caplog.text
 
-    def test_the_next_surface_gets_a_rendered_dashboard(self):
-        """The card legs click the dashboard shortcut first thing."""
+    def test_the_card_shortcut_waits_for_the_dashboard(self):
+        """The old view outlives a hash-only return home; clicking through it
+        is what lost the unbilled leg's first attempt live."""
         page = _FakeDialogPage(home_render_polls=12)
-
         _read_usd_dialog(page)
+        assert not page.home_rendered()
 
-        assert page.home_rendered() and page.reloads == 0
-        assert movements_mod._card_shortcut_visible(page)
+        assert movements_mod._open_card_area(page, attempt=0) is True
+        assert page.card_clicks == [True]
 
-    def test_a_dashboard_that_never_renders_is_reloaded_once(self):
-        page = _FakeDialogPage(home_needs_reload=True)
+    def test_a_rendered_dashboard_costs_no_wait(self):
+        page = _FakeDialogPage()
+        page.goto(banchile_web_mod._PORTAL_HOME)
+        page.home_renders_in = None
+        started = _CLOCK.now
 
-        _read_usd_dialog(page)
+        assert movements_mod._open_card_area(page, attempt=0) is True
+        assert _CLOCK.now == started
 
-        assert page.reloads == 1
-        assert movements_mod._card_shortcut_visible(page)
+    def test_off_the_home_route_nothing_is_waited_for(self):
+        page = _FakeDialogPage(home_render_polls=10**6)
+        page.url = "https://portalpersonas.bancochile.cl/mibancochile-web/#/tarjeta"
+        started = _CLOCK.now
+
+        movements_mod._open_card_area(page, attempt=0)
+
+        assert _CLOCK.now == started
+
+    def test_a_dashboard_that_never_renders_is_waited_for_bounded(self):
+        page = _FakeDialogPage(home_render_polls=10**6)
+        page.goto(banchile_web_mod._PORTAL_HOME)
+        started = _CLOCK.now
+
+        assert movements_mod._open_card_area(page, attempt=0) is False
+        assert _CLOCK.now - started <= movements_mod._DASHBOARD_READY_MS / 1000 + 1
+
+    def test_a_checking_read_leaves_the_dashboard_wait_to_the_card_legs(self):
+        """No dashboard wait after a checking attempt (it ran per attempt)."""
+        page = _FakeDialogPage(home_render_polls=10**6, options=("(CLP)",))
+        started = _CLOCK.now
+
+        assert _read_usd_dialog(page) == []
+        assert _CLOCK.now - started < movements_mod._DASHBOARD_READY_MS / 1000
+
+    def test_a_failing_cleanup_never_replaces_a_read(self, monkeypatch):
+        page = _FakeDialogPage(cartolas={"USD": {"movimientos": [_usd_cartola_row()]}})
+
+        def broken(*args, **kwargs):
+            raise RuntimeError("synthetic cleanup failure")
+
+        monkeypatch.setattr(movements_mod, "_recover_to_home", broken, raising=True)
+        page.keyboard.press = broken
+        monkeypatch.setattr(movements_mod, "_open_cartola", _drive_returning_usd_rows)
+
+        assert [m.currency for m in _read_usd_dialog(page)] == ["USD"]
 
     def test_a_slow_remembered_cartola_lands_before_the_capture_is_cleared(self):
         """Empty and `moneda`-less, it would pass every payload check, so it
