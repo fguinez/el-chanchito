@@ -58,6 +58,8 @@ export interface ProductTransaction {
   source: string;
   /** Source dedup key (the institution's operation id for some sources). */
   externalId: string | null;
+  /** "Lugar · Ciudad, País" when a location is stored, else null. */
+  location: string | null;
 }
 
 export interface ProductHistoryPoint {
