@@ -12,7 +12,7 @@ import {
   type ProductCatalog,
   type ProductInfo,
 } from "@/lib/monitors";
-import type { ClpRates } from "@/lib/rates";
+import type { RateBook } from "@/lib/rates";
 
 // All figures and identifiers below are synthetic (see the repo's personal
 // data policy): fake uuids, fake CLP/USD amounts, fake slugs.
@@ -26,7 +26,7 @@ const EUR_WALLET_ID = "77777777-7777-4777-8777-777777777777";
 const CLOSED_ID = "88888888-8888-4888-8888-888888888888";
 const UNKNOWN_ID = "99999999-9999-4999-8999-999999999999";
 
-const rates: ClpRates = { CLP: 1, USD: 900 };
+const rates: RateBook = { provider: { CLP: 1, USD: 900 }, overrides: [] };
 
 type Overrides = Partial<ProductInfo> &
   Pick<ProductInfo, "id" | "kind" | "slug" | "institutionSlug">;
@@ -161,8 +161,8 @@ describe("evaluateExpression arithmetic", () => {
   });
 
   it("division by zero is no-data, even transitively", () => {
-    expect(reason("1 / 0")).toBe("Division by zero");
-    expect(reason("100 / (2 - 2)")).toBe("Division by zero");
+    expect(reason("1 / 0")).toBe("División por cero");
+    expect(reason("100 / (2 - 2)")).toBe("División por cero");
   });
 });
 
@@ -195,6 +195,36 @@ describe("reference resolution and conversion", () => {
     expect(value("banchile:tarjeta_usd:owed", usdCtx)).toBe(100);
   });
 
+  it("converts with the referenced product's own institution rate", () => {
+    const override = {
+      institutionId: "00000000-0000-4000-8000-0000000000b1",
+      institutionSlug: "banchile",
+      currency: "USD",
+      source: "Fuente de prueba",
+      reportedAsOf: null,
+      observedAt: new Date("2026-07-15T12:00:00Z"),
+    };
+    const overridden = ctx({
+      rates: {
+        provider: rates.provider,
+        overrides: [
+          { ...override, productId: null, rate: 950 },
+          { ...override, productId: CARD_USD_ID, rate: 999.99 },
+        ],
+      },
+    });
+    // Product rate wins: 100 USD * 999.99.
+    expect(value("banchile:tarjeta_usd:owed", overridden)).toBeCloseTo(99999, 6);
+    // Institution rate for its other USD products: 1000 USD * 950.
+    expect(value("banchile:credito:owed", overridden)).toBe(950000);
+    // Another institution keeps the provider rate: 1000 USD * 900.
+    expect(value("fintual:fondo_a:nav", overridden)).toBe(900000);
+    // The CLP-to-USD leg of a banchile product uses banchile's rate too.
+    expect(
+      value("banchile:cuenta_corriente:balance", { ...overridden, currency: "USD" })
+    ).toBeCloseTo(2500000 / 950, 6);
+  });
+
   it("same product and monitor currency needs no rate", () => {
     // EUR has no rate, but an EUR monitor reads EUR products directly.
     expect(value("banchile:billetera_eur:balance", ctx({ currency: "EUR" }))).toBe(
@@ -203,7 +233,9 @@ describe("reference resolution and conversion", () => {
   });
 
   it("missing product rate is no-data and names the reference", () => {
-    expect(reason("banchile:billetera_eur:balance")).toContain("No rate for EUR");
+    expect(reason("banchile:billetera_eur:balance")).toContain(
+      "No hay tipo de cambio para EUR"
+    );
     expect(reason("banchile:billetera_eur:balance")).toContain(
       "banchile:billetera_eur:balance"
     );
@@ -212,20 +244,46 @@ describe("reference resolution and conversion", () => {
   it("missing monitor-currency rate is no-data", () => {
     expect(
       reason("banchile:cuenta_corriente:balance", ctx({ currency: "GBP" }))
-    ).toContain("monitor currency GBP");
+    ).toContain("moneda del monitor GBP");
+  });
+
+  it("unbound reference is no-data", () => {
+    // Parsed but never bound: the ref still carries only its slugs.
+    const result = evaluateExpression(
+      parseExpression("banchile:cuenta_corriente:balance"),
+      ctx()
+    );
+    expect(result).toEqual({
+      ok: false,
+      reason:
+        "La referencia banchile:cuenta_corriente:balance no está asociada a un producto",
+    });
   });
 
   it("unknown product id is no-data", () => {
-    expect(reason(`@{${UNKNOWN_ID}:owed}`)).toContain("Unknown product");
+    expect(reason(`@{${UNKNOWN_ID}:owed}`)).toBe(
+      `La referencia @{${UNKNOWN_ID}:owed} apunta a un producto que ya no existe`
+    );
   });
 
   it("inactive product is no-data", () => {
-    expect(reason("banchile:tarjeta_cerrada:owed")).toContain("inactive");
+    expect(reason("banchile:tarjeta_cerrada:owed")).toBe(
+      "El producto banchile:tarjeta_cerrada:owed está inactivo"
+    );
+  });
+
+  it("field not valid for the product's kind is no-data", () => {
+    expect(reason(`@{${CHECKING_ID}:owed}`)).toBe(
+      "El campo 'owed' no es válido para productos de tipo 'Cuenta corriente'" +
+        " (referencia banchile:cuenta_corriente:owed)"
+    );
   });
 
   it("field absent from the metrics payload is no-data", () => {
     // tarjeta_clp has no 'limit' in its metrics (valid for the kind, unreported).
-    expect(reason("banchile:tarjeta_clp:limit")).toContain("'limit' is missing");
+    expect(reason("banchile:tarjeta_clp:limit")).toBe(
+      "Falta el campo 'limit' en banchile:tarjeta_clp:limit"
+    );
   });
 
   it("null metrics is no-data", () => {
@@ -233,7 +291,9 @@ describe("reference resolution and conversion", () => {
     withNullMetrics.get(CARD_CLP_ID)!.metrics = null;
     expect(
       reason("banchile:tarjeta_clp:owed", ctx({ products: withNullMetrics }))
-    ).toContain("has no metrics");
+    ).toBe(
+      "Todavía no hay datos para banchile:tarjeta_clp:owed (actualiza su institución)"
+    );
   });
 
   it("null metrics on the headline field is no-data", () => {
@@ -244,13 +304,13 @@ describe("reference resolution and conversion", () => {
         "banchile:cuenta_corriente:balance",
         ctx({ products: withNullMetrics })
       )
-    ).toContain("has no metrics");
+    ).toContain("Todavía no hay datos");
   });
 
   it("a no-data reference poisons the whole expression (never a silent 0)", () => {
     expect(
       reason("banchile:cuenta_corriente:balance - banchile:tarjeta_cerrada:owed")
-    ).toContain("inactive");
+    ).toContain("está inactivo");
   });
 });
 
@@ -371,7 +431,7 @@ describe("evaluateMonitor: status precedence and margins", () => {
       ctx()
     );
     expect(result.status).toBe("no_data");
-    expect(result.noDataReason).toContain("Unknown product");
+    expect(result.noDataReason).toContain("ya no existe");
     expect(result.value).toBe(2500000);
     expect(result.thresholds[1].value).toBeNull();
     expect(result.margin).toBeNull();
@@ -447,7 +507,17 @@ describe("evaluateMonitor: status precedence and margins", () => {
       ctx()
     );
     expect(result.status).toBe("no_data");
-    expect(result.noDataReason).toContain("Invalid expression");
+    expect(result.noDataReason).toMatch(/^Expresión inválida: /);
+  });
+
+  it("an unparseable stored threshold degrades to no_data", () => {
+    const result = evaluateMonitor(
+      def([{ severity: "alert", comparator: "<", expression: "1 +" }]),
+      ctx()
+    );
+    expect(result.status).toBe("no_data");
+    expect(result.noDataReason).toMatch(/^Umbral inválido: /);
+    expect(result.value).toBe(2500000);
   });
 });
 

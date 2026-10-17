@@ -25,6 +25,8 @@ export interface ColumnProduct {
   currency: string;
   currentBalance: number | null;
   currentBalanceClp: number | null;
+  /** The rate behind currentBalanceClp (only `stale` is read here). */
+  exchangeRate?: { stale: boolean } | null;
   attributes: object;
   metrics: object | null;
 }
@@ -38,6 +40,9 @@ export interface ColumnCell {
   text: string | null;
   /** "≈ CLP" sub-line amount; only on headline cells of non-CLP products. */
   clp: number | null;
+  /** Set when the cell's CLP figure (the sub-line, or a clp_value text) was
+   *  converted with an institution rate that is not from today. */
+  clpStale?: true;
   /** Tone for signed columns by sign of the value; null for zero/unsigned. */
   tone: "positive" | "negative" | null;
 }
@@ -118,21 +123,27 @@ export function resolveColumnCell(
   product: ColumnProduct,
   column: ColumnSpec
 ): ColumnCell {
+  const staleClp = product.exchangeRate?.stale === true;
   switch (column.source) {
-    case "headline":
+    case "headline": {
+      const clp =
+        product.currentBalance != null && product.currency !== "CLP"
+          ? product.currentBalanceClp
+          : null;
       return {
         ...numericCell(product.currency, column, product.currentBalance),
         // Sort by the CLP-normalized value so cross-currency rows are
         // comparable; a product with no conversion (foreign/crypto without a
         // rate) stays null and sorts last rather than mixing raw amounts in.
         sortValue: product.currentBalanceClp,
-        clp:
-          product.currentBalance != null && product.currency !== "CLP"
-            ? product.currentBalanceClp
-            : null,
+        clp,
+        ...(staleClp && clp != null && { clpStale: true }),
       };
-    case "clp_value":
-      return numericCell(product.currency, column, product.currentBalanceClp);
+    }
+    case "clp_value": {
+      const cell = numericCell(product.currency, column, product.currentBalanceClp);
+      return staleClp && cell.text != null ? { ...cell, clpStale: true } : cell;
+    }
     case "metric":
       return numericCell(
         product.currency,

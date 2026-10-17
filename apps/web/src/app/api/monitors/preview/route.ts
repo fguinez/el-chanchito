@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getClpRates } from "@/lib/rates";
+import { getRateBook } from "@/lib/rate-book";
 import { evaluateMonitor } from "@/lib/monitors/evaluate";
 import {
   loadMonitorAdjustments,
@@ -44,7 +44,7 @@ export async function POST(request: NextRequest) {
 
     const [catalog, rates, adjustments] = await Promise.all([
       loadProductCatalog(),
-      getClpRates(),
+      getRateBook(),
       monitorId !== undefined ? loadMonitorAdjustments(monitorId) : [],
     ]);
     const result = validateMonitorInput(body, catalog);

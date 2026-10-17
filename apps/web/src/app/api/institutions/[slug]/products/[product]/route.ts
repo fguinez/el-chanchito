@@ -8,7 +8,8 @@ import {
   transactions,
 } from "@/lib/db/schema";
 import { and, eq, desc } from "drizzle-orm";
-import { getClpRates, toClp } from "@/lib/rates";
+import { rateInfoFor, ratesFor, toClp } from "@/lib/rates";
+import { getRateBook } from "@/lib/rate-book";
 import { isRetiredGhost } from "@/lib/retired-products";
 import {
   isUniqueViolation,
@@ -16,6 +17,7 @@ import {
   validateProductPatch,
 } from "@/lib/management";
 import type { ProductKind, ProductMetrics } from "@/lib/db/schema";
+import { formatLocationText } from "@/lib/transaction-location";
 
 // Next 16: dynamic segment params arrive as a Promise on the context arg.
 type Context = { params: Promise<{ slug: string; product: string }> };
@@ -30,7 +32,8 @@ export interface ProductHistoryPoint {
   asOf: string;
   /** Balance in the product's own currency. */
   balance: number;
-  /** Balance converted to CLP with current rates; null when unconvertible. */
+  /** Balance converted to CLP with the product's current rate (see
+   *  `product.exchangeRate`); null when unconvertible. */
   balanceClp: number | null;
   /** Full typed metrics payload at `asOf` (empty object when unknown). */
   metrics: ProductMetrics | Record<string, never>;
@@ -44,6 +47,10 @@ export interface ProductTransaction {
   /** Plain YYYY-MM-DD. */
   transactionDate: string;
   source: string;
+  /** Source dedup key (the institution's operation id for some sources). */
+  externalId: string | null;
+  /** "Lugar · Ciudad, País" when a location is stored (V025), else null. */
+  location: string | null;
 }
 
 /** The product this one hangs from (debit card -> checking, línea -> cta. cte.). */
@@ -59,8 +66,11 @@ export interface ProductParent {
 /**
  * GET /api/institutions/[slug]/products/[product] — one product by its
  * institution-unique slug, with its balance-over-time history from
- * `product_snapshots` (most recent first, capped at MAX_HISTORY_POINTS).
- * Returns 404 when the institution or the product is unknown.
+ * `product_snapshots` (most recent first, capped at MAX_HISTORY_POINTS) and
+ * its latest MAX_TRANSACTIONS transactions (`transactionsTruncated` says
+ * whether older ones were left out). `product.exchangeRate` is the rate its
+ * CLP figures use (institution/product override or provider, with staleness;
+ * see lib/rates). Returns 404 when the institution or the product is unknown.
  */
 export async function GET(_request: Request, { params }: Context) {
   const { slug, product } = await params;
@@ -102,7 +112,7 @@ export async function GET(_request: Request, { params }: Context) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  const [snapshots, txns, rates, parent] = await Promise.all([
+  const [snapshots, txns, book, parent] = await Promise.all([
     db
       .select({
         balance: productSnapshots.balance,
@@ -120,14 +130,28 @@ export async function GET(_request: Request, { params }: Context) {
         amount: transactions.amount,
         transactionDate: transactions.transactionDate,
         source: transactions.source,
+        externalId: transactions.externalId,
+        locationName: transactions.locationName,
+        locationCity: transactions.locationCity,
+        locationCountry: transactions.locationCountry,
       })
       .from(transactions)
       .where(eq(transactions.productId, row.productId))
-      .orderBy(desc(transactions.transactionDate))
-      .limit(MAX_TRANSACTIONS),
-    getClpRates(),
+      // createdAt breaks same-day ties so the order is stable across loads.
+      .orderBy(
+        desc(transactions.transactionDate),
+        desc(transactions.createdAt)
+      )
+      // One extra row tells whether the cap dropped anything.
+      .limit(MAX_TRANSACTIONS + 1),
+    getRateBook(),
     row.parentProductId ? loadParent(row.parentProductId) : null,
   ]);
+  const target = {
+    productId: row.productId,
+    institutionSlug: row.institutionSlug,
+  };
+  const rates = ratesFor(book, target);
 
   const history: ProductHistoryPoint[] = snapshots
     // Most recent first makes the cap drop the oldest observations.
@@ -145,8 +169,9 @@ export async function GET(_request: Request, { params }: Context) {
 
   // Most recent first makes the cap drop the oldest transactions; returned
   // ascending so the client can walk the sequence forward.
+  const transactionsTruncated = txns.length > MAX_TRANSACTIONS;
   const productTransactions: ProductTransaction[] = txns
-    .slice()
+    .slice(0, MAX_TRANSACTIONS)
     .reverse()
     .map((t) => ({
       id: t.id,
@@ -154,6 +179,12 @@ export async function GET(_request: Request, { params }: Context) {
       amount: Number(t.amount),
       transactionDate: new Date(t.transactionDate).toISOString().slice(0, 10),
       source: t.source,
+      externalId: t.externalId,
+      location: formatLocationText({
+        name: t.locationName,
+        city: t.locationCity,
+        country: t.locationCountry,
+      }),
     }));
 
   const currentBalance =
@@ -182,6 +213,11 @@ export async function GET(_request: Request, { params }: Context) {
         currentBalance != null
           ? toClp(row.currency, currentBalance, rates)
           : null,
+      exchangeRate: rateInfoFor(
+        book,
+        { ...target, currency: row.currency },
+        new Date()
+      ),
       balanceAsOf: row.balanceAsOf ? row.balanceAsOf.toISOString() : null,
       externalRef: row.externalRef,
       attributes: row.attributes,
@@ -192,6 +228,7 @@ export async function GET(_request: Request, { params }: Context) {
     parent,
     history,
     transactions: productTransactions,
+    transactionsTruncated,
   });
 }
 

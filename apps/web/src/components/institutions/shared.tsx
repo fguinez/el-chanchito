@@ -7,6 +7,7 @@
 
 import Link from "next/link";
 import { useCallback, useMemo } from "react";
+import { AlertTriangle } from "lucide-react";
 import {
   Table,
   TableBody,
@@ -17,7 +18,7 @@ import {
 import { SortableTableHead } from "@/components/ui/sortable-table-head";
 import { Badge } from "@/components/ui/badge";
 import { useSortableData } from "@/lib/use-sortable-data";
-import { formatCLP, cn } from "@/lib/utils";
+import { formatAmount, formatCLP, cn } from "@/lib/utils";
 import {
   groupProductsByFamily,
   resolveColumnCell,
@@ -34,6 +35,7 @@ import type {
   ProductKind,
   ProductMetrics,
 } from "@chanchito/product-model";
+import type { RateInfo } from "@/lib/rates";
 
 export interface InstitutionProduct {
   id: string;
@@ -46,6 +48,8 @@ export interface InstitutionProduct {
   currency: string;
   currentBalance: number | null;
   currentBalanceClp: number | null;
+  /** The rate behind currentBalanceClp; null for CLP or unconvertible. */
+  exchangeRate: RateInfo | null;
   balanceAsOf: string | null;
   externalRef: string | null;
   attributes: ProductAttributes | Record<string, never>;
@@ -112,9 +116,8 @@ export const POLL_TIMEOUT_MS = 60000;
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Latest run per institution (slug → status + started_at). `/api/scrapers`
- *  already returns the latest per (method, institution); collapse methods by
- *  keeping the most recent started_at so an institution maps to one entry. */
+/** Latest run per institution (slug → status + started_at), as returned by
+ *  `/api/scrapers`; keeps the most recent started_at should a slug repeat. */
 export async function fetchRunMap(): Promise<Map<string, ScraperRun>> {
   const map = new Map<string, ScraperRun>();
   try {
@@ -141,15 +144,11 @@ export function timeAgo(dateStr: string): string {
   return `hace ${days}d`;
 }
 
-/** Format a balance in its own currency: CLP as pesos, anything else (crypto,
- *  foreign) as a trimmed decimal followed by the currency code. */
+/** Format a balance or transaction amount in its own currency (see
+ *  `formatAmount`); null stays null so callers can show a placeholder. */
 export function formatBalance(currency: string, value: number | null): string | null {
   if (value == null) return null;
-  if (currency === "CLP") return formatCLP(value);
-  const formatted = new Intl.NumberFormat("en-US", {
-    maximumFractionDigits: 8,
-  }).format(value);
-  return `${formatted} ${currency}`;
+  return formatAmount(currency, value);
 }
 
 /** The product's credit limit (cupo) as observed in its latest metrics. */
@@ -401,11 +400,26 @@ function ProductColumnCell({
           {isHeadline ? "sin dato" : "—"}
         </span>
       )}
+      {cell.clpStale && cell.clp == null && <StaleRateMarker />}
       {cell.clp != null && (
         <div className="text-xs font-normal text-muted-foreground">
           ≈ {formatCLP(cell.clp)}
+          {cell.clpStale && <StaleRateMarker />}
         </div>
       )}
     </TableCell>
+  );
+}
+
+/** Amber marker next to a CLP figure converted with a stale rate. */
+function StaleRateMarker() {
+  return (
+    <span
+      className="ml-1 inline-flex align-[-2px] text-amber-600"
+      title="Tipo de cambio desactualizado"
+    >
+      <AlertTriangle className="h-3 w-3" aria-hidden />
+      <span className="sr-only">Tipo de cambio desactualizado</span>
+    </span>
   );
 }

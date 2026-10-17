@@ -1,0 +1,24 @@
+# Both images build from the repo root (docker-compose.yml) and install their
+# own dependencies, so nothing below is needed by a build. Compose injects the
+# configuration at runtime.
+
+# Secrets: scraper session caches, browser profiles and env files.
+**/.banchile_session.json*
+**/.fintual_session.json
+**/.*_chrome_profile*
+**/.env
+**/.env.*
+!**/.env.example
+
+# Personal data: debug dumps, database files and `make db-dump` output.
+**/local
+pgdata
+dump_*.sql
+
+# Host-only bulk.
+.git
+**/node_modules
+**/.next
+**/.venv
+**/__pycache__
+**/.pytest_cache
