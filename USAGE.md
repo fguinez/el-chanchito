@@ -298,7 +298,8 @@ on the **Categorías** page (`/categories`).
   etc.). Add new ones with a name, color, and icon, and edit them inline.
   Deleting a category that is in use is allowed; the page first tells you how
   many transactions and rules it has. Its transactions become uncategorized
-  (so the rules can pick them up again) and its rules are deleted.
+  and its rules are deleted; "Categorizar ahora" then runs the remaining rules
+  over them (new transactions are categorized on insert, these are not).
 - **Rules**: a rule matches when the transaction description contains its
   keyword, ignoring upper and lower case (a plain substring: `%` and `_` have no
   special meaning). When several rules match, the highest priority wins; on
