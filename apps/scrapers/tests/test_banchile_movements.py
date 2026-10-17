@@ -1585,3 +1585,175 @@ class TestDialogSteps:
             caplog.text
         )
 
+
+# --- USD checking cartola (issue #82) ------------------------------------------
+#
+# The USD row shape is pending live verification: the one USD account observed
+# had no movements. Every row, account number and amount below is synthetic,
+# built to cover the shapes the parser tolerates.
+
+
+def _usd_cartola_row(monto=1234.56, saldo=2345.67, tipo="cargo"):
+    """A synthetic USD `getCartola` row: the CLP shape, amounts with cents."""
+    row = _cartola_row(tipo=tipo, fecha="20260820 09:15:00")
+    row["monto"] = monto
+    row["saldo"] = saldo
+    row["id"] = f"CEX{ACCOUNT}:20260820 09:15:00:{monto}:{tipo}:1"
+    return row
+
+
+def _usd_cartola(rows):
+    return {"moneda": "USD", "movimientos": rows, "pagina": [{"masPaginas": "N"}]}
+
+
+class TestUsdAmountParsing:
+    def test_formats(self):
+        parse = movements_mod._usd_from_text
+        assert parse("1.234,56") == Decimal("1234.56")
+        assert parse("1,234.56") == Decimal("1234.56")
+        assert parse("1234,56") == Decimal("1234.56")
+        assert parse("1234.56") == Decimal("1234.56")
+        assert parse("USD 1.234,56") == Decimal("1234.56")
+        assert parse("USD 12,3") == Decimal("12.30")
+        assert parse("1.234") == Decimal("1234.00")
+        assert parse(1234.56) == Decimal("1234.56")
+        assert parse(1234) == Decimal("1234.00")
+
+    def test_unparseable(self):
+        parse = movements_mod._usd_from_text
+        assert parse("") is None
+        assert parse(None) is None
+        assert parse("sin dato") is None
+        assert parse(True) is None
+
+
+class TestUsdCartolaRows:
+    def test_a_cargo_keeps_its_cents(self):
+        movement = parse_cartola_movement(_usd_cartola_row(monto=1234.56), currency="USD")
+        assert movement.currency == "USD"
+        assert movement.amount == Decimal("-1234.56")
+        assert movement.product_kind == "checking"
+        assert movement.transaction_date == datetime.date(2026, 8, 20)
+
+    def test_an_abono_is_income(self):
+        movement = parse_cartola_movement(
+            _usd_cartola_row(monto="1.234,56", tipo="abono"), currency="USD"
+        )
+        assert movement.amount == Decimal("1234.56")
+
+    def test_cents_are_never_rounded_away(self):
+        movement = parse_cartola_movement(_usd_cartola_row(monto=0.99), currency="USD")
+        assert movement.amount == Decimal("-0.99")
+
+    def test_number_and_string_spellings_share_one_identity(self):
+        as_number = _usd_cartola_row(saldo=2345.67)
+        as_string = dict(as_number, saldo="2.345,67")
+        first = parse_cartola_movement(as_number, currency="USD")
+        second = parse_cartola_movement(as_string, currency="USD")
+        assert first.fingerprint == second.fingerprint == (as_number["id"], "2345.67")
+        assert external_id_for(first) == external_id_for(second)
+
+    def test_the_operation_id_scheme_is_the_clp_one(self):
+        movement = parse_cartola_movement(
+            _usd_cartola_row(), operation_id="TEF_IPE 0000123", currency="USD"
+        )
+        assert external_id_for(movement) == "bch_op_TEFIPE0000123"
+
+    def test_unreadable_rows_are_dropped(self):
+        assert parse_cartola_movement(_usd_cartola_row(monto="sin dato"), currency="USD") is None
+        assert parse_cartola_movement(_usd_cartola_row(tipo="reverso"), currency="USD") is None
+        row = _usd_cartola_row()
+        row["id"] = ""
+        row["saldo"] = None
+        assert parse_cartola_movement(row, currency="USD") is None
+
+
+class TestClpCartolaKeysAreUnchanged:
+    """Pinned against main before issue #82: no CLP checking key may move."""
+
+    def test_fingerprint_key(self):
+        movement = parse_cartola_movement(_cartola_row())
+        assert movement.currency == "CLP"
+        assert movement.amount == Decimal(1000000)
+        assert external_id_for(movement) == "bch_fp_9d6fd81f7f7ea522"
+
+    def test_operation_id_key(self):
+        movement = parse_cartola_movement(
+            _cartola_row(tipo="cargo", monto="999.999"), operation_id="TEF_IPE 0000123"
+        )
+        assert external_id_for(movement) == "bch_op_TEFIPE0000123"
+
+
+class TestUsdAndClpNeverCollide:
+    def test_the_same_row_keys_differently_per_currency(self):
+        """A USD fingerprint is hashed with the currency in front."""
+        row = _cartola_row(monto="1.000.000", saldo="2.500.000")
+        clp = parse_cartola_movement(row)
+        usd = parse_cartola_movement(row, currency="USD")
+        assert external_id_for(clp) != external_id_for(usd)
+        assert external_id_for(usd).startswith("bch_fp_")
+
+    def test_a_shared_operation_id_stays_two_movements(self):
+        """Both read `bch_op_<id>`, but on different products (currency routes
+        them, and `external_id` is unique per product), and one scrape keeps
+        both."""
+        clp = parse_cartola_movement(_cartola_row(), operation_id="12345678901")
+        usd = parse_cartola_movement(
+            _usd_cartola_row(), operation_id="12345678901", currency="USD"
+        )
+        assert (clp.currency, usd.currency) == ("CLP", "USD")
+        assert dedupe_movements([clp, usd]) == [clp, usd]
+
+
+class TestUsdCheckingSurface:
+    @pytest.fixture(autouse=True)
+    def _no_waiting(self, monkeypatch):
+        monkeypatch.setattr(movements_mod, "_RENDER_TIMEOUTS_MS", (0,))
+
+    def test_reads_the_usd_cartola_with_cents(self):
+        page = _FakeDialogPage(cartolas={"USD": _usd_cartola([_usd_cartola_row()])})
+
+        found = movements_mod._read_usd_checking_movements(page, attempt=0)
+
+        assert [(m.currency, m.amount) for m in found] == [("USD", Decimal("-1234.56"))]
+
+    def test_an_empty_cartola_is_a_reading_not_a_failure(self):
+        page = _FakeDialogPage(cartolas={"USD": _usd_cartola([])})
+
+        assert movements_mod._read_usd_checking_movements(page, attempt=0) == []
+
+    def test_no_usd_account_is_not_a_failed_surface(self, monkeypatch):
+        monkeypatch.setattr(
+            movements_mod,
+            "_MOVEMENT_READERS",
+            [("movimientos USD", movements_mod._read_usd_checking_movements)],
+        )
+
+        movements, failed = read_movement_surfaces(_FakeDialogPage(options=("(CLP)",)))
+
+        assert (movements, failed) == ([], ())
+
+    def test_a_failed_usd_cartola_never_costs_the_clp_one(self, monkeypatch):
+        page = _FakeDialogPage(
+            cartolas={"CLP": {"movimientos": [_cartola_row()]}},
+            accept_fails_for={"USD"},
+        )
+        monkeypatch.setattr(
+            movements_mod,
+            "_MOVEMENT_READERS",
+            [
+                ("movimientos", movements_mod._read_checking_movements),
+                ("movimientos USD", movements_mod._read_usd_checking_movements),
+            ],
+        )
+
+        movements, failed = read_movement_surfaces(page)
+
+        assert failed == ("movimientos USD",)
+        assert [(m.currency, external_id_for(m)) for m in movements] == [
+            ("CLP", "bch_fp_9d6fd81f7f7ea522")
+        ]
+
+    def test_it_is_registered_right_after_the_clp_cartola(self):
+        labels = [label for label, _ in movements_mod._MOVEMENT_READERS]
+        assert labels[:2] == ["movimientos", "movimientos USD"]

@@ -37,8 +37,15 @@ CLP figure). The USD statement is a sibling endpoint
 (`estadocuenta/internacional/resumen-por-fecha`) with its own row shape, read
 by the same capture-and-replay strategy as the national one. Every USD amount
 is a Decimal with exact cents and every movement carries its `currency`, which
-is what routes it to the USD product. USD checking movements are not read yet
-(see #82).
+is what routes it to the USD product.
+
+Issue #82 added the USD checking cartola: the same `getCartola` behind the
+same dialog with USD picked, read as its own surface ("movimientos USD") so a
+failure there never costs the CLP cartola. A customer with no USD account (no
+"(USD)" option, or no "(USD)" radio once it is picked) reads as an empty list,
+not a failure. Every dialog step logs which one failed and why. The USD row
+shape is pending live verification: the one account observed had no
+movements, so it is parsed with the CLP rules plus a defensive amount parser.
 
 Why this is its own module: `banchile_web.py` is 1.6k lines about *balances* and
 its docstring is a map of that surface. Movements are a different read, with
@@ -79,7 +86,7 @@ import math
 import re
 import time
 from dataclasses import dataclass, field, replace
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Callable, Optional
 
 from scrapers.backends.banchile_fx import read_exchange_rate_surface
@@ -234,6 +241,42 @@ def _usd(value) -> Optional[Decimal]:
     if number is None or not math.isfinite(number):
         return None
     return Decimal(repr(number)).quantize(_CENTS, rounding=ROUND_HALF_UP)
+
+
+def _usd_from_text(value) -> Optional[Decimal]:
+    """A USD amount from a JSON number or a formatted string (None if neither).
+
+    For the USD cartola, whose formatting has not been observed on a real row
+    yet (issue #82): accepts "1.234,56", "1,234.56", "1234,56", "1234.56",
+    "USD 1.234,56" and the CLP-style "1.234". Whichever of "," and "." comes
+    last is the decimal separator when both appear; a lone "." is a thousands
+    separator only when exactly three digits follow it, as on every figure this
+    portal prints. Never rounded to a whole unit: cents are kept, quantized.
+    """
+    if _number(value) is not None:
+        return _usd(value)
+    cleaned = re.sub(r"(?i)USD|US\$|\$|\s", "", _text(value))
+    if not re.search(r"\d", cleaned):
+        return None
+    if "," in cleaned and "." in cleaned:
+        if cleaned.rfind(",") > cleaned.rfind("."):
+            cleaned = cleaned.replace(".", "").replace(",", ".")
+        else:
+            cleaned = cleaned.replace(",", "")
+    elif "," in cleaned:
+        cleaned = cleaned.replace(",", "." if cleaned.count(",") == 1 else "")
+    elif cleaned.count(".") > 1 or (
+        "." in cleaned and len(cleaned.rsplit(".", 1)[-1]) == 3
+    ):
+        cleaned = cleaned.replace(".", "")
+    try:
+        amount = Decimal(cleaned)
+    except InvalidOperation:
+        logger.warning("BanChile: could not parse a USD amount")
+        return None
+    if not amount.is_finite():
+        return None
+    return amount.quantize(_CENTS, rounding=ROUND_HALF_UP)
 
 
 def card_location(city, country) -> Optional[TransactionLocation]:
@@ -420,7 +463,9 @@ def _cartola_dates(raw) -> tuple[Optional[datetime.date], Optional[datetime.date
     return occurred, posted
 
 
-def parse_cartola_movement(raw, operation_id: Optional[str] = None):
+def parse_cartola_movement(
+    raw, operation_id: Optional[str] = None, currency: str = "CLP"
+):
     """One `getCartola` row -> a BanChileMovement (None when unusable).
 
     `monto` is unsigned and `tipo` carries the direction, so an unrecognised
@@ -429,10 +474,28 @@ def parse_cartola_movement(raw, operation_id: Optional[str] = None):
     `id` plus `saldo` (the running ledger balance: every consecutive delta in
     the observed window equalled the signed `monto`, every value was distinct,
     and the values were identical across logins).
+
+    `currency` is the account's, as picked in the dialog. The CLP path is
+    exactly what it was before USD existed (whole pesos, `saldo` verbatim), so
+    no CLP key moves. A USD row keeps its cents (`_usd_from_text`, number or
+    string), and its `saldo` enters the fingerprint as a quantized Decimal so a
+    cosmetic change in how the bank spells it cannot re-key the movement.
+    `external_id_for` hashes a USD fingerprint with the currency in front, and
+    the rows land on their own product, so they never meet a CLP key.
+
+    Pending live verification (issue #82): no USD cartola row has been
+    observed yet, so whether `monto`/`saldo` are numbers or strings, what the
+    composite `id` looks like and whether `detalle-glosa` answers a
+    `transaccionId` for USD rows are all assumptions this parser tolerates
+    rather than facts it relies on.
     """
     if not isinstance(raw, dict):
         return None
-    monto = parse_clp(_text(raw.get("monto")))
+    usd = currency != "CLP"
+    if usd:
+        monto = _usd_from_text(raw.get("monto"))
+    else:
+        monto = parse_clp(_text(raw.get("monto")))
     if monto is None:
         return None
     tipo = _text(raw.get("tipo")).lower()
@@ -452,8 +515,13 @@ def parse_cartola_movement(raw, operation_id: Optional[str] = None):
     if tx_date is None:
         return None
 
-    bank_id = _text(raw.get("id"))
-    saldo = _text(raw.get("saldo"))
+    if usd:
+        bank_id = _fingerprint_value(raw.get("id"))
+        saldo_amount = _usd_from_text(raw.get("saldo"))
+        saldo = str(saldo_amount) if saldo_amount is not None else ""
+    else:
+        bank_id = _text(raw.get("id"))
+        saldo = _text(raw.get("saldo"))
     if operation_id is None and not bank_id and not saldo:
         # Nothing stable left to key on; a positional id would re-import the
         # movement on the next scrape.
@@ -468,6 +536,7 @@ def parse_cartola_movement(raw, operation_id: Optional[str] = None):
         accounting_date=posted,
         operation_id=operation_id,
         fingerprint=(bank_id, saldo),
+        currency=currency,
     )
 
 
@@ -1357,7 +1426,7 @@ def _movements_from_cartola(
     ids, remaining = _operation_ids_for(page, raw_movements, budget)
     movements = []
     for raw, operation_id in zip(raw_movements, ids):
-        movement = parse_cartola_movement(raw, operation_id)
+        movement = parse_cartola_movement(raw, operation_id, currency)
         if movement is not None:
             movements.append(movement)
     with_id = sum(1 for m in movements if m.operation_id)
@@ -1425,6 +1494,18 @@ def _read_checking_movements(
         collected.extend(movements)
         index += 1
     return dedupe_movements(collected)
+
+
+def _read_usd_checking_movements(page, attempt: int) -> Optional[list[BanChileMovement]]:
+    """The USD checking cartola: the same dialog drive with USD picked.
+
+    A surface of its own, so a failure here never costs the CLP cartola. Its
+    request and response matched the CLP ones in shape on the one live session
+    that reached it, but that account had no movements, so the row shape is
+    pending live verification (issue #82); an empty `movimientos` is a normal
+    reading, and so is a customer with no USD account at all.
+    """
+    return _read_checking_movements(page, attempt, currency="USD")
 
 
 # --- Credit card: the unbilled and billed legs --------------------------------
@@ -1579,6 +1660,7 @@ def _read_card_billed_usd(page, attempt: int) -> Optional[list[BanChileMovement]
 # `BanChileSessionResult.failed_surfaces` and become run warnings.
 _MOVEMENT_READERS: list[tuple[str, Callable]] = [
     ("movimientos", _read_checking_movements),
+    ("movimientos USD", _read_usd_checking_movements),
     ("tarjeta no facturados", _read_card_unbilled),
     ("tarjeta facturados", _read_card_billed),
     ("tarjeta facturados USD", _read_card_billed_usd),
