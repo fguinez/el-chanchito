@@ -12,7 +12,7 @@ import {
   index,
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 import type {
   ProductAttributes,
   ProductKind,
@@ -169,6 +169,49 @@ export const productSnapshots = pgTable(
       table.asOf
     ),
     index("idx_product_snapshots_product").on(table.productId),
+  ]
+);
+
+// Exchange rates an institution publishes itself, read by its scraper (V024).
+// product_id NULL = institution-wide; a product-scoped row also carries the
+// product's institution_id. Current value only: a rescrape overwrites it and
+// moves observed_at. Resolution and staleness live in lib/rates.
+export const exchangeRates = pgTable(
+  "exchange_rates",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    institutionId: uuid("institution_id")
+      .notNull()
+      .references(() => institutions.id, { onDelete: "cascade" }),
+    productId: uuid("product_id").references(() => products.id, {
+      onDelete: "cascade",
+    }),
+    baseCurrency: text("base_currency").notNull(),
+    quoteCurrency: text("quote_currency").notNull().default("CLP"),
+    // Quote units per 1 base unit.
+    rate: numeric("rate", { precision: 20, scale: 8 }).notNull(),
+    // Spanish UI label of where the rate was read.
+    source: text("source").notNull(),
+    // Validity date printed by the institution, when it shows one.
+    reportedAsOf: date("reported_as_of"),
+    // Last scrape that read this value.
+    observedAt: timestamp("observed_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("exchange_rates_scope_pair_idx").on(
+      table.institutionId,
+      sql`COALESCE(${table.productId}, '00000000-0000-0000-0000-000000000000'::uuid)`,
+      table.baseCurrency,
+      table.quoteCurrency
+    ),
   ]
 );
 
