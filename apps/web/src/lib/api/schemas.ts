@@ -131,11 +131,14 @@ export const updateTransferSchema = z.object({
   notes,
 });
 
-/** POST /api/wealth */
+/** A legacy total: patrimonio and deuda are sums, never negative. */
+const wealthTotal = clpAmount.pipe(z.number().nonnegative());
+
+/** POST /api/wealth; the backdating cutoff is checked by the route. */
 export const createWealthSnapshotSchema = z.object({
   snapshotDate: isoDate,
-  patrimonio: clpAmount,
-  deuda: clpAmount.nullish(),
+  patrimonio: wealthTotal,
+  deuda: wealthTotal.nullish(),
   fintualBalance: clpAmount.nullish(),
   mercadopagoBalance: clpAmount.nullish(),
   banchileSavings: clpAmount.nullish(),

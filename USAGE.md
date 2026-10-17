@@ -164,14 +164,9 @@ At the start of each month:
 2. Edit any monitor whose thresholds depend on a figure that changed (salary,
    credit card limit, etc.)
 3. Review **Gastos Fijos** for any changes to recurring expenses
-4. Check **Historial**: net worth is computed from product balances, so there is
-   nothing to enter. If an institution looks stale, refresh it from
-   **Instituciones**
-
-The **Agregar registro** form on **Historial** is legacy, kept for backdating
-pre-migration history (issue #18 retires it). Don't use it for new months:
-legacy snapshots are authoritative up to the latest one, so a snapshot dated
-today hides every computed point up to today.
+4. Check **Historial**: net worth is computed from product balances, so there
+   is nothing to enter; if an institution looks stale, refresh it from
+   **Instituciones** (see [Net-worth history](#net-worth-history))
 
 ## Monitors and variaciones
 
@@ -408,6 +403,42 @@ Rules only fill in missing categories: they never overwrite a category that is
 already set (including one chosen by hand), and editing or deleting a rule does
 not undo the categories it already assigned.
 
+## Net-worth history
+
+**Historial** charts patrimonio, deuda and ahorro (patrimonio minus deuda).
+Two kinds of points feed it:
+
+- **Calculado**: one point per day with product observations, carrying each
+  product's latest snapshot forward. Patrimonio is the sum of asset products
+  and deuda the amount owed on liability products (`credit_card`,
+  `line_of_credit`, `loan`, `mortgage`), all converted to CLP, so debt needs
+  no manual entry: scraping the card or línea is enough.
+- **Histórico**: legacy `wealth_snapshots` totals entered by hand before the
+  migration to product balances. They are authoritative up to the last legacy
+  date, which keeps the chart continuous across the boundary, and can be
+  deleted from the table. There is no form to add them.
+
+Legacy snapshots can still be posted through the API, but only to backdate
+history, and a backdated snapshot must never hide a computed point. The date
+must be before today and before the first real product observation after the
+latest legacy date; that date or later answers `409`. Dates inside legacy
+history are always accepted (a date that already has a snapshot answers
+`409`). The migration's backfill rows, which decomposed the three legacy
+component columns into per-product rows on legacy dates, don't count as
+observations.
+
+```bash
+# Synthetic values
+curl -X POST http://localhost:3000/api/wealth \
+  -H "Content-Type: application/json" \
+  -d '{"snapshotDate":"2023-03-01","patrimonio":2500000,"deuda":999999}'
+```
+
+`deuda` defaults to 0; `fintualBalance`, `mercadopagoBalance`,
+`banchileSavings` (informational component columns) and `notes` are optional.
+Amounts are rounded to whole pesos. `make seed-legacy-history` posts a set of
+synthetic legacy snapshots for demos.
+
 ## API Reference
 
 All API routes are under `/api/`:
@@ -436,7 +467,7 @@ All API routes are under `/api/`:
 | GET | `/api/categories/rules/preview` | Transactions a keyword would match (`?keyword=`) |
 | GET/POST/PUT/DELETE | `/api/fixed-expenses` | Fixed expenses CRUD |
 | GET/POST/PUT/DELETE | `/api/transfers` | Internal transfers |
-| GET/POST/DELETE | `/api/wealth` | Net-worth series (GET); legacy snapshots (POST, DELETE) |
+| GET/POST/DELETE | `/api/wealth` | Net-worth series (GET); backdate a legacy snapshot before the derived series starts (POST); delete a legacy snapshot (DELETE) |
 | POST | `/api/auth/login` | Exchange `DASHBOARD_PASSWORD` for a session cookie |
 | POST | `/api/auth/logout` | Clear the session cookie (public) |
 | GET | `/api/auth/session` | `{ enabled, authenticated }` (public) |

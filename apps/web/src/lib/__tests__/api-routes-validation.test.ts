@@ -569,6 +569,7 @@ describe("POST /api/wealth", () => {
     [{ snapshotDate: "2026-03-05" }, "patrimonio"],
     [{ snapshotDate: "5 de marzo", patrimonio: 1_000_000 }, "snapshotDate"],
     [{ snapshotDate: "2026-03-05", patrimonio: 1_000_000, fintualBalance: "999999" }, "fintualBalance"],
+    [{ snapshotDate: "2026-03-05", patrimonio: 1_000_000, deuda: -1 }, "deuda"],
   ])("rejects %j on %s", async (body, field) => {
     await expectRejected(await wealth.POST(jsonRequest("POST", body)), field);
   });
@@ -587,7 +588,9 @@ describe("DELETE /api/wealth", () => {
     await expectRejected(response, "id");
   });
 
-  it("deletes a manual snapshot by id", async () => {
+  it("deletes a legacy snapshot by id", async () => {
+    fake.respondWith((query) => (query.op === "delete" ? [{ id: ROW_ID }] : []));
+
     const response = await wealth.DELETE(jsonRequest("DELETE", { id: ROW_ID }));
 
     expect(response.status).toBe(200);
