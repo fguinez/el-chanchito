@@ -435,11 +435,18 @@ class TestDedupeMovements:
 # --- One surface, end to end, on a fake page ----------------------------------
 
 
+class _FakeRequest:
+    def __init__(self, url, body):
+        self.url = url
+        self.post_data_json = body
+
+
 class _FakeResponse:
-    def __init__(self, url, payload, status=200):
+    def __init__(self, url, payload, status=200, request=None):
         self.url = url
         self.status = status
         self._payload = payload
+        self.request = request
 
     def json(self):
         return self._payload
@@ -1392,6 +1399,13 @@ class TestCartolaMismatch:
         )
         assert movements_mod.cartola_mismatch(payload, "CLP", set()) == ""
 
+    def test_the_request_names_the_currency_when_the_payload_does_not(self):
+        usd_request = {"cuentaSeleccionada": {"moneda": "USD"}}
+        mismatch = movements_mod.cartola_mismatch
+        empty = {"movimientos": []}
+        assert mismatch(empty, "CLP", set(), usd_request) == "stale cartola (moneda USD)"
+        assert mismatch(empty, "USD", set(), usd_request) == ""
+
     def test_a_payload_without_moneda_is_not_judged_on_it(self):
         assert movements_mod.cartola_mismatch({"movimientos": []}, "USD") == ""
 
@@ -1552,6 +1566,9 @@ class _FakeDialogPage:
         dialog_delay_polls=0,
         home_render_polls=2,
         home_needs_reload=False,
+        payload_moneda=True,
+        button_needs_fetch=True,
+        accept_response_polls=1,
     ):
         self.url = "https://portalpersonas.bancochile.cl/mibancochile-web/#/home"
         self.options = options
@@ -1589,6 +1606,10 @@ class _FakeDialogPage:
         self.home_renders_in = None
         self.on_home = True
         self.reloads = 0
+        self.payload_moneda = payload_moneda
+        self.button_needs_fetch = button_needs_fetch
+        self.auto_request = None
+        self.accept_response_polls = accept_response_polls
         self.handlers = {}
         self.keyboard = _FakeKeyboard(self)
 
@@ -1604,20 +1625,31 @@ class _FakeDialogPage:
         self.dialog_open = False
         self.remembered = True
         if self.accept_answers_remembered and self.remembered_as is not None:
-            self.pending.append(self.remembered_as)
+            request = self.send_request(*self.remembered_as)
+            self.pending.append([self.accept_response_polls, *request])
             return
         self.remembered_as = (self.chosen, self.picked)
         # The response arrives later, while the scraper waits, as on the portal.
-        self.pending.append((self.chosen, self.picked))
+        request = self.send_request(self.chosen, self.picked)
+        self.pending.append([self.accept_response_polls, *request])
 
-    def fire_cartola(self, currency, picked):
+    _CARTOLA_URL = "https://portalpersonas.bancochile.cl/x/movimientos/getCartola"
+
+    def send_request(self, currency, picked):
+        """Fire a getCartola request; its response comes with `fire_cartola`."""
+        body = {"cuentaSeleccionada": {"moneda": currency, "codigoProducto": "SINTETICO"}}
+        request = _FakeRequest(self._CARTOLA_URL, body)
+        for handler in list(self.handlers.get("request", [])):
+            handler(request)
+        return (currency, picked, request)
+
+    def fire_cartola(self, currency, picked, request=None):
         payload = self.cartolas.get(currency, {"movimientos": []})
         if isinstance(payload, list):
             payload = payload[picked]
-        payload = {"moneda": currency, **payload}  # every live payload has one
-        response = _FakeResponse(
-            "https://portalpersonas.bancochile.cl/x/movimientos/getCartola", payload
-        )
+        if self.payload_moneda:
+            payload = {"moneda": currency, **payload}  # every live payload has one
+        response = _FakeResponse(self._CARTOLA_URL, payload, request=request)
         for handler in list(self.handlers.get("response", [])):
             handler(response)
 
@@ -1632,6 +1664,7 @@ class _FakeDialogPage:
             self.polls_since_route = 0
             if self.remembered and self.remembered_as is not None:
                 # The SPA fetches the remembered account's cartola by itself.
+                self.auto_request = self.send_request(*self.remembered_as)
                 self.auto_fetch_in = self.auto_fetch_polls
                 self._tick_auto_fetch(advance=False)
         return None
@@ -1647,11 +1680,11 @@ class _FakeDialogPage:
             self.auto_fetch_in -= 1
         if self.auto_fetch_in <= 0:
             self.auto_fetch_in = None
-            self.fire_cartola(*self.remembered_as)
+            self.fire_cartola(*self.auto_request)
 
     def click_reopen(self):
         self.reopen_clicks += 1
-        settled = self.auto_fetch_in is None
+        settled = self.auto_fetch_in is None or not self.button_needs_fetch
         if not settled or self.polls_since_route < self.reopen_ready_polls:
             self.ignored_reopen_clicks += 1  # the view is still rendering
             return
@@ -1677,9 +1710,14 @@ class _FakeDialogPage:
             self.home_renders_in -= 1
             if self.home_renders_in <= 0:
                 self.home_renders_in = None
-        pending, self.pending = self.pending, []
-        for currency, picked in pending:
-            self.fire_cartola(currency, picked)
+        due = []
+        for entry in self.pending:
+            entry[0] -= 1
+            if entry[0] <= 0:
+                due.append(entry)
+        self.pending = [entry for entry in self.pending if entry[0] > 0]
+        for _, currency, picked, request in due:
+            self.fire_cartola(currency, picked, request)
 
     def home_rendered(self):
         return self.on_home and self.home_renders_in is None and not self.home_needs_reload
@@ -1842,6 +1880,43 @@ class TestDialogSteps:
 
         assert page.reloads == 1
         assert movements_mod._card_shortcut_visible(page)
+
+    def test_a_slow_remembered_cartola_lands_before_the_capture_is_cleared(self):
+        """Empty and `moneda`-less, it would pass every payload check, so it
+        must have landed (and been dropped) before Aceptar."""
+        page = _remembered_page(
+            auto_fetch_polls=30,
+            button_needs_fetch=False,
+            payload_moneda=False,
+            accept_response_polls=40,
+        )
+        page.cartolas = {
+            "CLP": {"movimientos": []},
+            "USD": {"movimientos": [_usd_cartola_row()]},
+        }
+
+        found = _read_usd_dialog(page)
+
+        assert [(m.currency, m.amount) for m in found] == [("USD", Decimal("-1234.56"))]
+
+    def test_a_drive_reads_payloads_without_moneda(self):
+        page = _FakeDialogPage(
+            payload_moneda=False, cartolas={"USD": {"movimientos": [_usd_cartola_row()]}}
+        )
+
+        assert [m.currency for m in _read_usd_dialog(page)] == ["USD"]
+
+    def test_the_request_tells_a_moneda_less_stale_cartola_apart(self, caplog):
+        page = _FakeDialogPage(
+            payload_moneda=False, cartolas={"CLP": {"movimientos": [_cartola_row()]}}
+        )
+        assert len(movements_mod._read_checking_movements(page, attempt=0)) == 1
+        page.accept_answers_remembered = True
+
+        with caplog.at_level("INFO", logger=movements_mod.__name__):
+            assert _read_usd_dialog(page) is None
+
+        assert "stale cartola (moneda CLP)" in caplog.text
 
     def test_the_usd_radio_is_found_by_its_label_not_its_position(self):
         page = _FakeDialogPage(radios={"USD": [_CLP_RADIO, _USD_RADIO]})

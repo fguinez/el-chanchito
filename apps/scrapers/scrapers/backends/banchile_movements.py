@@ -990,17 +990,34 @@ def cartola_account_number(payload) -> str:
     return ""
 
 
-def cartola_mismatch(payload, currency: str, read_accounts=frozenset()) -> str:
+def _requested_currency(request_body) -> str:
+    """The currency a `getCartola` request asked for ("" when it doesn't say).
+
+    The request names the account in `cuentaSeleccionada`, `moneda` included.
+    """
+    if not isinstance(request_body, dict):
+        return ""
+    selected = request_body.get("cuentaSeleccionada")
+    if not isinstance(selected, dict):
+        return ""
+    return _text(selected.get("moneda")).upper()
+
+
+def cartola_mismatch(
+    payload, currency: str, read_accounts=frozenset(), request_body=None
+) -> str:
     """Why a captured `getCartola` payload is not the one a drive asked for.
 
     "" when it is. Once the SPA remembers an account it fetches that
     account's cartola by itself whenever the route renders, so a capture can
     hold a payload for the wrong account: a USD drive must never take a CLP
     cartola (its rows would be stored as USD), and a later CLP drive must not
-    take an account already read. A payload without `moneda` is not judged
-    on it (every payload observed carried one).
+    take an account already read. The payload's own `moneda` is checked, and
+    so is the one its request asked for (`request_body`), which still tells
+    an empty or `moneda`-less payload apart; neither is judged when absent.
     """
     moneda = _text(payload.get("moneda")).upper() if isinstance(payload, dict) else ""
+    moneda = moneda or _requested_currency(request_body)
     if moneda and moneda != currency:
         return f"stale cartola (moneda {moneda})"
     account = cartola_account_number(payload)
@@ -1075,6 +1092,8 @@ _REMEMBERED_SETTLE_MS = 4_000
 # After a reopen click, how long the select gets to show before a retry.
 _DIALOG_OPEN_WAIT_MS = 5_000
 _REOPEN_CLICKS = 3
+# Before Aceptar: how long an automatic cartola still in flight may take.
+_IN_FLIGHT_WAIT_MS = 10_000
 # Leaving the movements view: how long the dashboard gets to render its card
 # shortcut (the next surface's first click), and the pause once it has.
 _HOME_READY_MS = 15_000
@@ -1139,6 +1158,21 @@ class _JsonCapture:
         self.fragment = fragment
         self.payloads: list[dict] = []
         self.requests: list[dict] = []
+        # The request body behind each payload (None when unknown), and how
+        # many matching responses arrived at all, 200 or not: together with
+        # `requests` they say whether a call is still in flight.
+        self.payload_requests: list[Optional[dict]] = []
+        self.responses = 0
+
+    def in_flight(self) -> bool:
+        """True while a captured request has had no response yet."""
+        return len(self.requests) > self.responses
+
+    def clear(self) -> None:
+        self.payloads.clear()
+        self.requests.clear()
+        self.payload_requests.clear()
+        self.responses = 0
 
     def _on_request(self, request) -> None:
         try:
@@ -1152,11 +1186,15 @@ class _JsonCapture:
 
     def _on_response(self, response) -> None:
         try:
-            if self.fragment not in (response.url or "") or response.status != 200:
+            if self.fragment not in (response.url or ""):
+                return
+            self.responses += 1
+            if response.status != 200:
                 return
             payload = response.json()
             if isinstance(payload, dict):
                 self.payloads.append(payload)
+                self.payload_requests.append(_request_body(response))
         except Exception:
             pass
 
@@ -1178,6 +1216,15 @@ class _JsonCapture:
             except Exception:
                 pass
         return False
+
+
+def _request_body(response) -> Optional[dict]:
+    """The JSON body of the request behind `response` (None when unknown)."""
+    try:
+        body = response.request.post_data_json
+    except Exception:
+        return None
+    return body if isinstance(body, dict) else None
 
 
 def _wait_for_payload(page, capture: _JsonCapture, timeout_ms: int) -> Optional[dict]:
@@ -1212,8 +1259,9 @@ def _wait_for_cartola(
     while True:
         while checked < len(capture.payloads):
             payload = capture.payloads[checked]
+            request_body = capture.payload_requests[checked]
             checked += 1
-            mismatch = cartola_mismatch(payload, currency, read_accounts)
+            mismatch = cartola_mismatch(payload, currency, read_accounts, request_body)
             if not mismatch:
                 return payload, ""
             logger.debug("BanChile: skipping a captured cartola: %s", mismatch)
@@ -1602,8 +1650,12 @@ def _open_cartola(
             # Past the last account: the loop is done, nothing failed.
             return _CartolaDrive(accounts=pick.count)
 
-        capture.payloads.clear()
-        capture.requests.clear()
+        # A cartola the SPA fetched by itself (the remembered account's) may
+        # still be on its way; let it land before the capture is emptied, so
+        # it can never be taken for the one Aceptar asks for.
+        if not _wait_until(page, lambda: not capture.in_flight(), _IN_FLIGHT_WAIT_MS):
+            logger.debug("BanChile: a cartola is still in flight; clearing anyway")
+        capture.clear()
         if not _click_first(page, [_MODAL_ACCEPT_SELECTOR], timeout=timeout_ms):
             return _drive_failed(
                 currency, "accept", "Aceptar not clickable", index, attempt, pick.count
