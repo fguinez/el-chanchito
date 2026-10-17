@@ -9,6 +9,7 @@ from threading import Thread
 
 import pytest
 
+import main
 from main import _REFRESH_COOLDOWNS, _make_control_handler, _start_control_server
 from scrapers.backends import banchile_web
 
@@ -301,13 +302,28 @@ class TestControlServerBindHost:
 
         assert server.server_address[0] == "127.0.0.1"
 
-    def test_binds_the_configured_host(self, start_server, monkeypatch):
-        """Compose sets 0.0.0.0 so the web container can reach it."""
+    def test_binds_the_configured_host(self, monkeypatch):
+        """Compose sets 0.0.0.0 so the web container can reach it.
+
+        The server class is faked: really binding a wildcard address would pop
+        up the macOS firewall prompt on every test run.
+        """
+        bound = []
+
+        class FakeServer:
+            def __init__(self, address, handler):
+                bound.append(address)
+
+            def serve_forever(self):
+                pass
+
+        monkeypatch.setattr(main, "ThreadingHTTPServer", FakeServer)
+        monkeypatch.setenv("SCRAPER_CONTROL_PORT", "8080")
         monkeypatch.setenv("SCRAPER_CONTROL_HOST", "0.0.0.0")
 
-        server = start_server()
+        _start_control_server(FakeScheduler(["buda"]), {"buda"})
 
-        assert server.server_address[0] == "0.0.0.0"
+        assert bound == [("0.0.0.0", 8080)]
 
     def test_stays_disabled_without_a_port(self, monkeypatch):
         """No SCRAPER_CONTROL_PORT means no server, whatever the host."""
