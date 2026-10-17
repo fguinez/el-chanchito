@@ -110,6 +110,7 @@ Secrets and their meaning:
 | `chanchito.FINTUAL_PASSWORD` | Fintual account password (used by `make fintual-login` to open a web session) |
 | `chanchito.BUDA_API_KEY` | Buda.com API key |
 | `chanchito.BUDA_API_SECRET` | Buda.com API secret |
+| `chanchito.SKIPO_API_KEY` | Skipo read-only API key (see "Skipo API key") |
 | `chanchito.EMAIL_IMAP_PASSWORD` | Gmail App Password (see below) |
 | `chanchito.DASHBOARD_PASSWORD` | Dashboard login password (see "Deployment"; required in production, not exported to `make dev`) |
 
@@ -119,6 +120,7 @@ A scraper is enabled only when its credentials are present:
 |---|---|
 | Fintual | `FINTUAL_EMAIL` + `FINTUAL_PASSWORD` |
 | Buda | `BUDA_API_KEY` + `BUDA_API_SECRET` |
+| Skipo | `SKIPO_API_KEY` |
 | Banco de Chile | `BANCHILE_RUT` + `BANCHILE_PASSWORD` |
 | Tarjeta Lider Bci | `LIDER_BCI_RUT` |
 | Banco Santander | `SANTANDER_RUT` + `SANTANDER_PASSWORD` |
@@ -253,6 +255,24 @@ In reuse mode scrapes drive that Chrome (reusing the signed-in tab or re-logging
 via autofill) and report `Could not reach the Chrome debug port…` when it isn't up.
 (Override the debug port with `LIDER_BCI_CDP_PORT`.)
 
+### Skipo API key
+
+Skipo is read through its official API with a personal key. Create one in
+your Skipo account with read-only scopes only: `accounts:read`
+(balances and ledger) and `market_data:read` (asset catalog and coin
+prices). The scraper never writes. Leave the IP allowlist empty if your
+scrapers run from a dynamic residential IP, since the key would stop working
+when it changes.
+Store it with:
+
+```bash
+make secret-set KEY=SKIPO_API_KEY
+```
+
+A rejected key (expired, revoked, missing a scope or blocked by IP) fails the
+run with the HTTP status and Skipo's error code. Tokenized stocks and fiat
+other than CLP are not imported yet; holding them marks the run `partial`.
+
 ### Banco Santander
 
 The Santander scraper logs in with a headless Chromium once per run (RUT +
@@ -284,6 +304,7 @@ make scrapers-start
 Schedule per scraper:
 - **Fintual**: every 6 hours
 - **Buda**: every 1 hour
+- **Skipo**: every 1 hour
 - **BanChile**: every 24 hours
 - **BCI Lider**: every 24 hours
 - **Santander**: every 24 hours
