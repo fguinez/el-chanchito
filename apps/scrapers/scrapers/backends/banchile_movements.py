@@ -1075,6 +1075,10 @@ _REMEMBERED_SETTLE_MS = 4_000
 # After a reopen click, how long the select gets to show before a retry.
 _DIALOG_OPEN_WAIT_MS = 5_000
 _REOPEN_CLICKS = 3
+# Leaving the movements view: how long the dashboard gets to render its card
+# shortcut (the next surface's first click), and the pause once it has.
+_HOME_READY_MS = 15_000
+_HOME_SETTLE_MS = 1_500
 _CURRENCY_OPTION_SELECTOR = "mat-option"
 _ACCOUNT_RADIO_SELECTOR = "mat-radio-button"
 _MODAL_ACCEPT_SELECTOR = "#modalPrimaryBtn button"
@@ -1481,13 +1485,26 @@ def _click_account_radio(
         return _RadioPick(0, _STEP_FAILED, f"account radio raised {type(error).__name__}")
 
 
+def _card_shortcut_visible(page) -> bool:
+    return any(_visible_now(page, selector) for selector in _CARD_LINK_SELECTORS)
+
+
 def _leave_movements_view(page) -> None:
-    """Close whatever the dialog left open and return to the portal home.
+    """Close whatever the dialog left open and hand over a rendered dashboard.
 
     A drive can stop with the currency panel or the modal still open (no
     option for the currency, a failed step), and either would cover the next
-    surface's first click; the card legs also start from the dashboard. Escape
-    closes the panel, then the modal; it is harmless when nothing is open.
+    surface's first click. Escape closes the panel, then the modal; it is
+    harmless when nothing is open.
+
+    Then home. From the movements view that is a hash-only change: the call
+    returns at once and the dashboard renders afterwards, and the card legs,
+    which run next, click its shortcut straight away. A click on a dashboard
+    still rendering is lost (the unbilled leg then waits out its whole first
+    attempt), so this waits for the shortcut and lets the dashboard settle.
+    If it never shows, the page is reloaded once (a real navigation; the
+    session survives it) and the post-login popup dismissed. Bounded either
+    way, and a customer with no card simply costs the wait.
     """
     for _ in range(2):
         try:
@@ -1497,6 +1514,20 @@ def _leave_movements_view(page) -> None:
             logger.debug("BanChile: could not press Escape on the dialog", exc_info=True)
             break
     _recover_to_home(page)
+    if not _wait_until(page, lambda: _card_shortcut_visible(page), _HOME_READY_MS):
+        logger.info(
+            "BanChile: the dashboard did not render after the movements view; reloading"
+        )
+        try:
+            page.reload(wait_until="domcontentloaded")
+        except Exception:
+            logger.debug("BanChile: reloading the dashboard failed", exc_info=True)
+            return
+        _dismiss_popup(page)
+        if not _wait_until(page, lambda: _card_shortcut_visible(page), _HOME_READY_MS):
+            logger.info("BanChile: no card shortcut on the dashboard after a reload")
+            return
+    page.wait_for_timeout(_HOME_SETTLE_MS)
 
 
 def _drive_failed(

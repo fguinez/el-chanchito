@@ -1440,6 +1440,8 @@ class _DialogLocator:
         if self.selector == _REOPEN:
             shown = page.on_movements and page.remembered and not page.dialog_open
             return ["reopen"] if shown else []
+        if self.selector in banchile_web_mod._CARD_LINK_SELECTORS:
+            return ["card"] if page.home_rendered() else []
         if self.selector.endswith(" label") or self.selector.startswith("radio-label:"):
             return ["label"]
         return []
@@ -1548,6 +1550,8 @@ class _FakeDialogPage:
         auto_fetch_polls=0,
         reopen_ready_polls=0,
         dialog_delay_polls=0,
+        home_render_polls=2,
+        home_needs_reload=False,
     ):
         self.url = "https://portalpersonas.bancochile.cl/mibancochile-web/#/home"
         self.options = options
@@ -1577,6 +1581,14 @@ class _FakeDialogPage:
         self.auto_fetch_in = None
         self.dialog_opens_in = None
         self.ignored_reopen_clicks = 0
+        # Home is a hash-only change: overlays survive it, and the dashboard
+        # (with its card shortcut) renders `home_render_polls` waits later, or
+        # only after a reload when `home_needs_reload`.
+        self.home_render_polls = home_render_polls
+        self.home_needs_reload = home_needs_reload
+        self.home_renders_in = None
+        self.on_home = True
+        self.reloads = 0
         self.handlers = {}
         self.keyboard = _FakeKeyboard(self)
 
@@ -1615,6 +1627,7 @@ class _FakeDialogPage:
     def evaluate(self, script, arg=None):
         if arg == movements_mod._MOVIMIENTOS_ROUTE:
             self.on_movements = True
+            self.on_home = False
             self.dialog_open = not self.remembered
             self.polls_since_route = 0
             if self.remembered and self.remembered_as is not None:
@@ -1660,17 +1673,30 @@ class _FakeDialogPage:
         self.polls_since_route += 1
         self._tick_auto_fetch()
         self._tick_dialog()
+        if self.home_renders_in is not None:
+            self.home_renders_in -= 1
+            if self.home_renders_in <= 0:
+                self.home_renders_in = None
         pending, self.pending = self.pending, []
         for currency, picked in pending:
             self.fire_cartola(currency, picked)
+
+    def home_rendered(self):
+        return self.on_home and self.home_renders_in is None and not self.home_needs_reload
 
     def goto(self, url, **kwargs):
         self.url = url
         self.auto_fetch_in = None
         self.dialog_opens_in = None
         self.on_movements = False
-        self.dialog_open = False
-        self.select_open = False
+        self.on_home = url.endswith("#/home")
+        self.home_renders_in = self.home_render_polls if self.home_render_polls else None
+
+    def reload(self, **kwargs):
+        self.reloads += 1
+        self.home_needs_reload = False
+        self.dialog_open = self.select_open = False
+        self.goto(self.url)
 
 
 def _remembered_page(**kwargs):
@@ -1799,6 +1825,23 @@ class TestDialogSteps:
             "failed at the dialog open step (account 1, attempt 1): reopen button "
             "did not open the dialog after 3 click(s)"
         ) in caplog.text
+
+    def test_the_next_surface_gets_a_rendered_dashboard(self):
+        """The card legs click the dashboard shortcut first thing."""
+        page = _FakeDialogPage(home_render_polls=12)
+
+        _read_usd_dialog(page)
+
+        assert page.home_rendered() and page.reloads == 0
+        assert movements_mod._card_shortcut_visible(page)
+
+    def test_a_dashboard_that_never_renders_is_reloaded_once(self):
+        page = _FakeDialogPage(home_needs_reload=True)
+
+        _read_usd_dialog(page)
+
+        assert page.reloads == 1
+        assert movements_mod._card_shortcut_visible(page)
 
     def test_the_usd_radio_is_found_by_its_label_not_its_position(self):
         page = _FakeDialogPage(radios={"USD": [_CLP_RADIO, _USD_RADIO]})
