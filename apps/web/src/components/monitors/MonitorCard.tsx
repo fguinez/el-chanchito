@@ -7,8 +7,8 @@ import { Badge } from "@/components/ui/badge";
 import { cn, formatAmount } from "@/lib/utils";
 import {
   SEVERITY_LABELS,
+  StaleAsOf,
   StatusBadge,
-  formatDateEs,
   formatSignedAmount,
   type ApiMonitor,
   type MonitorEvaluation,
@@ -130,11 +130,7 @@ export function MonitorCard({ monitor }: { monitor: ApiMonitor }) {
                 {evaluation.noDataReason}
               </p>
             )}
-            {evaluation.staleAsOf && (
-              <p className="text-xs text-muted-foreground">
-                al {formatDateEs(evaluation.staleAsOf)}
-              </p>
-            )}
+            <StaleAsOf staleAsOf={evaluation.staleAsOf} />
           </div>
           <Sparkline monitor={monitor} />
         </CardContent>

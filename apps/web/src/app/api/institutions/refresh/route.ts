@@ -11,7 +11,9 @@ import { NextRequest, NextResponse } from "next/server";
  *
  * Returns `503` when the scraper service isn't configured or can't be reached
  * (e.g. the container isn't running), so the UI can explain it instead of
- * spinning forever.
+ * spinning forever. A scraper inside its manual-refresh cooldown is passed
+ * through as the service reports it: `429` + `Retry-After` for a single
+ * institution, a `skipped` list in the `202` of a refresh-all.
  */
 export async function POST(request: NextRequest) {
   const controlUrl = process.env.SCRAPER_CONTROL_URL;
@@ -41,7 +43,11 @@ export async function POST(request: NextRequest) {
       signal: AbortSignal.timeout(5000),
     });
     const data = await res.json().catch(() => ({}));
-    return NextResponse.json(data, { status: res.status });
+    const retryAfter = res.headers.get("Retry-After");
+    return NextResponse.json(data, {
+      status: res.status,
+      headers: retryAfter ? { "Retry-After": retryAfter } : undefined,
+    });
   } catch {
     return NextResponse.json(
       { error: "Servicio de scrapers no disponible." },
