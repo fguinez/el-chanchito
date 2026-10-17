@@ -375,6 +375,17 @@ export const internalTransfers = pgTable("internal_transfers", {
   amount: integer("amount").notNull(),
   fromProductId: uuid("from_product_id").references(() => products.id),
   toProductId: uuid("to_product_id").references(() => products.id),
+  // The scraped rows this transfer accounts for (V028): the outgoing one on
+  // fromProductId and the incoming one on toProductId. Each is optional (a
+  // product without a transaction feed has nothing to link) and unique, so a
+  // row serves at most one transfer. While linked, the row carries
+  // is_internal_transfer and drops out of the Gastos/Ingresos totals.
+  fromTransactionId: uuid("from_transaction_id")
+    .references(() => transactions.id, { onDelete: "set null" })
+    .unique("uq_internal_transfers_from_transaction"),
+  toTransactionId: uuid("to_transaction_id")
+    .references(() => transactions.id, { onDelete: "set null" })
+    .unique("uq_internal_transfers_to_transaction"),
   transferDate: date("transfer_date").notNull(),
   status: text("status").$type<TransferStatus>().notNull().default("pending"),
   notes: text("notes"),
