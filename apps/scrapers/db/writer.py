@@ -14,6 +14,7 @@ from psycopg.types.json import Jsonb
 from db.connection import get_pool
 from db.slug import slugify, unique_slug
 from scrapers.base import (
+    ScrapedExchangeRate,
     ScrapedProduct,
     ScrapedTransaction,
     SupersededTransaction,
@@ -950,4 +951,118 @@ def upsert_product(sp: ScrapedProduct) -> None:
             sp.kind,
             sp.currency,
             metrics_dict,
+        )
+
+
+# --- Exchange rates (V024) -----------------------------------------------------
+
+
+class UnresolvedRateScope(LookupError):
+    """An exchange rate names an institution or product the database lacks.
+
+    `run_scraper` turns it into a run warning: the rate is dropped, and nothing
+    is created to hang it on.
+    """
+
+
+def _lookup_product(
+    conn,
+    institution_id,
+    kind: str,
+    currency: str,
+    external_ref: str | None,
+):
+    """The id of the existing product with this identity, or None.
+
+    The identity rule of `_resolve_product` (the writer's account at the
+    institution, i.e. the oldest user's first one, then kind, currency and
+    COALESCE(external_ref, '')), but lookup-only: no link of the chain is
+    ever created.
+    """
+    row = conn.execute(
+        """
+        SELECT p.id FROM products p
+        WHERE p.account_id = (
+            SELECT a.id FROM accounts a
+            WHERE a.institution_id = %s
+              AND a.user_id = (SELECT id FROM users ORDER BY created_at LIMIT 1)
+            ORDER BY a.display_order LIMIT 1
+        )
+          AND p.kind = %s AND p.currency = %s
+          AND COALESCE(p.external_ref, '') = COALESCE(%s, '')
+        """,
+        (institution_id, kind, currency, external_ref),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def upsert_exchange_rate(rate: ScrapedExchangeRate) -> None:
+    """Record the latest reading of one institution or product exchange rate.
+
+    One row per (institution, product or none, base, quote): a re-scrape
+    updates the rate, source and `reported_as_of` in place and moves
+    `observed_at`, which is what the dashboard's staleness warning reads.
+    Raises `UnresolvedRateScope` when the institution or the product the
+    rate names does not exist yet.
+    """
+    pool = get_pool()
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT id FROM institutions WHERE slug = %s", (rate.institution,)
+        ).fetchone()
+        if not row:
+            raise UnresolvedRateScope(f"institution '{rate.institution}' not found")
+        institution_id = row[0]
+
+        product_id = None
+        if rate.product is not None:
+            ref = rate.product
+            product_id = _lookup_product(
+                conn, institution_id, ref.kind, ref.currency, ref.external_ref
+            )
+            if product_id is None:
+                raise UnresolvedRateScope(
+                    f"no {ref.kind} product in {ref.currency}"
+                    + (" with that external_ref" if ref.external_ref else "")
+                    + f" at '{rate.institution}'"
+                )
+
+        now = datetime.now(timezone.utc)
+        conn.execute(
+            """
+            INSERT INTO exchange_rates
+                (institution_id, product_id, base_currency, quote_currency, rate,
+                 source, reported_as_of, observed_at, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (
+                institution_id,
+                COALESCE(product_id, '00000000-0000-0000-0000-000000000000'::uuid),
+                base_currency,
+                quote_currency
+            )
+            DO UPDATE SET rate = EXCLUDED.rate, source = EXCLUDED.source,
+                          reported_as_of = EXCLUDED.reported_as_of,
+                          observed_at = EXCLUDED.observed_at,
+                          updated_at = EXCLUDED.updated_at
+            """,
+            (
+                institution_id,
+                product_id,
+                rate.base_currency,
+                rate.quote_currency,
+                rate.rate,
+                rate.source,
+                rate.reported_as_of,
+                now,
+                now,
+                now,
+            ),
+        )
+        logger.info(
+            "Exchange rate %s %s/%s (%s) = %s",
+            rate.institution,
+            rate.base_currency,
+            rate.quote_currency,
+            "product" if product_id is not None else "institution",
+            rate.rate,
         )
