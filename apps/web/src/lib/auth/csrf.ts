@@ -111,7 +111,9 @@ const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
  * `X-Forwarded-Host` is deliberately ignored: it is client-writable.
  */
 export function isLoopbackHost(raw: string | null | undefined): boolean {
-  if (!raw) return false;
+  // Userinfo, a path, a query or a fragment would let the URL parser pick a
+  // different hostname than the header names (`evil@localhost`).
+  if (!raw || /[@/\\?#]/.test(raw)) return false;
   let hostname: string;
   try {
     hostname = new URL(`http://${raw.trim()}`).hostname.toLowerCase();

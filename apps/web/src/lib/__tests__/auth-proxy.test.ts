@@ -153,6 +153,28 @@ describe("proxy: disabled mode", () => {
     expect(response.status).toBe(403);
   });
 
+  it("refuses look-alike and malformed hosts", async () => {
+    for (const host of [
+      "localhost.",
+      "localhost.attacker.example",
+      "127.0.0.1.nip.io",
+      "evil@localhost",
+      "evil@localhost:3000",
+      "localhost/evil",
+    ]) {
+      const response = await proxy(
+        makeRequest({ path: "/history", origin: LOCAL, headers: { host } })
+      );
+      expect(response.status, host).toBe(403);
+    }
+  });
+
+  it("refuses a request with no Host at all", async () => {
+    const request = new NextRequest(new URL("/history", LOCAL));
+    expect(request.headers.get("host")).toBeNull();
+    expect((await proxy(request)).status).toBe(403);
+  });
+
   it("still rejects a cross-site write, since nothing else guards the API here", async () => {
     // `make dev` runs without a password, so any page the browser visits could
     // otherwise forge transactions or start a live bank login.
