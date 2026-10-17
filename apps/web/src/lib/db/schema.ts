@@ -261,6 +261,11 @@ export const transactions = pgTable(
       .notNull()
       .references(() => products.id),
     description: text("description").notNull(),
+    // One-time per-row override the user set (V034). For a scraped row (with an
+    // external_id) `description` stays the immutable scraped text and the
+    // display is COALESCE(custom_description, description); a manual row edits
+    // description directly. Display only: matching keys on raw `description`.
+    customDescription: text("custom_description"),
     // Signed, in the product's currency (products.currency). NUMERIC(18, 2)
     // since V023 so foreign-currency movements keep their cents. postgres.js
     // hands NUMERIC over as a string; mode "number" converts it on every
