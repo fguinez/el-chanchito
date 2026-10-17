@@ -8,12 +8,12 @@ Personal finance tracker for Chilean banks and fintechs: automated scrapers, for
 
 ## Overview
 
-El Chanchito (“the piggy bank”) is a self-hosted personal finance tracker. Python scrapers pull balances and transactions from Chilean financial institutions (Banco de Chile, Banco Santander, Tarjeta Lider Bci, Fintual, Buda, Skipo, MACH, MercadoPago and Tenpo) into PostgreSQL, and a Next.js dashboard turns them into monitors (budget drift and other alerts over your balances), a spending history, and a net-worth timeline. Everything runs locally via the Makefile or Docker Compose, and credentials stay on your machine in the macOS Keychain.
+El Chanchito (“the piggy bank”) is a self-hosted personal finance tracker. Python scrapers pull balances and transactions from Chilean financial institutions (Banco de Chile, Banco Santander, Banco Falabella, Tarjeta Lider Bci, Fintual, Buda, Skipo, MACH, MercadoPago and Tenpo) into PostgreSQL, and a Next.js dashboard turns them into monitors (budget drift and other alerts over your balances), a spending history, and a net-worth timeline. Everything runs locally via the Makefile or Docker Compose, and credentials stay on your machine in the macOS Keychain.
 
 ## Highlights
 
 - **Monitors**: an equation over product values (say, the checking balance minus what the cards owe) checked against alert and warning thresholds that can ramp through the month, plus one-off variaciones (a reimbursement, an extra budget) that shift them until month end; evaluated live and replayed day by day from balance history.
-- **Nine institution scrapers** on independent schedules, mixing REST APIs (Fintual, Buda, Skipo), browser automation (Playwright for Banco de Chile and Banco Santander, a real Chrome over CDP for Tarjeta Lider Bci), and Gmail inbox parsing (MACH, MercadoPago, Tenpo).
+- **Ten institution scrapers** on independent schedules, mixing REST APIs (Fintual, Buda, Skipo), browser automation (Playwright for Banco de Chile, Banco Santander and Banco Falabella, a real Chrome over CDP for Tarjeta Lider Bci), and Gmail inbox parsing (MACH, MercadoPago, Tenpo).
 - **Typed product registry**: every product kind (checking, credit card, crypto, ...) is declared once in pydantic, grouped into display families with the column specs of their dashboard tables, and code-generated into TypeScript types, a JSON Schema, and per-kind docs.
 - **Net worth from snapshots**: derived from per-product snapshot history, with per-kind asset/liability conventions and multi-currency conversion to CLP.
 - **On-demand refresh**: an internal control endpoint lets the dashboard trigger a scrape immediately instead of waiting for the next scheduled run.
@@ -55,6 +55,7 @@ A scraper is enabled only when its credentials are present. See [USAGE.md](USAGE
 | `DATABASE_URL` | yes | PostgreSQL connection string; the `.env.example` default works with `make db-up` |
 | `BANCHILE_RUT` | no | Banco de Chile RUT; enables the BanChile scraper (Playwright) |
 | `SANTANDER_RUT` | no | Banco Santander RUT; with `SANTANDER_PASSWORD`, enables the Santander scraper (headless Playwright, CLP cuenta vista) |
+| `BANCO_FALABELLA_RUT` | no | Banco Falabella RUT; with `BANCO_FALABELLA_PASSWORD`, enables the Banco Falabella scraper (headless Playwright, CMR Mastercard credit card) |
 | `LIDER_BCI_RUT` | no | Tarjeta Lider Bci RUT; enables its scraper (drives a real Chrome, so it needs a machine with a display) |
 | `FINTUAL_EMAIL` | no | Fintual account e-mail; enables the Fintual scraper (run `make fintual-login` once) |
 | `EMAIL_IMAP_HOST` / `EMAIL_IMAP_USER` | no | Gmail IMAP identifiers; enable the e-mail parsers (MACH, MercadoPago, Tenpo) |

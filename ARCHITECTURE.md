@@ -55,6 +55,7 @@
 │  │  │ Fintual │ │ Buda │ │ BanChile  │ │ MACH / MP / Tenpo │ │  │
 │  │  │  (6h)   │ │Skipo │ │ BCI Lider │ │  shared IMAP 30m  │ │  │
 │  │  │         │ │ (1h) │ │ Santander │ │                   │ │  │
+│  │  │         │ │      │ │ Falabella │ │                   │ │  │
 │  │  │         │ │      │ │   (24h)   │ │                   │ │  │
 │  │  └────┬────┘ └──┬───┘ └─────┬─────┘ └─────────┬─────────┘ │  │
 │  │       │         │           │                 │           │  │
@@ -82,6 +83,7 @@
         │ Fintual  │ │ BanChile  │ │   MACH    │
         │Buda Skipo│ │ BCI Lider │ │ MP, Tenpo │
         │  (APIs)  │ │ Santander │ │  (IMAP)   │
+        │          │ │ Falabella │ │           │
         │          │ │ (browser) │ │           │
         └────┬─────┘ └─────┬─────┘ └─────┬─────┘
              │             │             │
@@ -420,6 +422,8 @@ the same function over the rows that are still uncategorized.
 | `V030__seed_skipo_institution.sql` | seeds the `skipo` institution (display name, kind, site) |
 | `V031__transfer_suggestions.sql` | dismissed_transfer_suggestions (rejected suggestions, null target = one-sided) and confirmed_transfer_patterns (products + description prefix that rank matching suggestions first); new tables only |
 | `V032__auto_linked_transfers.sql` | internal_transfers gain `auto_linked` (default false): set on transfers the suggestions confirmed on their own, cleared when the user edits their links |
+| `V033__transactions_soft_delete.sql` | transactions gain `deleted_at`: a deleted row with an `external_id` is soft-deleted (keeps its key, so a scrape cannot re-import it), manual rows are hard-deleted (see "Deleting a transaction") |
+| `V037__seed_banco_falabella_institution.sql` | seeds the Banco Falabella institution row (upsert, so it also fixes a row the writer auto-created) |
 
 ## Scraper Architecture
 
@@ -444,11 +448,13 @@ apps/scrapers/scrapers/
     banchile_fx.py         # BdC USD card exchange rate (fetch-only surface)
     bci_lider_web.py       # real Chrome over CDP -> scrape_card() / save_login_session()
     santander_web.py       # headless Santander login + the SPA's JSON -> fetch_session()
+    banco_falabella_web.py # headless Banco Falabella login + the rendered DOM -> fetch_session()
   institutions/
     mach.py  mercadopago.py  tenpo.py       -> consume backends/email
     banchile.py                              -> banchile_movements (one login: tx + balances)
     bci_lider.py                             -> bci_lider_web (one CDP drive: tx + balances)
     santander.py                             -> santander_web (one headless login: tx + balance)
+    banco_falabella.py                       -> banco_falabella_web (one headless login: tx + balance)
     buda.py  fintual.py  skipo.py            -> self-contained (HTTP APIs)
 ```
 
@@ -643,6 +649,33 @@ BioCatch's telemetry keeps from firing). The scraper does not try to evade
 BioCatch's automation detection: if Santander starts blocking the headless
 login, the run fails and says so.
 
+Banco Falabella has no API for individuals, and its private site's data BFF
+(`/movement-cc/*`) encrypts request bodies client-side (RSA + AES), so a plain
+HTTP client cannot ask it for anything. The scraper therefore logs in with a
+headless Playwright Chromium (`backends/banco_falabella_web.py`): it clicks "Mi
+Cuenta", types the RUT and six-digit clave into the slide-over (no second
+factor), and reads the figures from the rendered DOM. One product is modelled, a
+CMR Mastercard credit card in CLP, as a singleton `credit_card` that receives
+every movement. Balances (`available`/`limit`/`owed`, plus the masked `last4`
+and brand) come from the dashboard product card, anchored on the "Cupo de
+compras / utilizado / disponible" labels so the Avance cash-advance line is
+never read as a balance. Movements come from the card-detail `<credit-card-movements>`
+web component (shadow DOM): the unbilled "Ultimos movimientos" tab and the
+current billed "Movimientos facturados" statement. Older statements (the tab's
+month select) are not iterated yet; a daily run already sees each movement while
+it is unbilled and again while it is the current statement. Each purchase is
+emitted once at its full "Monto total" (not one row per installment). The
+gotchas handled: a post-login marketing modal whose backdrop intercepts clicks
+(dismissed first), components that render a moment after the page (each read
+waits for its content), an idle-timeout modal ("Tu sesion expirara") that logs
+the session out if its "Continuar" button is not clicked, and a flaky movements
+BFF that often 500s, read with bounded retries (a "Reintentar" click between
+tries) and reported as partial coverage when a surface never loads. A tab only
+counts as empty once its header-only table or "no movements" message holds for
+a few polls, and every read stays inside the movements component and its
+visible tab. One login feeds both legs per cycle, the way Santander and BCI
+Lider cache their drive, and every wait is bounded (never `networkidle`).
+
 Buda reads two signed REST surfaces (issue #3). Balances cover every wallet:
 one `crypto` product per currency, `units` kept fractional. Transactions cover
 **CLP deposits and withdrawals only**, minus annulled or rejected ones, paged
@@ -790,6 +823,7 @@ place (see [Exchange rates](#exchange-rates)).
 | `tenpo` | `email` | IMAP (Gmail) | Shared IMAP session | 30m |
 | `bci_lider` | `web` | Real Chrome over CDP (`bci_lider_web`) | Autofill in a real Chrome (managed by default; reuse via `LIDER_BCI_CDP_URL` + `make bci-lider-login`; Cloudflare Turnstile) | 24h |
 | `santander` | `web` | Headless Playwright login, the SPA's own JSON (`santander_web`) | RUT + password, one login per run | 24h |
+| `banco_falabella` | `web` | Headless Playwright login, the rendered DOM (`banco_falabella_web`) | RUT + 6-digit clave, one login per run | 24h |
 
 The three email-based scrapers reuse one `ImapSession`: it runs `NOOP` on
 each acquire and only re-logs-in when the mailbox has been dropped. imaplib is
@@ -935,6 +969,14 @@ Transactions are deduplicated via `UNIQUE(product_id, external_id)`:
   `san_fp_{md5(currency|transactionDate|
   accountingDate|movementAmount|newBalance|chargePaymentFlag)[:16]}`, raw
   fields only and never the description
+- Banco Falabella: `bfal_{sha1(date|amount|CLP|persona)[:16]}` over the
+  occurrence date, the signed full "Monto total" as an integer, the currency and
+  the persona (Titular / Adicional); no per-movement id is exposed in the DOM.
+  Description, the installment counter, the section label and the billing month
+  are left out because the portal rewrites them once a purchase is billed, so a
+  multi-installment purchase (repeated across months) and a movement seen in both
+  the unbilled and billed tabs dedup to one row. Two distinct charges on one day
+  for the same amount and persona collapse (the scheme's collision limit)
 - Email: `email_{institution}_{sha1(Message-ID)[:8]}` (`hashlib`, not Python's
   per-process salted `hash()`); an email without a Message-ID hashes
   `Date|From|Subject|body` instead
@@ -1232,9 +1274,9 @@ el-chanchito/
 │   └── scrapers/                     # Python scraper service
 │       ├── scrapers/
 │       │   ├── backends/             # email, banchile_web, banchile_movements, bci_lider_web,
-│       │   │                         #   santander_web
-│       │   └── institutions/         # 9 scrapers: banchile, bci_lider, buda, fintual,
-│       │                             #   mach, mercadopago, santander, skipo, tenpo
+│       │   │                         #   santander_web, banco_falabella_web
+│       │   └── institutions/         # 10 scrapers: banchile, banco_falabella, bci_lider, buda,
+│       │                             #   fintual, mach, mercadopago, santander, skipo, tenpo
 │       ├── db/                       # Connection pool + writer + slug
 │       ├── tests/                    # pytest (conftest.py: per-test DB fixtures)
 │       ├── main.py                   # Entry point + scheduler + control endpoint
@@ -1245,7 +1287,7 @@ el-chanchito/
 │
 ├── packages/
 │   ├── db-schema/                    # Shared SQL migrations
-│   │   ├── migrations/               # V001 through V025, V027 through V030
+│   │   ├── migrations/               # V001 through V037 (V026 reserved by an open branch)
 │   │   └── migrate.mjs               # Migration runner
 │   └── product-model/                # Product-kind registry (pydantic v2)
 │       ├── product_model/            # kinds, attributes, metrics, display, envelopes
