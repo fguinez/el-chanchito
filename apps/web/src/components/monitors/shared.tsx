@@ -92,6 +92,10 @@ export interface MonitorReference {
   name: string | null;
   currency: string | null;
   latestValue: number | null;
+  /** The ref's value in the monitor currency, as the evaluation sums it. */
+  monitorValue: number | null;
+  /** Whether monitorValue is a conversion from the product currency. */
+  converted: boolean;
   balanceAsOf: string | null;
   broken: boolean;
 }

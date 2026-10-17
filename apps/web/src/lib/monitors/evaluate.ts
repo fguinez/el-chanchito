@@ -101,7 +101,8 @@ function refLabel(ref: RefExpr, product?: ProductInfo): string {
   return `@{${ref.productId}:${ref.field}}`;
 }
 
-function resolveRef(ref: RefExpr, ctx: EvalContext): EvalResult {
+/** One reference's value in the monitor currency, as the evaluation sums it. */
+export function resolveRef(ref: RefExpr, ctx: EvalContext): EvalResult {
   if (ref.productId == null) {
     return {
       ok: false,

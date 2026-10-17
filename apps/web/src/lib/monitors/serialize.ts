@@ -14,7 +14,7 @@ import {
   type RefExpr,
 } from "./expr";
 import { formatLocalDate, isValidDay } from "./dates";
-import type { ProductInfo } from "./evaluate";
+import { resolveRef, type EvalContext, type ProductInfo } from "./evaluate";
 import { replayHistory, type HistoryPoint, type SnapshotRow } from "./history";
 import type {
   MonitorDefinition,
@@ -233,6 +233,12 @@ export type MonitorReference = {
   currency: string | null;
   /** The ref's field value in the product's own currency (unconverted). */
   latestValue: number | null;
+  /** What the ref contributes in the monitor currency, converted with the
+   *  product's own rate exactly as the evaluation does; null when it does not
+   *  resolve. Equals `latestValue` unless `converted`. */
+  monitorValue: number | null;
+  /** A currency field of a product in another currency than the monitor's. */
+  converted: boolean;
   balanceAsOf: string | null;
   /** Product gone from the catalog, field invalid for its kind, or inactive. */
   broken: boolean;
@@ -241,11 +247,11 @@ export type MonitorReference = {
 /** One row per distinct reference, for the detail view's references table. */
 export function buildReferences(
   def: MonitorDefinition,
-  products: Map<string, ProductInfo>
+  ctx: EvalContext
 ): MonitorReference[] {
   return collectMonitorRefs(def).map((ref) => {
     const productId = ref.productId!;
-    const product = products.get(productId);
+    const product = ctx.products.get(productId);
     if (!product) {
       return {
         productId,
@@ -255,12 +261,16 @@ export function buildReferences(
         name: null,
         currency: null,
         latestValue: null,
+        monitorValue: null,
+        converted: false,
         balanceAsOf: null,
         broken: true,
       };
     }
 
-    const fieldValid = ref.field in METRIC_FIELDS[product.kind];
+    const fieldInfo = METRIC_FIELDS[product.kind][ref.field];
+    const fieldValid = fieldInfo != null;
+    const resolved = resolveRef(ref, ctx);
 
     let latestValue: number | null = null;
     if (fieldValid && product.metrics != null) {
@@ -278,6 +288,10 @@ export function buildReferences(
       name: product.name,
       currency: product.currency,
       latestValue,
+      monitorValue: resolved.ok ? resolved.value : null,
+      converted:
+        fieldInfo?.denomination === "currency" &&
+        product.currency.toUpperCase() !== ctx.currency.toUpperCase(),
       balanceAsOf: product.balanceAsOf
         ? product.balanceAsOf.toISOString()
         : null,

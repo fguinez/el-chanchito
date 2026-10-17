@@ -64,12 +64,13 @@ export async function GET(request: NextRequest, { params }: Context) {
       loadMonitorAdjustments(id),
     ]);
     const def = { ...row, adjustments };
-    const evaluation = evaluateMonitor(def, {
+    const ctx = {
       date: now,
       products: catalog.byId,
       rates,
       currency: row.currency,
-    });
+    };
+    const evaluation = evaluateMonitor(def, ctx);
     const snapshots = await loadSnapshotsForProducts(referencedProductIds(row));
     const history = replayHistory(def, {
       snapshots,
@@ -78,7 +79,7 @@ export async function GET(request: NextRequest, { params }: Context) {
       from: range.from,
       to: range.to,
     });
-    const references = buildReferences(row, catalog.byId);
+    const references = buildReferences(row, ctx);
 
     return NextResponse.json({
       ...enrichMonitor(row, catalog, evaluation),
