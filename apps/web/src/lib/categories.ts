@@ -71,6 +71,12 @@ function fail(error: string, field?: string): ValidationFailure {
   return { ok: false, status: 400, error, field };
 }
 
+/** The 400 body for a failure, in the API's shared `{ error, field, issues }`
+ *  shape (lib/api/validation). */
+export function failureBody({ error, field }: { error: string; field?: string }) {
+  return { error, field, issues: [{ path: field ?? "", message: error }] };
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

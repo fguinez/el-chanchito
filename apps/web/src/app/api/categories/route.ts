@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { asc, count, desc, isNotNull, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { categories, categoryRules, transactions } from "@/lib/db/schema";
-import { validateCategoryInput } from "@/lib/categories";
+import { failureBody, validateCategoryInput } from "@/lib/categories";
 
 /**
  * GET /api/categories: every category ordered by name, each with its `rules`
@@ -55,10 +55,7 @@ export async function POST(request: NextRequest) {
 
     const result = validateCategoryInput(body);
     if (!result.ok) {
-      return NextResponse.json(
-        { error: result.error, field: result.field },
-        { status: result.status }
-      );
+      return NextResponse.json(failureBody(result), { status: result.status });
     }
 
     const [clash] = await db

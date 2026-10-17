@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { and, eq, ne, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { categories, categoryRules, transactions } from "@/lib/db/schema";
-import { UUID_RE, validateCategoryInput } from "@/lib/categories";
+import { UUID_RE, failureBody, validateCategoryInput } from "@/lib/categories";
 
 // Next 16: dynamic segment params arrive as a Promise on the context arg.
 type Context = { params: Promise<{ id: string }> };
@@ -26,10 +26,7 @@ export async function PATCH(request: NextRequest, { params }: Context) {
 
     const result = validateCategoryInput(body, { partial: true });
     if (!result.ok) {
-      return NextResponse.json(
-        { error: result.error, field: result.field },
-        { status: result.status }
-      );
+      return NextResponse.json(failureBody(result), { status: result.status });
     }
 
     const [existing] = await db

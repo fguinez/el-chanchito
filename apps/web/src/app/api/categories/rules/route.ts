@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { categories, categoryRules } from "@/lib/db/schema";
-import { validateRuleInput } from "@/lib/categories";
+import { failureBody, validateRuleInput } from "@/lib/categories";
 
 /** POST /api/categories/rules: create a rule `{ keyword, categoryId,
  *  priority? }`. The keyword is stored trimmed and lowercased; it applies to
@@ -18,10 +18,7 @@ export async function POST(request: NextRequest) {
 
     const result = validateRuleInput(body);
     if (!result.ok) {
-      return NextResponse.json(
-        { error: result.error, field: result.field },
-        { status: result.status }
-      );
+      return NextResponse.json(failureBody(result), { status: result.status });
     }
 
     const [category] = await db
@@ -30,7 +27,7 @@ export async function POST(request: NextRequest) {
       .where(eq(categories.id, result.value.categoryId));
     if (!category) {
       return NextResponse.json(
-        { error: "Category not found", field: "categoryId" },
+        failureBody({ error: "Category not found", field: "categoryId" }),
         { status: 400 }
       );
     }

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { count, desc, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { products, transactions } from "@/lib/db/schema";
-import { normalizeKeyword } from "@/lib/categories";
+import { failureBody, normalizeKeyword } from "@/lib/categories";
 
 const PREVIEW_LIMIT = 20;
 
@@ -21,10 +21,7 @@ export async function GET(request: NextRequest) {
       request.nextUrl.searchParams.get("keyword")
     );
     if (!keyword.ok) {
-      return NextResponse.json(
-        { error: keyword.error, field: keyword.field },
-        { status: keyword.status }
-      );
+      return NextResponse.json(failureBody(keyword), { status: keyword.status });
     }
 
     const matches = sql`strpos(lower(${transactions.description}), lower(${keyword.value})) > 0`;

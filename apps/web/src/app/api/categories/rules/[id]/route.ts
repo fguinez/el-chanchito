@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { categories, categoryRules } from "@/lib/db/schema";
-import { UUID_RE, validateRuleInput } from "@/lib/categories";
+import { UUID_RE, failureBody, validateRuleInput } from "@/lib/categories";
 
 // Next 16: dynamic segment params arrive as a Promise on the context arg.
 type Context = { params: Promise<{ id: string }> };
@@ -25,10 +25,7 @@ export async function PATCH(request: NextRequest, { params }: Context) {
 
     const result = validateRuleInput(body, { partial: true });
     if (!result.ok) {
-      return NextResponse.json(
-        { error: result.error, field: result.field },
-        { status: result.status }
-      );
+      return NextResponse.json(failureBody(result), { status: result.status });
     }
 
     const [existing] = await db
@@ -46,7 +43,7 @@ export async function PATCH(request: NextRequest, { params }: Context) {
         .where(eq(categories.id, result.value.categoryId));
       if (!category) {
         return NextResponse.json(
-          { error: "Category not found", field: "categoryId" },
+          failureBody({ error: "Category not found", field: "categoryId" }),
           { status: 400 }
         );
       }

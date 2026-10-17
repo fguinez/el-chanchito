@@ -21,7 +21,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useSortableData } from "@/lib/use-sortable-data";
-import { formatCLP, cn } from "@/lib/utils";
+import { formatCLP, cn, parseNumberInput } from "@/lib/utils";
 import { Trash2, Check } from "lucide-react";
 
 interface InternalTransfer {
@@ -64,23 +64,26 @@ export default function TransfersPage() {
   }, []);
 
   const handleAdd = async () => {
-    if (!description || !amount) return;
+    const parsedAmount = parseNumberInput(amount);
+    if (!description || parsedAmount === null) return;
     setSaving(true);
     try {
-      await fetch("/api/transfers", {
+      const res = await fetch("/api/transfers", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           description,
-          amount: parseInt(amount),
+          amount: Math.round(parsedAmount),
           transferDate,
           notes: notes || null,
         }),
       });
-      setDescription("");
-      setAmount("");
-      setNotes("");
-      loadTransfers();
+      if (res.ok) {
+        setDescription("");
+        setAmount("");
+        setNotes("");
+        loadTransfers();
+      }
     } finally {
       setSaving(false);
     }
