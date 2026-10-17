@@ -99,10 +99,11 @@ function dismissBody(s: TransferSuggestion) {
 /**
  * "Sugeridas": rows that look like internal transfers (GET
  * /api/transfers/suggestions), each with its evidence and Confirmar /
- * Descartar. Nothing is linked until the user confirms. Hidden while there is
- * nothing to suggest. `reloadKey` refetches when the page's transfers change
- * (a deleted or unlinked transfer can bring a suggestion back); `onConfirmed`
- * lets the page reload its transfer lists.
+ * Descartar. The load itself links the confident pairs (see pickAutoLinks);
+ * the rest wait for the user. Hidden while there is nothing to suggest.
+ * `reloadKey` refetches when the page's transfers change (a deleted or
+ * unlinked transfer can bring a suggestion back); `onConfirmed` lets the page
+ * reload its transfer lists, after a confirm or a load that linked some.
  */
 export function TransferSuggestionsCard({
   reloadKey,
@@ -117,6 +118,13 @@ export function TransferSuggestionsCard({
   const [busy, setBusy] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
+  // Read from the load effect without refetching each time the page renders
+  // a new callback.
+  const onConfirmedRef = useRef(onConfirmed);
+  useEffect(() => {
+    onConfirmedRef.current = onConfirmed;
+  });
+
   useEffect(() => {
     const controller = new AbortController();
     fetch("/api/transfers/suggestions", { signal: controller.signal })
@@ -124,8 +132,9 @@ export function TransferSuggestionsCard({
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();
       })
-      .then((data: { suggestions: TransferSuggestion[] }) => {
+      .then((data: { suggestions: TransferSuggestion[]; autoLinked: string[] }) => {
         setSuggestions(data.suggestions);
+        if (data.autoLinked.length > 0) onConfirmedRef.current();
         setLoadFailed(false);
         // An error only makes sense next to a row that is still listed.
         const present = new Set(data.suggestions.map((s) => s.id));
@@ -233,9 +242,9 @@ export function TransferSuggestionsCard({
         <CardTitle>Sugeridas</CardTitle>
         <CardDescription>
           Cargos y abonos que parecen movimientos entre tus productos, de los
-          últimos 90 días. Nada se vincula hasta que confirmes: al confirmar se
-          crea el movimiento resuelto y sus transacciones dejan de contar en
-          Gastos e Ingresos
+          últimos 90 días. Al confirmar se crea el movimiento resuelto y sus
+          transacciones dejan de contar en Gastos e Ingresos. Los pares más
+          claros se vinculan solos y aparecen como Automática
         </CardDescription>
       </CardHeader>
       <CardContent>

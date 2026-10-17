@@ -419,6 +419,7 @@ the same function over the rows that are still uncategorized.
 | `V029__seed_santander_institution.sql` | seeds the Banco Santander institution row (upsert, so it also fixes a row the writer auto-created) |
 | `V030__seed_skipo_institution.sql` | seeds the `skipo` institution (display name, kind, site) |
 | `V031__transfer_suggestions.sql` | dismissed_transfer_suggestions (rejected suggestions, null target = one-sided) and confirmed_transfer_patterns (products + description prefix that rank matching suggestions first); new tables only |
+| `V032__auto_linked_transfers.sql` | internal_transfers gain `auto_linked` (default false): set on transfers the suggestions confirmed on their own, cleared when the user edits their links |
 
 ## Scraper Architecture
 

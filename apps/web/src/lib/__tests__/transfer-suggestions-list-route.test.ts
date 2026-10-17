@@ -3,14 +3,21 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { TransferSuggestion } from "@/lib/transfer-suggestions";
 
 // GET /api/transfers/suggestions hands the scored list over as
-// `{ suggestions }`, narrows it to one row with `?transactionId=`, and hides a
+// `{ suggestions, autoLinked }`, narrows it to one row with `?transactionId=`, and hides a
 // failure behind a 500. The query module is
 // mocked; its SQL runs against a real PostgreSQL in
 // transfer-suggestions.db.test.ts. Every id, name and amount is synthetic
 // (see the repo's personal data policy).
 
-const loadTransferSuggestions = vi.fn<() => Promise<TransferSuggestion[]>>();
-vi.mock("@/lib/transfer-suggestions-db", () => ({ loadTransferSuggestions }));
+const autoLinkSuggestions =
+  vi.fn<
+    () => Promise<{ suggestions: TransferSuggestion[]; autoLinked: string[] }>
+  >();
+vi.mock("@/lib/transfer-suggestions-db", () => ({ autoLinkSuggestions }));
+
+const TRANSFER_ID = "99999999-9999-4999-8999-999999999999";
+const loaded = (suggestions: TransferSuggestion[], autoLinked: string[] = []) =>
+  autoLinkSuggestions.mockResolvedValue({ suggestions, autoLinked });
 
 const { GET } = await import("@/app/api/transfers/suggestions/route");
 
@@ -55,17 +62,31 @@ function get(query = "") {
 }
 
 beforeEach(() => {
-  loadTransferSuggestions.mockReset();
+  autoLinkSuggestions.mockReset();
 });
 
 describe("GET /api/transfers/suggestions", () => {
   it("returns the suggestions in the order the module gives them", async () => {
-    loadTransferSuggestions.mockResolvedValue([suggestion]);
+    loaded([suggestion]);
 
     const response = await get();
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ suggestions: [suggestion] });
+    await expect(response.json()).resolves.toEqual({
+      suggestions: [suggestion],
+      autoLinked: [],
+    });
+  });
+
+  it("reports the transfers it linked on its own, even when filtering", async () => {
+    loaded([], [TRANSFER_ID]);
+
+    const response = await get("?transactionId=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+
+    await expect(response.json()).resolves.toEqual({
+      suggestions: [],
+      autoLinked: [TRANSFER_ID],
+    });
   });
 
   it.each([
@@ -73,7 +94,7 @@ describe("GET /api/transfers/suggestions", () => {
     ["the target", "?transactionId=bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", 1],
     ["another row", "?transactionId=cccccccc-cccc-4ccc-8ccc-cccccccccccc", 0],
   ])("filters by %s row", async (_, query, count) => {
-    loadTransferSuggestions.mockResolvedValue([suggestion]);
+    loaded([suggestion]);
 
     const response = await get(query);
 
@@ -89,11 +110,11 @@ describe("GET /api/transfers/suggestions", () => {
     await expect(response.json()).resolves.toMatchObject({
       field: "transactionId",
     });
-    expect(loadTransferSuggestions).not.toHaveBeenCalled();
+    expect(autoLinkSuggestions).not.toHaveBeenCalled();
   });
 
   it("answers 500 when the query fails", async () => {
-    loadTransferSuggestions.mockRejectedValue(new Error("connection refused"));
+    autoLinkSuggestions.mockRejectedValue(new Error("connection refused"));
     vi.spyOn(console, "error").mockImplementation(() => {});
 
     const response = await get();

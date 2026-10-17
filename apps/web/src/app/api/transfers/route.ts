@@ -64,8 +64,9 @@ export const PUT = withJsonBody(updateTransferSchema, async (body) => {
 });
 
 /** DELETE /api/transfers: delete a transfer. The rows it linked lose
- *  `is_internal_transfer` (unless another transfer links them), in the same
- *  db transaction. */
+ *  `is_internal_transfer` (unless another transfer links them) and, when it
+ *  linked both sides, that pair is dismissed from the suggestions, in the
+ *  same db transaction. */
 export const DELETE = withJsonBody(idSchema, async ({ id }) => {
   await deleteTransfer(id);
   return NextResponse.json({ ok: true });

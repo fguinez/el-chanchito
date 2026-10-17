@@ -3,6 +3,7 @@
 import Link from "next/link";
 import {
   useEffect,
+  useRef,
   useState,
   useSyncExternalStore,
   type ReactNode,
@@ -40,14 +41,18 @@ type LoadResult =
  * Side panel with everything stored for one transaction; only the location
  * can be edited from here. Open while
  * `transactionId` is set; `onClose` should clear it (the caller owns the id,
- * e.g. in the URL).
+ * e.g. in the URL). `onTransferChanged` tells the caller a transfer link
+ * changed under the panel (an automatic link made or undone), so it can
+ * reload its list.
  */
 export function TransactionDetailSheet({
   transactionId,
   onClose,
+  onTransferChanged,
 }: {
   transactionId: string | null;
   onClose: () => void;
+  onTransferChanged?: () => void;
 }) {
   const [result, setResult] = useState<LoadResult | null>(null);
   const [attempt, setAttempt] = useState(0);
@@ -101,6 +106,11 @@ export function TransactionDetailSheet({
     setResult(null);
     setAttempt((n) => n + 1);
   };
+  // Refetch in place (the transfer link changed): no loading state.
+  const reload = () => {
+    setAttempt((n) => n + 1);
+    onTransferChanged?.();
+  };
 
   return (
     <Sheet
@@ -114,6 +124,7 @@ export function TransactionDetailSheet({
           <TransactionDetailBody
             txn={current.data}
             onLocationSaved={locationSaved}
+            onTransferChanged={reload}
           />
         ) : (
           <SheetHeader>
@@ -151,12 +162,14 @@ export function TransactionDetailSheet({
 function TransactionDetailBody({
   txn,
   onLocationSaved,
+  onTransferChanged,
 }: {
   txn: TransactionDetail;
   onLocationSaved: (
     savedId: string,
     location: TransactionLocation | null
   ) => void;
+  onTransferChanged: () => void;
 }) {
   const productHref = `/institutions/${txn.institution.slug}/${txn.product.slug}`;
   const productName = displayProductName(txn.product, txn.institution.name);
@@ -221,13 +234,24 @@ function TransactionDetailBody({
                   {formatPlainDateEs(txn.transfer.transferDate)} ·{" "}
                   {txn.transfer.status === "resolved" ? "Resuelta" : "Pendiente"}
                 </span>
+                {txn.transfer.autoLinked && (
+                  <AutoLinkUndo
+                    key={txn.transfer.id}
+                    transferId={txn.transfer.id}
+                    onUndone={onTransferChanged}
+                  />
+                )}
               </>
             ) : txn.isInternalTransfer ? (
               "Sí"
             ) : (
               <>
                 No
-                <SuggestionHint key={txn.id} transactionId={txn.id} />
+                <SuggestionHint
+                  key={txn.id}
+                  transactionId={txn.id}
+                  onAutoLinked={onTransferChanged}
+                />
               </>
             )}
           </Field>
@@ -331,11 +355,68 @@ function Muted({ children }: { children: ReactNode }) {
 
 const noSubscribe = () => () => {};
 
+/** The "Automática" badge of a transfer the suggestions linked on their own,
+ *  and its undo: deleting it also dismisses the pair, so it is not linked
+ *  again. */
+function AutoLinkUndo({
+  transferId,
+  onUndone,
+}: {
+  transferId: string;
+  onUndone: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  const undo = async () => {
+    setBusy(true);
+    setFailed(false);
+    try {
+      const res = await fetch("/api/transfers", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: transferId }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      onUndone();
+    } catch {
+      setFailed(true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <span className="mt-1 flex flex-wrap items-center gap-2">
+      <Badge variant="secondary">Automática</Badge>
+      <Button size="xs" variant="outline" disabled={busy} onClick={undo}>
+        Deshacer vínculo
+      </Button>
+      {failed && (
+        <span className="text-xs text-destructive">No se pudo deshacer</span>
+      )}
+    </span>
+  );
+}
+
 /** "Parece una transferencia interna" when an unlinked row is in a current
- *  transfer suggestion, linking to the Sugeridas card. Silent on errors: it
- *  is only a hint. */
-function SuggestionHint({ transactionId }: { transactionId: string }) {
+ *  transfer suggestion, linking to the Sugeridas card. Loading the
+ *  suggestions may link some on their own (this row among them), so
+ *  `onAutoLinked` reloads the panel then. Silent on errors: it is only a
+ *  hint. */
+function SuggestionHint({
+  transactionId,
+  onAutoLinked,
+}: {
+  transactionId: string;
+  onAutoLinked: () => void;
+}) {
   const [suggested, setSuggested] = useState(false);
+  // Read from the effect without refetching on every render.
+  const onAutoLinkedRef = useRef(onAutoLinked);
+  useEffect(() => {
+    onAutoLinkedRef.current = onAutoLinked;
+  });
 
   useEffect(() => {
     const controller = new AbortController();
@@ -344,9 +425,10 @@ function SuggestionHint({ transactionId }: { transactionId: string }) {
       { signal: controller.signal }
     )
       .then((res) => (res.ok ? res.json() : null))
-      .then((data: { suggestions: unknown[] } | null) => {
+      .then((data: { suggestions: unknown[]; autoLinked: string[] } | null) => {
         if (!controller.signal.aborted) {
           setSuggested((data?.suggestions.length ?? 0) > 0);
+          if ((data?.autoLinked.length ?? 0) > 0) onAutoLinkedRef.current();
         }
       })
       .catch(() => {});

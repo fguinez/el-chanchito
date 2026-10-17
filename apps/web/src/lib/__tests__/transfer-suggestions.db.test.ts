@@ -22,12 +22,14 @@ const TODAY = "2026-09-30";
 const MIGRATE = path.resolve(__dirname, "../../../../../packages/db-schema/migrate.mjs");
 
 type Suggestions = typeof import("@/lib/transfer-suggestions-db");
+type Transfers = typeof import("@/lib/transfers-db");
 
 describe.skipIf(!ADMIN_URL)("transfer suggestions (real PostgreSQL)", () => {
   const dbName = `chanchito_test_${randomUUID().replace(/-/g, "")}`;
   let admin: ReturnType<typeof postgres>;
   let sql: ReturnType<typeof postgres>;
   let lib: Suggestions;
+  let transfersLib: Transfers;
   let ids: Record<string, string>;
 
   async function txn(
@@ -98,6 +100,7 @@ describe.skipIf(!ADMIN_URL)("transfer suggestions (real PostgreSQL)", () => {
     process.env.DATABASE_URL = url.toString();
     sql = postgres(url.toString(), { max: 1, onnotice: () => {} });
     lib = await import("@/lib/transfer-suggestions-db");
+    transfersLib = await import("@/lib/transfers-db");
   });
 
   beforeEach(async () => {
@@ -372,5 +375,158 @@ describe.skipIf(!ADMIN_URL)("transfer suggestions (real PostgreSQL)", () => {
       WHERE source_transaction_id = ${ids.fundDebit}`;
     expect(count.n).toBe(1);
     expect(await listed()).toEqual([]);
+  });
+
+  /** A card payment from checking on the same day: 85 points, at the bar. */
+  async function seedSameDayPair() {
+    await txn("payDebit", "checking", "2026-09-15", -1_000_000, "Pago TC 1234");
+    await txn("payCredit", "card", "2026-09-15", 1_000_000, "Pago recibido");
+  }
+
+  async function autoTransfers() {
+    return sql`
+      SELECT id, status, auto_linked, from_transaction_id, to_transaction_id
+      FROM internal_transfers WHERE auto_linked`;
+  }
+
+  it("links a confident pair on its own, without a pattern, once", async () => {
+    await giveFeedlessProductsAFeed();
+    await seedSameDayPair();
+
+    const first = await lib.autoLinkSuggestions(TODAY);
+    const again = await lib.autoLinkSuggestions(TODAY);
+
+    const [transfer] = await autoTransfers();
+    expect(first).toEqual({ suggestions: [], autoLinked: [transfer.id] });
+    expect(again).toEqual({ suggestions: [], autoLinked: [] });
+    expect(transfer).toMatchObject({
+      status: "resolved",
+      from_transaction_id: ids.payDebit,
+      to_transaction_id: ids.payCredit,
+    });
+    expect(await lib.loadConfirmedPatterns()).toEqual([]);
+  });
+
+  it("leaves a pair below the bar or with a rival partner to the user", async () => {
+    await giveFeedlessProductsAFeed();
+    await seedPair();
+    await txn("rivalDebit", "checking", "2026-09-20", -2_500_000, "Pago TC 1234");
+    await txn("rivalA", "card", "2026-09-20", 2_500_000, "Pago recibido");
+    await txn("rivalB", "card", "2026-09-20", 2_500_000, "Pago recibido");
+
+    const result = await lib.autoLinkSuggestions(TODAY);
+
+    expect(result.autoLinked).toEqual([]);
+    expect(result.suggestions.map(keyOf).sort()).toEqual([
+      "payDebit>payCredit",
+      "rivalDebit>rivalA",
+      "rivalDebit>rivalB",
+    ]);
+  });
+
+  it("undoes an automatic link for good by deleting it", async () => {
+    await giveFeedlessProductsAFeed();
+    await seedSameDayPair();
+    const { autoLinked } = await lib.autoLinkSuggestions(TODAY);
+
+    expect(await transfersLib.deleteTransfer(autoLinked[0])).toBe(true);
+
+    const [flagged] = await sql`
+      SELECT count(*)::int AS n FROM transactions WHERE is_internal_transfer`;
+    expect(flagged.n).toBe(0);
+    const dismissed = await sql`
+      SELECT source_transaction_id, target_transaction_id
+      FROM dismissed_transfer_suggestions`;
+    expect(dismissed).toEqual([
+      { source_transaction_id: ids.payDebit, target_transaction_id: ids.payCredit },
+    ]);
+    expect(await lib.autoLinkSuggestions(TODAY)).toEqual({
+      suggestions: [],
+      autoLinked: [],
+    });
+  });
+
+  it("hands an automatic transfer to the user once its links are edited", async () => {
+    await giveFeedlessProductsAFeed();
+    await seedSameDayPair();
+    const { autoLinked } = await lib.autoLinkSuggestions(TODAY);
+
+    const { db } = await import("@/lib/db");
+    const outcome = await db.transaction((tx) =>
+      transfersLib.applyTransferLinks(tx, autoLinked[0], { toTransactionId: null })
+    );
+
+    expect(outcome).toEqual({ ok: true });
+    expect(await autoTransfers()).toEqual([]);
+    expect(await lib.autoLinkSuggestions(TODAY)).toEqual({
+      suggestions: [],
+      autoLinked: [],
+    });
+  });
+
+  it("does not recreate a confirmed pair once its transfer is deleted", async () => {
+    await giveFeedlessProductsAFeed();
+    await seedSameDayPair();
+    const confirmed = await lib.confirmTransferSuggestion({
+      sourceTransactionId: ids.payDebit,
+      targetTransactionId: ids.payCredit,
+      targetProductId: null,
+    });
+    if (!confirmed.ok) throw new Error("confirm failed");
+
+    await transfersLib.deleteTransfer(confirmed.transferId);
+
+    // The saved pattern lifts the pair well past the bar; the dismissal wins.
+    expect(await lib.autoLinkSuggestions(TODAY)).toEqual({
+      suggestions: [],
+      autoLinked: [],
+    });
+  });
+
+  it("dismisses the pair a manual transfer lets go when its links are edited", async () => {
+    await giveFeedlessProductsAFeed();
+    await seedSameDayPair();
+    const confirmed = await lib.confirmTransferSuggestion({
+      sourceTransactionId: ids.payDebit,
+      targetTransactionId: ids.payCredit,
+      targetProductId: null,
+    });
+    if (!confirmed.ok) throw new Error("confirm failed");
+
+    const { db } = await import("@/lib/db");
+    await db.transaction((tx) =>
+      transfersLib.applyTransferLinks(tx, confirmed.transferId, {
+        toTransactionId: null,
+      })
+    );
+
+    const dismissed = await sql`
+      SELECT source_transaction_id, target_transaction_id
+      FROM dismissed_transfer_suggestions`;
+    expect(dismissed).toEqual([
+      { source_transaction_id: ids.payDebit, target_transaction_id: ids.payCredit },
+    ]);
+    expect((await lib.autoLinkSuggestions(TODAY)).autoLinked).toEqual([]);
+  });
+
+  it("will not auto-confirm a pair dismissed after the load picked it", async () => {
+    await seedSameDayPair();
+    await lib.dismissTransferSuggestion({
+      sourceTransactionId: ids.payDebit,
+      targetTransactionId: ids.payCredit,
+    });
+
+    const outcome = await lib.confirmTransferSuggestion(
+      {
+        sourceTransactionId: ids.payDebit,
+        targetTransactionId: ids.payCredit,
+        targetProductId: null,
+      },
+      { auto: true }
+    );
+
+    expect(outcome).toMatchObject({ ok: false, status: 409 });
+    const [count] = await sql`SELECT count(*)::int AS n FROM internal_transfers`;
+    expect(count.n).toBe(0);
   });
 });
