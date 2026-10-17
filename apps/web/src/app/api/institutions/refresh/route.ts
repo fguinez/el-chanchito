@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { requireJsonContentType } from "@/lib/api/validation";
 
 /**
  * POST /api/institutions/refresh — ask the scraper service to run now.
@@ -24,13 +25,20 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // Body is optional — an empty/absent body means "refresh everything".
+  // Body is optional: none at all means "refresh everything". One that is
+  // there must be labelled JSON, so a cross-origin form post cannot start a
+  // live bank login (the proxy's Origin check is the other half).
   let institution: string | undefined;
-  try {
-    const body = await request.json();
-    if (typeof body?.institution === "string") institution = body.institution;
-  } catch {
-    /* no body */
+  const raw = await request.text();
+  if (raw.trim() !== "" || request.headers.has("content-type")) {
+    const unsupported = requireJsonContentType(request);
+    if (unsupported) return unsupported;
+    try {
+      const body = raw.trim() === "" ? {} : JSON.parse(raw);
+      if (typeof body?.institution === "string") institution = body.institution;
+    } catch {
+      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    }
   }
 
   const target = institution

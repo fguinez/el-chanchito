@@ -3,18 +3,16 @@ import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { categories, categoryRules } from "@/lib/db/schema";
 import { failureBody, validateRuleInput } from "@/lib/categories";
+import { readJsonBody } from "@/lib/api/validation";
 
 /** POST /api/categories/rules: create a rule `{ keyword, categoryId,
  *  priority? }`. The keyword is stored trimmed and lowercased; it applies to
  *  transactions inserted from now on and to the next PUT /api/categories. */
 export async function POST(request: NextRequest) {
   try {
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-    }
+    const read = await readJsonBody(request);
+    if (!read.ok) return read.response;
+    const body = read.body;
 
     const result = validateRuleInput(body);
     if (!result.ok) {

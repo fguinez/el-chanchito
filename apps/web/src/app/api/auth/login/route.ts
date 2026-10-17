@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { requireJsonContentType } from "@/lib/api/validation";
 import { tokenLifetimeSeconds } from "@/lib/auth/config";
 import {
   currentAuthMode,
@@ -34,6 +35,9 @@ export async function POST(request: NextRequest) {
       { status: 503, headers: NO_STORE }
     );
   }
+
+  const unsupported = requireJsonContentType(request, { headers: NO_STORE });
+  if (unsupported) return unsupported;
 
   let password = "";
   try {
