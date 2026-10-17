@@ -13,7 +13,12 @@ from psycopg.types.json import Jsonb
 
 from db.connection import get_pool
 from db.slug import slugify, unique_slug
-from scrapers.base import ScrapedProduct, ScrapedTransaction, SupersededTransaction
+from scrapers.base import (
+    ScrapedProduct,
+    ScrapedTransaction,
+    SupersededTransaction,
+    TransactionLocation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -405,6 +410,70 @@ def _sibling_rows(conn, product_id: str, txn: ScrapedTransaction, source: str) -
     ).fetchall()
 
 
+def _location_values(location: TransactionLocation | None) -> tuple:
+    """The five location columns' values, in table order (all None for none)."""
+    if location is None:
+        return (None, None, None, None, None)
+    return (
+        location.name,
+        location.city,
+        location.country,
+        location.latitude,
+        location.longitude,
+    )
+
+
+def _fill_location(conn, row_id, location: TransactionLocation | None) -> None:
+    """Fill the stored row's NULL location columns from a scraped location.
+
+    A non-NULL column is never overwritten, whoever wrote it, and a row whose
+    location the user set or cleared (`location_is_manual`, V025) is never
+    touched at all. This is how rows stored before V025, or before their
+    source reported a location, gain one on the next scrape. The coordinates
+    move as a pair: both are filled only while the stored latitude is NULL
+    (the schema keeps the two NULL together). A row with nothing to fill is
+    not written, so `updated_at` only moves when something changed.
+    """
+    if location is None:
+        return
+    name, city, country, latitude, longitude = _location_values(location)
+    sets: list[str] = []
+    gaps: list[str] = []
+    params: list = []
+    for column, value in (
+        ("location_name", name),
+        ("location_city", city),
+        ("location_country", country),
+    ):
+        if value is not None:
+            sets.append(f"{column} = COALESCE({column}, %s)")
+            gaps.append(f"{column} IS NULL")
+            params.append(value)
+    if latitude is not None and longitude is not None:
+        # Every expression of an UPDATE reads the row as it was, so both
+        # CASEs test the stored latitude.
+        sets.append(
+            "location_latitude = CASE WHEN location_latitude IS NULL "
+            "THEN %s ELSE location_latitude END"
+        )
+        sets.append(
+            "location_longitude = CASE WHEN location_latitude IS NULL "
+            "THEN %s ELSE location_longitude END"
+        )
+        gaps.append("location_latitude IS NULL")
+        params.extend((latitude, longitude))
+    if not sets:
+        return
+    conn.execute(
+        "UPDATE transactions SET "
+        + ", ".join(sets)
+        + ", updated_at = now() WHERE id = %s AND NOT location_is_manual AND ("
+        + " OR ".join(gaps)
+        + ")",
+        (*params, row_id),
+    )
+
+
 @dataclass(frozen=True)
 class TransactionWriteResult:
     """What `write_transactions` did.
@@ -441,6 +510,10 @@ def write_transactions(transactions: list[ScrapedTransaction]) -> TransactionWri
     (issue #57): the row's `external_id`, both dates and `scheduled_month` are
     rewritten in place. Everything else keeps the plain
     `ON CONFLICT (product_id, external_id) DO NOTHING` insert.
+
+    A movement that is already stored (or adopted) only ever FILLS its row's
+    location: NULL location columns take the scraped values, non-NULL ones and
+    rows the user edited the location of are left alone (`_fill_location`).
 
     A row that never gets adopted, because its movement fell out of the bank's
     window before the first post-#57 scrape, keeps the date it was imported with
@@ -491,6 +564,7 @@ def write_transactions(transactions: list[ScrapedTransaction]) -> TransactionWri
                 ).fetchone()
                 if row:
                     claimed.add(row[0])
+                    _fill_location(conn, row[0], txn.location)
                     persisted.add(txn.external_id)
                     continue
 
@@ -521,6 +595,7 @@ def write_transactions(transactions: list[ScrapedTransaction]) -> TransactionWri
                                 row_id,
                             ),
                         )
+                        _fill_location(conn, row_id, txn.location)
                         logger.info(
                             "Adopted stored transaction %s onto %s",
                             row_id,
@@ -544,8 +619,11 @@ def write_transactions(transactions: list[ScrapedTransaction]) -> TransactionWri
                     """
                     INSERT INTO transactions
                         (id, product_id, description, amount, transaction_date,
-                         accounting_date, scheduled_month, source, external_id)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         accounting_date, scheduled_month, source, external_id,
+                         location_name, location_city, location_country,
+                         location_latitude, location_longitude)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s)
                     ON CONFLICT (product_id, external_id) DO NOTHING
                     """,
                     (
@@ -558,6 +636,7 @@ def write_transactions(transactions: list[ScrapedTransaction]) -> TransactionWri
                         txn.scheduled_month,
                         source,
                         txn.external_id,
+                        *_location_values(txn.location),
                     ),
                 )
                 if cur.rowcount and cur.rowcount > 0:
@@ -582,9 +661,16 @@ def _like_prefix(prefix: str) -> str:
     return f"{escaped}%"
 
 
-def _carries_user_edits(is_manually_categorized, is_internal_transfer, notes) -> bool:
-    """True for a row the user touched: categorised, annotated or paired."""
-    return bool(is_manually_categorized or is_internal_transfer or (notes or "").strip())
+def _carries_user_edits(
+    is_manually_categorized, is_internal_transfer, notes, location_is_manual=False
+) -> bool:
+    """True for a row the user touched: categorised, annotated, paired or located."""
+    return bool(
+        is_manually_categorized
+        or is_internal_transfer
+        or (notes or "").strip()
+        or location_is_manual
+    )
 
 
 def delete_superseded_transactions(
@@ -611,8 +697,9 @@ def delete_superseded_transactions(
     Nor is a row created at or after the moment the item's
     `created_before_migration` was applied (per `_migrations.applied_at`); an
     item whose migration is not recorded matches nothing.
-    A matching row the user categorised, annotated or marked as an internal
-    transfer is left in place and logged instead.
+    A matching row the user categorised, annotated, gave a location to (or
+    cleared one on) or marked as an internal transfer is left in place and
+    logged instead.
     """
     replaced = [
         item for item in superseded if item.replacement_external_id in persisted_external_ids
@@ -681,7 +768,7 @@ def delete_superseded_transactions(
             rows = conn.execute(
                 """
                 SELECT id, external_id, is_manually_categorized,
-                       is_internal_transfer, notes
+                       is_internal_transfer, notes, location_is_manual
                 FROM transactions
                 WHERE product_id = ANY(%s) AND source = %s
                   AND transaction_date = %s AND amount = %s
@@ -718,7 +805,7 @@ def delete_superseded_transactions(
                 kept.append(row_id)
                 logger.warning(
                     "Superseded transaction %s left in place: it carries user "
-                    "edits (category, notes or transfer pairing)",
+                    "edits (category, notes, transfer pairing or location)",
                     row_id,
                 )
                 continue

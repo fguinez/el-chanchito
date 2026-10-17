@@ -36,6 +36,7 @@ from product_model import (
     ScrapedProduct,
     ScrapedTransaction,
     TermDepositMetrics,
+    TransactionLocation,
 )
 
 
@@ -568,6 +569,7 @@ class _FakeTxConn:
     def __init__(self, rows=None):
         self.rows = list(rows or [])
         self.executed = []
+        self.location_fills = []
         self._clock = 100
 
     def __enter__(self):
@@ -630,6 +632,7 @@ class _FakeTxConn:
                 month,
                 source,
                 ext,
+                *location,
             ) = p
             self._clock += 1
             self.rows.append(
@@ -644,8 +647,12 @@ class _FakeTxConn:
                     "scheduled_month": month,
                     "source": source,
                     "created_at": self._clock,
+                    "location": tuple(location),
                 }
             )
+            return _FakeCursor(rowcount=1)
+        if "UPDATE transactions SET location_" in q:
+            self.location_fills.append(p)
             return _FakeCursor(rowcount=1)
         return _FakeCursor()
 
@@ -685,6 +692,7 @@ def _txn(
     kind="checking",
     tx_date=date(2026, 8, 20),
     accounting_date=None,
+    location=None,
 ):
     return ScrapedTransaction(
         institution="banchile",
@@ -695,6 +703,7 @@ def _txn(
         accounting_date=accounting_date,
         external_id=external_id,
         scheduled_month=date(tx_date.year, tx_date.month, 1),
+        location=location,
     )
 
 
@@ -991,7 +1000,7 @@ class TestWriteTransactionsPersistedKeys:
         execute = conn.execute
 
         def failing(sql, params=None):
-            if "INSERT" in sql and params[-1] == "bch_op_10000000002":
+            if "INSERT" in sql and "bch_op_10000000002" in params:
                 raise RuntimeError("synthetic failure")
             return execute(sql, params)
 
@@ -1007,3 +1016,85 @@ class TestWriteTransactionsPersistedKeys:
         _use_tx_conn(monkeypatch, _FakeTxConn([]))
 
         assert upsert_transactions([_txn("bch_op_10000000001")]) == 1
+
+
+# Synthetic place: no real city or country.
+_LOCATION = TransactionLocation(city="CIUDAD FICTICIA", country="PAIS FICTICIO")
+
+
+class TestTransactionLocation:
+    """V025: a scraped location is inserted, and only ever fills NULL columns."""
+
+    def test_a_new_row_is_inserted_with_its_location(self, monkeypatch):
+        conn = _FakeTxConn()
+        _use_tx_conn(monkeypatch, conn)
+
+        upsert_transactions([_txn("bch_op_12345678901", location=_LOCATION)])
+
+        assert conn.rows[0]["location"] == (
+            None,
+            "CIUDAD FICTICIA",
+            "PAIS FICTICIO",
+            None,
+            None,
+        )
+        assert conn.location_fills == []
+
+    def test_a_row_without_location_inserts_nulls(self, monkeypatch):
+        conn = _FakeTxConn()
+        _use_tx_conn(monkeypatch, conn)
+
+        upsert_transactions([_txn("bch_op_12345678901")])
+
+        assert conn.rows[0]["location"] == (None,) * 5
+
+    def test_an_already_stored_row_gets_a_fill_only_update(self, monkeypatch):
+        conn = _FakeTxConn([_legacy_row("row-1", "bch_op_12345678901", 1)])
+        _use_tx_conn(monkeypatch, conn)
+
+        inserted = upsert_transactions(
+            [_txn("bch_op_12345678901", location=_LOCATION)]
+        )
+
+        assert inserted == 0
+        (fill,) = [q for q, _ in conn.executed if "SET location_" in q]
+        assert "location_city = COALESCE(location_city, %s)" in fill
+        assert "location_country = COALESCE(location_country, %s)" in fill
+        # Name and coordinates were not scraped, so they are not touched.
+        assert "location_name" not in fill
+        assert "location_latitude" not in fill
+        assert "NOT location_is_manual" in fill
+        assert conn.location_fills == [("CIUDAD FICTICIA", "PAIS FICTICIO", "row-1")]
+
+    def test_an_adopted_row_gets_its_location_filled(self, monkeypatch):
+        conn = _FakeTxConn([_legacy_row("row-1", "bch_a1b2c3d4e5f60718", 1)])
+        _use_tx_conn(monkeypatch, conn)
+
+        upsert_transactions([_txn("bch_op_12345678901", location=_LOCATION)])
+
+        assert conn.location_fills == [("CIUDAD FICTICIA", "PAIS FICTICIO", "row-1")]
+
+    def test_a_stored_row_without_scraped_location_is_not_written(self, monkeypatch):
+        conn = _FakeTxConn([_legacy_row("row-1", "bch_op_12345678901", 1)])
+        _use_tx_conn(monkeypatch, conn)
+
+        upsert_transactions([_txn("bch_op_12345678901")])
+
+        assert conn.location_fills == []
+
+    def test_coordinates_fill_as_a_pair(self, monkeypatch):
+        conn = _FakeTxConn([_legacy_row("row-1", "bch_op_12345678901", 1)])
+        _use_tx_conn(monkeypatch, conn)
+
+        upsert_transactions(
+            [
+                _txn(
+                    "bch_op_12345678901",
+                    location=TransactionLocation(latitude=-33.0, longitude=-70.0),
+                )
+            ]
+        )
+
+        (fill,) = [q for q, _ in conn.executed if "SET location_" in q]
+        assert fill.count("WHEN location_latitude IS NULL") == 2
+        assert conn.location_fills == [(-33.0, -70.0, "row-1")]

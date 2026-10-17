@@ -34,6 +34,7 @@ from product_model import (
     ScrapedProduct,
     ScrapedTransaction,
     TermDepositMetrics,
+    TransactionLocation,
 )
 from scrapers.base import SupersededTransaction
 
@@ -87,6 +88,7 @@ def _txn(
     accounting_date=None,
     amount=-999999,
     currency="CLP",
+    location=None,
 ):
     return ScrapedTransaction(
         institution=institution,
@@ -98,6 +100,7 @@ def _txn(
         external_id=external_id,
         currency=currency,
         scheduled_month=date(tx_date.year, tx_date.month, 1),
+        location=location,
     )
 
 
@@ -306,6 +309,115 @@ class TestUpsertTransactions:
                 "accounting_date": date(2026, 8, 24),
             }
         ]
+
+
+_LOCATION_COLUMNS = (
+    "location_name, location_city, location_country, "
+    "location_latitude, location_longitude"
+)
+
+
+def _location_of(conn, external_id):
+    return conn.execute(
+        f"SELECT {_LOCATION_COLUMNS}, location_is_manual FROM transactions "
+        "WHERE external_id = %s",
+        (external_id,),
+    ).fetchone()
+
+
+class TestTransactionLocation:
+    """V025: inserted with the row, then only ever fills NULL columns."""
+
+    # Synthetic place: no real city, country or coordinates.
+    FULL = TransactionLocation(
+        name="Tienda Ficticia",
+        city="Ciudad Ficticia",
+        country="XX",
+        latitude=-33.0,
+        longitude=-70.0,
+    )
+
+    def test_a_new_row_stores_its_location(self, db_conn):
+        upsert_transactions([_txn("email_mach_0001", location=self.FULL)])
+
+        assert _location_of(db_conn, "email_mach_0001") == {
+            "location_name": "Tienda Ficticia",
+            "location_city": "Ciudad Ficticia",
+            "location_country": "XX",
+            "location_latitude": Decimal("-33.000000"),
+            "location_longitude": Decimal("-70.000000"),
+            "location_is_manual": False,
+        }
+
+    def test_a_row_stored_without_location_gains_it_on_the_next_scrape(self, db_conn):
+        upsert_transactions([_txn("email_mach_0001")])
+        before = db_conn.execute("SELECT updated_at FROM transactions").fetchone()
+
+        inserted = upsert_transactions(
+            [_txn("email_mach_0001", location=TransactionLocation(city="Ciudad Ficticia"))]
+        )
+
+        assert inserted == 0
+        row = _location_of(db_conn, "email_mach_0001")
+        assert row["location_city"] == "Ciudad Ficticia"
+        assert row["location_country"] is None
+        after = db_conn.execute("SELECT updated_at FROM transactions").fetchone()
+        assert after["updated_at"] > before["updated_at"]
+
+    def test_a_non_null_column_is_never_overwritten(self, db_conn):
+        upsert_transactions(
+            [_txn("email_mach_0001", location=TransactionLocation(city="Ciudad Ficticia"))]
+        )
+
+        upsert_transactions(
+            [
+                _txn(
+                    "email_mach_0001",
+                    location=TransactionLocation(city="Otra Ciudad", country="XX"),
+                )
+            ]
+        )
+
+        row = _location_of(db_conn, "email_mach_0001")
+        assert row["location_city"] == "Ciudad Ficticia"
+        assert row["location_country"] == "XX"
+
+    def test_a_location_the_user_edited_is_left_alone(self, db_conn):
+        upsert_transactions([_txn("email_mach_0001")])
+        db_conn.execute(
+            "UPDATE transactions SET location_is_manual = true, "
+            "location_name = 'Lugar Manual'"
+        )
+
+        upsert_transactions([_txn("email_mach_0001", location=self.FULL)])
+
+        row = _location_of(db_conn, "email_mach_0001")
+        assert row["location_name"] == "Lugar Manual"
+        assert row["location_city"] is None
+        assert row["location_latitude"] is None
+
+    def test_nothing_to_fill_does_not_touch_the_row(self, db_conn):
+        upsert_transactions([_txn("email_mach_0001", location=self.FULL)])
+        before = db_conn.execute("SELECT updated_at FROM transactions").fetchone()
+
+        upsert_transactions([_txn("email_mach_0001", location=self.FULL)])
+
+        after = db_conn.execute("SELECT updated_at FROM transactions").fetchone()
+        assert after == before
+
+    @pytest.mark.parametrize(
+        "assignment",
+        [
+            "location_latitude = 90.5, location_longitude = 0",
+            "location_latitude = 0, location_longitude = 180.5",
+            "location_latitude = -33",
+        ],
+    )
+    def test_the_schema_rejects_bad_coordinates(self, db_conn, assignment):
+        upsert_transactions([_txn("email_mach_0001")])
+
+        with pytest.raises(psycopg.errors.CheckViolation):
+            db_conn.execute(f"UPDATE transactions SET {assignment}")
 
 
 class TestDecimalAmounts:
@@ -522,6 +634,9 @@ class TestSupersededTransactions:
             "is_manually_categorized = true",
             "is_internal_transfer = true",
             "notes = 'nota sintetica'",
+            # A location the user set, or cleared (all columns NULL).
+            "location_is_manual = true, location_city = 'Ciudad Ficticia'",
+            "location_is_manual = true",
         ],
     )
     def test_a_row_the_user_edited_is_skipped_not_replaced(self, db_conn, edit):
@@ -665,7 +780,24 @@ class TestAmountMigration:
             )
             for n, amount in enumerate(amounts)
         ]
-        upsert_transactions(legacy)
+        # Staged with SQL of that era: the writer now also writes V025's
+        # location columns, which this schema does not have yet.
+        with psycopg.connect(unmigrated_db) as conn:
+            product_id = writer._resolve_product(conn, "banchile", "checking", "CLP")
+            for txn in legacy:
+                conn.execute(
+                    "INSERT INTO transactions (product_id, description, amount, "
+                    "transaction_date, scheduled_month, source, external_id) "
+                    "VALUES (%s, %s, %s, %s, %s, 'scraper_banchile', %s)",
+                    (
+                        product_id,
+                        txn.description,
+                        int(txn.amount),
+                        txn.transaction_date,
+                        txn.scheduled_month,
+                        txn.external_id,
+                    ),
+                )
 
         apply_migrations(unmigrated_db)
 
