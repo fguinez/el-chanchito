@@ -278,6 +278,7 @@ scraper_runs                    transfer_date
 | `V022__monitor_adjustments.sql` | monitor_adjustments: dated variaciones that shift a monitor's thresholds until month end |
 | `V023__transactions_amount_numeric.sql` | `transactions.amount` integer -> NUMERIC(18, 2) so foreign-currency movements keep their cents; existing values unchanged |
 | `V025__transactions_location.sql` | optional transaction location: name, city, country, a range-checked lat/lng pair, and `location_is_manual`; no backfill |
+| `V026__seed_racional_institution.sql` | institutions: seeds (upserts) the `racional` row as a fintech so the dashboard shows its name, not the slug |
 
 ## Scraper Architecture
 
@@ -303,7 +304,7 @@ apps/scrapers/scrapers/
     mach.py  mercadopago.py  tenpo.py       -> consume backends/email
     banchile.py                              -> banchile_movements (one login: tx + balances)
     bci_lider.py                             -> bci_lider_web (one CDP drive: tx + balances)
-    buda.py  fintual.py                      -> self-contained (HTTP APIs)
+    buda.py  fintual.py  racional.py         -> self-contained (HTTP APIs)
 ```
 
 BanChile drives **one self-contained Playwright login per run** (issue #57,
@@ -434,6 +435,35 @@ attach to the CLP balance product. That product stays `crypto` rather than
 `units` figure already converts 1:1. V020 deleted the crypto movements the old
 scraper had truncated and stored on it as pesos.
 
+Racional (racional.cl, an investment app) has no API for individuals, isn't
+covered by `fintself`, and Chile's open finance system isn't in force yet. Its
+web app is a single-page app over Firebase, so the scraper reproduces that
+app's sign-in over plain HTTP: Racional's own `authMfaStart` / `authMfaVerify`
+Cloud Functions (a 6-digit code e-mailed to the account), then Firebase Auth's
+`accounts:signInWithPassword`. Only the refresh token is kept
+(`.racional_session.json`, 0600): each run mints an ID token with it and runs,
+through the Firestore REST API, the one query the web app runs itself
+(`portfolios` where `userId` is the signed-in uid). A full sign-in happens
+only through `make racional-login`, or unattended with the code read from IMAP
+when the account is the service's mailbox; a failed unattended sign-in
+(anything but a dropped connection) turns further ones off until a manual
+sign-in succeeds, and the next runs report why. The public Firebase web key
+is read from the web app's bundle at sign-in (or `RACIONAL_FIREBASE_API_KEY`),
+never committed, and sent in the `X-Goog-Api-Key` header so it stays out of
+logged URLs. Each portfolio becomes one `investment` product keyed by
+its Firestore document id: CLP for Racional Portafolios, USD for Racional
+Stocks (`isDrivewealth`, its `portfolioEvolutionUSD` figures). `nav` is the
+value, `deposited` the contributions (`accumulatedInputAmount`, else value
+minus all-time profit), and Racional's daily, 30-day and year-to-date returns
+(fractions) become the percent metrics. Archived portfolios are still emitted, so
+one emptied and archived between runs drops to zero. Accounts with device
+security (a `deviceSecurityEnabled` claim, which the web app answers by
+signing out and pointing to Racional's new app) and accounts with an SMS
+second factor are refused with a clear error rather than read around; on
+device security the cached session is dropped as well. There are no transactions
+yet: movements belong to one portfolio each, and the writer files
+transactions only on a singleton product.
+
 **Balance conventions & net worth** are registry-driven: each kind's `role`
 (asset/liability/none) and `balance_convention` (value/available/owed/units)
 live in `packages/product-model` — see `packages/product-model/PRODUCTS.md`
@@ -479,6 +509,7 @@ shallow-merges `attributes`, always refreshes
 |---|---|---|---|---|
 | `fintual` | `http_api` | REST API (`/api/goals`) | Web session + e-mail 2FA (cached; `make fintual-login`) | 6h |
 | `buda` | `http_api` | REST API | HMAC-SHA384 signed requests | 1h |
+| `racional` | `http_api` | Firebase REST (Auth + Firestore `portfolios`) | Refresh token from the web app's e-mail-code sign-in (cached; `make racional-login`) | 6h |
 | `banchile` | `web` | Browser (Playwright: `banchile_web` + `banchile_movements`) | RUT + password | 24h |
 | `mach` | `email` | IMAP (Gmail) | Shared IMAP session | 30m |
 | `mercadopago` | `email` | IMAP (Gmail) | Shared IMAP session | 30m |
@@ -547,6 +578,7 @@ data without direct DB access.
 Transactions are deduplicated via `UNIQUE(product_id, external_id)`:
 
 - Fintual: no transactions (balance-only)
+- Racional: no transactions (balance-only, one product per portfolio)
 - Buda: `buda_{deposit/withdrawal_id}` (CLP movements only)
 - BanChile: the bank's own operation id where the portal exposes one, else a
   description-free fingerprint (issue #57). Three forms, each greppable:
