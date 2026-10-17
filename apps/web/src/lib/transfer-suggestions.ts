@@ -370,6 +370,42 @@ export function suggestionsForTransaction<
   );
 }
 
+/**
+ * The list once `settled` was confirmed or dismissed, before the refetch
+ * lands, so a stale row cannot be clicked into a 409:
+ *   - confirm: every suggestion using either of its rows (they are linked now)
+ *   - dismiss a pair: that pair only (its siblings are still valid)
+ *   - dismiss a one-sided suggestion: every one-sided one for that source
+ */
+export function withoutSettled<T extends TransferSuggestion>(
+  suggestions: readonly T[],
+  settled: TransferSuggestion,
+  action: "confirm" | "dismiss"
+): T[] {
+  if (action === "confirm") {
+    const used = new Set(
+      [settled.source.transactionId, settled.target.transactionId].filter(
+        (id): id is string => id !== null
+      )
+    );
+    return suggestions.filter(
+      (s) =>
+        !used.has(s.source.transactionId) &&
+        !(s.target.transactionId !== null && used.has(s.target.transactionId))
+    );
+  }
+  if (settled.kind === "pair") {
+    return suggestions.filter((s) => s.id !== settled.id);
+  }
+  return suggestions.filter(
+    (s) =>
+      !(
+        s.kind === "one_sided" &&
+        s.source.transactionId === settled.source.transactionId
+      )
+  );
+}
+
 /** Highest score first, then the most recent source row, then by key so the
  *  order is stable. Returns a new array. */
 export function sortSuggestions<

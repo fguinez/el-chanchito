@@ -23,6 +23,7 @@ import {
   scoreSuggestion,
   sortSuggestions,
   suggestionsForTransaction,
+  withoutSettled,
   type ConfirmedPattern,
   type OneSidedCandidate,
   type PairCandidate,
@@ -367,5 +368,53 @@ describe("suggestionsForTransaction", () => {
     ["an unrelated row", "cccccccc-cccc-4ccc-8ccc-cccccccccccc", 0],
   ])("keeps the suggestions using %s", (_, id, count) => {
     expect(suggestionsForTransaction(suggestions, id)).toHaveLength(count);
+  });
+});
+
+describe("withoutSettled", () => {
+  const OTHER_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  // One debit with two possible partners and a one-sided match, plus an
+  // unrelated pair that shares nothing with it.
+  const suggestions = buildSuggestions([
+    pair(),
+    pair({}, { transactionId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" }),
+    oneSided(),
+    pair(
+      { transactionId: OTHER_ID },
+      { transactionId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" }
+    ),
+  ]);
+  const byKind = (kind: string, target?: string) =>
+    suggestions.find(
+      (s) =>
+        s.kind === kind &&
+        (target === undefined || s.target.transactionId === target)
+    )!;
+
+  it.each([
+    [
+      "confirming a pair drops everything using its rows",
+      byKind("pair", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+      "confirm",
+      [OTHER_ID],
+    ],
+    [
+      "dismissing a pair keeps its siblings",
+      byKind("pair", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+      "dismiss",
+      ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", OTHER_ID],
+    ],
+    [
+      "dismissing a one-sided suggestion keeps the source's pairs",
+      byKind("one_sided"),
+      "dismiss",
+      ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", OTHER_ID],
+    ],
+  ] as const)("%s", (_, settled, action, sources) => {
+    const left = withoutSettled(suggestions, settled, action);
+
+    expect(left.map((s) => s.source.transactionId).sort()).toEqual(
+      [...sources].sort()
+    );
   });
 });

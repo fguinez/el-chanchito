@@ -24,6 +24,7 @@ import { formatCLP, formatPlainDateEs } from "@/lib/utils";
 import { hrefWithSearchParam, TXN_PARAM } from "@/lib/transaction-selection";
 import {
   SUGGESTIONS_ANCHOR,
+  withoutSettled,
   type SuggestionProductLeg,
   type SuggestionTransactionLeg,
   type TransferSuggestion,
@@ -114,6 +115,13 @@ export function TransferSuggestionsCard({
       .then((data: { suggestions: TransferSuggestion[] }) => {
         setSuggestions(data.suggestions);
         setLoadFailed(false);
+        // An error only makes sense next to a row that is still listed.
+        const present = new Set(data.suggestions.map((s) => s.id));
+        setErrors((previous) =>
+          Object.fromEntries(
+            Object.entries(previous).filter(([id]) => present.has(id))
+          )
+        );
       })
       .catch(() => {
         if (!controller.signal.aborted) setLoadFailed(true);
@@ -157,8 +165,14 @@ export function TransferSuggestionsCard({
               ? "No se pudo confirmar la sugerencia"
               : "No se pudo descartar la sugerencia"),
         }));
+        // A 400 or 409 usually means the rows changed (linked or deleted
+        // elsewhere): reload so dead suggestions go away.
+        setAttempt((n) => n + 1);
         return;
       }
+      // Drop what this settled right away, so no stale sibling stays
+      // clickable until the refetch lands.
+      setSuggestions((previous) => withoutSettled(previous, s, action));
       if (action === "confirm") onConfirmed();
       setAttempt((n) => n + 1);
     } catch {
