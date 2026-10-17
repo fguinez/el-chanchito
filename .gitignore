@@ -38,8 +38,8 @@ local/
 .fintual_session.json
 .bci_lider_chrome_profile/
 .agents/*local*
-.claude/*
-!.claude/skills/
+**/.claude/*
+!/.claude/skills/
 .gemini/
 .cursor/
 .lavish/
