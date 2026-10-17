@@ -322,7 +322,8 @@ All API routes are under `/api/`:
 | POST | `/api/monitors/preview` | Evaluate an unsaved monitor (`monitorId` applies that monitor's variaciones) |
 | GET/POST | `/api/monitors/[id]/adjustments` | Variaciones (`?month=YYYY-MM`); create from `{ adjustmentDate, amount, description? }` |
 | PATCH/DELETE | `/api/monitors/[id]/adjustments/[adjustmentId]` | Edit or delete one variación |
-| GET/POST | `/api/transactions` | Transactions (list, create) |
+| GET/POST | `/api/transactions` | Transactions (list, create; create takes an optional `location`) |
+| GET/PATCH | `/api/transactions/[id]` | One transaction with product, institution, category and location; PATCH sets or clears only `{ location }` |
 | POST | `/api/import` | CSV import |
 | GET/POST/PUT/DELETE | `/api/fixed-expenses` | Fixed expenses CRUD |
 | GET/POST/DELETE | `/api/wealth` | Wealth snapshots |

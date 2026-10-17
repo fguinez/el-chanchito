@@ -14,19 +14,49 @@ export function formatCLP(amount: number): string {
   }).format(amount);
 }
 
-/** Format an amount in an arbitrary currency: CLP as pesos, anything else
- *  (crypto, foreign) as a trimmed decimal followed by its currency code. */
+let isoCurrencies: Set<string> | null = null;
+
+/** Minor-unit digits of an ISO 4217 currency (USD 2, JPY 0), or null for a
+ *  code that is not one (BTC, USDC and other crypto tickers). */
+function isoFractionDigits(currency: string): number | null {
+  isoCurrencies ??= new Set(
+    typeof Intl.supportedValuesOf === "function"
+      ? Intl.supportedValuesOf("currency")
+      : ["USD", "EUR", "GBP"]
+  );
+  if (!isoCurrencies.has(currency)) return null;
+  return (
+    new Intl.NumberFormat("en-US", { style: "currency", currency })
+      .resolvedOptions().maximumFractionDigits ?? null
+  );
+}
+
+/** Format an amount in an arbitrary currency: CLP as pesos, other fiat with
+ *  exactly its minor-unit digits (USD always shows its cents), anything else
+ *  (crypto) as a trimmed decimal, each followed by its currency code. */
 export function formatAmount(currency: string, amount: number): string {
   if (currency === "CLP") return formatCLP(amount);
-  const formatted = new Intl.NumberFormat("en-US", {
-    maximumFractionDigits: 8,
-  }).format(amount);
+  const digits = isoFractionDigits(currency);
+  const formatted = new Intl.NumberFormat(
+    "en-US",
+    digits == null
+      ? { maximumFractionDigits: 8 }
+      : { minimumFractionDigits: digits, maximumFractionDigits: digits }
+  ).format(amount);
   return `${formatted} ${currency}`;
 }
 
 /** es-CL calendar date from an ISO timestamp (carries its own timezone). */
 export function formatDateEs(iso: string): string {
   return new Date(iso).toLocaleDateString("es-CL");
+}
+
+/** Short es-CL date and time for an ISO timestamp. */
+export function formatTimestampEs(iso: string): string {
+  return new Date(iso).toLocaleString("es-CL", {
+    dateStyle: "short",
+    timeStyle: "short",
+  });
 }
 
 /** Short es-CL label for a plain YYYY-MM-DD date; parsed as local time so

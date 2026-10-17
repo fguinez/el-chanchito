@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { transactions } from "@/lib/db/schema";
+import { products, transactions } from "@/lib/db/schema";
 import { resolveProductId } from "@/lib/db/resolve";
 import { eq, desc, and } from "drizzle-orm";
+import {
+  locationToColumns,
+  validateLocationInput,
+} from "@/lib/transaction-location";
 
 /** GET /api/transactions — list transactions with optional filters */
 export async function GET(request: NextRequest) {
@@ -29,12 +33,15 @@ export async function GET(request: NextRequest) {
       scheduledMonth: transactions.scheduledMonth,
       source: transactions.source,
       productId: transactions.productId,
+      // `amount` is in this currency; only CLP rows may be summed as pesos.
+      currency: products.currency,
       categoryId: transactions.categoryId,
       isInternalTransfer: transactions.isInternalTransfer,
       notes: transactions.notes,
       createdAt: transactions.createdAt,
     })
     .from(transactions)
+    .innerJoin(products, eq(transactions.productId, products.id))
     .where(conditions.length > 0 ? and(...conditions) : undefined)
     .orderBy(desc(transactions.transactionDate))
     .limit(limit);
@@ -42,7 +49,9 @@ export async function GET(request: NextRequest) {
   return NextResponse.json(rows);
 }
 
-/** POST /api/transactions — create a manual transaction */
+/** POST /api/transactions: create a manual transaction. An optional
+ *  `location` ({ name?, city?, country?, latitude?, longitude? }) is validated
+ *  like PATCH /api/transactions/[id] does; 400 `{ error, field }` when not. */
 export async function POST(request: NextRequest) {
   const body = await request.json();
 
@@ -53,6 +62,14 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       { error: "Missing required fields: description, amount, transactionDate" },
       { status: 400 }
+    );
+  }
+
+  const location = validateLocationInput(body.location ?? null);
+  if (!location.ok) {
+    return NextResponse.json(
+      { error: location.error, field: location.field },
+      { status: location.status }
     );
   }
 
@@ -76,6 +93,9 @@ export async function POST(request: NextRequest) {
       scheduledMonth: derivedMonth,
       source: "manual",
       notes: notes ?? null,
+      ...locationToColumns(location.value),
+      // A location typed in by the user is theirs, like one set via PATCH.
+      locationIsManual: location.value !== null,
     })
     .returning();
 
