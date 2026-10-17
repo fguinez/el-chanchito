@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Pencil, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,7 +15,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { normalizeSlug } from "@/lib/db/slug";
-import { nameFieldPatch } from "@/lib/product-names";
+import { fillsNameFromDefault, nameFieldPatch } from "@/lib/product-names";
 import {
   DISPLAY_ORDER_LIMIT,
   PRODUCT_NAME_MAX,
@@ -94,6 +94,7 @@ export function ProductEditDialog({
   const [siblings, setSiblings] = useState<InstitutionProduct[] | null>(null);
 
   const [name, setName] = useState(nameInputValue(product));
+  const nameInputRef = useRef<HTMLInputElement>(null);
   const [parentId, setParentId] = useState(product.parentProductId ?? "");
   const [displayOrder, setDisplayOrder] = useState(String(product.displayOrder));
   const [isActive, setIsActive] = useState(product.isActive);
@@ -143,6 +144,16 @@ export function ProductEditDialog({
     institution.name
   );
   const cannotDeactivate = product.isActive && product.currentBalance == null;
+
+  /** Start a custom name from the default: fill the empty field with the
+   *  placeholder label and leave the caret at its end. */
+  function fillNameFromDefault() {
+    const filled = defaultLabel.slice(0, PRODUCT_NAME_MAX);
+    setName(filled);
+    requestAnimationFrame(() => {
+      nameInputRef.current?.setSelectionRange(filled.length, filled.length);
+    });
+  }
 
   async function saveDetails(event: React.FormEvent) {
     event.preventDefault();
@@ -237,11 +248,22 @@ export function ProductEditDialog({
             <div className="relative">
               <Input
                 id="product-name"
+                ref={nameInputRef}
                 value={name}
                 placeholder={defaultLabel}
                 maxLength={PRODUCT_NAME_MAX}
                 className={name ? "pr-28" : undefined}
                 onChange={(e) => setName(e.target.value)}
+                onDoubleClick={(e) => {
+                  if (!fillsNameFromDefault(name)) return;
+                  e.preventDefault();
+                  fillNameFromDefault();
+                }}
+                onKeyDown={(e) => {
+                  if (!fillsNameFromDefault(name, e.key)) return;
+                  e.preventDefault();
+                  fillNameFromDefault();
+                }}
               />
               {name && (
                 <Button
@@ -258,8 +280,8 @@ export function ProductEditDialog({
               )}
             </div>
             <p className="text-xs text-muted-foreground">
-              Vacío usa el nombre por defecto. Cambiar el nombre no cambia el
-              slug ni la URL.
+              Vacío usa el nombre por defecto; doble clic (o →) para partir de
+              él. Cambiar el nombre no cambia el slug ni la URL.
             </p>
           </div>
 

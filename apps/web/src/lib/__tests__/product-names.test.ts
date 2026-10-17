@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { displayProductName, nameFieldPatch } from "@/lib/product-names";
+import {
+  displayProductName,
+  fillsNameFromDefault,
+  nameFieldPatch,
+} from "@/lib/product-names";
 
 describe("displayProductName", () => {
   it("replaces an auto-name with the friendly kind label", () => {
@@ -51,5 +55,19 @@ describe("nameFieldPatch", () => {
     ["a new name", " Tarjeta Sintetica ", unrenamed, "Tarjeta Sintetica"],
   ])("maps %s", (_label, input, product, expected) => {
     expect(nameFieldPatch(input, product, label)).toBe(expected);
+  });
+});
+
+describe("fillsNameFromDefault", () => {
+  it.each([
+    ["a double-click on an empty field", "", undefined, true],
+    ["ArrowRight on an empty field", "", "ArrowRight", true],
+    ["End on an empty field", "", "End", true],
+    ["Tab on an empty field", "", "Tab", false],
+    ["a letter on an empty field", "", "a", false],
+    ["a double-click on typed text", "Mi tarjeta", undefined, false],
+    ["ArrowRight on typed text", "Mi tarjeta", "ArrowRight", false],
+  ])("%s", (_label, value, key, expected) => {
+    expect(fillsNameFromDefault(value, key)).toBe(expected);
   });
 });

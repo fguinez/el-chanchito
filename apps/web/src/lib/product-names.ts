@@ -51,3 +51,16 @@ export function nameFieldPatch(
   }
   return trimmed !== product.name ? trimmed : undefined;
 }
+
+/** Keys that accept the placeholder as a starting point, like a suggestion. */
+const FILL_KEYS = new Set(["ArrowRight", "End"]);
+
+/**
+ * Whether a double-click (no `key`) or a key press on the edit dialog's
+ * Nombre field should fill it with the default's display label. Only an empty
+ * field fills, so a double-click on typed text keeps its word selection.
+ */
+export function fillsNameFromDefault(value: string, key?: string): boolean {
+  if (value !== "") return false;
+  return key === undefined || FILL_KEYS.has(key);
+}
