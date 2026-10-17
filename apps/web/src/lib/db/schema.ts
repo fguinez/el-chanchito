@@ -262,8 +262,11 @@ export type MatchType = (typeof MATCH_TYPES)[number];
 // `alias_for_transaction`, so editing or deleting one updates every list right
 // away with no backfill. The scraped `description` is never overwritten; the
 // alias only changes what is shown. Matching is case-insensitive: exact =
-// trimmed whole-string equality, substring = literal strpos. Ties: priority
-// desc, then oldest, then id. (Phase 3 will add amountMin/amountMax/currency.)
+// trimmed whole-string equality, substring = literal strpos. An optional amount
+// condition (V036) narrows the match: the signed amount must fall in the
+// inclusive [amountMin, amountMax] range, scoped to `currency`. Ordering:
+// amount- or currency-bound ("conditional") aliases first, then priority desc,
+// oldest, id.
 export const descriptionAliases = pgTable(
   "description_aliases",
   {
@@ -272,6 +275,23 @@ export const descriptionAliases = pgTable(
     matchType: text("match_type").$type<MatchType>().notNull().default("exact"),
     alias: text("alias").notNull(),
     priority: integer("priority").notNull().default(0),
+    // Optional amount condition (V036). Inclusive, signed bounds on the
+    // transaction amount; either may be NULL for an open end, and an exact value
+    // Y is amountMin = amountMax = Y. mode "number" for the same reason as
+    // transactions.amount: postgres.js returns NUMERIC as a string otherwise.
+    amountMin: numeric("amount_min", {
+      precision: 18,
+      scale: 2,
+      mode: "number",
+    }),
+    amountMax: numeric("amount_max", {
+      precision: 18,
+      scale: 2,
+      mode: "number",
+    }),
+    // Currency that scopes the amount bounds (products.currency); required
+    // whenever a bound is set, so a CLP bound never matches a USD row.
+    currency: text("currency"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
