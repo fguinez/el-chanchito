@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { count, desc, sql } from "drizzle-orm";
+import { count, desc, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { transactions } from "@/lib/db/schema";
+import { products, transactions } from "@/lib/db/schema";
 import { normalizeKeyword } from "@/lib/categories";
 
 const PREVIEW_LIMIT = 20;
@@ -46,11 +46,14 @@ export async function GET(request: NextRequest) {
           id: transactions.id,
           description: transactions.description,
           amount: transactions.amount,
+          // `amount` is in this currency (V023): USD rows keep their cents.
+          currency: products.currency,
           transactionDate: transactions.transactionDate,
           categoryId: transactions.categoryId,
           isManuallyCategorized: transactions.isManuallyCategorized,
         })
         .from(transactions)
+        .innerJoin(products, eq(transactions.productId, products.id))
         .where(matches)
         .orderBy(
           desc(transactions.transactionDate),

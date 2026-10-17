@@ -12,7 +12,7 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { formatCLP, formatPlainDateEs } from "@/lib/utils";
+import { formatAmount, formatPlainDateEs } from "@/lib/utils";
 import {
   CategoryLabel,
   plural,
@@ -139,7 +139,7 @@ export function RulePreview({
                       {txn.description}
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
-                      {formatCLP(txn.amount)}
+                      {formatAmount(txn.currency, txn.amount)}
                     </TableCell>
                     <TableCell>
                       <span className="inline-flex items-center gap-2">

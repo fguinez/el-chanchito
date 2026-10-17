@@ -28,6 +28,7 @@ export interface RulePreviewTransaction {
   id: string;
   description: string;
   amount: number;
+  currency: string;
   transactionDate: string;
   categoryId: string | null;
   isManuallyCategorized: boolean;
