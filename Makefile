@@ -86,6 +86,7 @@ dev: ## Start the full local stack: postgres + scrapers (with on-demand refresh)
 	./scripts/dev.sh
 
 dev-web: ## Start only the Next.js dev server (assumes postgres is already up)
+	. ./scripts/require-dashboard-password.sh && \
 	DATABASE_URL=$${DATABASE_URL:-postgres://finance:finance@localhost:5435/finance} \
 		pnpm --filter @chanchito/web dev --hostname $${DASHBOARD_HOST:-127.0.0.1}
 

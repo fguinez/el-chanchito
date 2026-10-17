@@ -41,9 +41,11 @@ export DATABASE_URL
 # Everything listens on loopback by default: the control endpoint is an
 # unauthenticated trigger for live bank logins, and the dashboard serves real
 # data with no login under `next dev`. DASHBOARD_HOST=0.0.0.0 opts the
-# dashboard in to LAN access (see USAGE.md > Reaching the dashboard).
+# dashboard in to LAN access, and only with DASHBOARD_PASSWORD set (see
+# USAGE.md > Reaching the dashboard from another device).
 SCRAPER_CONTROL_HOST="${SCRAPER_CONTROL_HOST:-127.0.0.1}"
 DASHBOARD_HOST="${DASHBOARD_HOST:-127.0.0.1}"
+. ./scripts/require-dashboard-password.sh
 
 # Probe the address the control server binds. 8080 is a popular port: if
 # another stack already holds it, fall back to the next free one instead of

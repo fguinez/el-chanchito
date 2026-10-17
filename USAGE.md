@@ -555,16 +555,34 @@ To open the dashboard from a phone or another computer, opt in with
 `DASHBOARD_HOST`, the address the dashboard listens on:
 
 ```bash
-DASHBOARD_HOST=0.0.0.0 make dev   # host-dev: read from your shell
-# make up reads it from .env (or your shell): DASHBOARD_HOST=0.0.0.0
+# host-dev: both variables from your shell, in the same command
+DASHBOARD_PASSWORD="$(security find-generic-password -a "$USER" -s chanchito.DASHBOARD_PASSWORD -w)" \
+  DASHBOARD_HOST=0.0.0.0 make dev
+
+# make up: DASHBOARD_HOST=0.0.0.0 in .env (or your shell), DASHBOARD_PASSWORD
+# exported as in "Authentication" above
 ```
 
 `0.0.0.0` means every interface; a specific address (e.g. your Tailscale or LAN
-IP) limits it to that network. Set `DASHBOARD_PASSWORD` first: `next dev` skips
-the login when it is unset, so `make dev` on `0.0.0.0` would hand your data to
-anyone on the network. PostgreSQL and the scraper control endpoint have no
-opt-in: they stay on loopback (the database password defaults to a public value
-and the control endpoint is unauthenticated).
+IP) limits it to that network. Compose needs an IPv4 address or a bracketed IPv6
+one (`[::]`).
+
+A password is required beyond loopback. `next dev` skips the login when
+`DASHBOARD_PASSWORD` is unset, so `make dev` and `make dev-web` refuse to start
+with a non-loopback `DASHBOARD_HOST` until it is set. It has to come from your
+shell: `next dev` runs in `apps/web` and never reads the root `.env`, and
+`scripts/load-secrets.sh` deliberately skips it. The production build behind
+`make up` already fails closed without it (see "Authentication" above).
+
+`next dev` also blocks hot reload for origins other than `localhost` and the
+address it listens on. When you open it through another address (e.g. your LAN
+IP while listening on `0.0.0.0`), list those hostnames in
+`DASHBOARD_DEV_ORIGINS` (comma-separated) in the same shell:
+`DASHBOARD_DEV_ORIGINS=192.168.0.10`. Production builds ignore it.
+
+PostgreSQL and the scraper control endpoint have no opt-in: they stay on
+loopback (the database password defaults to a public value and the control
+endpoint is unauthenticated).
 
 ### Local (Docker Compose)
 
