@@ -14,6 +14,8 @@ from unittest.mock import MagicMock
 from scrapers.backends import banchile_movements as movements_mod
 from scrapers.backends.banchile_movements import (
     BanChileMovement,
+    card_location,
+    merge_locations,
     _read_card_billed,
     _read_card_billed_usd,
     _read_card_unbilled,
@@ -36,6 +38,7 @@ from scrapers.backends.banchile_movements import (
     read_movement_surfaces,
     statement_dates,
 )
+from scrapers.base import TransactionLocation
 from scrapers.institutions.banchile import external_id_for
 
 # --- Synthetic payload builders ------------------------------------------------
@@ -81,6 +84,8 @@ def _unbilled_row(
     comercio="COMERCIO SINTETICO",
     tbk="000000000001",
     origen="NAC",
+    ciudad="CIUDAD SINTETICA",
+    pais="PAIS SINTETICO",
 ):
     """One unbilled row; `origen="INT"` makes it a USD row (synthetic)."""
     return {
@@ -93,8 +98,9 @@ def _unbilled_row(
         "codigoComercioINT": "000001",
         "nombreComercio": comercio,
         "rubroComercio": "RETAIL",
-        "codigoPaisComercio": "CL",
-        "ciudad": "SANTIAGO",
+        # The portal puts the country's NAME under this key.
+        "codigoPaisComercio": pais,
+        "ciudad": ciudad,
         "fechaAutorizacion": 1755000000000,
         "horaAutorizacion": hora,
         "numeroTarjeta": CARD_LAST4,
@@ -116,6 +122,7 @@ def _billed_row(
     descripcion="COMERCIO SINTETICO",
     grupo="avancesCompras",
     totales=False,
+    ciudad="CIUDAD SINTETICA",
 ):
     return {
         "numReferencia": referencia,
@@ -124,7 +131,7 @@ def _billed_row(
         "fechaTransaccionString": fecha,
         "montoTransaccion": monto,
         "descripcion": descripcion,
-        "ciudad": "SANTIAGO",
+        "ciudad": ciudad,
         "cuotas": "",
         "comercio": descripcion,
         "rubro": "RETAIL",
@@ -807,6 +814,8 @@ def _intl_row(
     descripcion="COMERCIO SINTETICO",
     grupo="generico",
     totales=False,
+    ciudad="CIUDAD SINTETICA",
+    pais="PAIS SINTETICO",
 ):
     """One USD statement row, every value synthetic."""
     return {
@@ -815,7 +824,8 @@ def _intl_row(
         "fechaTransaccionString": None if totales else fecha,
         "descripcion": descripcion,
         "codigoPais": None,
-        "ciudadComercio": "CIUDAD SINTETICA",
+        "ciudadComercio": ciudad,
+        "pais": pais,
         "montoDolar": monto,
         "montoMonedaOrigen": monto,
         "tituloTarjeta": f"****{CARD_LAST4}",
@@ -1096,3 +1106,121 @@ class TestSurfaceIsolation:
 
         assert movements == [clp]
         assert failed == ("tarjeta facturados USD",)
+
+
+# Synthetic place: no real city or country.
+_PLACE = TransactionLocation(city="CIUDAD SINTETICA", country="PAIS SINTETICO")
+
+
+class TestCardLocation:
+    """V025: the card legs carry the merchant's city and country."""
+
+    def test_an_unbilled_row_reads_ciudad_and_the_country_name(self):
+        assert parse_unbilled_movement(_unbilled_row()).location == _PLACE
+
+    def test_a_usd_unbilled_row_carries_it_too(self):
+        movement = parse_unbilled_movement(_unbilled_row(monto=12.34, origen="INT"))
+        assert movement.location == _PLACE
+
+    def test_a_national_billed_row_has_a_city_and_no_country(self):
+        (movement,) = parse_billed_movements(_billed_payload([_billed_row()]))
+        assert movement.location == TransactionLocation(city="CIUDAD SINTETICA")
+
+    def test_a_usd_statement_row_reads_ciudad_comercio_and_pais(self):
+        (movement,) = parse_international_billed_movements(
+            _intl_payload(compras=[_intl_row()])
+        )
+        assert movement.location == _PLACE
+
+    def test_codigo_pais_is_only_a_fallback(self):
+        row = _intl_row(pais="")
+        row["codigoPais"] = "XX"
+        (movement,) = parse_international_billed_movements(_intl_payload(compras=[row]))
+        assert movement.location.country == "XX"
+
+    def test_blank_fields_mean_no_location(self):
+        """Payment rows leave both fields empty."""
+        (movement,) = parse_international_billed_movements(
+            _intl_payload(pagos=[_intl_row(monto=-1234.56, ciudad="", pais=" ")])
+        )
+        assert movement.location is None
+        assert parse_unbilled_movement(_unbilled_row(ciudad=None, pais="")).location is None
+
+    def test_values_are_trimmed_and_not_recased(self):
+        location = card_location("  Ciudad Sintetica ", "PAIS SINTETICO ")
+        assert location == TransactionLocation(
+            city="Ciudad Sintetica", country="PAIS SINTETICO"
+        )
+
+    def test_an_unstorable_value_drops_the_location_not_the_movement(self):
+        movement = parse_unbilled_movement(_unbilled_row(ciudad="X" * 500))
+        assert movement is not None
+        assert movement.location is None
+
+    def test_location_never_reaches_an_identity(self):
+        here = parse_unbilled_movement(_unbilled_row())
+        there = parse_unbilled_movement(_unbilled_row(ciudad="OTRA", pais="OTRO"))
+        assert external_id_for(here) == external_id_for(there)
+
+    def test_a_dropped_unbilled_twin_hands_over_its_location(self):
+        unbilled = parse_unbilled_movement(_unbilled_row(monto=1234.56, origen="INT"))
+        (billed,) = parse_international_billed_movements(
+            _intl_payload(compras=[_intl_row(ciudad="", pais="")])
+        )
+
+        (kept,) = drop_unbilled_duplicates([unbilled, billed])
+
+        assert kept.source == "card_billed"
+        assert kept.location == _PLACE
+
+    def test_a_dropped_twin_fills_the_billed_rows_gaps_field_by_field(self):
+        """The billed leg wins per field; the unbilled one only fills gaps."""
+        unbilled = parse_unbilled_movement(
+            _unbilled_row(
+                monto=1234.56, origen="INT", ciudad="OTRA", pais="PAIS SINTETICO"
+            )
+        )
+        (billed,) = parse_international_billed_movements(
+            _intl_payload(compras=[_intl_row(ciudad="CIUDAD SINTETICA", pais="")])
+        )
+
+        (kept,) = drop_unbilled_duplicates([unbilled, billed])
+
+        assert kept.location == _PLACE
+
+    def test_a_billed_location_wins_over_its_unbilled_twin(self):
+        unbilled = parse_unbilled_movement(
+            _unbilled_row(monto=1234.56, origen="INT", ciudad="OTRA")
+        )
+        (billed,) = parse_international_billed_movements(
+            _intl_payload(compras=[_intl_row()])
+        )
+
+        (kept,) = drop_unbilled_duplicates([unbilled, billed])
+
+        assert kept.location == _PLACE
+
+
+class TestMergeLocations:
+    """Field-by-field merge; coordinates travel as a pair."""
+
+    def test_either_side_missing(self):
+        assert merge_locations(None, None) is None
+        assert merge_locations(_PLACE, None) == _PLACE
+        assert merge_locations(None, _PLACE) == _PLACE
+
+    def test_primary_text_wins_and_gaps_are_filled(self):
+        merged = merge_locations(
+            TransactionLocation(city="CIUDAD SINTETICA"),
+            TransactionLocation(name="TIENDA", city="OTRA", country="PAIS SINTETICO"),
+        )
+        assert merged == TransactionLocation(
+            name="TIENDA", city="CIUDAD SINTETICA", country="PAIS SINTETICO"
+        )
+
+    def test_coordinates_are_never_mixed(self):
+        primary = TransactionLocation(latitude=-33.0, longitude=-70.0)
+        fallback = TransactionLocation(latitude=-34.0, longitude=-71.0)
+        assert merge_locations(primary, fallback) == primary
+        merged = merge_locations(TransactionLocation(city="X"), fallback)
+        assert (merged.latitude, merged.longitude) == (-34.0, -71.0)

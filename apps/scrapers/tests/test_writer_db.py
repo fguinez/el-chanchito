@@ -420,6 +420,79 @@ class TestTransactionLocation:
             db_conn.execute(f"UPDATE transactions SET {assignment}")
 
 
+class TestBanChileUsdCardLocation:
+    """The #79 USD statement path carries its location all the way to the row."""
+
+    def _scrape(self, monkeypatch, row):
+        from scrapers.backends.banchile_movements import (
+            parse_international_billed_movements,
+        )
+        from scrapers.institutions.banchile import BanChileScraper
+
+        monkeypatch.setenv("BANCHILE_RUT", "test")
+        monkeypatch.setenv("BANCHILE_PASSWORD", "test")
+        payload = {"seccionCompras": {"transaccionesTarjetas": [row]}}
+        (movement,) = parse_international_billed_movements(payload)
+        return BanChileScraper()._movement_to_transaction(movement)
+
+    def _row(self, **location):
+        """A synthetic USD purchase row; every value is fake."""
+        return {
+            "numeroDocumento": "2008 " + "1" * 23,
+            "fechaTransaccionString": "20/08/2026",
+            "descripcion": "COMERCIO SINTETICO",
+            "montoDolar": 1234.56,
+            "tituloTarjeta": "****1234",
+            "totales": False,
+            "grupo": "generico",
+            "codigoPais": None,
+            **location,
+        }
+
+    def _stored(self, conn):
+        return conn.execute(
+            "SELECT p.currency, t.location_city, t.location_country "
+            "FROM transactions t JOIN products p ON t.product_id = p.id"
+        ).fetchall()
+
+    def test_a_new_usd_charge_is_stored_with_its_location(self, db_conn, monkeypatch):
+        txn = self._scrape(
+            monkeypatch,
+            self._row(ciudadComercio="CIUDAD SINTETICA", pais="PAIS SINTETICO"),
+        )
+
+        assert upsert_transactions([txn]) == 1
+        assert self._stored(db_conn) == [
+            {
+                "currency": "USD",
+                "location_city": "CIUDAD SINTETICA",
+                "location_country": "PAIS SINTETICO",
+            }
+        ]
+
+    def test_a_usd_charge_stored_before_v024_gains_it_on_rescrape(
+        self, db_conn, monkeypatch
+    ):
+        bare = self._scrape(monkeypatch, self._row(ciudadComercio="", pais=""))
+        upsert_transactions([bare])
+        assert self._stored(db_conn)[0]["location_city"] is None
+
+        located = self._scrape(
+            monkeypatch,
+            self._row(ciudadComercio="CIUDAD SINTETICA", pais="PAIS SINTETICO"),
+        )
+
+        assert located.external_id == bare.external_id
+        assert upsert_transactions([located]) == 0
+        assert self._stored(db_conn) == [
+            {
+                "currency": "USD",
+                "location_city": "CIUDAD SINTETICA",
+                "location_country": "PAIS SINTETICO",
+            }
+        ]
+
+
 class TestDecimalAmounts:
     """Amounts with cents, stored in NUMERIC(18, 2) since V023 (issue #79)."""
 
