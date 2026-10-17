@@ -389,6 +389,9 @@ export const internalTransfers = pgTable("internal_transfers", {
     .unique("uq_internal_transfers_to_transaction"),
   transferDate: date("transfer_date").notNull(),
   status: text("status").$type<TransferStatus>().notNull().default("pending"),
+  // Created by an automatic suggestion confirm (V032); editing its links by
+  // hand clears it.
+  autoLinked: boolean("auto_linked").notNull().default(false),
   notes: text("notes"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()

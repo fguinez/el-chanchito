@@ -1,6 +1,7 @@
 // Database side of the transfer suggestions (issue #95): find the candidates,
 // confirm one (a transfer linked through the #94 logic, plus a learned
-// pattern) or dismiss it. Scoring and wording live in lib/transfer-suggestions.
+// pattern), link the safest ones without asking, or dismiss one. Scoring and
+// wording live in lib/transfer-suggestions.
 //
 // Sign convention (transactions.amount): negative = money out of the product,
 // positive = money in, on every kind. A card charge is negative and a card
@@ -46,6 +47,8 @@ import {
   lookbackStart,
   matchesPattern,
   normalizeText,
+  pickAutoLinks,
+  withoutSettled,
   type BalanceMatch,
   type ConfirmedPattern,
   type OneSidedCandidate,
@@ -529,7 +532,8 @@ function sideField(
 
 async function confirmIn(
   tx: Tx,
-  input: ConfirmSuggestionInput
+  input: ConfirmSuggestionInput,
+  auto: boolean
 ): Promise<ConfirmOutcome> {
   const ids = [input.sourceTransactionId, input.targetTransactionId].filter(
     (id): id is string => id !== null
@@ -710,6 +714,17 @@ async function confirmIn(
     throw new Rollback(failure(400, linked.error, sideField(side, input)));
   }
 
+  if (auto) {
+    // Set after linking: applyTransferLinks clears it on any link change.
+    await tx
+      .update(internalTransfers)
+      .set({ autoLinked: true })
+      .where(eq(internalTransfers.id, created.id));
+    // No pattern: only the user's own confirms teach the scorer, so an
+    // automatic link cannot boost the next one past the bar.
+    return { ok: true, transferId: created.id };
+  }
+
   const prefix = descriptionPrefix(source.description);
   if (prefix) {
     await tx
@@ -731,14 +746,16 @@ async function confirmIn(
  * rows with the #94 logic (which flags them `is_internal_transfer` and turns
  * the transfer `resolved` once every side with a feed is linked) and save the
  * pattern. Nothing is written when a check fails. 409 when a row is already
- * linked, including a concurrent confirm losing the race.
+ * linked, including a concurrent confirm losing the race. `auto` marks the
+ * transfer `autoLinked` and saves no pattern (see autoLinkSuggestions).
  */
 export async function confirmTransferSuggestion(
-  input: ConfirmSuggestionInput
+  input: ConfirmSuggestionInput,
+  { auto = false }: { auto?: boolean } = {}
 ): Promise<ConfirmOutcome> {
   try {
     return await db.transaction(async (tx) => {
-      const outcome = await confirmIn(tx, input);
+      const outcome = await confirmIn(tx, input, auto);
       if (!outcome.ok) throw new Rollback(outcome);
       return outcome;
     });
@@ -754,6 +771,35 @@ export async function confirmTransferSuggestion(
     }
     throw error;
   }
+}
+
+/**
+ * Link the current suggestions pickAutoLinks deems safe (confident pairs that
+ * share no row with another suggestion), each in its own db transaction
+ * through confirmTransferSuggestion, and return what is left to show plus the
+ * ids of the transfers created. Idempotent: a linked row drops out of the
+ * candidates, and an undone link is dismissed. A confirm that fails (a
+ * concurrent load linked the rows first) is skipped; the next load settles it.
+ */
+export async function autoLinkSuggestions(
+  today: string = formatLocalDate(new Date())
+): Promise<{ suggestions: TransferSuggestion[]; autoLinked: string[] }> {
+  let suggestions = await loadTransferSuggestions(today);
+  const autoLinked: string[] = [];
+  for (const suggestion of pickAutoLinks(suggestions)) {
+    const outcome = await confirmTransferSuggestion(
+      {
+        sourceTransactionId: suggestion.source.transactionId,
+        targetTransactionId: suggestion.target.transactionId,
+        targetProductId: null,
+      },
+      { auto: true }
+    );
+    if (!outcome.ok) continue;
+    autoLinked.push(outcome.transferId);
+    suggestions = withoutSettled(suggestions, suggestion, "confirm");
+  }
+  return { suggestions, autoLinked };
 }
 
 export interface DismissSuggestionInput {

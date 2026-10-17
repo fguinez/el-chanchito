@@ -20,6 +20,7 @@ import { db } from "@/lib/db";
 import { isUniqueViolation } from "@/lib/management";
 import {
   accounts,
+  dismissedTransferSuggestions,
   institutions,
   internalTransfers,
   products,
@@ -176,6 +177,28 @@ async function unflagReleasedRows(tx: Tx, ids: string[]) {
     );
 }
 
+/** An automatic link the user took back: dismiss the pair it linked, so the
+ *  suggestions do not link it again. A side whose row is gone has nothing to
+ *  dismiss. */
+async function dismissAutoLinkedPair(
+  tx: Tx,
+  transfer: {
+    autoLinked: boolean;
+    fromTransactionId: string | null;
+    toTransactionId: string | null;
+  }
+) {
+  if (!transfer.autoLinked) return;
+  if (!transfer.fromTransactionId || !transfer.toTransactionId) return;
+  await tx
+    .insert(dismissedTransferSuggestions)
+    .values({
+      sourceTransactionId: transfer.fromTransactionId,
+      targetTransactionId: transfer.toTransactionId,
+    })
+    .onConflictDoNothing();
+}
+
 export type LinkOutcome =
   | { ok: true }
   | { ok: false; status: 404 }
@@ -188,7 +211,9 @@ export type LinkOutcome =
  * the transfer lets go loses it unless another transfer links it. A pending
  * transfer turns `resolved` once every side whose product has a transaction
  * feed is linked (see transferIsAccountedFor); the status never moves back on
- * its own, so unlinking leaves a resolved transfer resolved.
+ * its own, so unlinking leaves a resolved transfer resolved. Changing the
+ * links of an automatic transfer makes it the user's: the pair it had is
+ * dismissed and `autoLinked` cleared.
  */
 export async function applyTransferLinks(
   tx: Tx,
@@ -308,9 +333,19 @@ export async function applyTransferLinks(
     }
   }
 
+  const relinked =
+    next.fromTransactionId !== transfer.fromTransactionId ||
+    next.toTransactionId !== transfer.toTransactionId;
+  if (relinked) await dismissAutoLinkedPair(tx, transfer);
+
   await tx
     .update(internalTransfers)
-    .set({ ...next, status, updatedAt: new Date() })
+    .set({
+      ...next,
+      status,
+      autoLinked: transfer.autoLinked && !relinked,
+      updatedAt: new Date(),
+    })
     .where(eq(internalTransfers.id, transferId));
   await flagRows(tx, [...linkedNow]);
   await unflagReleasedRows(tx, released);
@@ -318,17 +353,21 @@ export async function applyTransferLinks(
 }
 
 /** Delete a transfer and clear the flag on the rows it linked (unless another
- *  transfer links them), in one db transaction. False when it did not exist. */
+ *  transfer links them), in one db transaction. Deleting an automatic
+ *  transfer is its undo: the pair it linked is dismissed too. False when it
+ *  did not exist. */
 export async function deleteTransfer(transferId: string): Promise<boolean> {
   return db.transaction(async (tx) => {
     const [deleted] = await tx
       .delete(internalTransfers)
       .where(eq(internalTransfers.id, transferId))
       .returning({
+        autoLinked: internalTransfers.autoLinked,
         fromTransactionId: internalTransfers.fromTransactionId,
         toTransactionId: internalTransfers.toTransactionId,
       });
     if (!deleted) return false;
+    await dismissAutoLinkedPair(tx, deleted);
     await unflagReleasedRows(
       tx,
       [deleted.fromTransactionId, deleted.toTransactionId].filter(
