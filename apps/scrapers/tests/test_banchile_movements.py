@@ -435,11 +435,18 @@ class TestDedupeMovements:
 # --- One surface, end to end, on a fake page ----------------------------------
 
 
+class _FakeRequest:
+    def __init__(self, url, body):
+        self.url = url
+        self.post_data_json = body
+
+
 class _FakeResponse:
-    def __init__(self, url, payload, status=200):
+    def __init__(self, url, payload, status=200, request=None):
         self.url = url
         self.status = status
         self._payload = payload
+        self.request = request
 
     def json(self):
         return self._payload
@@ -470,6 +477,12 @@ class _FakeLocator:
         self.page.fire_card_response()
 
 
+# Synthetic page texts: the dashboard's checking row, and the movements view of
+# a remembered account (which a hash-only return home leaves on screen a while).
+_DASHBOARD_TEXT = "Mis Productos\nCuenta Corriente\nDisponible $ 1.000.000"
+_CARTOLA_VIEW_TEXT = "Consultar Cuentas\nSELECCIONAR OTRA CUENTA\nSaldo Disponible $ 2.500.000"
+
+
 class _FakeCardPage:
     """The card page: clicking the shortcut makes the SPA load its movements."""
 
@@ -496,7 +509,7 @@ class _FakeCardPage:
         return _FakeLocator(self, "SALDOS Y MOV.TARJETAS" in selector)
 
     def evaluate(self, script, arg=None):
-        return ""
+        return _DASHBOARD_TEXT if script == banchile_web_mod._INNER_TEXT_JS else ""
 
     def wait_for_timeout(self, ms):
         return None
@@ -1368,3 +1381,965 @@ class TestReadSession:
         assert result.products == [product]
         assert result.movements == [movement]
         assert result.failed_surfaces == ("línea", "tipo de cambio", "movimientos")
+
+
+# --- The account dialog, step by step (issue #82) -----------------------------
+#
+# Every label, account number and payload below is synthetic.
+
+_USD_RADIO = "Cuenta Corriente 00-000-00000-02 (USD)"
+_CLP_RADIO = "Cuenta Corriente 00-000-00000-01 (CLP)"
+
+
+class TestCartolaMismatch:
+    def test_the_currency_must_match(self):
+        assert movements_mod.cartola_mismatch({"moneda": "USD"}, "USD") == ""
+        assert movements_mod.cartola_mismatch({"moneda": "clp"}, "USD") == (
+            "stale cartola (moneda CLP)"
+        )
+
+    def test_an_account_already_read_is_stale(self):
+        payload = {"moneda": "CLP", "movimientos": [_cartola_row()]}
+        assert movements_mod.cartola_mismatch(payload, "CLP", {ACCOUNT}) == (
+            "stale cartola (an account already read)"
+        )
+        assert movements_mod.cartola_mismatch(payload, "CLP", set()) == ""
+
+    def test_the_request_names_the_currency_when_the_payload_does_not(self):
+        usd_request = {"cuentaSeleccionada": {"moneda": "USD"}}
+        mismatch = movements_mod.cartola_mismatch
+        empty = {"movimientos": []}
+        assert mismatch(empty, "CLP", set(), usd_request) == "stale cartola (moneda USD)"
+        assert mismatch(empty, "USD", set(), usd_request) == ""
+
+    def test_an_unrecognised_moneda_is_never_a_mismatch(self):
+        mismatch = movements_mod.cartola_mismatch
+        empty = {"movimientos": []}
+        odd_request = {"cuentaSeleccionada": {"moneda": "DOLAR"}}
+        assert mismatch({"moneda": "PESOS", "movimientos": []}, "USD") == ""
+        assert mismatch(empty, "CLP", set(), odd_request) == ""
+        # An unrecognised payload value falls back to a recognised request one.
+        clp_request = {"cuentaSeleccionada": {"moneda": "clp"}}
+        assert mismatch({"moneda": "PESOS"}, "USD", set(), clp_request) == (
+            "stale cartola (moneda CLP)"
+        )
+
+    def test_a_payload_without_moneda_is_not_judged_on_it(self):
+        assert movements_mod.cartola_mismatch({"movimientos": []}, "USD") == ""
+
+
+class TestCurrencyHelpers:
+    def test_option_index(self):
+        options = ["(USD)", "(CLP)"]
+        assert movements_mod.matching_option_index(options, "USD") == 0
+        assert movements_mod.matching_option_index(options, "CLP") == 1
+        assert movements_mod.matching_option_index(["(CLP)"], "USD") is None
+        assert movements_mod.matching_option_index([], "CLP") is None
+
+    def test_usd_radios_are_found_by_label(self):
+        labels = [_CLP_RADIO, _USD_RADIO]
+        assert movements_mod.matching_radio_indices(labels, "USD") == [1]
+        assert movements_mod.matching_radio_indices(labels[:1], "USD") == []
+
+    def test_clp_radios_keep_their_positional_pick(self):
+        labels = ["Cuenta Corriente 00-000-00000-01", "Cuenta Vista 00-000-00000-03"]
+        assert movements_mod.matching_radio_indices(labels, "CLP") == [0, 1]
+
+
+_REOPEN = "role=button[name=SELECCIONAR OTRA CUENTA]"
+
+
+class _DialogLocator:
+    """One selector on the fake account dialog (see `_FakeDialogPage`)."""
+
+    def __init__(self, page, selector, index=0):
+        self.page = page
+        self.selector = selector
+        self.index = index
+
+    def _items(self):
+        page = self.page
+        if self.selector == movements_mod._CURRENCY_SELECT_SELECTOR:
+            return ["select"] if page.dialog_open and page.select_visible else []
+        if self.selector == movements_mod._CURRENCY_OPTION_SELECTOR:
+            return list(page.options) if page.select_open else []
+        if self.selector == movements_mod._ACCOUNT_RADIO_SELECTOR:
+            return list(page.radios.get(page.chosen, [])) if page.dialog_open else []
+        if self.selector == movements_mod._MODAL_ACCEPT_SELECTOR:
+            if not page.dialog_open or page.chosen in page.accept_fails_for:
+                return []
+            return ["accept"]
+        if self.selector == _REOPEN:
+            shown = page.on_movements and page.remembered and not page.dialog_open
+            return ["reopen"] if shown else []
+        if self.selector in banchile_web_mod._CARD_LINK_SELECTORS:
+            return ["card"] if page.home_rendered() else []
+        if self.selector.endswith(" label") or self.selector.startswith("radio-label:"):
+            return ["label"]
+        return []
+
+    @property
+    def first(self):
+        return _DialogLocator(self.page, self.selector, 0)
+
+    def nth(self, index):
+        return _DialogLocator(self.page, self.selector, index)
+
+    def count(self):
+        return len(self._items())
+
+    def is_visible(self):
+        return self.index < len(self._items())
+
+    def wait_for(self, **kwargs):
+        if self.index >= len(self._items()):
+            raise RuntimeError("not visible")
+
+    def inner_text(self):
+        return self._items()[self.index]
+
+    def get_attribute(self, name):
+        return f"mat-radio-{self.index}"
+
+    def locator(self, selector):
+        return _DialogLocator(self.page, f"radio-label:{self.index}")
+
+    def filter(self, visible=None):
+        return self
+
+    def click(self, **kwargs):
+        page = self.page
+        if self.selector == movements_mod._CURRENCY_SELECT_SELECTOR:
+            page.select_open = True
+        elif self.selector == movements_mod._CURRENCY_OPTION_SELECTOR:
+            page.chosen = "USD" if "USD" in self.inner_text() else "CLP"
+            page.select_open = False
+        elif self.selector.startswith("radio-label:"):
+            page.picked = int(self.selector.split(":")[1])
+        elif self.selector.startswith("#mat-radio-"):
+            page.picked = int(self.selector.split()[0].rsplit("-", 1)[1])
+        elif self.selector == movements_mod._MODAL_ACCEPT_SELECTOR:
+            page.accept()
+        elif self.selector == _REOPEN:
+            page.click_reopen(kwargs.get("timeout", 0))
+        elif self.selector in banchile_web_mod._CARD_LINK_SELECTORS:
+            page.card_clicks.append(page.home_rendered())
+        else:
+            raise RuntimeError("not clickable")
+
+
+class _FakeClock:
+    """Stands in for `time` in the movements module: only the page's waits
+    move it, so every budget is real but no test ever sleeps."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+
+_CLOCK = _FakeClock()
+
+
+def _use_fake_clock(monkeypatch):
+    _CLOCK.now = 1000.0
+    monkeypatch.setattr(movements_mod, "time", _CLOCK)
+
+
+class _FakeKeyboard:
+    def __init__(self, page):
+        self.page = page
+
+    def press(self, key):
+        if key != "Escape":
+            return
+        if self.page.select_open:
+            self.page.select_open = False
+        elif self.page.dialog_open:
+            self.page.dialog_open = False
+
+
+class _FakeDialogPage:
+    """The movements route and its "Seleccione una cuenta" dialog, all synthetic.
+
+    `radios` maps a currency to the radio labels it lists, `cartolas` maps it
+    to the `getCartola` payload Aceptar makes the SPA load (or to a list of
+    them, one per radio). The select defaults to USD, as on the portal. Like
+    the SPA, the page remembers the account once one is accepted: the route
+    then shows that cartola and a "SELECCIONAR OTRA CUENTA" button instead of
+    the dialog.
+    """
+
+    def __init__(
+        self,
+        options=("(USD)", "(CLP)"),
+        radios=None,
+        cartolas=None,
+        accept_fails_for=(),
+        cartola_fires=True,
+        select_visible=True,
+        remembered=False,
+        accept_answers_remembered=False,
+        auto_fetch_polls=0,
+        reopen_ready_polls=0,
+        dialog_delay_polls=0,
+        home_render_polls=2,
+        payload_moneda=True,
+        button_needs_fetch=True,
+        accept_response_polls=1,
+        reopen_click_raises=0,
+        auto_fetch_fails=False,
+        auto_request_body=...,
+    ):
+        self.url = "https://portalpersonas.bancochile.cl/mibancochile-web/#/home"
+        self.options = options
+        self.radios = radios if radios is not None else {"CLP": [_CLP_RADIO], "USD": [_USD_RADIO]}
+        self.cartolas = cartolas or {}
+        self.accept_fails_for = set(accept_fails_for)
+        self.cartola_fires = cartola_fires
+        self.select_visible = select_visible
+        self.remembered = remembered
+        self.on_movements = False
+        self.dialog_open = False
+        self.select_open = False
+        self.chosen = "USD"
+        self.picked = None
+        self.reopen_clicks = 0
+        self.remembered_as = None
+        self.pending = []
+        self.accept_answers_remembered = accept_answers_remembered
+        # The remembered view: its own cartola arrives `auto_fetch_polls`
+        # waits after the route, its button only works once that fetch landed
+        # and `reopen_ready_polls` waits passed, and the dialog then takes
+        # `dialog_delay_polls` waits to show.
+        self.auto_fetch_polls = auto_fetch_polls
+        self.reopen_ready_polls = reopen_ready_polls
+        self.dialog_delay_polls = dialog_delay_polls
+        self.polls_since_route = 0
+        self.auto_fetch_in = None
+        self.dialog_opens_in = None
+        self.ignored_reopen_clicks = 0
+        # Home is a hash-only change: overlays survive it, the old view stays
+        # on screen, and the dashboard (with its card shortcut) renders
+        # `home_render_polls` waits later. Card clicks record whether it had.
+        self.home_render_polls = home_render_polls
+        self.home_renders_in = None
+        self.on_home = True
+        self.card_clicks = []
+        self.payload_moneda = payload_moneda
+        self.button_needs_fetch = button_needs_fetch
+        self.auto_request = None
+        self.accept_response_polls = accept_response_polls
+        self.reopen_click_raises = reopen_click_raises
+        self.auto_fetch_fails = auto_fetch_fails
+        self.auto_request_body = auto_request_body
+        self.handlers = {}
+        self.keyboard = _FakeKeyboard(self)
+
+    def on(self, event, handler):
+        self.handlers.setdefault(event, []).append(handler)
+
+    def remove_listener(self, event, handler):
+        self.handlers.get(event, []).remove(handler)
+
+    def accept(self):
+        if not self.cartola_fires or self.picked is None:
+            return
+        self.dialog_open = False
+        self.remembered = True
+        if self.accept_answers_remembered and self.remembered_as is not None:
+            request = self.send_request(*self.remembered_as)
+            self.pending.append([self.accept_response_polls, *request])
+            return
+        self.remembered_as = (self.chosen, self.picked)
+        # The response arrives later, while the scraper waits, as on the portal.
+        request = self.send_request(self.chosen, self.picked)
+        self.pending.append([self.accept_response_polls, *request])
+
+    _CARTOLA_URL = "https://portalpersonas.bancochile.cl/x/movimientos/getCartola"
+
+    def send_request(self, currency, picked, body=...):
+        """Fire a getCartola request; its response comes with `fire_cartola`."""
+        if body is ...:
+            body = {"cuentaSeleccionada": {"moneda": currency, "codigoProducto": "SINTETICO"}}
+        request = _FakeRequest(self._CARTOLA_URL, body)
+        for handler in list(self.handlers.get("request", [])):
+            handler(request)
+        return (currency, picked, request)
+
+    def fire_cartola(self, currency, picked, request=None):
+        payload = self.cartolas.get(currency, {"movimientos": []})
+        if isinstance(payload, list):
+            payload = payload[picked]
+        if self.payload_moneda is True:
+            payload = {"moneda": currency, **payload}  # every live payload has one
+        elif self.payload_moneda:
+            payload = {"moneda": self.payload_moneda, **payload}
+        response = _FakeResponse(self._CARTOLA_URL, payload, request=request)
+        for handler in list(self.handlers.get("response", [])):
+            handler(response)
+
+    def locator(self, selector):
+        return _DialogLocator(self, selector)
+
+    def evaluate(self, script, arg=None):
+        if script == banchile_web_mod._INNER_TEXT_JS:
+            return _DASHBOARD_TEXT if self.home_rendered() else _CARTOLA_VIEW_TEXT
+        if arg == movements_mod._MOVIMIENTOS_ROUTE:
+            self.on_movements = True
+            self.on_home = False
+            self.dialog_open = not self.remembered
+            self.polls_since_route = 0
+            if self.remembered and self.remembered_as is not None:
+                # The SPA fetches the remembered account's cartola by itself.
+                self.auto_request = self.send_request(
+                    *self.remembered_as, body=self.auto_request_body
+                )
+                self.auto_fetch_in = self.auto_fetch_polls
+                self._tick_auto_fetch(advance=False)
+        return None
+
+    def get_by_role(self, role, name=None):
+        assert role == "button" and name.search("SELECCIONAR OTRA CUENTA")
+        return _DialogLocator(self, _REOPEN)
+
+    def _tick_auto_fetch(self, advance=True):
+        if self.auto_fetch_in is None:
+            return
+        if advance:
+            self.auto_fetch_in -= 1
+        if self.auto_fetch_in <= 0:
+            self.auto_fetch_in = None
+            if self.auto_fetch_fails:
+                for handler in list(self.handlers.get("requestfailed", [])):
+                    handler(self.auto_request[2])
+                return
+            self.fire_cartola(*self.auto_request)
+
+    def click_reopen(self, timeout_ms=0):
+        self.reopen_clicks += 1
+        if self.reopen_click_raises:
+            self.reopen_click_raises -= 1
+            _CLOCK.now += timeout_ms / 1000  # a click that times out burns it all
+            raise RuntimeError("synthetic click timeout")
+        settled = self.auto_fetch_in is None or not self.button_needs_fetch
+        if not settled or self.polls_since_route < self.reopen_ready_polls:
+            self.ignored_reopen_clicks += 1  # the view is still rendering
+            return
+        self.chosen = "USD"  # the dialog opens on its USD default again
+        self.dialog_opens_in = self.dialog_delay_polls
+        self._tick_dialog(advance=False)
+
+    def _tick_dialog(self, advance=True):
+        if self.dialog_opens_in is None:
+            return
+        if advance:
+            self.dialog_opens_in -= 1
+        if self.dialog_opens_in <= 0:
+            self.dialog_opens_in = None
+            self.dialog_open = True
+
+    def wait_for_timeout(self, ms):
+        _CLOCK.now += ms / 1000
+        self.polls_since_route += 1
+        self._tick_auto_fetch()
+        self._tick_dialog()
+        if self.home_renders_in is not None:
+            self.home_renders_in -= 1
+            if self.home_renders_in <= 0:
+                self.home_renders_in = None
+        due = []
+        for entry in self.pending:
+            entry[0] -= 1
+            if entry[0] <= 0:
+                due.append(entry)
+        self.pending = [entry for entry in self.pending if entry[0] > 0]
+        for _, currency, picked, request in due:
+            self.fire_cartola(currency, picked, request)
+
+    def home_rendered(self):
+        return self.on_home and self.home_renders_in is None
+
+    def goto(self, url, **kwargs):
+        self.url = url
+        self.auto_fetch_in = None
+        self.dialog_opens_in = None
+        self.on_movements = False
+        self.on_home = url.endswith("#/home")
+        self.home_renders_in = self.home_render_polls if self.home_render_polls else None
+
+
+def _remembered_page(**kwargs):
+    """A page whose SPA already remembers the (synthetic) CLP account."""
+    page = _FakeDialogPage(cartolas={"CLP": {"movimientos": [_cartola_row()]}}, **kwargs)
+    page.remembered = True
+    page.remembered_as = ("CLP", 0)
+    return page
+
+
+def _drive_returning_usd_rows(page, index, *args, **kwargs):
+    return movements_mod._CartolaDrive(
+        payload={"moneda": "USD", "movimientos": [_usd_cartola_row()]}, accounts=1
+    )
+
+
+def _read_usd_dialog(page, attempt=0):
+    return movements_mod._read_checking_movements(page, attempt, currency="USD")
+
+
+class TestDialogSteps:
+    @pytest.fixture(autouse=True)
+    def _fake_time(self, monkeypatch):
+        _use_fake_clock(monkeypatch)
+
+    def test_the_clp_drive_still_picks_clp_by_position(self):
+        page = _FakeDialogPage(cartolas={"CLP": {"movimientos": [_cartola_row()]}})
+
+        found = movements_mod._read_checking_movements(page, attempt=0)
+
+        assert page.chosen == "CLP"
+        assert page.picked == 0
+        assert [(m.currency, m.amount) for m in found] == [("CLP", Decimal(1000000))]
+
+    def test_a_remembered_account_reopens_the_dialog_with_its_button(self):
+        """Once an account is remembered the route shows no dialog by itself."""
+        page = _FakeDialogPage(
+            remembered=True, cartolas={"CLP": {"movimientos": [_cartola_row()]}}
+        )
+
+        found = movements_mod._read_checking_movements(page, attempt=0)
+
+        assert page.reopen_clicks == 1
+        assert [m.currency for m in found] == ["CLP"]
+
+    def test_a_second_clp_account_is_read_through_the_reopen_button(self):
+        second = dict(_cartola_row(saldo="999.999"), numeroCuenta="00-000-00000-03")
+        second["id"] = "CTD00-000-00000-03:20260820 12:41:33:1000000:abono:1"
+        page = _FakeDialogPage(
+            radios={"CLP": [_CLP_RADIO, "Cuenta Vista 00-000-00000-03 (CLP)"]},
+            cartolas={
+                "CLP": [{"movimientos": [_cartola_row()]}, {"movimientos": [second]}]
+            },
+        )
+
+        found = movements_mod._read_checking_movements(page, attempt=0)
+
+        assert page.reopen_clicks == 1  # the first drive found the dialog open
+        assert [m.fingerprint[1] for m in found] == ["2.500.000", "999.999"]
+
+    def test_the_usd_drive_after_the_clp_one_reopens_the_dialog(self):
+        page = _FakeDialogPage(cartolas={"CLP": {"movimientos": [_cartola_row()]}})
+
+        assert len(movements_mod._read_checking_movements(page, attempt=0)) == 1
+        assert _read_usd_dialog(page) == []
+        assert (page.reopen_clicks, page.chosen, page.picked) == (1, "USD", 0)
+
+    def test_no_account_leaves_no_panel_open(self):
+        """The currency panel stayed open behind a no-account return live."""
+        page = _FakeDialogPage(options=("(CLP)",))
+
+        assert _read_usd_dialog(page) == []
+        assert (page.select_open, page.dialog_open, page.on_movements) == (
+            False,
+            False,
+            False,
+        )
+
+    @pytest.mark.parametrize(
+        "page_kwargs",
+        [{}, {"accept_fails_for": {"USD"}}, {"cartola_fires": False}],
+        ids=["read", "accept-failed", "cartola-wait-failed"],
+    )
+    def test_every_usd_outcome_leaves_the_page_on_home(self, page_kwargs):
+        """The card legs start from the dashboard and must find it uncovered."""
+        page = _FakeDialogPage(**page_kwargs)
+
+        _read_usd_dialog(page)
+
+        assert not (page.select_open or page.dialog_open or page.on_movements)
+        assert page.url == banchile_web_mod._PORTAL_HOME
+
+    def test_a_clp_cartola_is_never_read_as_the_usd_one(self, caplog):
+        """Aceptar answered only by the remembered CLP account's cartola."""
+        page = _FakeDialogPage(cartolas={"CLP": {"movimientos": [_cartola_row()]}})
+        assert len(movements_mod._read_checking_movements(page, attempt=0)) == 1
+        page.accept_answers_remembered = True
+
+        with caplog.at_level("INFO", logger=movements_mod.__name__):
+            assert _read_usd_dialog(page) is None
+
+        assert "failed at the cartola wait step" in caplog.text
+        assert "stale cartola (moneda CLP)" in caplog.text
+
+    def test_the_reopen_click_waits_for_the_remembered_cartola(self):
+        """Clicking while the remembered view still fetches does nothing."""
+        page = _remembered_page(auto_fetch_polls=6)
+
+        assert _read_usd_dialog(page) == []
+        assert (page.reopen_clicks, page.ignored_reopen_clicks) == (1, 0)
+
+    def test_an_ignored_reopen_click_is_retried(self):
+        page = _remembered_page(reopen_ready_polls=8)
+
+        assert _read_usd_dialog(page) == []
+        assert (page.reopen_clicks, page.ignored_reopen_clicks) == (2, 1)
+
+    def test_a_slow_dialog_is_waited_for_not_clicked_again(self):
+        page = _remembered_page(dialog_delay_polls=4)
+
+        assert _read_usd_dialog(page) == []
+        assert page.reopen_clicks == 1
+
+    def test_a_reopen_click_that_times_out_is_retried(self):
+        page = _remembered_page(reopen_click_raises=2)
+
+        assert _read_usd_dialog(page) == []
+        assert page.reopen_clicks == 3
+
+    def test_the_button_is_clicked_even_when_settling_used_the_budget(self):
+        page = _FakeDialogPage(remembered=True)
+        page.on_movements = True
+        with movements_mod._JsonCapture(page, movements_mod._CARTOLA_FRAGMENT) as capture:
+            result = movements_mod._open_dialog(page, capture, timeout_ms=1_000)
+
+        assert result.status == movements_mod._STEP_OK
+        assert page.reopen_clicks == 1
+
+    def test_a_button_that_never_opens_the_dialog_fails_the_step(self, caplog):
+        page = _remembered_page(reopen_ready_polls=10**6)
+
+        with caplog.at_level("INFO", logger=movements_mod.__name__):
+            assert _read_usd_dialog(page) is None
+
+        assert page.reopen_clicks == movements_mod._REOPEN_CLICKS
+        assert (
+            "failed at the dialog open step (account 1, attempt 1): reopen button "
+            "did not open the dialog after 3 click(s)"
+        ) in caplog.text
+
+    def test_the_card_shortcut_waits_for_the_dashboard(self):
+        """The old view outlives a hash-only return home; clicking through it
+        is what lost the unbilled leg's first attempt live."""
+        page = _FakeDialogPage(home_render_polls=12)
+        _read_usd_dialog(page)
+        assert not page.home_rendered()
+
+        assert movements_mod._open_card_area(page, attempt=0) is True
+        assert page.card_clicks == [True]
+
+    def test_a_rendered_dashboard_costs_no_wait(self):
+        page = _FakeDialogPage()
+        page.goto(banchile_web_mod._PORTAL_HOME)
+        page.home_renders_in = None
+        started = _CLOCK.now
+
+        assert movements_mod._open_card_area(page, attempt=0) is True
+        assert _CLOCK.now == started
+
+    def test_off_the_home_route_nothing_is_waited_for(self):
+        page = _FakeDialogPage(home_render_polls=10**6)
+        page.url = "https://portalpersonas.bancochile.cl/mibancochile-web/#/tarjeta"
+        started = _CLOCK.now
+
+        movements_mod._open_card_area(page, attempt=0)
+
+        assert _CLOCK.now == started
+
+    def test_a_dashboard_that_never_renders_is_waited_for_bounded(self):
+        page = _FakeDialogPage(home_render_polls=10**6)
+        page.goto(banchile_web_mod._PORTAL_HOME)
+        started = _CLOCK.now
+
+        assert movements_mod._open_card_area(page, attempt=0) is False
+        assert _CLOCK.now - started <= movements_mod._DASHBOARD_READY_MS / 1000 + 1
+
+    def test_a_checking_read_leaves_the_dashboard_wait_to_the_card_legs(self):
+        """No dashboard wait after a checking attempt (it ran per attempt)."""
+        page = _FakeDialogPage(home_render_polls=10**6, options=("(CLP)",))
+        started = _CLOCK.now
+
+        assert _read_usd_dialog(page) == []
+        assert _CLOCK.now - started < movements_mod._DASHBOARD_READY_MS / 1000
+
+    def test_a_failing_cleanup_never_replaces_a_read(self, monkeypatch):
+        page = _FakeDialogPage(cartolas={"USD": {"movimientos": [_usd_cartola_row()]}})
+
+        def broken(*args, **kwargs):
+            raise RuntimeError("synthetic cleanup failure")
+
+        monkeypatch.setattr(movements_mod, "_recover_to_home", broken, raising=True)
+        page.keyboard.press = broken
+        monkeypatch.setattr(movements_mod, "_open_cartola", _drive_returning_usd_rows)
+
+        assert [m.currency for m in _read_usd_dialog(page)] == ["USD"]
+
+    def test_a_slow_remembered_cartola_lands_before_the_capture_is_cleared(self):
+        """Empty and `moneda`-less, it would pass every payload check, so it
+        must have landed (and been dropped) before Aceptar."""
+        page = _remembered_page(
+            auto_fetch_polls=30,
+            button_needs_fetch=False,
+            payload_moneda=False,
+            accept_response_polls=40,
+        )
+        page.cartolas = {
+            "CLP": {"movimientos": []},
+            "USD": {"movimientos": [_usd_cartola_row()]},
+        }
+
+        found = _read_usd_dialog(page)
+
+        assert [(m.currency, m.amount) for m in found] == [("USD", Decimal("-1234.56"))]
+
+    def test_a_failed_remembered_fetch_is_not_waited_for(self):
+        """An aborted automatic fetch ends; it must not cost the in-flight wait."""
+        page = _remembered_page(auto_fetch_polls=1, auto_fetch_fails=True)
+        page.cartolas["USD"] = {"movimientos": [_usd_cartola_row()]}
+        started = _CLOCK.now
+
+        assert [m.currency for m in _read_usd_dialog(page)] == ["USD"]
+        assert _CLOCK.now - started < movements_mod._IN_FLIGHT_WAIT_MS / 1000
+
+    def test_a_request_without_a_json_body_still_counts_as_in_flight(self):
+        """Its slow, unjudgeable answer must land before the capture is cleared."""
+        page = _remembered_page(
+            auto_fetch_polls=30,
+            button_needs_fetch=False,
+            payload_moneda=False,
+            accept_response_polls=40,
+            auto_request_body=None,
+        )
+        page.cartolas = {
+            "CLP": {"movimientos": []},
+            "USD": {"movimientos": [_usd_cartola_row()]},
+        }
+
+        found = _read_usd_dialog(page)
+
+        assert [(m.currency, m.amount) for m in found] == [("USD", Decimal("-1234.56"))]
+
+    def test_a_drive_reads_payloads_with_an_unrecognised_moneda(self):
+        page = _FakeDialogPage(
+            payload_moneda="DOLARES", cartolas={"USD": {"movimientos": [_usd_cartola_row()]}}
+        )
+
+        assert [m.currency for m in _read_usd_dialog(page)] == ["USD"]
+
+    def test_a_drive_reads_payloads_without_moneda(self):
+        page = _FakeDialogPage(
+            payload_moneda=False, cartolas={"USD": {"movimientos": [_usd_cartola_row()]}}
+        )
+
+        assert [m.currency for m in _read_usd_dialog(page)] == ["USD"]
+
+    def test_the_request_tells_a_moneda_less_stale_cartola_apart(self, caplog):
+        page = _FakeDialogPage(
+            payload_moneda=False, cartolas={"CLP": {"movimientos": [_cartola_row()]}}
+        )
+        assert len(movements_mod._read_checking_movements(page, attempt=0)) == 1
+        page.accept_answers_remembered = True
+
+        with caplog.at_level("INFO", logger=movements_mod.__name__):
+            assert _read_usd_dialog(page) is None
+
+        assert "stale cartola (moneda CLP)" in caplog.text
+
+    def test_a_stale_cartola_costs_a_short_grace_not_the_budget(self):
+        page = _FakeDialogPage(cartolas={"CLP": {"movimientos": [_cartola_row()]}})
+        assert len(movements_mod._read_checking_movements(page, attempt=0)) == 1
+        page.accept_answers_remembered = True
+        started = _CLOCK.now
+
+        assert _read_usd_dialog(page) is None
+
+        budget = movements_mod._RENDER_TIMEOUTS_MS[0] / 1000
+        assert _CLOCK.now - started < budget
+
+    def test_a_reopened_account_already_read_is_warned_about(self, caplog):
+        """The dialog hands back account 1 at radio 2: stop, keep what was read."""
+        page = _FakeDialogPage(
+            radios={"CLP": [_CLP_RADIO, "Cuenta Vista 00-000-00000-03 (CLP)"]},
+            cartolas={"CLP": [{"movimientos": [_cartola_row()]}] * 2},
+        )
+
+        with caplog.at_level("WARNING", logger=movements_mod.__name__):
+            found = movements_mod._read_checking_movements(page, attempt=0)
+
+        assert len(found) == 1
+        assert "re-opened an account already read at radio 2 of 2" in caplog.text
+
+    def test_the_usd_radio_is_found_by_its_label_not_its_position(self):
+        page = _FakeDialogPage(radios={"USD": [_CLP_RADIO, _USD_RADIO]})
+
+        assert _read_usd_dialog(page) == []
+        assert (page.chosen, page.picked) == ("USD", 1)
+
+    def test_option_text_is_never_logged(self, caplog):
+        page = _FakeDialogPage(options=("(USD) sintetico", "(CLP) sintetico"))
+
+        with caplog.at_level("DEBUG", logger=movements_mod.__name__):
+            _read_usd_dialog(page)
+
+        assert "2 currency option(s); recognised: ['CLP', 'USD']" in caplog.text
+        assert "sintetico" not in caplog.text
+
+    def test_no_usd_option_means_no_account(self, caplog):
+        page = _FakeDialogPage(options=("(CLP)",))
+
+        with caplog.at_level("INFO", logger=movements_mod.__name__):
+            found = _read_usd_dialog(page)
+
+        assert found == []
+        assert "no USD checking account (no USD option)" in caplog.text
+
+    def test_a_list_with_no_recognised_currency_is_a_failure(self, caplog):
+        """Blank or relabelled options are a slow render, not a missing account."""
+        page = _FakeDialogPage(options=("",))
+
+        with caplog.at_level("INFO", logger=movements_mod.__name__):
+            assert _read_usd_dialog(page) is None
+
+        assert "no currency option recognised" in caplog.text
+
+    def test_a_usd_option_whose_radios_never_render_is_a_failure(self, caplog):
+        """The option promised an account; a radio wait that times out is a
+        broken drive, not a missing account."""
+        page = _FakeDialogPage(radios={"USD": []})
+
+        with caplog.at_level("INFO", logger=movements_mod.__name__):
+            assert _read_usd_dialog(page) is None
+
+        assert "failed at the account radio step" in caplog.text
+        assert "no account radio rendered" in caplog.text
+
+    def test_a_usd_option_with_only_clp_radios_is_a_failure(self, caplog):
+        page = _FakeDialogPage(radios={"USD": [_CLP_RADIO]})
+
+        with caplog.at_level("INFO", logger=movements_mod.__name__):
+            assert _read_usd_dialog(page) is None
+
+        assert "1 account radio(s), none labelled (USD)" in caplog.text
+
+    def test_a_missing_clp_option_is_still_a_failure(self, caplog):
+        """Every customer has a CLP account, so its absence is a broken drive."""
+        page = _FakeDialogPage(options=("(USD)",))
+
+        with caplog.at_level("INFO", logger=movements_mod.__name__):
+            assert movements_mod._read_checking_movements(page, attempt=0) is None
+
+        assert "CLP cartola dialog failed at the currency select step" in caplog.text
+
+    @pytest.mark.parametrize(
+        ("page_kwargs", "step"),
+        [
+            ({"select_visible": False}, "dialog open"),
+            ({"options": ()}, "currency select"),
+            ({"accept_fails_for": {"USD"}}, "accept"),
+            ({"cartola_fires": False}, "cartola wait"),
+        ],
+        ids=["select-hidden", "list-empty", "accept", "cartola-wait"],
+    )
+    def test_a_failing_step_is_named_and_is_a_failure(self, caplog, page_kwargs, step):
+        page = _FakeDialogPage(**page_kwargs)
+
+        with caplog.at_level("INFO", logger=movements_mod.__name__):
+            found = _read_usd_dialog(page, attempt=1)
+
+        assert found is None
+        assert f"USD cartola dialog failed at the {step} step (account 1, attempt 2)" in (
+            caplog.text
+        )
+
+
+# --- USD checking cartola (issue #82) ------------------------------------------
+#
+# The USD row shape is pending live verification: the one USD account observed
+# had no movements. Every row, account number and amount below is synthetic,
+# built to cover the shapes the parser tolerates.
+
+
+def _usd_cartola_row(monto=1234.56, saldo=2345.67, tipo="cargo"):
+    """A synthetic USD `getCartola` row: the CLP shape, amounts with cents."""
+    row = _cartola_row(tipo=tipo, fecha="20260820 09:15:00")
+    row["monto"] = monto
+    row["saldo"] = saldo
+    row["id"] = f"CEX{ACCOUNT}:20260820 09:15:00:{monto}:{tipo}:1"
+    return row
+
+
+def _usd_cartola(rows):
+    return {"moneda": "USD", "movimientos": rows, "pagina": [{"masPaginas": "N"}]}
+
+
+class TestUsdAmountParsing:
+    def test_formats(self):
+        parse = movements_mod._usd_from_text
+        assert parse("1.234,56") == Decimal("1234.56")
+        assert parse("1,234.56") == Decimal("1234.56")
+        assert parse("1234,56") == Decimal("1234.56")
+        assert parse("1234.56") == Decimal("1234.56")
+        assert parse("USD 1.234,56") == Decimal("1234.56")
+        assert parse("USD 12,3") == Decimal("12.30")
+        assert parse("1.234") == Decimal("1234.00")
+        assert parse(1234.56) == Decimal("1234.56")
+        assert parse(1234) == Decimal("1234.00")
+
+    def test_a_lone_comma_is_always_the_decimal_separator(self, caplog):
+        """Chilean format, even when three digits follow it (ambiguous, so logged)."""
+        with caplog.at_level("WARNING", logger=movements_mod.__name__):
+            assert movements_mod._usd_from_text("1,234") == Decimal("1.23")
+        assert "three digits after a lone comma" in caplog.text
+
+    def test_unparseable(self):
+        parse = movements_mod._usd_from_text
+        assert parse("") is None
+        assert parse(None) is None
+        assert parse("sin dato") is None
+        assert parse(True) is None
+
+
+class TestUsdCartolaRows:
+    def test_a_cargo_keeps_its_cents(self):
+        movement = parse_cartola_movement(_usd_cartola_row(monto=1234.56), currency="USD")
+        assert movement.currency == "USD"
+        assert movement.amount == Decimal("-1234.56")
+        assert movement.product_kind == "checking"
+        assert movement.transaction_date == datetime.date(2026, 8, 20)
+
+    def test_an_abono_is_income(self):
+        movement = parse_cartola_movement(
+            _usd_cartola_row(monto="1.234,56", tipo="abono"), currency="USD"
+        )
+        assert movement.amount == Decimal("1234.56")
+
+    def test_cents_are_never_rounded_away(self):
+        movement = parse_cartola_movement(_usd_cartola_row(monto=0.99), currency="USD")
+        assert movement.amount == Decimal("-0.99")
+
+    def test_number_and_string_spellings_share_one_identity(self):
+        as_number = _usd_cartola_row(saldo=2345.67)
+        as_string = dict(as_number, saldo="2.345,67")
+        first = parse_cartola_movement(as_number, currency="USD")
+        second = parse_cartola_movement(as_string, currency="USD")
+        assert first.fingerprint == second.fingerprint == (as_number["id"], "2345.67")
+        assert external_id_for(first) == external_id_for(second)
+
+    def test_rows_without_a_saldo_are_kept_and_warned_about_once(self, caplog):
+        rows = [_usd_cartola_row(monto=1234.56), _usd_cartola_row(monto=0.99)]
+        for row in rows:
+            row["saldo"] = None
+
+        with caplog.at_level("WARNING", logger=movements_mod.__name__):
+            found, _ = movements_mod._movements_from_cartola(
+                MagicMock(), _usd_cartola(rows), 0, "USD"
+            )
+
+        assert [m.fingerprint for m in found] == [(row["id"], "") for row in rows]
+        assert caplog.text.count("no parseable saldo") == 1
+        assert "2 USD cartola row(s) have no parseable saldo" in caplog.text
+
+    def test_the_operation_id_scheme_is_the_clp_one(self):
+        movement = parse_cartola_movement(
+            _usd_cartola_row(), operation_id="TEF_IPE 0000123", currency="USD"
+        )
+        assert external_id_for(movement) == "bch_op_TEFIPE0000123"
+
+    def test_unreadable_rows_are_dropped(self):
+        assert parse_cartola_movement(_usd_cartola_row(monto="sin dato"), currency="USD") is None
+        assert parse_cartola_movement(_usd_cartola_row(tipo="reverso"), currency="USD") is None
+        row = _usd_cartola_row()
+        row["id"] = ""
+        row["saldo"] = None
+        assert parse_cartola_movement(row, currency="USD") is None
+
+
+class TestClpCartolaKeysAreUnchanged:
+    """Pinned against main before issue #82: no CLP checking key may move."""
+
+    def test_fingerprint_key(self):
+        movement = parse_cartola_movement(_cartola_row())
+        assert movement.currency == "CLP"
+        assert movement.amount == Decimal(1000000)
+        assert external_id_for(movement) == "bch_fp_9d6fd81f7f7ea522"
+
+    def test_operation_id_key(self):
+        movement = parse_cartola_movement(
+            _cartola_row(tipo="cargo", monto="999.999"), operation_id="TEF_IPE 0000123"
+        )
+        assert external_id_for(movement) == "bch_op_TEFIPE0000123"
+
+
+class TestUsdAndClpNeverCollide:
+    def test_the_same_row_keys_differently_per_currency(self):
+        """A USD fingerprint is hashed with the currency in front."""
+        row = _cartola_row(monto="1.000.000", saldo="2.500.000")
+        clp = parse_cartola_movement(row)
+        usd = parse_cartola_movement(row, currency="USD")
+        assert external_id_for(clp) != external_id_for(usd)
+        assert external_id_for(usd).startswith("bch_fp_")
+
+    def test_a_shared_operation_id_stays_two_movements(self):
+        """Both read `bch_op_<id>`, but on different products (currency routes
+        them, and `external_id` is unique per product), and one scrape keeps
+        both."""
+        clp = parse_cartola_movement(_cartola_row(), operation_id="12345678901")
+        usd = parse_cartola_movement(
+            _usd_cartola_row(), operation_id="12345678901", currency="USD"
+        )
+        assert (clp.currency, usd.currency) == ("CLP", "USD")
+        assert dedupe_movements([clp, usd]) == [clp, usd]
+
+
+class TestUsdCheckingSurface:
+    @pytest.fixture(autouse=True)
+    def _fake_time(self, monkeypatch):
+        _use_fake_clock(monkeypatch)
+
+    def test_reads_the_usd_cartola_with_cents(self):
+        page = _FakeDialogPage(cartolas={"USD": _usd_cartola([_usd_cartola_row()])})
+
+        found = movements_mod._read_usd_checking_movements(page, attempt=0)
+
+        assert [(m.currency, m.amount) for m in found] == [("USD", Decimal("-1234.56"))]
+
+    def test_an_empty_cartola_is_a_reading_not_a_failure(self):
+        page = _FakeDialogPage(cartolas={"USD": _usd_cartola([])})
+
+        assert movements_mod._read_usd_checking_movements(page, attempt=0) == []
+
+    def test_no_usd_account_is_not_a_failed_surface(self, monkeypatch):
+        monkeypatch.setattr(
+            movements_mod,
+            "_MOVEMENT_READERS",
+            [("movimientos USD", movements_mod._read_usd_checking_movements)],
+        )
+
+        movements, failed = read_movement_surfaces(_FakeDialogPage(options=("(CLP)",)))
+
+        assert (movements, failed) == ([], ())
+
+    def test_a_failed_usd_cartola_never_costs_the_clp_one(self, monkeypatch):
+        page = _FakeDialogPage(
+            cartolas={"CLP": {"movimientos": [_cartola_row()]}},
+            accept_fails_for={"USD"},
+        )
+        monkeypatch.setattr(
+            movements_mod,
+            "_MOVEMENT_READERS",
+            [
+                ("movimientos", movements_mod._read_checking_movements),
+                ("movimientos USD", movements_mod._read_usd_checking_movements),
+            ],
+        )
+
+        movements, failed = read_movement_surfaces(page)
+
+        assert failed == ("movimientos USD",)
+        assert [(m.currency, external_id_for(m)) for m in movements] == [
+            ("CLP", "bch_fp_9d6fd81f7f7ea522")
+        ]
+
+    def test_it_is_registered_right_after_the_clp_cartola(self):
+        labels = [label for label, _ in movements_mod._MOVEMENT_READERS]
+        assert labels[:2] == ["movimientos", "movimientos USD"]

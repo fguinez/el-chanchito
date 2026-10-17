@@ -37,8 +37,16 @@ CLP figure). The USD statement is a sibling endpoint
 (`estadocuenta/internacional/resumen-por-fecha`) with its own row shape, read
 by the same capture-and-replay strategy as the national one. Every USD amount
 is a Decimal with exact cents and every movement carries its `currency`, which
-is what routes it to the USD product. USD checking movements are not read yet
-(see #82).
+is what routes it to the USD product.
+
+Issue #82 added the USD checking cartola: the same `getCartola` behind the
+same dialog with USD picked, read as its own surface ("movimientos USD") so a
+failure there never costs the CLP cartola. A customer with no USD account (no
+"(USD)" option in the currency list) reads as an empty list, not a failure; a
+USD option with no "(USD)" radio behind it is a failure. Every dialog step
+logs which one failed and why. The USD row shape is pending live
+verification: the one account observed had no movements, so it is parsed
+with the CLP rules plus a defensive amount parser.
 
 Why this is its own module: `banchile_web.py` is 1.6k lines about *balances* and
 its docstring is a map of that surface. Movements are a different read, with
@@ -79,14 +87,16 @@ import math
 import re
 import time
 from dataclasses import dataclass, field, replace
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Callable, Optional
 
 from scrapers.backends.banchile_fx import read_exchange_rate_surface
 from scrapers.backends.banchile_web import (
     _CARD_LINK_SELECTORS,
     _CARD_LINK_TIMEOUTS_MS,
+    _INNER_TEXT_JS,
     _PORTAL_HOST,
+    _PRODUCT_ROWS,
     _RENDER_TIMEOUTS_MS,
     _authenticated_session,
     _budget,
@@ -234,6 +244,54 @@ def _usd(value) -> Optional[Decimal]:
     if number is None or not math.isfinite(number):
         return None
     return Decimal(repr(number)).quantize(_CENTS, rounding=ROUND_HALF_UP)
+
+
+def _usd_from_text(value) -> Optional[Decimal]:
+    """A USD amount from a JSON number or a formatted string (None if neither).
+
+    For the USD cartola, whose formatting has not been observed on a real row
+    yet (issue #82): accepts "1.234,56", "1,234.56", "1234,56", "1234.56",
+    "USD 1.234,56" and the CLP-style "1.234". Whichever of "," and "." comes
+    last is the decimal separator when both appear; a lone "." is a thousands
+    separator only when exactly three digits follow it, as on every figure this
+    portal prints. Never rounded to a whole unit: cents are kept, quantized.
+
+    A lone "," is always the decimal separator, the portal's Chilean format
+    ("." groups thousands, "," starts the decimals), even with exactly three
+    digits after it ("1,234" reads 1.23 after quantizing, never 1234). That
+    case is ambiguous in isolation, so it is logged at WARNING while the USD
+    row shape is unverified.
+    """
+    if _number(value) is not None:
+        return _usd(value)
+    cleaned = re.sub(r"(?i)USD|US\$|\$|\s", "", _text(value))
+    if not re.search(r"\d", cleaned):
+        return None
+    if "," in cleaned and "." in cleaned:
+        if cleaned.rfind(",") > cleaned.rfind("."):
+            cleaned = cleaned.replace(".", "").replace(",", ".")
+        else:
+            cleaned = cleaned.replace(",", "")
+    elif "," in cleaned:
+        if cleaned.count(",") == 1 and len(cleaned.rsplit(",", 1)[-1]) == 3:
+            # WARNING until a real USD row confirms the format (issue #82).
+            logger.warning(
+                "BanChile: a USD amount has three digits after a lone comma; "
+                "reading the comma as the decimal separator"
+            )
+        cleaned = cleaned.replace(",", "." if cleaned.count(",") == 1 else "")
+    elif cleaned.count(".") > 1 or (
+        "." in cleaned and len(cleaned.rsplit(".", 1)[-1]) == 3
+    ):
+        cleaned = cleaned.replace(".", "")
+    try:
+        amount = Decimal(cleaned)
+    except InvalidOperation:
+        logger.warning("BanChile: could not parse a USD amount")
+        return None
+    if not amount.is_finite():
+        return None
+    return amount.quantize(_CENTS, rounding=ROUND_HALF_UP)
 
 
 def card_location(city, country) -> Optional[TransactionLocation]:
@@ -420,7 +478,9 @@ def _cartola_dates(raw) -> tuple[Optional[datetime.date], Optional[datetime.date
     return occurred, posted
 
 
-def parse_cartola_movement(raw, operation_id: Optional[str] = None):
+def parse_cartola_movement(
+    raw, operation_id: Optional[str] = None, currency: str = "CLP"
+):
     """One `getCartola` row -> a BanChileMovement (None when unusable).
 
     `monto` is unsigned and `tipo` carries the direction, so an unrecognised
@@ -429,10 +489,28 @@ def parse_cartola_movement(raw, operation_id: Optional[str] = None):
     `id` plus `saldo` (the running ledger balance: every consecutive delta in
     the observed window equalled the signed `monto`, every value was distinct,
     and the values were identical across logins).
+
+    `currency` is the account's, as picked in the dialog. The CLP path is
+    exactly what it was before USD existed (whole pesos, `saldo` verbatim), so
+    no CLP key moves. A USD row keeps its cents (`_usd_from_text`, number or
+    string), and its `saldo` enters the fingerprint as a quantized Decimal so a
+    cosmetic change in how the bank spells it cannot re-key the movement.
+    `external_id_for` hashes a USD fingerprint with the currency in front, and
+    the rows land on their own product, so they never meet a CLP key.
+
+    Pending live verification (issue #82): no USD cartola row has been
+    observed yet, so whether `monto`/`saldo` are numbers or strings, what the
+    composite `id` looks like and whether `detalle-glosa` answers a
+    `transaccionId` for USD rows are all assumptions this parser tolerates
+    rather than facts it relies on.
     """
     if not isinstance(raw, dict):
         return None
-    monto = parse_clp(_text(raw.get("monto")))
+    usd = currency != "CLP"
+    if usd:
+        monto = _usd_from_text(raw.get("monto"))
+    else:
+        monto = parse_clp(_text(raw.get("monto")))
     if monto is None:
         return None
     tipo = _text(raw.get("tipo")).lower()
@@ -452,8 +530,13 @@ def parse_cartola_movement(raw, operation_id: Optional[str] = None):
     if tx_date is None:
         return None
 
-    bank_id = _text(raw.get("id"))
-    saldo = _text(raw.get("saldo"))
+    if usd:
+        bank_id = _fingerprint_value(raw.get("id"))
+        saldo_amount = _usd_from_text(raw.get("saldo"))
+        saldo = str(saldo_amount) if saldo_amount is not None else ""
+    else:
+        bank_id = _text(raw.get("id"))
+        saldo = _text(raw.get("saldo"))
     if operation_id is None and not bank_id and not saldo:
         # Nothing stable left to key on; a positional id would re-import the
         # movement on the next scrape.
@@ -468,6 +551,7 @@ def parse_cartola_movement(raw, operation_id: Optional[str] = None):
         accounting_date=posted,
         operation_id=operation_id,
         fingerprint=(bank_id, saldo),
+        currency=currency,
     )
 
 
@@ -908,6 +992,54 @@ def cartola_account_number(payload) -> str:
     return ""
 
 
+def _currency_code(value) -> str:
+    """`value` as "CLP" or "USD" (any case); "" for anything else.
+
+    Only a recognised code is ever judged: a value we have not seen (a
+    renamed field, a label instead of a code) must not reject a cartola.
+    """
+    code = _text(value).upper()
+    return code if code in _CURRENCY_OPTION_RES else ""
+
+
+def _requested_currency(request_body) -> str:
+    """The currency a `getCartola` request asked for ("" when it doesn't say).
+
+    The request names the account in `cuentaSeleccionada`, `moneda` included.
+    Unverified on a live USD drive, so only a recognised code counts.
+    """
+    if not isinstance(request_body, dict):
+        return ""
+    selected = request_body.get("cuentaSeleccionada")
+    if not isinstance(selected, dict):
+        return ""
+    return _currency_code(selected.get("moneda"))
+
+
+def cartola_mismatch(
+    payload, currency: str, read_accounts=frozenset(), request_body=None
+) -> str:
+    """Why a captured `getCartola` payload is not the one a drive asked for.
+
+    "" when it is. Once the SPA remembers an account it fetches that
+    account's cartola by itself whenever the route renders, so a capture can
+    hold a payload for the wrong account: a USD drive must never take a CLP
+    cartola (its rows would be stored as USD), and a later CLP drive must not
+    take an account already read. The payload's own `moneda` is checked, and
+    so is the one its request asked for (`request_body`), which still tells
+    an empty or `moneda`-less payload apart; neither is judged when absent or
+    not a recognised code ("CLP", "USD").
+    """
+    moneda = _currency_code(payload.get("moneda")) if isinstance(payload, dict) else ""
+    moneda = moneda or _requested_currency(request_body)
+    if moneda and moneda != currency:
+        return f"stale cartola (moneda {moneda})"
+    account = cartola_account_number(payload)
+    if account and account in read_accounts:
+        return _STALE_ACCOUNT
+    return ""
+
+
 def dedupe_movements(movements: list[BanChileMovement]) -> list[BanChileMovement]:
     """Drop movements repeated within one read, keeping the first of each.
 
@@ -951,12 +1083,49 @@ _BILLED_ROUTE = "#/tarjeta-credito/consultar/facturados"
 
 # The movements route opens a Material dialog ("Seleccione una cuenta") that
 # defaults to the USD account, and `getCartola` does not fire until it is
-# cleared: pick the currency, pick the account radio, press Aceptar.
+# cleared: pick the currency, pick the account radio, press Aceptar. The
+# options read "(USD)" and "(CLP)"; the radios only list the accounts of the
+# picked currency. The USD radio was observed unchecked, labelled "Cuenta
+# Corriente ... (USD)", with an id that changes between renders, so it is found
+# by that label and clicked through its own `label` child, never by id.
+#
+# The dialog only opens by itself until an account has been chosen once: the
+# SPA then remembers that account for the rest of the browser session, and the
+# route (a hash change, a return home, even a reload) renders that account's
+# cartola straight away with no dialog. The cartola page's "SELECCIONAR OTRA
+# CUENTA" button reopens the same dialog, so every drive after the first goes
+# through it. The button is only live once that view has settled (it fetches
+# the remembered account's cartola first): a click while it still renders does
+# nothing, so the click waits for that fetch and is retried, bounded.
 _CURRENCY_SELECT_SELECTOR = "mat-select[name=monedas]"
+_REOPEN_DIALOG_NAME_RE = re.compile(r"SELECCIONAR\s+OTRA\s+CUENTA", re.I)
+# How often the dialog step looks for the select or the reopen button.
+_DIALOG_POLL_MS = 250
+# The longest wait for the remembered view's own cartola before clicking.
+_REMEMBERED_SETTLE_MS = 4_000
+# After a reopen click, how long the select gets to show before a retry.
+_DIALOG_OPEN_WAIT_MS = 5_000
+_REOPEN_CLICKS = 3
+# Before Aceptar: how long an automatic cartola still in flight may take.
+_IN_FLIGHT_WAIT_MS = 10_000
+# After Aceptar: once only stale cartolas have come, how much longer to wait
+# for the right one before giving up (the full budget would cost 30-60 s).
+_STALE_GRACE_MS = 8_000
+# Before a card leg clicks the dashboard shortcut: how long the dashboard gets
+# to render, and the pause once it had to be waited for.
+_DASHBOARD_READY_MS = 15_000
+_DASHBOARD_SETTLE_MS = 1_500
+_DASHBOARD_POLL_MS = 500
 _CURRENCY_OPTION_SELECTOR = "mat-option"
 _ACCOUNT_RADIO_SELECTOR = "mat-radio-button"
 _MODAL_ACCEPT_SELECTOR = "#modalPrimaryBtn button"
-_CLP_OPTION_RE = re.compile(r"\bCLP\b", re.I)
+_CURRENCY_OPTION_RES = {
+    "CLP": re.compile(r"\bCLP\b", re.I),
+    "USD": re.compile(r"\bUSD\b", re.I),
+}
+# Only the USD drive filters radios by label; the CLP one keeps its positional
+# pick, unchanged since issue #57.
+_ACCOUNT_LABEL_RES = {"USD": re.compile(r"\(\s*USD\s*\)", re.I)}
 
 # Movement surfaces are slower than a balance read (the cartola arrives after a
 # dialog round trip), so they reuse banchile_web's escalating render budgets.
@@ -967,8 +1136,8 @@ _DIALOG_SETTLE_MS = 600
 # licence to hammer.
 _GLOSA_PAUSE_MS = 300
 _MAX_GLOSA_CALLS = 80
-# One radio per account of the chosen currency. The dialog has to be re-driven
-# per account (see `_read_checking_movements`), so this bounds the re-drives.
+# One radio per account of the chosen currency. The dialog is driven once per
+# account (see `_read_checking_movements`), so this bounds the drives.
 _MAX_CHECKING_ACCOUNTS = 4
 # How far back the billed leg reads. The unbilled leg only covers the current
 # cycle, so reading the newest two statements covers a charge that crossed the
@@ -1007,24 +1176,54 @@ class _JsonCapture:
         self.fragment = fragment
         self.payloads: list[dict] = []
         self.requests: list[dict] = []
+        # The request body behind each payload (None when unknown). `started`
+        # counts every matching request, whatever its body, and `finished`
+        # every one that ended: answered (200 or not) or failed (aborted,
+        # cancelled), so a dropped call is never in flight forever.
+        self.payload_requests: list[Optional[dict]] = []
+        self.started = 0
+        self.finished = 0
+
+    def in_flight(self) -> bool:
+        """True while a matching request has neither been answered nor failed."""
+        return self.started > self.finished
+
+    def clear(self) -> None:
+        self.payloads.clear()
+        self.requests.clear()
+        self.payload_requests.clear()
+        self.started = 0
+        self.finished = 0
 
     def _on_request(self, request) -> None:
         try:
             if self.fragment not in (request.url or ""):
                 return
+            self.started += 1
             data = request.post_data_json
             if isinstance(data, dict):
                 self.requests.append({"url": request.url, "body": data})
         except Exception:
             pass
 
+    def _on_request_failed(self, request) -> None:
+        try:
+            if self.fragment in (request.url or ""):
+                self.finished += 1
+        except Exception:
+            pass
+
     def _on_response(self, response) -> None:
         try:
-            if self.fragment not in (response.url or "") or response.status != 200:
+            if self.fragment not in (response.url or ""):
+                return
+            self.finished += 1
+            if response.status != 200:
                 return
             payload = response.json()
             if isinstance(payload, dict):
                 self.payloads.append(payload)
+                self.payload_requests.append(_request_body(response))
         except Exception:
             pass
 
@@ -1032,6 +1231,7 @@ class _JsonCapture:
         try:
             self.page.on("request", self._on_request)
             self.page.on("response", self._on_response)
+            self.page.on("requestfailed", self._on_request_failed)
         except Exception:
             logger.debug("BanChile: could not attach a %s listener", self.fragment)
         return self
@@ -1040,12 +1240,22 @@ class _JsonCapture:
         for event, handler in (
             ("request", self._on_request),
             ("response", self._on_response),
+            ("requestfailed", self._on_request_failed),
         ):
             try:
                 self.page.remove_listener(event, handler)
             except Exception:
                 pass
         return False
+
+
+def _request_body(response) -> Optional[dict]:
+    """The JSON body of the request behind `response` (None when unknown)."""
+    try:
+        body = response.request.post_data_json
+    except Exception:
+        return None
+    return body if isinstance(body, dict) else None
 
 
 def _wait_for_payload(page, capture: _JsonCapture, timeout_ms: int) -> Optional[dict]:
@@ -1062,6 +1272,39 @@ def _wait_for_payload(page, capture: _JsonCapture, timeout_ms: int) -> Optional[
             return None
         if time.monotonic() >= deadline:
             return None
+        page.wait_for_timeout(500)
+
+
+def _wait_for_cartola(
+    page, capture: _JsonCapture, timeout_ms: int, currency: str, read_accounts
+) -> tuple[Optional[dict], str]:
+    """Wait for the drive's own `getCartola` payload; (None, reason) if none came.
+
+    Payloads that `cartola_mismatch` rejects are skipped and the wait goes on,
+    so a late automatic fetch of the remembered account cannot stand in for
+    the one Aceptar asked for. A mismatched payload is never returned. Once
+    one has been seen the wait only lasts `_STALE_GRACE_MS` more: the SPA has
+    answered, just not with the account asked for.
+    """
+    deadline = time.monotonic() + timeout_ms / 1000
+    checked = 0
+    stale = ""
+    while True:
+        while checked < len(capture.payloads):
+            payload = capture.payloads[checked]
+            request_body = capture.payload_requests[checked]
+            checked += 1
+            mismatch = cartola_mismatch(payload, currency, read_accounts, request_body)
+            if not mismatch:
+                return payload, ""
+            logger.debug("BanChile: skipping a captured cartola: %s", mismatch)
+            if not stale:
+                deadline = min(deadline, time.monotonic() + _STALE_GRACE_MS / 1000)
+            stale = mismatch
+        if not _on_portal(page):
+            return None, "left the portal"
+        if time.monotonic() >= deadline:
+            return None, stale or f"no getCartola response within {timeout_ms} ms"
         page.wait_for_timeout(500)
 
 
@@ -1085,36 +1328,240 @@ def _post_json(page, url: str, body: dict) -> tuple[int, Optional[dict]]:
 # --- Checking: the cartola behind the account dialog --------------------------
 
 
-def _select_clp_currency(page, timeout_ms: int) -> bool:
-    """Open the dialog's currency select and pick CLP (it defaults to USD)."""
+# The dialog drive, step by step. Each step reports how it went instead of a
+# bare bool, so a failing drive names the step that failed (issue #82: the
+# first USD attempt failed every retry and the logs could not say where).
+_STEP_OK = "ok"
+_STEP_ABSENT = "absent"  # the dialog has nothing in this currency
+_STEP_FAILED = "failed"
+_STALE_ACCOUNT = "stale cartola (an account already read)"
+
+
+@dataclass(frozen=True)
+class _StepResult:
+    status: str
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class _RadioPick:
+    """What the account step found: how many radios, and whether it clicked."""
+
+    count: int
+    status: str
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class _CartolaDrive:
+    """One dialog drive. `no_account` means the currency has no account at all."""
+
+    payload: Optional[dict] = None
+    accounts: int = 0
+    no_account: bool = False
+    # The dialog answered with an account this attempt already read.
+    repeated_account: bool = False
+
+
+def matching_option_index(option_texts: list[str], currency: str) -> Optional[int]:
+    """Which currency option to click (None when no option is `currency`'s)."""
+    option_re = _CURRENCY_OPTION_RES[currency]
+    for index, text in enumerate(option_texts):
+        if option_re.search(text or ""):
+            return index
+    return None
+
+
+def matching_radio_indices(radio_labels: list[str], currency: str) -> list[int]:
+    """The radios that belong to `currency`'s accounts, in dialog order.
+
+    Every radio for CLP (its positional pick predates labels and stays as it
+    was); only the radios whose label carries "(USD)" for USD.
+    """
+    label_re = _ACCOUNT_LABEL_RES.get(currency)
+    if label_re is None:
+        return list(range(len(radio_labels)))
+    return [i for i, label in enumerate(radio_labels) if label_re.search(label or "")]
+
+
+def _visible_now(page, selector: str) -> bool:
+    """True when `selector`'s first match is visible right now (never raises)."""
+    try:
+        return bool(page.locator(selector).first.is_visible())
+    except Exception:
+        return False
+
+
+def _reopen_button(page):
+    """The visible "SELECCIONAR OTRA CUENTA" button (a hidden twin is skipped)."""
+    return page.get_by_role("button", name=_REOPEN_DIALOG_NAME_RE).filter(visible=True).first
+
+
+def _reopen_button_visible(page) -> bool:
+    try:
+        return bool(_reopen_button(page).is_visible())
+    except Exception:
+        return False
+
+
+def _ms_left(deadline: float) -> int:
+    return max(0, int((deadline - time.monotonic()) * 1000))
+
+
+def _wait_until(page, condition: Callable[[], bool], timeout_ms: int) -> bool:
+    """Poll `condition` through the page clock until it holds or time runs out."""
+    deadline = time.monotonic() + timeout_ms / 1000
+    while True:
+        if condition():
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        page.wait_for_timeout(_DIALOG_POLL_MS)
+
+
+def _open_dialog(page, capture: "_JsonCapture", timeout_ms: int) -> _StepResult:
+    """Make sure the account dialog is open, reopening it when it is not.
+
+    The route shows the dialog by itself only while no account is remembered
+    (see `_REOPEN_DIALOG_NAME_RE`); otherwise it renders the remembered
+    account's cartola, whose "SELECCIONAR OTRA CUENTA" button opens the same
+    dialog. Waits for whichever of the two shows first within the budget. On
+    the remembered path it first lets that view settle (its automatic
+    `getCartola` captured, or `_REMEMBERED_SETTLE_MS`), then clicks and checks
+    that the select appeared, retrying up to `_REOPEN_CLICKS` times.
+    """
+    deadline = time.monotonic() + timeout_ms / 1000
+    while True:
+        if _visible_now(page, _CURRENCY_SELECT_SELECTOR):
+            return _StepResult(_STEP_OK)
+        if _reopen_button_visible(page):
+            break
+        if not _on_portal(page):
+            return _StepResult(_STEP_FAILED, "left the portal")
+        if time.monotonic() >= deadline:
+            return _StepResult(
+                _STEP_FAILED, "dialog did not open; reopen button not found"
+            )
+        page.wait_for_timeout(_DIALOG_POLL_MS)
+
+    logger.debug("BanChile: an account is remembered; reopening the dialog")
+    if not _wait_until(
+        page,
+        lambda: bool(capture.payloads),
+        min(_REMEMBERED_SETTLE_MS, _ms_left(deadline)),
+    ):
+        logger.debug("BanChile: the remembered cartola did not arrive; clicking anyway")
+    page.wait_for_timeout(_DIALOG_SETTLE_MS)
+    clicks = 0
+    # The first click always happens, even if settling used up the budget; a
+    # click that hangs only costs one retry's share, so the retries still run.
+    while clicks < _REOPEN_CLICKS and (clicks == 0 or _ms_left(deadline) > 0):
+        clicks += 1
+        try:
+            _reopen_button(page).click(
+                timeout=max(1_000, min(_DIALOG_OPEN_WAIT_MS, _ms_left(deadline)))
+            )
+        except Exception:
+            logger.debug("BanChile: reopen click %d raised", clicks, exc_info=True)
+            page.wait_for_timeout(_DIALOG_SETTLE_MS)
+            continue
+        if _wait_until(
+            page,
+            lambda: _visible_now(page, _CURRENCY_SELECT_SELECTOR),
+            min(_DIALOG_OPEN_WAIT_MS, _ms_left(deadline)),
+        ):
+            return _StepResult(_STEP_OK)
+        logger.debug("BanChile: reopen click %d did not open the dialog", clicks)
+    return _StepResult(
+        _STEP_FAILED, f"reopen button did not open the dialog after {clicks} click(s)"
+    )
+
+
+def _select_currency(page, currency: str, timeout_ms: int) -> _StepResult:
+    """Open the dialog's currency select and pick `currency` (it defaults to USD).
+
+    USD is picked explicitly too rather than trusted as the default, so both
+    drives go through the same steps. `_STEP_ABSENT` means the list opened with
+    another currency recognised and none of its options is `currency`'s; an
+    empty or unrecognised list is a failure, since that is what a slow render
+    looks like.
+    """
     try:
         select = page.locator(_CURRENCY_SELECT_SELECTOR).first
-        select.wait_for(state="visible", timeout=timeout_ms)
+        try:
+            select.wait_for(state="visible", timeout=timeout_ms)
+        except Exception:
+            logger.debug("BanChile: currency select never became visible", exc_info=True)
+            return _StepResult(_STEP_FAILED, "currency select not visible")
         select.click()
         page.wait_for_timeout(_DIALOG_SETTLE_MS)
         options = page.locator(_CURRENCY_OPTION_SELECTOR)
-        for index in range(options.count()):
-            option = options.nth(index)
-            if _CLP_OPTION_RE.search(option.inner_text() or ""):
-                option.click()
-                page.wait_for_timeout(_DIALOG_SETTLE_MS)
-                return True
-    except Exception:
+        texts = [options.nth(i).inner_text() or "" for i in range(options.count())]
+        # The count and the currencies recognised, never the raw option text.
+        recognised = [
+            c for c in _CURRENCY_OPTION_RES if matching_option_index(texts, c) is not None
+        ]
+        logger.debug(
+            "BanChile: %d currency option(s); recognised: %s", len(texts), recognised
+        )
+        if not texts:
+            return _StepResult(_STEP_FAILED, "currency list did not open")
+        if not recognised:
+            return _StepResult(_STEP_FAILED, "no currency option recognised")
+        index = matching_option_index(texts, currency)
+        if index is None:
+            return _StepResult(_STEP_ABSENT, f"no {currency} option")
+        options.nth(index).click()
+        page.wait_for_timeout(_DIALOG_SETTLE_MS)
+        return _StepResult(_STEP_OK)
+    except Exception as error:
         logger.debug("BanChile: currency select not usable", exc_info=True)
-    return False
+        return _StepResult(_STEP_FAILED, f"currency select raised {type(error).__name__}")
 
 
-def _click_account_radio(page, index: int) -> int:
-    """Select the index-th account radio; returns how many the dialog offers.
+def _click_account_radio(
+    page, index: int, currency: str = "CLP", timeout_ms: int = 0
+) -> _RadioPick:
+    """Select the index-th account radio of `currency`; report how many it offers.
 
-    Returns 0 when the radios aren't there or the index is out of range, which
-    the caller reads as "no account to open".
+    CLP is unchanged since issue #57: the radios are counted after the settle
+    pause and picked by position, through `#<id> label`. USD waits for the
+    radios to render and keeps only the ones labelled "(USD)", then clicks the
+    picked radio's own `label` child (its id changes between renders, so it is
+    never looked up again). The USD option was there, so an account is
+    expected: radios that never render, or none labelled "(USD)", are a
+    failure (only a missing option means "no account").
     """
+    labelled = currency in _ACCOUNT_LABEL_RES
     try:
         radios = page.locator(_ACCOUNT_RADIO_SELECTOR)
+        if labelled:
+            try:
+                radios.first.wait_for(state="visible", timeout=timeout_ms)
+            except Exception:
+                logger.debug("BanChile: no account radio rendered", exc_info=True)
+                return _RadioPick(0, _STEP_FAILED, "no account radio rendered")
+            labels = [radios.nth(i).inner_text() or "" for i in range(radios.count())]
+            # Only the count is logged: a radio's label carries the account number.
+            logger.debug("BanChile: %d account radio(s) rendered", len(labels))
+            matching = matching_radio_indices(labels, currency)
+            if not matching:
+                return _RadioPick(
+                    0,
+                    _STEP_FAILED,
+                    f"{len(labels)} account radio(s), none labelled ({currency})",
+                )
+            if index >= len(matching):
+                return _RadioPick(len(matching), _STEP_OK)
+            radios.nth(matching[index]).locator("label").first.click()
+            page.wait_for_timeout(_DIALOG_SETTLE_MS)
+            return _RadioPick(len(matching), _STEP_OK)
+
         count = radios.count()
+        if not count:
+            return _RadioPick(0, _STEP_FAILED, "no account radio rendered")
         if index >= count:
-            return count
+            return _RadioPick(count, _STEP_OK)
         radio = radios.nth(index)
         radio_id = radio.get_attribute("id")
         # The radio's own input is covered by its label, which is what the SPA
@@ -1122,38 +1569,173 @@ def _click_account_radio(page, index: int) -> int:
         target = page.locator(f"#{radio_id} label").first if radio_id else radio
         target.click()
         page.wait_for_timeout(_DIALOG_SETTLE_MS)
-        return count
-    except Exception:
+        return _RadioPick(count, _STEP_OK)
+    except Exception as error:
         logger.debug("BanChile: account radio %d not usable", index, exc_info=True)
-        return 0
+        return _RadioPick(0, _STEP_FAILED, f"account radio raised {type(error).__name__}")
 
 
-def _open_cartola(page, index: int, timeout_ms: int) -> tuple[Optional[dict], int]:
-    """Drive the account dialog for account `index` and capture its cartola.
+def _leave_movements_view(page) -> None:
+    """Close whatever the dialog left open and return to the portal home.
 
-    Returns (payload, account_count). The whole route is re-driven per account
-    because no control for re-opening the selector in place was observed; a
-    re-drive that fails simply ends the loop with whatever was already read.
+    A drive can stop with the currency panel or the modal still open (no
+    option for the currency, a failed step), and either would cover the next
+    surface's first click. Escape closes the panel, then the modal; it is
+    harmless when nothing is open. Cheap on purpose: it runs after every
+    checking attempt, and waiting for the dashboard is `_wait_for_dashboard`'s
+    job, once, right before the card legs need it. Never raises: it runs in a
+    `finally` and must not replace a successful read with an exception.
+    """
+    try:
+        for _ in range(2):
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(_DIALOG_SETTLE_MS // 3)
+    except Exception:
+        logger.debug("BanChile: could not press Escape on the dialog", exc_info=True)
+    try:
+        _recover_to_home(page)
+    except Exception:
+        logger.debug("BanChile: could not return home after the dialog", exc_info=True)
+
+
+_CHECKING_ROW_RE = dict(_PRODUCT_ROWS)["checking"]
+
+
+def dashboard_rendered(text: Optional[str]) -> bool:
+    """True when `text` is the rendered "Mis Productos" dashboard.
+
+    Its checking row is the signal (every customer here has the account, card
+    or not), and the movements view must be gone: right after a hash-only
+    return home the old view is still on screen, and its "SELECCIONAR OTRA
+    CUENTA" cartola carries balance labels of its own.
+    """
+    if not text or _REOPEN_DIALOG_NAME_RE.search(text):
+        return False
+    return bool(_CHECKING_ROW_RE.search(text))
+
+
+def _page_text(page) -> str:
+    try:
+        text = page.evaluate(_INNER_TEXT_JS)
+    except Exception:
+        return ""
+    return text if isinstance(text, str) else ""
+
+
+def _wait_for_dashboard(page) -> None:
+    """On the home route, wait (bounded) for the dashboard before clicking it.
+
+    Going home from another view is a hash-only change: the URL changes at
+    once and the dashboard renders afterwards, and a click on it while it
+    still renders is lost (the unbilled leg then waited out its whole first
+    attempt). When it had to be waited for, it also gets a moment to settle.
+    Off the home route (the card legs after the first, already on the card
+    page) this costs nothing.
+    """
+    if not (page.url or "").endswith("#/home"):
+        return
+    if dashboard_rendered(_page_text(page)):
+        return
+    deadline = time.monotonic() + _DASHBOARD_READY_MS / 1000
+    while time.monotonic() < deadline:
+        page.wait_for_timeout(_DASHBOARD_POLL_MS)
+        if dashboard_rendered(_page_text(page)):
+            page.wait_for_timeout(_DASHBOARD_SETTLE_MS)
+            return
+    logger.info("BanChile: the dashboard did not render in time; trying anyway")
+
+
+def _drive_failed(
+    currency: str, step: str, reason: str, index: int, attempt: int, accounts: int = 0
+) -> _CartolaDrive:
+    """Log which dialog step failed and why, and return the failed drive."""
+    logger.info(
+        "BanChile: %s cartola dialog failed at the %s step (account %d, attempt %d): %s",
+        currency,
+        step,
+        index + 1,
+        attempt + 1,
+        reason,
+    )
+    return _CartolaDrive(accounts=accounts)
+
+
+def _open_cartola(
+    page,
+    index: int,
+    timeout_ms: int,
+    currency: str = "CLP",
+    attempt: int = 0,
+    read_accounts=frozenset(),
+) -> _CartolaDrive:
+    """Drive the account dialog for `currency`'s account `index`; capture its cartola.
+
+    Each drive routes to the movements view and opens the dialog, by itself
+    on a first drive or through "SELECCIONAR OTRA CUENTA" once the SPA
+    remembers an account (`_open_dialog`); a re-drive that fails simply ends
+    the loop with whatever was already read. The steps are route, dialog open,
+    currency select, account radio, accept and cartola wait; a failure in any
+    of them is logged at INFO naming the step (DEBUG carries the detail). A
+    currency with no option in the list comes back as `no_account`, which is
+    a reading and not a failure.
+
+    The capture is emptied right before Aceptar and every payload after it is
+    checked (`cartola_mismatch`): a remembered account's automatic fetch must
+    never be read as the chosen account's cartola.
     """
     _recover_to_home(page)
     if not _ensure_on_portal(page):
-        return None, 0
+        return _drive_failed(currency, "route", "not on the portal", index, attempt)
     with _JsonCapture(page, _CARTOLA_FRAGMENT) as capture:
         try:
             page.evaluate(
                 "route => { window.location.hash = route; }", _MOVIMIENTOS_ROUTE
             )
-        except Exception:
+        except Exception as error:
             logger.debug("BanChile: could not route to the movements view", exc_info=True)
-            return None, 0
-        if not _select_clp_currency(page, timeout_ms):
-            return None, 0
-        count = _click_account_radio(page, index)
-        if not count or index >= count:
-            return None, count
+            return _drive_failed(
+                currency, "route", f"routing raised {type(error).__name__}", index, attempt
+            )
+
+        opened = _open_dialog(page, capture, timeout_ms)
+        if opened.status != _STEP_OK:
+            return _drive_failed(currency, "dialog open", opened.reason, index, attempt)
+
+        selected = _select_currency(page, currency, timeout_ms)
+        if selected.status == _STEP_ABSENT and currency != "CLP":
+            logger.info("BanChile: no %s checking account (%s)", currency, selected.reason)
+            return _CartolaDrive(no_account=True)
+        if selected.status != _STEP_OK:
+            return _drive_failed(
+                currency, "currency select", selected.reason, index, attempt
+            )
+
+        pick = _click_account_radio(page, index, currency, timeout_ms)
+        if pick.status != _STEP_OK:
+            return _drive_failed(currency, "account radio", pick.reason, index, attempt)
+        if index >= pick.count:
+            # Past the last account: the loop is done, nothing failed.
+            return _CartolaDrive(accounts=pick.count)
+
+        # A cartola the SPA fetched by itself (the remembered account's) may
+        # still be on its way; let it land before the capture is emptied, so
+        # it can never be taken for the one Aceptar asks for.
+        if not _wait_until(page, lambda: not capture.in_flight(), _IN_FLIGHT_WAIT_MS):
+            logger.debug("BanChile: a cartola is still in flight; clearing anyway")
+        capture.clear()
         if not _click_first(page, [_MODAL_ACCEPT_SELECTOR], timeout=timeout_ms):
-            return None, count
-        return _wait_for_payload(page, capture, timeout_ms), count
+            return _drive_failed(
+                currency, "accept", "Aceptar not clickable", index, attempt, pick.count
+            )
+        payload, reason = _wait_for_cartola(
+            page, capture, timeout_ms, currency, read_accounts
+        )
+        if payload is None:
+            failed = _drive_failed(
+                currency, "cartola wait", reason, index, attempt, pick.count
+            )
+            return replace(failed, repeated_account=reason == _STALE_ACCOUNT)
+        return _CartolaDrive(payload=payload, accounts=pick.count)
 
 
 def _operation_ids_for(
@@ -1193,7 +1775,7 @@ def _operation_ids_for(
 
 
 def _movements_from_cartola(
-    page, payload: dict, budget: int
+    page, payload: dict, budget: int, currency: str = "CLP"
 ) -> tuple[list[BanChileMovement], int]:
     """Shape one `getCartola` payload into movements, ids fetched as needed."""
     raw_movements = payload.get("movimientos")
@@ -1207,32 +1789,58 @@ def _movements_from_cartola(
     ids, remaining = _operation_ids_for(page, raw_movements, budget)
     movements = []
     for raw, operation_id in zip(raw_movements, ids):
-        movement = parse_cartola_movement(raw, operation_id)
+        movement = parse_cartola_movement(raw, operation_id, currency)
         if movement is not None:
             movements.append(movement)
+    if currency != "CLP":
+        # One line per cartola, no figures: these keys rest on the id alone.
+        no_saldo = sum(1 for m in movements if not m.fingerprint[1])
+        if no_saldo:
+            logger.warning(
+                "BanChile: %d %s cartola row(s) have no parseable saldo; their "
+                "fallback key rests on the composite id alone",
+                no_saldo,
+                currency,
+            )
     with_id = sum(1 for m in movements if m.operation_id)
     logger.info(
-        "BanChile: %d checking movements (%d with an operation id)",
+        "BanChile: %d %s checking movements (%d with an operation id)",
         len(movements),
+        currency,
         with_id,
     )
     return movements, remaining
 
 
-def _read_checking_movements(page, attempt: int) -> Optional[list[BanChileMovement]]:
-    """Read every CLP checking account's cartola (one attempt).
+def _read_checking_movements(
+    page, attempt: int, currency: str = "CLP"
+) -> Optional[list[BanChileMovement]]:
+    """Read every `currency` checking account's cartola (one attempt).
 
     The dialog lists one radio per account of the chosen currency, and this
-    account also holds a USD one, so the currency is picked explicitly first.
-    Accounts are read one dialog drive each: the SPA offers no observed way to
-    switch accounts without re-opening the selector, so the route is re-driven
-    per index and the results deduped. A re-drive that lands back on an account
-    already read is reported and stops the loop: silently deduping it away would
-    hide the fact that the other account's movements were never read.
+    customer holds both a CLP and a USD one, so the currency is picked
+    explicitly first. Accounts are read one dialog drive each, reopening the
+    dialog per index ("SELECCIONAR OTRA CUENTA"), and the results deduped. A
+    re-drive that lands back on an account already read is reported and stops
+    the loop: silently deduping it away would hide the fact that the other
+    account's movements were never read.
 
     Returns None when the first drive never produced a cartola (the surface
-    failed and is worth retrying); a list, possibly empty, once one did.
+    failed and is worth retrying); a list, possibly empty, once one did. A
+    currency the customer holds no account in is an empty list too, so a
+    customer without a USD account never sees a `partial` run for it.
     """
+    try:
+        return _read_checking_accounts(page, attempt, currency)
+    finally:
+        # Whatever happened, leave no overlay behind for the next surface.
+        _leave_movements_view(page)
+
+
+def _read_checking_accounts(
+    page, attempt: int, currency: str
+) -> Optional[list[BanChileMovement]]:
+    """`_read_checking_movements`' account loop, before the page is cleaned up."""
     budget = _budget(_RENDER_TIMEOUTS_MS, attempt)
     collected: list[BanChileMovement] = []
     seen_accounts: set[str] = set()
@@ -1240,30 +1848,47 @@ def _read_checking_movements(page, attempt: int) -> Optional[list[BanChileMoveme
     accounts = 1
     index = 0
     while index < min(accounts, _MAX_CHECKING_ACCOUNTS):
-        payload, count = _open_cartola(page, index, budget)
-        if count:
-            accounts = count
+        drive = _open_cartola(
+            page, index, budget, currency, attempt, frozenset(seen_accounts - {""})
+        )
+        if drive.no_account:
+            if index == 0:
+                return []
+            break
+        if drive.accounts:
+            accounts = drive.accounts
+        payload = drive.payload
         if payload is None:
+            if drive.repeated_account:
+                logger.warning(
+                    "BanChile: the account dialog re-opened an account already "
+                    "read at radio %d of %d; stopping (the remaining accounts' "
+                    "movements were not read)",
+                    index + 1,
+                    accounts,
+                )
             if index == 0:
                 return None
             break
-        account = cartola_account_number(payload)
-        if account and account in seen_accounts:
-            logger.warning(
-                "BanChile: the account dialog re-opened an account already read "
-                "at radio %d of %d; stopping (the remaining accounts' movements "
-                "were not read)",
-                index + 1,
-                accounts,
-            )
-            break
-        seen_accounts.add(account)
+        seen_accounts.add(cartola_account_number(payload))
         movements, glosa_calls_left = _movements_from_cartola(
-            page, payload, glosa_calls_left
+            page, payload, glosa_calls_left, currency
         )
         collected.extend(movements)
         index += 1
     return dedupe_movements(collected)
+
+
+def _read_usd_checking_movements(page, attempt: int) -> Optional[list[BanChileMovement]]:
+    """The USD checking cartola: the same dialog drive with USD picked.
+
+    A surface of its own, so a failure here never costs the CLP cartola. Its
+    request and response matched the CLP ones in shape on the one live session
+    that reached it, but that account had no movements, so the row shape is
+    pending live verification (issue #82); an empty `movimientos` is a normal
+    reading, and so is a customer with no USD account at all.
+    """
+    return _read_checking_movements(page, attempt, currency="USD")
 
 
 # --- Credit card: the unbilled and billed legs --------------------------------
@@ -1274,10 +1899,12 @@ def _open_card_area(page, attempt: int) -> bool:
 
     Reuses banchile_web's `_CARD_LINK_SELECTORS`: the dashboard is littered with
     marketing "Tarjeta de Crédito" links pointing at the public site, so only
-    the "SALDOS Y MOV.TARJETAS" shortcut is safe to click.
+    the "SALDOS Y MOV.TARJETAS" shortcut is safe to click. The dashboard is
+    waited for first (`_wait_for_dashboard`).
     """
     if not _ensure_on_portal(page):
         return False
+    _wait_for_dashboard(page)
     if not _click_first(
         page, _CARD_LINK_SELECTORS, timeout=_budget(_CARD_LINK_TIMEOUTS_MS, attempt)
     ):
@@ -1418,6 +2045,7 @@ def _read_card_billed_usd(page, attempt: int) -> Optional[list[BanChileMovement]
 # `BanChileSessionResult.failed_surfaces` and become run warnings.
 _MOVEMENT_READERS: list[tuple[str, Callable]] = [
     ("movimientos", _read_checking_movements),
+    ("movimientos USD", _read_usd_checking_movements),
     ("tarjeta no facturados", _read_card_unbilled),
     ("tarjeta facturados", _read_card_billed),
     ("tarjeta facturados USD", _read_card_billed_usd),

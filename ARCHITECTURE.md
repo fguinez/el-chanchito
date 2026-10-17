@@ -548,8 +548,15 @@ columns; a location the user set or cleared in the dashboard
 
 Three more surfaces feed its transactions (`banchile_movements.py`, issue #57):
 the checking cartola, reached by driving the account-selection dialog that
-defaults to the USD account; the card's unbilled movements, which the SPA loads
-when the card page opens; and the card's billed statements, the newest two,
+defaults to the USD account (it opens by itself only until an account is
+chosen; the SPA then remembers that account for the browser session and the
+route shows its cartola directly, so later drives reopen the dialog with the
+"SELECCIONAR OTRA CUENTA" button once that view has settled, and skip the
+remembered account's automatic `getCartola`: a payload whose `moneda` or account
+is not the drive's is never read); the card's unbilled movements, which the SPA
+loads when the card page opens (from home it first waits, bounded, for the
+dashboard's checking row: a click on a dashboard still rendering is lost); and
+the card's billed statements, the newest two,
 read by replaying the SPA's own statement request with a different
 `fechaFacturacion`. Only calls whose body is fully known are composed (the
 per-movement `cartola/detalle-glosa` that carries the operation id, spaced and
@@ -566,7 +573,15 @@ failed surface.
 The USD products get their movements the same way (issue #79): the unbilled
 list mixes both currencies and `origenTransaccion == "INT"` marks the USD rows;
 the USD statement (`estadocuenta/internacional/resumen-por-fecha`) is a surface
-of its own. USD checking movements are not read yet (see #82).
+of its own, and so is the USD checking cartola (issue #82: the same dialog with
+USD picked and the account radio found by its "(USD)" label). A customer with
+no USD account (no "(USD)" option in the currency list) reads as an empty list
+rather than a failed surface, a USD dialog that fails after offering the option
+(no "(USD)" radio, Aceptar, the cartola wait) fails only that surface, and
+every dialog step logs which one failed and why. The USD cartola's row shape
+is pending live verification
+(the account observed had no movements), so its amounts are parsed defensively
+(numbers or strings, cents kept).
 Every movement carries its currency, so the writer resolves the USD product,
 and USD amounts keep their cents. Before #79 the unbilled USD charges were
 stored on the CLP card as whole "pesos"; each run deletes those leftovers once
