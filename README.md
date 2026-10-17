@@ -44,7 +44,7 @@ make scrapers-start   # long-running, each scraper on its own schedule
 make fintual-login    # one-time Fintual sign-in (e-mail 2FA, session cached)
 ```
 
-A scraper is enabled only when its credentials are present. See [USAGE.md](USAGE.md) for the full guide: scraper setup, dashboard pages, daily and monthly workflows, CSV import, category auto-assignment, deployment, and the API reference.
+A scraper is enabled only when its credentials are present. See [USAGE.md](USAGE.md) for the full guide: scraper setup, dashboard pages, daily and monthly workflows, CSV import, categories and automatic categorization, deployment, and the API reference.
 
 ## Configuration
 

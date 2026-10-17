@@ -44,13 +44,6 @@ export const idSchema = z.object({ id: rowId });
 // Per route
 // ---------------------------------------------------------------------------
 
-/** POST /api/categories */
-export const createCategoryRuleSchema = z.object({
-  keyword: requiredText.toLowerCase(),
-  categoryId: rowId,
-  priority: z.int32().nullish(),
-});
-
 const fixedExpenseSchema = z.object({
   name: requiredText,
   amount: clpAmount,

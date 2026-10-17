@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  FAKE_ROW_ID,
   argOf,
   createFakeDb,
   whereParams,
@@ -22,6 +23,7 @@ vi.mock("@/lib/db/resolve", () => ({
 }));
 
 const categories = await import("@/app/api/categories/route");
+const categoryRules = await import("@/app/api/categories/rules/route");
 const fixedExpenses = await import("@/app/api/fixed-expenses/route");
 const csvImport = await import("@/app/api/import/route");
 const transactions = await import("@/app/api/transactions/route");
@@ -68,6 +70,7 @@ beforeEach(() => {
 
 const MUTATING_ROUTES: [string, string, Handler][] = [
   ["POST /api/categories", "POST", categories.POST],
+  ["POST /api/categories/rules", "POST", categoryRules.POST],
   ["POST /api/fixed-expenses", "POST", fixedExpenses.POST],
   ["PUT /api/fixed-expenses", "PUT", fixedExpenses.PUT],
   ["DELETE /api/fixed-expenses", "DELETE", fixedExpenses.DELETE],
@@ -110,8 +113,37 @@ describe.each(MUTATING_ROUTES)("%s", (_route, method, handler) => {
 });
 
 describe("POST /api/categories", () => {
-  it("stores a trimmed, lowercased keyword with the default priority", async () => {
+  it("stores a trimmed name with no color or icon by default", async () => {
     const response = await categories.POST(
+      jsonRequest("POST", { name: "  Mascotas " })
+    );
+
+    expect(response.status).toBe(201);
+    expect(argOf(onlyQuery("insert"), "values")).toEqual({
+      name: "Mascotas",
+      color: null,
+      icon: null,
+    });
+  });
+
+  it.each([
+    [{ name: "   " }, "name"],
+    [{ name: "Mascotas", color: "red" }, "color"],
+    [{ name: "Mascotas", icon: "not-an-icon" }, "icon"],
+  ])("rejects %j on %s", async (body, field) => {
+    await expectRejected(await categories.POST(jsonRequest("POST", body)), field);
+  });
+});
+
+describe("POST /api/categories/rules", () => {
+  it("stores a trimmed, lowercased keyword with the default priority", async () => {
+    fake.respondWith((query) =>
+      query.op === "select"
+        ? [{ id: CATEGORY_ID }]
+        : [{ id: FAKE_ROW_ID, ...(argOf(query, "values") as object) }]
+    );
+
+    const response = await categoryRules.POST(
       jsonRequest("POST", { keyword: "  UBER ", categoryId: CATEGORY_ID })
     );
 
@@ -123,12 +155,16 @@ describe("POST /api/categories", () => {
     });
   });
 
-  it("treats a null priority as the default", async () => {
-    await categories.POST(
-      jsonRequest("POST", { keyword: "uber", categoryId: CATEGORY_ID, priority: null })
+  it("answers 400 with issues to an unknown category", async () => {
+    const response = await categoryRules.POST(
+      jsonRequest("POST", { keyword: "uber", categoryId: CATEGORY_ID })
     );
 
-    expect(argOf(onlyQuery("insert"), "values")).toMatchObject({ priority: 0 });
+    expect(response.status).toBe(400);
+    const json = await response.json();
+    expect(json.field).toBe("categoryId");
+    expect(json.issues.length).toBeGreaterThan(0);
+    expect(fake.queries.map((query) => query.op)).toEqual(["select"]);
   });
 
   it.each([
@@ -136,7 +172,7 @@ describe("POST /api/categories", () => {
     [{ keyword: "uber", categoryId: "transport" }, "categoryId"],
     [{ keyword: "uber", categoryId: CATEGORY_ID, priority: 1.5 }, "priority"],
   ])("rejects %j on %s", async (body, field) => {
-    await expectRejected(await categories.POST(jsonRequest("POST", body)), field);
+    await expectRejected(await categoryRules.POST(jsonRequest("POST", body)), field);
   });
 });
 

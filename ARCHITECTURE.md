@@ -352,6 +352,14 @@ exchange_rates (V024)
           base_currency, quote_currency)
 ```
 
+New transactions are categorized in the database itself (V021): a `BEFORE
+INSERT` trigger on `transactions` fills a missing `category_id` from
+`category_rules` through `category_for_description()`, so every writer (the
+scrapers' DB writer, CSV import, manual entry) gets it without code of its own.
+Rows that arrive with a category, or flagged `is_manually_categorized`, are
+left alone. The dashboard's "Categorizar ahora" (`PUT /api/categories`) runs
+the same function over the rows that are still uncategorized.
+
 `exchange_rates` semantics, resolution order and staleness: see
 [Exchange rates](#exchange-rates).
 
@@ -379,6 +387,7 @@ exchange_rates (V024)
 | `V018__banchile_transaction_ids_adopt_operation_id.sql` | prepares BanChile transactions for operation-id keys; the writer re-keys stored rows on the next scrape |
 | `V019__transactions_accounting_date.sql` | transactions gain a nullable `accounting_date` (the posting date, where the institution reports one) |
 | `V020__buda_drop_crypto_movements_stored_as_clp.sql` | deletes the crypto movements the old Buda scraper truncated and stored as pesos (CLP movements only now) |
+| `V021__auto_categorize_transactions.sql` | `category_for_description()` + a BEFORE INSERT trigger on transactions that fills a missing category from category_rules |
 | `V022__monitor_adjustments.sql` | monitor_adjustments: dated variaciones that shift a monitor's thresholds until month end |
 | `V023__transactions_amount_numeric.sql` | `transactions.amount` integer -> NUMERIC(18, 2) so foreign-currency movements keep their cents; existing values unchanged |
 | `V024__exchange_rates.sql` | exchange_rates: the latest scraped rate per institution or product and currency pair |
@@ -975,6 +984,7 @@ el-chanchito/
 │   │   │   │   │   ├── history/      # Historial
 │   │   │   │   │   ├── institutions/ # Instituciones, [institution], [product]
 │   │   │   │   │   ├── expenses/     # Gastos + CSV import
+│   │   │   │   │   ├── categories/   # Categorías + keyword rules
 │   │   │   │   │   ├── fixed/        # Gastos fijos
 │   │   │   │   │   └── transfers/    # Movimientos internos
 │   │   │   │   └── api/              # 11 API route groups

@@ -135,6 +135,7 @@ For the email parser, you need a Gmail App Password (not your regular password):
 | **Historial** | `/history` | Net-worth timeline (patrimonio, deuda, ahorro) computed from product balances, plus legacy snapshots |
 | **Instituciones** | `/institutions` | Every scraped product grouped by institution, with on-demand refresh; drill into `/institutions/[institution]` and `/institutions/[institution]/[product]` for balance history and movements |
 | **Gastos** | `/expenses` | Transaction list, manual entry form, CSV import |
+| **Categorías** | `/categories` | Categories and keyword rules for automatic categorization |
 | **Gastos Fijos** | `/fixed` | Monthly fixed expenses with shared ratio (69%) |
 | **Transferencias** | `/transfers` | Internal money movements (pending/resolved) |
 
@@ -341,32 +342,38 @@ under **Omitidos**.
 
 Amounts: handles `1.234` (Chilean thousands separator) and `-1.234,56`
 
-## Category Auto-Assignment
+## Categories
 
-There is no screen for categories yet (issue #14), so rules are managed through
-the API. A rule matches when a transaction's description contains its keyword
-(case-insensitive); higher `priority` rules run first.
+Transactions are categorized automatically from keyword rules, which you manage
+on the **Categorías** page (`/categories`).
 
-1. Categories are pre-seeded: Supermercado, Transporte, Restaurantes, etc.
-   (`GET /api/categories` lists them with their ids and rules)
-2. Add keyword rules:
-   ```bash
-   # Example: UBER -> Transporte
-   curl -X POST http://localhost:3000/api/categories \
-     -H "Content-Type: application/json" \
-     -d '{"keyword":"uber","categoryId":"<transport-category-id>","priority":10}'
-   ```
-   `make seed-category-rules` adds a few example rules (uber, rappi,
-   supermercado, lider).
-3. Run auto-assignment over the uncategorized transactions (manually
-   categorized ones are never touched):
-   ```bash
-   curl -X PUT http://localhost:3000/api/categories   # or: make categorize
-   ```
+- **Categories**: eight come pre-seeded (Supermercado, Transporte, Restaurantes,
+  etc.). Add new ones with a name, color, and icon, and edit them inline.
+  Deleting a category that is in use is allowed; the page first tells you how
+  many transactions and rules it has. Its transactions become uncategorized
+  and its rules are deleted; "Categorizar ahora" then runs the remaining rules
+  over them (new transactions are categorized on insert, these are not).
+- **Rules**: a rule matches when the transaction description contains its
+  keyword, ignoring upper and lower case (a plain substring: `%` and `_` have no
+  special meaning). When several rules match, the highest priority wins; on
+  equal priority the older rule wins, so a more specific keyword added later
+  (say `uber eats` after `uber`) needs a higher priority.
+- **Probar** previews a keyword, before or after you save the rule: how many
+  transactions contain it, how many are still waiting for a category, and the
+  20 most recent matches with their current category.
 
-Rules are applied only when you run step 3; new transactions arrive
-uncategorized. With `DASHBOARD_PASSWORD` set, these calls need a session cookie
-(see "API Reference").
+When categories are assigned:
+
+- **On import**: every new transaction is categorized as it is inserted, whatever
+  its source (scrapers, CSV import, manual entry). This happens in the database
+  (see [ARCHITECTURE.md](ARCHITECTURE.md#database-schema-er-diagram)), so there
+  is nothing to run.
+- **Categorizar ahora**: applies new or changed rules to the transactions that
+  are still uncategorized and reports how many it categorized.
+
+Rules only fill in missing categories: they never overwrite a category that is
+already set (including one chosen by hand), and editing or deleting a rule does
+not undo the categories it already assigned.
 
 ## API Reference
 
@@ -389,7 +396,11 @@ All API routes are under `/api/`:
 | GET/POST | `/api/transactions` | Transactions (list, create; create takes an optional `location`) |
 | GET/PATCH | `/api/transactions/[id]` | One transaction with product, institution, category and location; PATCH sets or clears only `{ location }` |
 | POST | `/api/import` | CSV import |
-| GET/POST/PUT | `/api/categories` | Categories with their rules (GET); add a rule (POST); auto-assign (PUT) |
+| GET/POST/PUT | `/api/categories` | Categories with their rules and transaction counts; create a category; apply the rules to uncategorized transactions (PUT) |
+| PATCH/DELETE | `/api/categories/[id]` | Update or delete a category (its transactions become uncategorized, its rules are deleted) |
+| POST | `/api/categories/rules` | Create a keyword rule |
+| PATCH/DELETE | `/api/categories/rules/[id]` | Update or delete a rule |
+| GET | `/api/categories/rules/preview` | Transactions a keyword would match (`?keyword=`) |
 | GET/POST/PUT/DELETE | `/api/fixed-expenses` | Fixed expenses CRUD |
 | GET/POST/PUT/DELETE | `/api/transfers` | Internal transfers |
 | GET/POST/DELETE | `/api/wealth` | Net-worth series (GET); legacy snapshots (POST, DELETE) |
