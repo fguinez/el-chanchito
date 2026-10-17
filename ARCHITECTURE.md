@@ -890,7 +890,7 @@ table, no session table and no third-party dependency.
   |---|---|---|
   | set | any | Enforced: pages redirect to `/login`, `/api/*` answers `401` |
   | unset | production | Misconfigured: pages show a "not configured" notice, `/api/*` answers `503` |
-  | unset | development | Disabled: identical to the pre-auth app, so `make dev` needs no setup |
+  | unset | development | Disabled: no login, so `make dev` needs no setup; cross-site writes are still refused |
 
 - **Public surfaces**: `/login`, `POST /api/auth/login`, `GET /api/auth/session`,
   `POST /api/auth/logout`, `/favicon.ico`, `_next/static` and `_next/image`.
@@ -900,7 +900,9 @@ table, no session table and no third-party dependency.
   *cross-site* requests, so a sibling subdomain or any host under a shared public
   suffix (`*.duckdns.org`, `*.nip.io`, `*.ngrok-free.app`) would otherwise be
   free to POST to every API. Mutating `/api/*` requests are therefore checked
-  against two allow-lists before any handler runs, `403` on failure:
+  against two allow-lists before any handler runs, `403` on failure, in every
+  auth mode: with no password (`make dev`) this is the only thing keeping any
+  page the browser visits from writing transactions or starting bank logins.
   `Sec-Fetch-Site` must be `same-origin`, `none` or absent (case-insensitive; an
   unknown value is refused), and `Origin`, when present, must match the request's
   own host. The Origin comparison uses `Host` (or
@@ -912,6 +914,11 @@ table, no session table and no third-party dependency.
   sends our host in `Host` and its own in `Origin`). `OPTIONS` counting as
   mutating is load-bearing rather than an oversight: it is what refuses the
   preflight that forging a header forces, so no browser-reachable path survives.
+  An absent `Origin` is allowed because browsers always send one on a
+  cross-origin write; only non-browser clients (curl, scripts) omit it.
+  JSON routes also require `Content-Type: application/json` (`415` otherwise,
+  `readJsonBody` in `lib/api/validation.ts`), which is the label that forces a
+  browser preflight: a form post or `text/plain` fetch never gets that far.
 - **Caching**: authenticated pages are served `Cache-Control: private, no-store`
   and the login redirect `no-store`. Protected pages build as static and would
   otherwise carry a year-long `s-maxage`, which a CDN could hand to an anonymous
