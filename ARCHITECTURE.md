@@ -39,6 +39,7 @@
 │  users | institutions | accounts | products | product_snapshots │
 │  transactions | categories | category_rules | monitors          │
 │  monitor_adjustments | fixed_expenses | internal_transfers      │
+│  dismissed_transfer_suggestions | confirmed_transfer_patterns   │
 │  scraper_runs | wealth_snapshots (legacy)                       │
 └────────────────────────────────▲────────────────────────────────┘
                                  │
@@ -340,6 +341,16 @@ fixed_expenses                internal_transfers
                                 status (pending|resolved)
 
 
+dismissed_transfer_suggestions    confirmed_transfer_patterns
+  id PK                             id PK
+  source_transaction_id FK          source_product_id FK
+  target_transaction_id FK            -- ON DELETE CASCADE
+    -- NULL = one-sided; unique     target_product_id FK
+    -- (NULLS NOT DISTINCT) pair;   description_prefix
+    -- ON DELETE CASCADE              -- normalised; unique triple
+  dismissed_at                      created_at
+
+
 scraper_runs
   id PK
   method       (email|web|http_api|fintself|open_banking; last two on legacy rows)
@@ -407,6 +418,7 @@ the same function over the rows that are still uncategorized.
 | `V028__internal_transfer_transaction_links.sql` | internal_transfers gain `from_transaction_id` / `to_transaction_id`: nullable, unique FKs (ON DELETE SET NULL) to the scraped rows a transfer accounts for; no backfill |
 | `V029__seed_santander_institution.sql` | seeds the Banco Santander institution row (upsert, so it also fixes a row the writer auto-created) |
 | `V030__seed_skipo_institution.sql` | seeds the `skipo` institution (display name, kind, site) |
+| `V031__transfer_suggestions.sql` | dismissed_transfer_suggestions (rejected suggestions, null target = one-sided) and confirmed_transfer_patterns (products + description prefix that rank matching suggestions first); new tables only |
 
 ## Scraper Architecture
 

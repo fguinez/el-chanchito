@@ -201,6 +201,76 @@ export const transferLinksSchema = z
     { error: "Expected fromTransactionId and/or toTransactionId" }
   );
 
+/** A suggestion leg's row or product id, lowercased as Postgres returns it. */
+const suggestionId = rowId.transform((id) => id.toLowerCase());
+
+/** GET /api/transfers/suggestions: optionally only those using one row. */
+export const suggestionsQuerySchema = z.object({
+  transactionId: suggestionId.optional(),
+});
+
+/** POST /api/transfers/suggestions/confirm: the outgoing row and either the
+ *  incoming row (a pair) or the target product (one-sided), not both. */
+export const confirmSuggestionSchema = z
+  .object({
+    sourceTransactionId: suggestionId,
+    targetTransactionId: suggestionId.nullish(),
+    targetProductId: suggestionId.nullish(),
+  })
+  .transform((body, ctx) => {
+    const targetTransactionId = body.targetTransactionId ?? null;
+    const targetProductId = body.targetProductId ?? null;
+    if (targetTransactionId === null && targetProductId === null) {
+      ctx.addIssue({
+        code: "custom",
+        message: "Expected targetTransactionId or targetProductId",
+        path: ["targetTransactionId"],
+      });
+      return z.NEVER;
+    }
+    if (targetTransactionId !== null && targetProductId !== null) {
+      ctx.addIssue({
+        code: "custom",
+        message: "Expected targetTransactionId or targetProductId, not both",
+        path: ["targetProductId"],
+      });
+      return z.NEVER;
+    }
+    if (targetTransactionId === body.sourceTransactionId) {
+      ctx.addIssue({
+        code: "custom",
+        message: "Source and target transactions must differ",
+        path: ["targetTransactionId"],
+      });
+      return z.NEVER;
+    }
+    return {
+      sourceTransactionId: body.sourceTransactionId,
+      targetTransactionId,
+      targetProductId,
+    };
+  });
+
+/** POST /api/transfers/suggestions/dismiss: the outgoing row and the incoming
+ *  one of a pair; no target (or null) dismisses the one-sided suggestion. */
+export const dismissSuggestionSchema = z
+  .object({
+    sourceTransactionId: suggestionId,
+    targetTransactionId: suggestionId.nullish(),
+  })
+  .transform((body, ctx) => {
+    const targetTransactionId = body.targetTransactionId ?? null;
+    if (targetTransactionId === body.sourceTransactionId) {
+      ctx.addIssue({
+        code: "custom",
+        message: "Source and target transactions must differ",
+        path: ["targetTransactionId"],
+      });
+      return z.NEVER;
+    }
+    return { sourceTransactionId: body.sourceTransactionId, targetTransactionId };
+  });
+
 /** A legacy total: patrimonio and deuda are sums, never negative. */
 const wealthTotal = clpAmount.pipe(z.number().nonnegative());
 

@@ -148,7 +148,7 @@ For the email parser, you need a Gmail App Password (not your regular password):
 | **Gastos** | `/expenses` | Transaction list, manual entry form, CSV import |
 | **Categorías** | `/categories` | Categories and keyword rules for automatic categorization |
 | **Gastos Fijos** | `/fixed` | Monthly fixed expenses with shared ratio (69%) |
-| **Transferencias** | `/transfers` | Internal money movements between two of your CLP products (pending/resolved); "Vincular" links each one to the scraped debit and credit that moved the money |
+| **Transferencias** | `/transfers` | Internal money movements between two of your CLP products (pending/resolved); "Vincular" links each one to the scraped debit and credit that moved the money, and "Sugeridas" proposes rows that look like transfers for one-click confirm or dismiss |
 | **Instituciones** | `/institutions` | Every institution and its products with balances; edit institutions, accounts and products from their detail pages |
 | **Configuracion** | `/settings` | Budget parameters, income split calculator, monthly reset |
 
@@ -466,6 +466,58 @@ transactions is linked. A side whose product has none (a fund, a term
 deposit) stays unlinked; resolve that transfer by hand with the check button.
 Unlinking never moves a transfer back to pending.
 
+### Suggested transfers
+
+The **Sugeridas** section, above Pendientes, proposes scraped rows that look
+like internal transfers, so most linking is a click on **Confirmar**. It is
+hidden when there is nothing to suggest. Suggestions are computed on each load
+from the last 90 days of CLP rows that no transfer links and that are not
+already flagged. Nothing is ever linked automatically: paying a person the
+same amount on the same day is a real false positive, so every suggestion
+waits for you.
+
+Two kinds:
+
+- **Pair**: a debit on one product and a credit of exactly the same amount on
+  another, dated at most 3 days apart. Paying a credit card from checking is
+  the usual case. A row with several possible partners shows once per partner
+  ("una de N opciones"); confirming one drops the rest.
+- **One side only**: a debit whose description names a CLP product with no
+  transactions (a fund, a term deposit), by its product name, or by its
+  institution's name when the debit is at another institution. Names shorter
+  than 5 characters and generic kind labels never match.
+
+Each suggestion shows a score and its evidence, from simple additive signals:
+
+| Signal | Points | Evidence |
+|---|---|---|
+| Same amount (pairs, always) | 40 | "Mismo monto" |
+| Date gap (pairs; a one-sided balance rise) | 30, minus 10 per day | "Mismo día", "1 día de diferencia" |
+| Description names the target product | 25 (10 for an institution name shared by several such products) | "La glosa menciona ..." |
+| Target's balance rose by the same amount (within 2%) within 3 days | 30 | "Depósito similar en ..." |
+| A keyword (Traspaso, Transferencia, Pago tarjeta, Abono, Pago TC) in either description | 15 | "Glosa '...'" |
+| A confirmed pattern: same products and description prefix | 50 | "Patrón confirmado antes" |
+| Same products as a confirmed suggestion, other description | 20 | "Mismos productos que una transferencia confirmada" |
+
+**Confirmar** creates a resolved transfer (the source row's date and
+description, its amount) and links its rows exactly as Vincular does, so they
+drop out of Gastos and Ingresos. A one-sided suggestion links only the source.
+It also saves a pattern: the two products and the start of the source
+description, lowercased without accents or digits, so account numbers and
+dates do not matter. Later rows matching it rank first. Patterns live in
+`confirmed_transfer_patterns`; deleting a row there removes its boost.
+
+**Descartar** remembers the dismissal in `dismissed_transfer_suggestions`, so
+the suggestion does not come back. A dismissed pair is that exact pair of
+rows. Dismissing a one-sided suggestion hides every one-sided suggestion for
+that debit (all target products), but not its pairs.
+
+Known limits: one balance rise can back several debits of about the same
+size; an institution-name match lists every product without transactions at
+that institution (scored lower when there are several); transfers with a fee
+on top have no exact pair. The transaction detail panel shows "Parece una
+transferencia interna" for a row in a current suggestion.
+
 ## Net-worth history
 
 **Historial** charts patrimonio, deuda and ahorro (patrimonio minus deuda).
@@ -532,6 +584,9 @@ All API routes are under `/api/`:
 | GET/POST/PUT/DELETE | `/api/transfers` | Internal transfers (POST needs distinct CLP `fromProductId` + `toProductId`); GET includes the linked `fromTransaction` / `toTransaction` |
 | PUT | `/api/transfers/[id]/links` | Set or clear the linked transactions: `{ fromTransactionId?, toTransactionId? }` (null clears, omitted keeps) |
 | GET | `/api/transfers/[id]/candidates` | Per side, the unlinked transactions a transfer may link (same amount, right sign, within 5 days) |
+| GET | `/api/transfers/suggestions` | `{ suggestions }`: likely internal transfers (pairs and one-sided), highest score first, with legs, `score` and Spanish `evidence`; `?transactionId=` keeps those using that row |
+| POST | `/api/transfers/suggestions/confirm` | `{ sourceTransactionId, targetTransactionId }` (pair) or `{ sourceTransactionId, targetProductId }` (one-sided): creates and links a resolved transfer and saves the pattern; 201 with the transfer, 409 when a row is already linked or flagged |
+| POST | `/api/transfers/suggestions/dismiss` | `{ sourceTransactionId, targetTransactionId? }`: hides that suggestion (no target = the debit's one-sided suggestions); idempotent |
 | GET/POST/DELETE | `/api/wealth` | Net-worth series (GET); backdate a legacy snapshot before the derived series starts (POST); delete a legacy snapshot (DELETE) |
 | POST | `/api/auth/login` | Exchange `DASHBOARD_PASSWORD` for a session cookie |
 | POST | `/api/auth/logout` | Clear the session cookie (public) |

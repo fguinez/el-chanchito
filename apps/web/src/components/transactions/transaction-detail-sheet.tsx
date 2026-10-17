@@ -29,6 +29,7 @@ import {
 import type { TransactionDetail } from "@/app/api/transactions/[id]/route";
 import type { TransactionLocation } from "@/lib/transaction-location";
 import { TransactionLocationField } from "@/components/transactions/transaction-location-field";
+import { SUGGESTIONS_ANCHOR } from "@/lib/transfer-suggestions";
 
 type LoadResult =
   | { id: string; status: "ok"; data: TransactionDetail }
@@ -224,7 +225,10 @@ function TransactionDetailBody({
             ) : txn.isInternalTransfer ? (
               "Sí"
             ) : (
-              "No"
+              <>
+                No
+                <SuggestionHint key={txn.id} transactionId={txn.id} />
+              </>
             )}
           </Field>
           <TransactionLocationField
@@ -326,6 +330,39 @@ function Muted({ children }: { children: ReactNode }) {
 }
 
 const noSubscribe = () => () => {};
+
+/** "Parece una transferencia interna" when an unlinked row is in a current
+ *  transfer suggestion, linking to the Sugeridas card. Silent on errors: it
+ *  is only a hint. */
+function SuggestionHint({ transactionId }: { transactionId: string }) {
+  const [suggested, setSuggested] = useState(false);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(
+      `/api/transfers/suggestions?transactionId=${encodeURIComponent(transactionId)}`,
+      { signal: controller.signal }
+    )
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { suggestions: unknown[] } | null) => {
+        if (!controller.signal.aborted) {
+          setSuggested((data?.suggestions.length ?? 0) > 0);
+        }
+      })
+      .catch(() => {});
+    return () => controller.abort();
+  }, [transactionId]);
+
+  if (!suggested) return null;
+  return (
+    <Link
+      href={`/transfers#${SUGGESTIONS_ANCHOR}`}
+      className="block text-xs text-muted-foreground underline-offset-4 hover:underline"
+    >
+      Parece una transferencia interna
+    </Link>
+  );
+}
 
 /** Clipboard API exists only in secure contexts; false while server rendering. */
 function useCanCopy(): boolean {
