@@ -164,8 +164,6 @@ class BudaScraper(BaseScraper):
 
         Follows `meta.total_pages` when Buda reports it, else stops at the
         first short page. Pages already yielded survive a later page failing.
-        Each page is fetched with bounded retries; every attempt is re-signed,
-        since Buda rejects a nonce it has already seen.
         """
         currency = TRANSACTION_CURRENCY.lower()
         for page in range(1, MAX_PAGES + 1):

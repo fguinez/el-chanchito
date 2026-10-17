@@ -102,8 +102,7 @@ export function ScraperStatus() {
   }
 
   const errors = runs.filter((r) => r.status === "error");
-  // Part of the run's data landed and part failed (or the scraper warned about
-  // incomplete coverage): not an outage, but the numbers may be partly stale.
+  // A partial run is no outage, but its numbers may be partly stale.
   const partials = runs.filter((r) => r.status === "partial");
 
   return (

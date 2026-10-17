@@ -26,8 +26,7 @@ export function runStatusStyle(status: string): RunStatusStyle {
     : { label: status, badgeClass: "" };
 }
 
-/** True when a run's row can expand to show its error_message: failed and
- *  partial runs both carry their details there. */
+/** True when a run's row can expand to show its error_message. */
 export function hasRunDetails(run: {
   status: string;
   error_message: string | null;
@@ -38,7 +37,6 @@ export function hasRunDetails(run: {
   );
 }
 
-/** A run message cut to `max` characters for the banners. */
 export function truncateRunMessage(message: string, max = 120): string {
   return message.length > max ? message.slice(0, max) + "..." : message;
 }

@@ -1,8 +1,7 @@
 """Bounded retries with exponential backoff for transient failures.
 
-Only idempotent work goes through here: HTTP GETs, and DB writes that run in
-one transaction each (a failed attempt rolls back whole, and the writers are
-upserts, so another attempt can't double-write). Logins and other
+Only idempotent work goes through here: HTTP GETs, and DB writes that are
+safe to repeat (see `db.connection.with_db_retry`). Logins and other
 non-idempotent requests are deliberately never retried: a repeated Fintual
 `initiate_login` would e-mail a second 2FA code, and bank logins are
 rate-limited.
