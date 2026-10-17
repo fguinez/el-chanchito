@@ -43,6 +43,12 @@ export function validationErrorResponse(error: z.ZodError): NextResponse {
   );
 }
 
+/** The 400 body for a hand-checked failure, in the same `{ error, field, issues }`
+ *  shape as a schema failure. */
+export function failureBody({ error, field }: { error: string; field?: string }) {
+  return { error, field, issues: [{ path: field ?? "", message: error }] };
+}
+
 function check<S extends z.ZodType>(
   schema: S,
   input: unknown

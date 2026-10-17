@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { failureBody } from "@/lib/api/validation";
 import {
   institutions,
   accounts,
@@ -283,10 +284,7 @@ export async function PATCH(request: NextRequest, { params }: Context) {
     }
     const patch = validateProductPatch(body);
     if (!patch.ok) {
-      return NextResponse.json(
-        { error: patch.error, field: patch.field },
-        { status: patch.status }
-      );
+      return NextResponse.json(failureBody(patch), { status: patch.status });
     }
 
     const result = await db.transaction(async (tx) => {
@@ -358,10 +356,7 @@ export async function PATCH(request: NextRequest, { params }: Context) {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
     if (!result.ok) {
-      return NextResponse.json(
-        { error: result.error, field: result.field },
-        { status: result.status }
-      );
+      return NextResponse.json(failureBody(result), { status: result.status });
     }
     return NextResponse.json({
       institutionSlug: slug,

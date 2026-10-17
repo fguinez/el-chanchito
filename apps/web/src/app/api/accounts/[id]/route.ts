@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
+import { failureBody } from "@/lib/api/validation";
 import { accounts } from "@/lib/db/schema";
 import {
   isUniqueViolation,
@@ -33,10 +34,7 @@ export async function PATCH(request: NextRequest, { params }: Context) {
     }
     const patch = validateAccountPatch(body);
     if (!patch.ok) {
-      return NextResponse.json(
-        { error: patch.error, field: patch.field },
-        { status: patch.status }
-      );
+      return NextResponse.json(failureBody(patch), { status: patch.status });
     }
 
     const [updated] = await db
