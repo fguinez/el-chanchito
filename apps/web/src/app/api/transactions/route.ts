@@ -3,6 +3,12 @@ import { db } from "@/lib/db";
 import { products, transactions } from "@/lib/db/schema";
 import { resolveProductId } from "@/lib/db/resolve";
 import { eq, desc, and } from "drizzle-orm";
+import { parseSearchParams, withJsonBody } from "@/lib/api/validation";
+import {
+  createTransactionSchema,
+  listTransactionsQuerySchema,
+  monthStart,
+} from "@/lib/api/schemas";
 import {
   locationToColumns,
   validateLocationInput,
@@ -10,11 +16,13 @@ import {
 
 /** GET /api/transactions — list transactions with optional filters */
 export async function GET(request: NextRequest) {
-  const searchParams = request.nextUrl.searchParams;
-  const month = searchParams.get("month");
-  const productId =
-    searchParams.get("productId") ?? searchParams.get("accountId");
-  const limit = parseInt(searchParams.get("limit") ?? "50");
+  const query = parseSearchParams(
+    request.nextUrl.searchParams,
+    listTransactionsQuerySchema
+  );
+  if (!query.ok) return query.response;
+  const { month, limit } = query.data;
+  const productId = query.data.productId ?? query.data.accountId;
 
   const conditions = [];
   if (month) {
@@ -52,18 +60,9 @@ export async function GET(request: NextRequest) {
 /** POST /api/transactions: create a manual transaction. An optional
  *  `location` ({ name?, city?, country?, latitude?, longitude? }) is validated
  *  like PATCH /api/transactions/[id] does; 400 `{ error, field }` when not. */
-export async function POST(request: NextRequest) {
-  const body = await request.json();
-
+export const POST = withJsonBody(createTransactionSchema, async (body) => {
   const { description, amount, transactionDate, scheduledMonth, notes } = body;
   const productId = body.productId ?? body.accountId;
-
-  if (!description || amount === undefined || !transactionDate) {
-    return NextResponse.json(
-      { error: "Missing required fields: description, amount, transactionDate" },
-      { status: 400 }
-    );
-  }
 
   const location = validateLocationInput(body.location ?? null);
   if (!location.ok) {
@@ -77,20 +76,14 @@ export async function POST(request: NextRequest) {
   const resolvedProductId =
     productId ?? (await resolveProductId("manual", "checking"));
 
-  // Derive scheduledMonth from transactionDate if not provided
-  const txDate = new Date(transactionDate);
-  const derivedMonth =
-    scheduledMonth ??
-    `${txDate.getFullYear()}-${String(txDate.getMonth() + 1).padStart(2, "0")}-01`;
-
   const [created] = await db
     .insert(transactions)
     .values({
       productId: resolvedProductId,
       description,
-      amount: Math.round(amount),
+      amount,
       transactionDate,
-      scheduledMonth: derivedMonth,
+      scheduledMonth: scheduledMonth ?? monthStart(transactionDate),
       source: "manual",
       notes: notes ?? null,
       ...locationToColumns(location.value),
@@ -100,4 +93,4 @@ export async function POST(request: NextRequest) {
     .returning();
 
   return NextResponse.json(created, { status: 201 });
-}
+});
