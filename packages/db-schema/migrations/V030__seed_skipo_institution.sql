@@ -1,4 +1,4 @@
--- V029: Seed the Skipo institution.
+-- V030: Seed the Skipo institution.
 --
 -- The scraper writer creates a missing institution on its first write with
 -- name = slug and kind = 'other', so this row only gives Skipo its display

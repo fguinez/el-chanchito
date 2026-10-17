@@ -69,6 +69,7 @@ DATABASE_URL=postgres://finance:finance@localhost:5435/finance
 BANCHILE_RUT=12345678-9          # Banco de Chile (via Playwright)
 LIDER_BCI_RUT=12345678-9         # Tarjeta Lider Bci (real Chrome over CDP)
 # LIDER_BCI_CDP_URL=http://localhost:9222  # optional: reuse the make bci-lider-login Chrome
+SANTANDER_RUT=00.000.000-0       # Banco Santander (headless Playwright login)
 FINTUAL_EMAIL=your@email.com     # Fintual (web session; run `make fintual-login` once)
 EMAIL_IMAP_HOST=imap.gmail.com   # Email parser (MercadoPago, MACH, Tenpo)
 EMAIL_IMAP_USER=your@gmail.com
@@ -78,7 +79,8 @@ EMAIL_IMAP_USER=your@gmail.com
 host port (`POSTGRES_PORT`), the e-mail tuning (`EMAIL_LOOKBACK_DAYS`,
 `EMAIL_MAX_MESSAGES`, `EMAIL_IMAP_MAILBOX`), the Fintual session cache
 (`FINTUAL_SESSION_FILE`), the Tarjeta Lider Bci Chrome
-(`LIDER_BCI_CDP_PORT`, `LIDER_BCI_CHROME_PATH`), the scraper service mode
+(`LIDER_BCI_CDP_PORT`, `LIDER_BCI_CHROME_PATH`), the visible-browser debug switch
+for Santander (`SANTANDER_HEADLESS=0`), the scraper service mode
 (`SCRAPER_MODE`), the on-demand refresh wiring and the dashboard login.
 
 Optional email parser tuning (defaults in parentheses):
@@ -104,6 +106,7 @@ Secrets and their meaning:
 |---|---|
 | `chanchito.BANCHILE_PASSWORD` | Banco de Chile web password |
 | `chanchito.LIDER_BCI_PASSWORD` | Tarjeta Lider Bci clave (autofills the login; without it someone has to type it into the Chrome window) |
+| `chanchito.SANTANDER_PASSWORD` | Banco Santander web clave |
 | `chanchito.FINTUAL_PASSWORD` | Fintual account password (used by `make fintual-login` to open a web session) |
 | `chanchito.BUDA_API_KEY` | Buda.com API key |
 | `chanchito.BUDA_API_SECRET` | Buda.com API secret |
@@ -120,6 +123,7 @@ A scraper is enabled only when its credentials are present:
 | Skipo | `SKIPO_API_KEY` |
 | Banco de Chile | `BANCHILE_RUT` + `BANCHILE_PASSWORD` |
 | Tarjeta Lider Bci | `LIDER_BCI_RUT` |
+| Banco Santander | `SANTANDER_RUT` + `SANTANDER_PASSWORD` |
 | MACH, MercadoPago, Tenpo | `EMAIL_IMAP_HOST` + `EMAIL_IMAP_USER` + `EMAIL_IMAP_PASSWORD` |
 
 On non-macOS hosts (e.g. Docker-only deploys), export the secret env vars
@@ -269,6 +273,22 @@ A rejected key (expired, revoked, missing a scope or blocked by IP) fails the
 run with the HTTP status and Skipo's error code. Tokenized stocks and fiat
 other than CLP are not imported yet; holding them marks the run `partial`.
 
+### Banco Santander
+
+The Santander scraper logs in with a headless Chromium once per run (RUT +
+clave, no session kept between runs) and reads only the CLP cuenta vista: its
+balance and its movements, from the JSON the bank's own site loads. Other
+Santander products are ignored. It runs on the host and in the Docker
+container alike.
+
+Santander's login is protected by an edge firewall and behavioural telemetry.
+The scraper never retries a failed login: if the bank shows its "Revisa tu
+conexión a internet" block page, asks for a second factor (Santander Pass, a
+clave dinámica) or rejects the credentials, the run fails with a message
+saying which, and the next scheduled run tries again. To watch the browser
+while debugging, set `SANTANDER_HEADLESS=0` (needs a display, so not in the
+container).
+
 ### Running scrapers once
 
 ```bash
@@ -287,6 +307,7 @@ Schedule per scraper:
 - **Skipo**: every 1 hour
 - **BanChile**: every 24 hours
 - **BCI Lider**: every 24 hours
+- **Santander**: every 24 hours
 - **MACH, MercadoPago, Tenpo** (e-mail): every 30 minutes
 
 `make scrapers-start` (like `make dev` and the Compose service) also runs every

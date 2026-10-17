@@ -10,6 +10,7 @@ const INSTITUTION_LABELS: Record<string, string> = {
   tenpo: "Tenpo",
   bci_lider: "BCI Lider",
   skipo: "Skipo",
+  santander: "Banco Santander",
   _legacy_composite: "Email (legacy)",
 };
 

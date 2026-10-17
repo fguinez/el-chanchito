@@ -53,7 +53,8 @@
 │  │  ┌─────────┐ ┌──────┐ ┌───────────┐ ┌───────────────────┐ │  │
 │  │  │ Fintual │ │ Buda │ │ BanChile  │ │ MACH / MP / Tenpo │ │  │
 │  │  │  (6h)   │ │Skipo │ │ BCI Lider │ │  shared IMAP 30m  │ │  │
-│  │  │         │ │ (1h) │ │   (24h)   │ │                   │ │  │
+│  │  │         │ │ (1h) │ │ Santander │ │                   │ │  │
+│  │  │         │ │      │ │   (24h)   │ │                   │ │  │
 │  │  └────┬────┘ └──┬───┘ └─────┬─────┘ └─────────┬─────────┘ │  │
 │  │       │         │           │                 │           │  │
 │  │       ▼         ▼           ▼                 ▼           │  │
@@ -79,7 +80,8 @@
         ┌──────────┐ ┌───────────┐ ┌───────────┐
         │ Fintual  │ │ BanChile  │ │   MACH    │
         │Buda Skipo│ │ BCI Lider │ │ MP, Tenpo │
-        │  (APIs)  │ │ (browser) │ │  (IMAP)   │
+        │  (APIs)  │ │ Santander │ │  (IMAP)   │
+        │          │ │ (browser) │ │           │
         └────┬─────┘ └─────┬─────┘ └─────┬─────┘
              │             │             │
              ▼             ▼             ▼
@@ -341,7 +343,7 @@ fixed_expenses                internal_transfers
 scraper_runs
   id PK
   method       (email|web|http_api|fintself|open_banking; last two on legacy rows)
-  institution  (mach|mercadopago|tenpo|banchile|bci_lider|...)
+  institution  (mach|mercadopago|tenpo|banchile|bci_lider|santander|...)
   started_at
   finished_at
   status       (running|success|partial|error)
@@ -403,7 +405,8 @@ the same function over the rows that are still uncategorized.
 | `V024__exchange_rates.sql` | exchange_rates: the latest scraped rate per institution or product and currency pair |
 | `V025__transactions_location.sql` | optional transaction location: name, city, country, a range-checked lat/lng pair, and `location_is_manual`; no backfill |
 | `V028__internal_transfer_transaction_links.sql` | internal_transfers gain `from_transaction_id` / `to_transaction_id`: nullable, unique FKs (ON DELETE SET NULL) to the scraped rows a transfer accounts for; no backfill |
-| `V029__seed_skipo_institution.sql` | seeds the `skipo` institution (display name, kind, site) |
+| `V029__seed_santander_institution.sql` | seeds the Banco Santander institution row (upsert, so it also fixes a row the writer auto-created) |
+| `V030__seed_skipo_institution.sql` | seeds the `skipo` institution (display name, kind, site) |
 
 ## Scraper Architecture
 
@@ -427,10 +430,12 @@ apps/scrapers/scrapers/
     banchile_movements.py  # BdC movements + the shared session -> fetch_session()
     banchile_fx.py         # BdC USD card exchange rate (fetch-only surface)
     bci_lider_web.py       # real Chrome over CDP -> scrape_card() / save_login_session()
+    santander_web.py       # headless Santander login + the SPA's JSON -> fetch_session()
   institutions/
     mach.py  mercadopago.py  tenpo.py       -> consume backends/email
     banchile.py                              -> banchile_movements (one login: tx + balances)
     bci_lider.py                             -> bci_lider_web (one CDP drive: tx + balances)
+    santander.py                             -> santander_web (one headless login: tx + balance)
     buda.py  fintual.py  skipo.py            -> self-contained (HTTP APIs)
 ```
 
@@ -588,6 +593,28 @@ yields the Nacionales (CLP) charges, paged. Figures are anchored on their
 `$`/`US$` labels (a drift records nothing rather than a wrong number), and USD
 balances convert to CLP via lib/rates' multi-currency FX.
 
+Banco Santander has no API for individuals (Chile's Open Finance system is not
+operating yet), `fintself` reads its rendered DOM without movement ids, and its
+login runs behind Akamai's edge with BioCatch behavioural telemetry, so a plain
+HTTP client only gets the block page. The scraper therefore logs in with a
+headless Playwright Chromium (`backends/santander_web.py`), typing the RUT and
+clave into the login iframe, and reads only the JSON the private SPA loads for
+itself, captured by a response listener: `cruceProductosOnline` (fired by the
+dashboard) for the products, and the open-banking transactions API (fired when
+the vista's card is clicked) for the movements, taken only from a response
+whose request named the vista's own account id. If that click yields nothing,
+the transactions call is replayed once from inside the page with the headers
+the SPA sent in the same session, or the run is recorded as partial. Only the
+CLP cuenta vista is modelled: a singleton `vista` product (`balance` from
+`MONTODISPONIBLE`, read as implied cents) that receives every movement; other
+products in the list are ignored. One login feeds both legs per cycle, the way
+BCI Lider caches its drive. The edge's block page, a step-up (second factor)
+prompt or a login error raises a typed error that is never retried, and every
+wait polls for a specific response or element (never `networkidle`, which
+BioCatch's telemetry keeps from firing). The scraper does not try to evade
+BioCatch's automation detection: if Santander starts blocking the headless
+login, the run fails and says so.
+
 Buda reads two signed REST surfaces (issue #3). Balances cover every wallet:
 one `crypto` product per currency, `units` kept fractional. Transactions cover
 **CLP deposits and withdrawals only**, minus annulled or rejected ones, paged
@@ -734,6 +761,7 @@ place (see [Exchange rates](#exchange-rates)).
 | `mercadopago` | `email` | IMAP (Gmail) | Shared IMAP session | 30m |
 | `tenpo` | `email` | IMAP (Gmail) | Shared IMAP session | 30m |
 | `bci_lider` | `web` | Real Chrome over CDP (`bci_lider_web`) | Autofill in a real Chrome (managed by default; reuse via `LIDER_BCI_CDP_URL` + `make bci-lider-login`; Cloudflare Turnstile) | 24h |
+| `santander` | `web` | Headless Playwright login, the SPA's own JSON (`santander_web`) | RUT + password, one login per run | 24h |
 
 The three email-based scrapers reuse one `ImapSession`: it runs `NOOP` on
 each acquire and only re-logs-in when the mailbox has been dropped. imaplib is
@@ -871,6 +899,14 @@ Transactions are deduplicated via `UNIQUE(product_id, external_id)`:
 - BCI Lider: `bcl_{md5(date|amount|CLP)[:16]}` (no per-movement id in the DOM;
   the description is left out because the portal rewrites it once a charge is
   billed, see V017)
+- Santander: `san_mov_{accountingDate}_{movementNumber}` from the bank's own
+  movement number (zero padding stripped), stable across separate logins and
+  scoped by the posting date, since the number may be a per-posting-day
+  sequence; a movement without a number or without a posting date (the
+  occurrence date is never substituted) falls back to
+  `san_fp_{md5(currency|transactionDate|
+  accountingDate|movementAmount|newBalance|chargePaymentFlag)[:16]}`, raw
+  fields only and never the description
 - Email: `email_{institution}_{sha1(Message-ID)[:8]}` (`hashlib`, not Python's
   per-process salted `hash()`); an email without a Message-ID hashes
   `Date|From|Subject|body` instead
@@ -1146,9 +1182,10 @@ el-chanchito/
 │   │
 │   └── scrapers/                     # Python scraper service
 │       ├── scrapers/
-│       │   ├── backends/             # email, banchile_web, banchile_movements, bci_lider_web
-│       │   └── institutions/         # 8 scrapers: banchile, bci_lider, buda, fintual,
-│       │                             #   mach, mercadopago, skipo, tenpo
+│       │   ├── backends/             # email, banchile_web, banchile_movements, bci_lider_web,
+│       │   │                         #   santander_web
+│       │   └── institutions/         # 9 scrapers: banchile, bci_lider, buda, fintual,
+│       │                             #   mach, mercadopago, santander, skipo, tenpo
 │       ├── db/                       # Connection pool + writer + slug
 │       ├── tests/                    # pytest (conftest.py: per-test DB fixtures)
 │       ├── main.py                   # Entry point + scheduler + control endpoint
@@ -1159,7 +1196,7 @@ el-chanchito/
 │
 ├── packages/
 │   ├── db-schema/                    # Shared SQL migrations
-│   │   ├── migrations/               # V001 through V025, V027, V028
+│   │   ├── migrations/               # V001 through V025, V027 through V030
 │   │   └── migrate.mjs               # Migration runner
 │   └── product-model/                # Product-kind registry (pydantic v2)
 │       ├── product_model/            # kinds, attributes, metrics, display, envelopes

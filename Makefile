@@ -31,7 +31,7 @@ env: ## Create .env from .env.example
 # Secrets live in the login Keychain as generic passwords named "chanchito.<VAR>".
 # Non-secret config (RUT, emails, hosts) stays in .env.
 
-SECRET_KEYS := BANCHILE_PASSWORD LIDER_BCI_PASSWORD FINTUAL_PASSWORD BUDA_API_KEY BUDA_API_SECRET SKIPO_API_KEY EMAIL_IMAP_PASSWORD DASHBOARD_PASSWORD
+SECRET_KEYS := BANCHILE_PASSWORD LIDER_BCI_PASSWORD SANTANDER_PASSWORD FINTUAL_PASSWORD BUDA_API_KEY BUDA_API_SECRET SKIPO_API_KEY EMAIL_IMAP_PASSWORD DASHBOARD_PASSWORD
 
 secrets-init: ## Store scraper secrets in macOS Keychain (interactive, skips existing)
 	@for k in $(SECRET_KEYS); do \
@@ -150,7 +150,7 @@ bci-lider-login: ## Tarjeta Lider Bci reuse mode (optional; managed is default):
 		../../.venv/bin/python -m scrapers.institutions.bci_lider
 
 scrapers-test: ## Test scraper imports and basic functionality
-	cd apps/scrapers && ../../.venv/bin/python -c "from scrapers.institutions import FintualScraper, BudaScraper, BanChileScraper, BciLiderScraper, MachScraper, MercadoPagoScraper, SkipoScraper, TenpoScraper; from scrapers.backends.email import get_session, fetch_transactions_for_pattern; from scrapers.backends.banchile_movements import fetch_session; from db.writer import start_scraper_run, finish_scraper_run; print('All scraper imports OK')"
+	cd apps/scrapers && ../../.venv/bin/python -c "from scrapers.institutions import FintualScraper, BudaScraper, BanChileScraper, BciLiderScraper, MachScraper, MercadoPagoScraper, SantanderScraper, SkipoScraper, TenpoScraper; from scrapers.backends.email import get_session, fetch_transactions_for_pattern; from scrapers.backends.banchile_movements import fetch_session; from scrapers.backends.santander_web import fetch_session as santander_fetch_session; from db.writer import start_scraper_run, finish_scraper_run; print('All scraper imports OK')"
 
 # ─── Docker (full stack) ────────────────────────────────────────────────────
 
