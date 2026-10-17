@@ -82,6 +82,7 @@ from dataclasses import dataclass, field, replace
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Callable, Optional
 
+from scrapers.backends.banchile_fx import read_exchange_rate_surface
 from scrapers.backends.banchile_web import (
     DEFAULT_TIMEOUT,
     _CARD_LINK_SELECTORS,
@@ -102,7 +103,7 @@ from scrapers.backends.banchile_web import (
     _recover_to_home,
     parse_clp,
 )
-from scrapers.base import ScrapedProduct, TransactionLocation
+from scrapers.base import ScrapedExchangeRate, ScrapedProduct, TransactionLocation
 
 logger = logging.getLogger(__name__)
 
@@ -174,13 +175,16 @@ class BanChileSessionResult:
     """Everything one BanChile login produced: products, movements, failures.
 
     `failed_surfaces` merges the product surfaces (banchile_web's dashboard /
-    card / línea / depósitos / fondos) with the movement ones, so the scraper
-    can report partial coverage from either half of the shared session.
+    card / línea / depósitos / fondos), banchile_fx's "tipo de cambio" and the
+    movement ones, so the scraper can report partial coverage from any part of
+    the shared session. `exchange_rates` is the USD card's rate (banchile_fx),
+    kept apart from `products`: it is not a product observation.
     """
 
     products: list[ScrapedProduct] = field(default_factory=list)
     movements: list[BanChileMovement] = field(default_factory=list)
     failed_surfaces: tuple[str, ...] = ()
+    exchange_rates: list[ScrapedExchangeRate] = field(default_factory=list)
 
 
 # --- Pure helpers (unit-tested; no browser) -----------------------------------
@@ -1450,13 +1454,28 @@ def read_movement_surfaces(page) -> tuple[list[BanChileMovement], tuple[str, ...
 
 # --- The shared session -------------------------------------------------------
 
-def _session_sync(rut: str, password: str, headless: bool) -> BanChileSessionResult:
-    """One login, both reads (issue #28): products first, then movements.
+def read_session(page) -> BanChileSessionResult:
+    """Every read of one authenticated page: products, the rate, movements.
 
     Products run first so the heavier movements read (a dialog drive plus one
     call per movement without an inline glosa) can never cost the balances,
-    which is the leg the dashboard depends on every day.
+    which is the leg the dashboard depends on every day. The USD card rate
+    (two fetches, no navigation) goes between them, so it prices the balances
+    read in the same session. This is the seam the session tests drive.
     """
+    balances = _read_all_surfaces(page)
+    rates, rate_failed = read_exchange_rate_surface(page)
+    movements, movement_failed = read_movement_surfaces(page)
+    return BanChileSessionResult(
+        products=balances.products,
+        movements=movements,
+        failed_surfaces=balances.failed_surfaces + rate_failed + movement_failed,
+        exchange_rates=rates,
+    )
+
+
+def _session_sync(rut: str, password: str, headless: bool) -> BanChileSessionResult:
+    """One login, every read (issue #28); see `read_session` for the order."""
     from playwright.sync_api import sync_playwright  # lazy: keeps tests browser-free
 
     with sync_playwright() as playwright:
@@ -1468,14 +1487,7 @@ def _session_sync(rut: str, password: str, headless: bool) -> BanChileSessionRes
 
             _login(page, rut, password)
             _dismiss_popup(page)
-
-            balances = _read_all_surfaces(page)
-            movements, failed = read_movement_surfaces(page)
-            return BanChileSessionResult(
-                products=balances.products,
-                movements=movements,
-                failed_surfaces=balances.failed_surfaces + failed,
-            )
+            return read_session(page)
         finally:
             browser.close()
 
@@ -1483,7 +1495,7 @@ def _session_sync(rut: str, password: str, headless: bool) -> BanChileSessionRes
 async def fetch_session(
     rut: str, password: str, *, headless: bool = True
 ) -> BanChileSessionResult:
-    """Log into Banco de Chile once and read both products and movements.
+    """Log into Banco de Chile once and read its products, rate and movements.
 
     Runs the synchronous Playwright flow in a thread executor so it doesn't
     block the scheduler's event loop, mirroring `banchile_web.fetch_balances`.
