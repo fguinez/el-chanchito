@@ -121,12 +121,17 @@ _DEAD_SESSION_ERRORS = frozenset(
 _BAD_CREDENTIALS_ERRORS = frozenset(
     {"INVALID_LOGIN_CREDENTIALS", "INVALID_PASSWORD", "EMAIL_NOT_FOUND", "INVALID_EMAIL"}
 )
+_KEY_REJECTED = (
+    "Google rejected Racional's Firebase key; set or update RACIONAL_FIREBASE_API_KEY "
+    "(see USAGE.md)."
+)
 
 # apps/scrapers/, resolved from this file so cwd doesn't matter.
 _APP_DIR = Path(__file__).resolve().parents[2]
 _DEFAULT_SESSION_FILE = _APP_DIR / ".racional_session.json"
 
 _CENT = Decimal("0.01")
+_ERROR_CODE = re.compile(r"[A-Z0-9_]{1,64}")
 _MAIN_BUNDLE = re.compile(r'src="(main-es2015\.[0-9a-f]+\.js)"')
 # Anchored on the project's authDomain so another Firebase config can't match.
 _API_KEY = re.compile(
@@ -190,7 +195,9 @@ def _documents(payload: Any) -> list[tuple[str, dict]]:
     """(document id, decoded fields) for each document in a runQuery answer.
 
     The answer is a JSON array; entries without a `document` (a bare
-    `readTime`, sent when nothing matched) are not results.
+    `readTime`, sent when nothing matched) are not results. A name without
+    an id is skipped: an empty `external_ref` would share the identity of a
+    product without one.
     """
     if not isinstance(payload, list):
         raise RuntimeError("Racional sent an unexpected payload reading portfolios")
@@ -200,9 +207,10 @@ def _documents(payload: Any) -> list[tuple[str, dict]]:
         if not isinstance(document, dict):
             continue
         name = document.get("name")
-        if not isinstance(name, str) or "/" not in name:
+        doc_id = name.rsplit("/", 1)[1] if isinstance(name, str) and "/" in name else ""
+        if not doc_id:
             continue
-        documents.append((name.rsplit("/", 1)[1], _decode_fields(document.get("fields") or {})))
+        documents.append((doc_id, _decode_fields(document.get("fields") or {})))
     return documents
 
 
@@ -217,7 +225,7 @@ def _decimal(raw: Any) -> Decimal | None:
     return value if value.is_finite() else None
 
 
-def _round(value: Decimal, currency: str) -> float:
+def _round(value: Decimal, currency: str) -> int | float:
     """Whole CLP or USD cents, half up (never Python's banker's `round`)."""
     if currency == "CLP":
         return int(value.quantize(Decimal(1), rounding=ROUND_HALF_UP))
@@ -313,14 +321,26 @@ def _find_firebase_api_key(js: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _firebase_error(resp: httpx.Response) -> str:
-    """Firebase's error code ("INVALID_REFRESH_TOKEN", ...) without any detail."""
+def _firebase_message(resp: httpx.Response) -> str:
+    """The head of Google's error message, upper-cased; for matching only, never shown.
+
+    Codes may carry a free-text suffix ("TOO_MANY_ATTEMPTS_TRY_LATER : ...").
+    """
     try:
         message = resp.json().get("error", {}).get("message", "")
     except (ValueError, AttributeError):
         return ""
-    # Codes may carry a free-text suffix ("TOO_MANY_ATTEMPTS_TRY_LATER : ...").
     return str(message).split(":", 1)[0].strip().upper()
+
+
+def _firebase_error(resp: httpx.Response) -> str:
+    """Firebase's error code ("INVALID_REFRESH_TOKEN", ...), or "" for free text.
+
+    Only a code-shaped token may reach an error message: Google also answers
+    with prose ("Requests from referer ... are blocked.") that quotes the request.
+    """
+    message = _firebase_message(resp)
+    return message if _ERROR_CODE.fullmatch(message) else ""
 
 
 def _json_dict(resp: httpx.Response) -> dict:
@@ -334,7 +354,7 @@ def _json_dict(resp: httpx.Response) -> dict:
 
 def _is_api_key_error(resp: httpx.Response) -> bool:
     """Google's answer to an invalid or restricted API key (400 or 403)."""
-    return resp.status_code in (400, 403) and "API KEY" in _firebase_error(resp)
+    return resp.status_code in (400, 403) and "API KEY" in _firebase_message(resp)
 
 
 def _failure_reason(error: Exception) -> str:
@@ -343,7 +363,7 @@ def _failure_reason(error: Exception) -> str:
     Our exception messages are written to carry no secrets; anything else
     (an httpx error names the URL, say) is reduced to its type.
     """
-    if isinstance(error, RuntimeError):
+    if isinstance(error, RacionalSessionError):
         return str(error)
     return f"an unexpected {type(error).__name__}."
 
@@ -466,8 +486,9 @@ class RacionalScraper(BaseScraper):
         """Sign in the way the web app does, cache the session, return (ID token, uid).
 
         `code_provider` is called only when Racional asks for the e-mailed
-        code; it may be sync (a prompt) or async (the IMAP reader). Every
-        refusal raises `RacionalLoginError` and nothing is retried. The device
+        code; it may be sync (a prompt) or async (the IMAP reader). A refusal
+        by Racional or Firebase raises `RacionalLoginError`; a rejected key or
+        an unreadable token raises `RacionalSessionError`; nothing is retried. The device
         id is saved before Racional first sees it, so a failed sign-in doesn't
         turn the next one into a new device.
         """
@@ -519,10 +540,7 @@ class RacionalScraper(BaseScraper):
                 json={"email": self.email, "password": self.password, "returnSecureToken": True},
             )
         if _is_api_key_error(resp):
-            raise RacionalSessionError(
-                "Google rejected Racional's Firebase key; set RACIONAL_FIREBASE_API_KEY "
-                "(see USAGE.md)."
-            )
+            raise RacionalSessionError(_KEY_REJECTED)
         if not resp.is_success:
             raise RacionalLoginError(self._sign_in_refusal(_firebase_error(resp), resp.status_code))
         data = _json_dict(resp)
@@ -565,7 +583,7 @@ class RacionalScraper(BaseScraper):
         """
         claims = _token_claims(id_token)
         if not claims:
-            raise RuntimeError("Racional's ID token couldn't be read")
+            raise RacionalSessionError("Racional's ID token couldn't be read.")
         if claims.get("deviceSecurityEnabled") is True:
             error = RacionalDeviceSecurityError(
                 "This Racional account has device security on: Racional serves it only "
@@ -618,8 +636,11 @@ class RacionalScraper(BaseScraper):
         automatically. The reason is kept for the next run's error message.
         """
         logger.info("Racional: no usable session; signing in with the e-mailed code")
+        # Noting the inbox's newest code sends nothing to Racional, so an IMAP
+        # failure here is left to the next cycle instead of blocking.
+        provider = await self._imap_code_provider()
         try:
-            return await self.login(await self._imap_code_provider())
+            return await self.login(provider)
         except httpx.TransportError:
             raise
         except Exception as e:
@@ -638,6 +659,8 @@ class RacionalScraper(BaseScraper):
             session["api_key"] = await self._discover_api_key(client)
             self._save_session(session)
             resp = await self._post_refresh(client, session, session["api_key"])
+        if _is_api_key_error(resp):
+            raise RacionalSessionError(_KEY_REJECTED)
         if resp.is_success:
             data = _json_dict(resp)
             if data.get("refresh_token") and data["refresh_token"] != session["refresh_token"]:
@@ -744,7 +767,7 @@ class RacionalScraper(BaseScraper):
         if len(documents) >= MAX_PORTFOLIOS:
             warnings.append(f"Racional: read only the first {MAX_PORTFOLIOS} portfolios")
         for warning in warnings:
-            logger.warning(warning)
+            logger.warning("%s", warning)
         logger.info("Racional: %d portfolio(s)", len(products))
         return ProductScrapeResult(products, warnings)
 

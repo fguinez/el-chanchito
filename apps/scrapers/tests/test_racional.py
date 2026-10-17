@@ -127,6 +127,7 @@ class _Racional:
         self.sign_in_error = None
         self.sign_in_extra = {}
         self.unreadable_tokens = False
+        self.drop_mfa_start = False
         self.issued: set[str] = set()
         self.requests: list[httpx.Request] = []
 
@@ -150,6 +151,8 @@ class _Racional:
                 'authDomain:"racional-prod.firebaseapp.com",projectId:"racional-prod"}',
             )
         if url == racional_mod.MFA_START_URL:
+            if self.drop_mfa_start:
+                raise httpx.ConnectError("synthetic dropped connection", request=request)
             return httpx.Response(200, json={"showMfaModal": self.show_code, "canSkipMfa": False})
         if url == racional_mod.MFA_VERIFY_URL:
             body = json.loads(request.content)
@@ -285,6 +288,12 @@ class TestDocuments:
     def test_bare_read_time_is_no_result(self):
         """An empty answer carries only a readTime entry."""
         assert _documents([{"readTime": "2026-01-15T12:00:00Z"}]) == []
+
+    def test_name_without_an_id_is_skipped(self):
+        """An empty id would collide with the identity of a product without an external_ref."""
+        payload = [{"document": {"name": "projects/racional-prod/documents/portfolios/", "fields": {}}}]
+
+        assert _documents(payload) == []
 
     def test_non_list_payload_raises(self):
         """An error object instead of the result array is not silently empty."""
@@ -559,7 +568,7 @@ class TestScrapeProducts:
         fake.unreadable_tokens = True
         _install(monkeypatch, fake)
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RacionalSessionError, match="couldn't be read"):
             asyncio.run(RacionalScraper().scrape_products())
 
         assert fake.calls("documents:runQuery") == []
@@ -674,6 +683,24 @@ class TestScrapeProducts:
         assert len(result.products) == 1
         assert len(fake.calls(BUNDLE)) == 1
         assert json.loads(session_file.read_text())["api_key"] == API_KEY
+        for request in fake.requests:
+            assert "key" not in request.url.params
+            assert API_KEY not in str(request.url) and "synthetic-old-key" not in str(request.url)
+
+    def test_rejected_override_on_refresh_names_it(self, monkeypatch, session_file):
+        """A hand-set key Google refuses is reported as such, without the key or a bundle read."""
+        _write_session(session_file)
+        monkeypatch.setenv("RACIONAL_FIREBASE_API_KEY", "synthetic-wrong-key")
+        fake = _Racional({"portfolio-0001": _portfolio()})
+        _install(monkeypatch, fake)
+
+        with pytest.raises(RacionalSessionError) as excinfo:
+            asyncio.run(RacionalScraper().scrape_products())
+
+        assert "RACIONAL_FIREBASE_API_KEY" in str(excinfo.value)
+        assert "synthetic-wrong-key" not in str(excinfo.value)
+        assert fake.calls(BUNDLE) == []
+        assert fake.calls("documents:runQuery") == []
 
     def test_api_key_override_skips_the_bundle(self, monkeypatch, session_file):
         """RACIONAL_FIREBASE_API_KEY is used as is; the web app is never fetched."""
@@ -811,6 +838,11 @@ class TestLogin:
             pytest.param("TOO_MANY_ATTEMPTS_TRY_LATER : synthetic detail", "rate-limiting", id="rate-limit"),
             pytest.param("MISSING_RECAPTCHA_TOKEN", "reCAPTCHA", id="recaptcha"),
             pytest.param("OPERATION_NOT_ALLOWED", "OPERATION_NOT_ALLOWED", id="other"),
+            pytest.param(
+                "Requests from referer synthetic.example.com are blocked.",
+                "no error code",
+                id="free-text",
+            ),
         ],
     )
     def test_sign_in_refusals_are_explained_once(self, monkeypatch, session_file, firebase_error, fragment):
@@ -826,6 +858,7 @@ class TestLogin:
         assert fragment in message
         assert PASSWORD not in message and EMAIL not in message
         assert "synthetic detail" not in message
+        assert "REFERER" not in message.upper() and "example.com" not in message
         assert len(fake.calls("signInWithPassword")) == 1
 
     def test_sms_second_factor_is_refused(self, monkeypatch, session_file):
@@ -969,6 +1002,53 @@ class TestAutoLogin:
         assert "didn't arrive" in session["auto_login_blocked"]
         assert session["device_id"]
 
+    def test_imap_failure_before_any_request_doesnt_block(self, monkeypatch, session_file):
+        """If the inbox can't be read before the code is requested, Racional saw nothing: no block."""
+        _write_session(session_file, refresh_token="synthetic-refresh-dead")
+        _enable_imap(monkeypatch)
+        self._imap(monkeypatch, [OSError("synthetic IMAP failure")])
+        fake = _Racional()
+        _install(monkeypatch, fake)
+
+        with pytest.raises(OSError):
+            asyncio.run(RacionalScraper().scrape_products())
+
+        assert "auto_login_blocked" not in json.loads(session_file.read_text())
+        assert fake.calls("authMfaStart") == []
+
+    def test_dropped_connection_doesnt_block(self, monkeypatch, session_file):
+        """A transport error says nothing about the account, so the next cycle may sign in again."""
+        _write_session(session_file, refresh_token="synthetic-refresh-dead")
+        _enable_imap(monkeypatch)
+        self._imap(monkeypatch, [None, CODE])
+        fake = _Racional()
+        fake.drop_mfa_start = True
+        _install(monkeypatch, fake)
+
+        with pytest.raises(httpx.TransportError):
+            asyncio.run(RacionalScraper().scrape_products())
+
+        assert "auto_login_blocked" not in json.loads(session_file.read_text())
+        assert fake.calls("signInWithPassword") == []
+
+    def test_foreign_error_is_remembered_by_type_only(self, monkeypatch, session_file):
+        """An exception that isn't ours blocks, but only its type is stored and shown."""
+        _write_session(session_file, refresh_token="synthetic-refresh-dead")
+        _enable_imap(monkeypatch)
+        self._imap(monkeypatch, [None, ValueError("synthetic-refresh-secret")])
+        fake = _Racional()
+        _install(monkeypatch, fake)
+
+        with pytest.raises(ValueError):
+            asyncio.run(RacionalScraper().scrape_products())
+        with pytest.raises(RacionalSessionError) as excinfo:
+            asyncio.run(RacionalScraper().scrape_products())
+
+        assert json.loads(session_file.read_text())["auto_login_blocked"] == "an unexpected ValueError."
+        assert "synthetic-refresh-secret" not in session_file.read_text()
+        assert "ValueError" in str(excinfo.value)
+        assert "synthetic-refresh-secret" not in str(excinfo.value)
+
     @pytest.mark.parametrize(
         ("imap_host", "imap_user", "imap_password"),
         [
@@ -984,6 +1064,7 @@ class TestAutoLogin:
         monkeypatch.setenv("EMAIL_IMAP_HOST", imap_host)
         monkeypatch.setenv("EMAIL_IMAP_USER", imap_user)
         monkeypatch.setenv("EMAIL_IMAP_PASSWORD", imap_password)
+        reader = self._imap(monkeypatch, [CODE])
         fake = _Racional()
         _install(monkeypatch, fake)
 
@@ -991,3 +1072,4 @@ class TestAutoLogin:
             asyncio.run(RacionalScraper().scrape_products())
 
         assert fake.requests == []
+        reader.assert_not_awaited()
