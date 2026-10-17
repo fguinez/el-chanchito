@@ -32,7 +32,7 @@ import {
 import { hrefWithSearchParam, TXN_PARAM } from "@/lib/transaction-selection";
 import { TransferLinksDialog } from "@/components/transfers/transfer-links-dialog";
 import { TransferSuggestionsCard } from "@/components/transfers/transfer-suggestions-card";
-import { Trash2, Check, Link2 } from "lucide-react";
+import { Trash2, Check, Link2, Undo2 } from "lucide-react";
 
 interface InternalTransfer {
   id: string;
@@ -49,6 +49,8 @@ interface InternalTransfer {
   toTransaction: TransferLinkedTransaction | null;
   transferDate: string;
   status: string;
+  /** Linked by the suggestions on their own (V032). */
+  autoLinked: boolean;
   notes: string | null;
 }
 
@@ -118,6 +120,53 @@ function ProductCell({
         </Link>
       )}
     </>
+  );
+}
+
+/** The description, with an "Automática" badge on a transfer the suggestions
+ *  linked on their own. */
+function DescriptionCell({ transfer }: { transfer: InternalTransfer }) {
+  return (
+    <>
+      {transfer.description}
+      {transfer.autoLinked && (
+        <Badge variant="secondary" className="ml-2">
+          Automática
+        </Badge>
+      )}
+    </>
+  );
+}
+
+/** Delete, or for an automatic transfer its undo: deleting it also dismisses
+ *  the pair, so it is not linked again. */
+function DeleteButton({
+  transfer,
+  onDelete,
+}: {
+  transfer: InternalTransfer;
+  onDelete: (id: string) => void;
+}) {
+  if (transfer.autoLinked) {
+    return (
+      <button
+        onClick={() => onDelete(transfer.id)}
+        className="text-muted-foreground hover:text-destructive"
+        title="Deshacer vínculo automático"
+        aria-label={`Deshacer vínculo automático: ${transfer.description}`}
+      >
+        <Undo2 className="h-4 w-4" />
+      </button>
+    );
+  }
+  return (
+    <button
+      onClick={() => onDelete(transfer.id)}
+      className="text-muted-foreground hover:text-destructive"
+      title="Eliminar"
+    >
+      <Trash2 className="h-4 w-4" />
+    </button>
   );
 }
 
@@ -549,7 +598,9 @@ export default function TransfersPage() {
                     <TableCell className="whitespace-nowrap">
                       {formatPlainDateEs(t.transferDate)}
                     </TableCell>
-                    <TableCell>{t.description}</TableCell>
+                    <TableCell>
+                      <DescriptionCell transfer={t} />
+                    </TableCell>
                     <TableCell>
                       <ProductCell
                         product={t.fromProduct}
@@ -581,13 +632,7 @@ export default function TransfersPage() {
                         >
                           <Check className="h-4 w-4" />
                         </button>
-                        <button
-                          onClick={() => handleDelete(t.id)}
-                          className="text-muted-foreground hover:text-destructive"
-                          title="Eliminar"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </button>
+                        <DeleteButton transfer={t} onDelete={handleDelete} />
                       </div>
                     </TableCell>
                   </TableRow>
@@ -691,7 +736,9 @@ export default function TransfersPage() {
                     <TableCell className="whitespace-nowrap">
                       {formatPlainDateEs(t.transferDate)}
                     </TableCell>
-                    <TableCell>{t.description}</TableCell>
+                    <TableCell>
+                      <DescriptionCell transfer={t} />
+                    </TableCell>
                     <TableCell>
                       <ProductCell
                         product={t.fromProduct}
@@ -718,13 +765,7 @@ export default function TransfersPage() {
                           transfer={t}
                           onSaved={refreshAll}
                         />
-                        <button
-                          onClick={() => handleDelete(t.id)}
-                          className="text-muted-foreground hover:text-destructive"
-                          title="Eliminar"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </button>
+                        <DeleteButton transfer={t} onDelete={handleDelete} />
                       </div>
                     </TableCell>
                   </TableRow>

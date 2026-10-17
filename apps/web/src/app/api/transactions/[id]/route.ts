@@ -57,7 +57,8 @@ export interface TransactionDetail {
   institution: { id: string; name: string; slug: string };
   category: { id: string; name: string } | null;
   /** The internal transfer that links this row (V028), and on which side:
-   *  "from" = its outgoing leg, "to" = its incoming leg. */
+   *  "from" = its outgoing leg, "to" = its incoming leg. `autoLinked`: the
+   *  suggestions linked it on their own (V032). */
   transfer: {
     id: string;
     description: string;
@@ -65,6 +66,7 @@ export interface TransactionDetail {
     transferDate: string;
     status: TransferStatus;
     side: "from" | "to";
+    autoLinked: boolean;
   } | null;
 }
 
@@ -148,6 +150,7 @@ async function loadTransactionDetail(id: string) {
       amount: internalTransfers.amount,
       transferDate: internalTransfers.transferDate,
       status: internalTransfers.status,
+      autoLinked: internalTransfers.autoLinked,
       fromTransactionId: internalTransfers.fromTransactionId,
     })
     .from(internalTransfers)
@@ -202,6 +205,7 @@ async function loadTransactionDetail(id: string) {
           transferDate: link.transferDate,
           status: link.status,
           side: link.fromTransactionId === row.id ? "from" : "to",
+          autoLinked: link.autoLinked,
         }
       : null,
   };
