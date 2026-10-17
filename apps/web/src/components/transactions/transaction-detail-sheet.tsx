@@ -30,6 +30,7 @@ import {
 import type { TransactionDetail } from "@/app/api/transactions/[id]/route";
 import type { TransactionLocation } from "@/lib/transaction-location";
 import { TransactionLocationField } from "@/components/transactions/transaction-location-field";
+import { TransactionEditForm } from "@/components/transactions/transaction-edit-form";
 import { SUGGESTIONS_ANCHOR } from "@/lib/transfer-suggestions";
 
 type LoadResult =
@@ -38,22 +39,26 @@ type LoadResult =
   | { id: string; status: "error" };
 
 /**
- * Side panel with everything stored for one transaction; only the location
- * can be edited from here. Open while
- * `transactionId` is set; `onClose` should clear it (the caller owns the id,
- * e.g. in the URL). `onTransferChanged` tells the caller a transfer link
- * changed under the panel (an automatic link made or undone), so it can
- * reload its list.
+ * Side panel with everything stored for one transaction, editable in place
+ * (description, amount, dates, category, product, internal-transfer flag and
+ * location) and deletable. Open while `transactionId` is set; `onClose` should
+ * clear it (the caller owns the id, e.g. in the URL). `onChanged` tells the
+ * caller the row changed under the panel (an edit, a delete, or a transfer link
+ * made or undone), so it can reload its list; `onTransferChanged` is kept as an
+ * alias for callers that only cared about transfer links.
  */
 export function TransactionDetailSheet({
   transactionId,
   onClose,
+  onChanged,
   onTransferChanged,
 }: {
   transactionId: string | null;
   onClose: () => void;
+  onChanged?: () => void;
   onTransferChanged?: () => void;
 }) {
+  const notifyChanged = onChanged ?? onTransferChanged;
   const [result, setResult] = useState<LoadResult | null>(null);
   const [attempt, setAttempt] = useState(0);
 
@@ -106,10 +111,16 @@ export function TransactionDetailSheet({
     setResult(null);
     setAttempt((n) => n + 1);
   };
-  // Refetch in place (the transfer link changed): no loading state.
+  // Refetch in place (a link changed or the row was edited): no loading state.
   const reload = () => {
     setAttempt((n) => n + 1);
-    onTransferChanged?.();
+    notifyChanged?.();
+  };
+
+  // The row was deleted: close the panel and tell the caller to refresh.
+  const handleDeleted = () => {
+    onClose();
+    notifyChanged?.();
   };
 
   return (
@@ -124,7 +135,8 @@ export function TransactionDetailSheet({
           <TransactionDetailBody
             txn={current.data}
             onLocationSaved={locationSaved}
-            onTransferChanged={reload}
+            onChanged={reload}
+            onDeleted={handleDeleted}
           />
         ) : (
           <SheetHeader>
@@ -162,18 +174,21 @@ export function TransactionDetailSheet({
 function TransactionDetailBody({
   txn,
   onLocationSaved,
-  onTransferChanged,
+  onChanged,
+  onDeleted,
 }: {
   txn: TransactionDetail;
   onLocationSaved: (
     savedId: string,
     location: TransactionLocation | null
   ) => void;
-  onTransferChanged: () => void;
+  onChanged: () => void;
+  onDeleted: () => void;
 }) {
   const productHref = `/institutions/${txn.institution.slug}/${txn.product.slug}`;
   const productName = displayProductName(txn.product, txn.institution.name);
   const kindLabel = KIND_INFO[txn.product.kind]?.labelEs ?? txn.product.kind;
+  const [editing, setEditing] = useState(false);
 
   return (
     <>
@@ -196,7 +211,32 @@ function TransactionDetailBody({
       </SheetHeader>
 
       <div className="flex-1 space-y-5 overflow-y-auto p-4">
-        <Section title="Detalles">
+        <Section
+          title="Detalles"
+          action={
+            !editing && (
+              <Button
+                variant="outline"
+                size="xs"
+                onClick={() => setEditing(true)}
+              >
+                Editar
+              </Button>
+            )
+          }
+        >
+          {editing && (
+            <TransactionEditForm
+              txn={txn}
+              onSaved={() => {
+                setEditing(false);
+                onChanged();
+              }}
+              onCancel={() => setEditing(false)}
+            />
+          )}
+          {!editing && (
+          <>
           <Field label="Fecha de transacción">
             {formatPlainDateEs(txn.transactionDate)}
           </Field>
@@ -238,7 +278,7 @@ function TransactionDetailBody({
                   <AutoLinkUndo
                     key={txn.transfer.id}
                     transferId={txn.transfer.id}
-                    onUndone={onTransferChanged}
+                    onUndone={onChanged}
                   />
                 )}
               </>
@@ -250,11 +290,13 @@ function TransactionDetailBody({
                 <SuggestionHint
                   key={txn.id}
                   transactionId={txn.id}
-                  onAutoLinked={onTransferChanged}
+                  onAutoLinked={onChanged}
                 />
               </>
             )}
           </Field>
+          </>
+          )}
           <TransactionLocationField
             key={txn.id}
             transactionId={txn.id}
@@ -324,17 +366,32 @@ function TransactionDetailBody({
           <Field label="Creado">{formatTimestampEs(txn.createdAt)}</Field>
           <Field label="Actualizado">{formatTimestampEs(txn.updatedAt)}</Field>
         </Section>
+
+        <Separator />
+
+        <DeleteSection txn={txn} onDeleted={onDeleted} />
       </div>
     </>
   );
 }
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
+function Section({
+  title,
+  action,
+  children,
+}: {
+  title: string;
+  action?: ReactNode;
+  children: ReactNode;
+}) {
   return (
     <section className="space-y-2">
-      <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-        {title}
-      </h3>
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+          {title}
+        </h3>
+        {action}
+      </div>
       {children}
     </section>
   );
@@ -351,6 +408,83 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 
 function Muted({ children }: { children: ReactNode }) {
   return <span className="text-muted-foreground">{children}</span>;
+}
+
+/** Delete control with an inline confirm step (no browser confirm()). A row
+ *  from a scraper or CSV (it has an external id) is hidden, not erased, so a
+ *  re-scrape does not bring it back; that is surfaced as a short note. */
+function DeleteSection({
+  txn,
+  onDeleted,
+}: {
+  txn: TransactionDetail;
+  onDeleted: () => void;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const imported = txn.externalId !== null && txn.externalId !== "";
+
+  const remove = async () => {
+    setBusy(true);
+    setFailed(false);
+    try {
+      const res = await fetch(
+        `/api/transactions/${encodeURIComponent(txn.id)}`,
+        { method: "DELETE" }
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      onDeleted();
+    } catch {
+      setFailed(true);
+      setBusy(false);
+    }
+  };
+
+  if (!confirming) {
+    return (
+      <Button
+        variant="outline"
+        size="sm"
+        className="text-destructive hover:text-destructive"
+        onClick={() => setConfirming(true)}
+      >
+        Eliminar transacción
+      </Button>
+    );
+  }
+
+  return (
+    <div className="space-y-2 rounded-md border border-destructive/40 p-3">
+      <p className="text-sm">¿Eliminar esta transacción?</p>
+      <p className="text-xs text-muted-foreground">
+        {imported
+          ? "Viene de un scraper o importación: se ocultará para que un nuevo scrape no la vuelva a traer."
+          : "Es una entrada manual: se eliminará de forma definitiva."}
+      </p>
+      {failed && (
+        <p className="text-xs text-destructive">No se pudo eliminar.</p>
+      )}
+      <div className="flex gap-2">
+        <Button
+          variant="destructive"
+          size="sm"
+          onClick={remove}
+          disabled={busy}
+        >
+          {busy ? "Eliminando..." : "Sí, eliminar"}
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => setConfirming(false)}
+          disabled={busy}
+        >
+          Cancelar
+        </Button>
+      </div>
+    </div>
+  );
 }
 
 const noSubscribe = () => () => {};
