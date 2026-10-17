@@ -5,13 +5,13 @@ import {
   type ProductInfo,
   type SnapshotRow,
 } from "@/lib/monitors";
-import type { ClpRates } from "@/lib/rates";
+import type { RateBook } from "@/lib/rates";
 
 // Synthetic uuids and figures only.
 const CHECKING_ID = "11111111-1111-4111-8111-111111111111";
 const CARD_ID = "22222222-2222-4222-8222-222222222222";
 
-const rates: ClpRates = { CLP: 1, USD: 900 };
+const rates: RateBook = { provider: { CLP: 1, USD: 900 }, overrides: [] };
 
 // Current product rows carry deliberately different values than any snapshot,
 // so a leak of "today" into the past would show up in the assertions.

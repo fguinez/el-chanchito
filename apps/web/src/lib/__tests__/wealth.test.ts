@@ -3,12 +3,12 @@ import {
   BACKFILL_SOURCE,
   buildWealthSeries,
   derivedSeriesStart,
+  legacyDateError,
   legacyEntryCutoff,
-  validateLegacySnapshot,
   type LegacyWealthRow,
   type WealthSnapshotRow,
 } from "@/lib/wealth";
-import type { ClpRates } from "@/lib/rates";
+import type { RateBook } from "@/lib/rates";
 
 // Synthetic uuids and figures only. Timestamps use local-time constructors:
 // the series groups snapshots by local day and the suite runs in
@@ -17,7 +17,7 @@ const GOAL_ID = "11111111-1111-4111-8111-111111111111";
 const CHECKING_ID = "22222222-2222-4222-8222-222222222222";
 const CARD_ID = "33333333-3333-4333-8333-333333333333";
 
-const rates: ClpRates = { CLP: 1 };
+const book: RateBook = { provider: { CLP: 1 }, overrides: [] };
 
 const legacyRow = (
   snapshotDate: string,
@@ -90,7 +90,7 @@ describe("buildWealthSeries", () => {
         goal(new Date(2026, 1, 10, 9), 1000000),
         checking(new Date(2026, 2, 5, 10), 1500000),
       ],
-      rates
+      book
     );
 
     expect(series.map((p) => [p.snapshotDate, p.source])).toEqual([
@@ -120,7 +120,7 @@ describe("buildWealthSeries", () => {
         goal(new Date(Date.UTC(2026, 0, 10)), 1000000, BACKFILL_SOURCE),
         goal(new Date(Date.UTC(2026, 1, 10)), 1000000, BACKFILL_SOURCE),
       ],
-      rates
+      book
     );
 
     expect(series.map((p) => p.id)).toEqual([
@@ -138,7 +138,7 @@ describe("buildWealthSeries", () => {
         goal(new Date(Date.UTC(2026, 1, 10)), 1000000, BACKFILL_SOURCE),
         checking(new Date(2026, 2, 5, 10), 1500000),
       ],
-      rates
+      book
     );
 
     expect(series.map((p) => p.id)).toEqual([
@@ -156,7 +156,7 @@ describe("buildWealthSeries", () => {
         checking(new Date(2026, 2, 1, 23), 1000000),
         goal(new Date(2026, 2, 5, 10), 1500000),
       ],
-      rates
+      book
     );
 
     expect(series.map((p) => [p.snapshotDate, p.source])).toEqual([
@@ -173,7 +173,7 @@ describe("buildWealthSeries", () => {
         checking(new Date(2026, 2, 5, 10), 2500000),
         card(new Date(2026, 2, 5, 11), 1000000, 999999),
       ],
-      rates
+      book
     );
 
     expect(series).toHaveLength(1);
@@ -193,7 +193,7 @@ describe("buildWealthSeries", () => {
         checking(new Date(2026, 2, 10, 10), 2500000),
         card(new Date(2026, 2, 10, 11), 1000000, 1000000),
       ],
-      rates
+      book
     );
 
     expect(series[0]).toMatchObject({
@@ -216,7 +216,7 @@ describe("buildWealthSeries", () => {
     const series = buildWealthSeries(
       [legacyRow("2026-03-01", 2000000, 1000000)],
       [checking(new Date(2026, 3, 15, 10), 2500000)],
-      rates
+      book
     );
 
     expect(series[1]).toMatchObject({
@@ -310,87 +310,19 @@ describe("legacyEntryCutoff", () => {
   });
 });
 
-describe("validateLegacySnapshot", () => {
+describe("legacyDateError", () => {
   const cutoff = "2026-03-05";
 
-  it("rounds amounts and fills the optional fields", () => {
-    expect(
-      validateLegacySnapshot(
-        { snapshotDate: "2026-03-04", patrimonio: 2500000.4 },
-        cutoff
-      )
-    ).toEqual({
-      ok: true,
-      value: {
-        snapshotDate: "2026-03-04",
-        patrimonio: 2500000,
-        deuda: 0,
-        fintualBalance: null,
-        mercadopagoBalance: null,
-        banchileSavings: null,
-        notes: null,
-      },
-    });
+  it("accepts dates before the cutoff", () => {
+    expect(legacyDateError("2026-03-04", cutoff)).toBeNull();
   });
 
-  it("keeps components and notes when present", () => {
-    const result = validateLegacySnapshot(
-      {
-        snapshotDate: "2026-01-10",
-        patrimonio: 2500000,
-        deuda: 999999,
-        fintualBalance: 1000000,
-        mercadopagoBalance: null,
-        banchileSavings: 999999.6,
-        notes: "Synthetic example",
-      },
-      cutoff
-    );
-    expect(result).toMatchObject({
-      ok: true,
-      value: {
-        deuda: 999999,
-        fintualBalance: 1000000,
-        mercadopagoBalance: null,
-        banchileSavings: 1000000,
-        notes: "Synthetic example",
-      },
-    });
-  });
-
-  it.each([
-    ["a non-object body", ["2026-01-10"]],
-    ["a missing date", { patrimonio: 2500000 }],
-    ["an impossible date", { snapshotDate: "2026-02-30", patrimonio: 2500000 }],
-    ["a missing patrimonio", { snapshotDate: "2026-01-10" }],
-    ["a string amount", { snapshotDate: "2026-01-10", patrimonio: "2500000" }],
-    [
-      "a negative deuda",
-      { snapshotDate: "2026-01-10", patrimonio: 2500000, deuda: -1 },
-    ],
-    [
-      "an amount beyond the INTEGER column",
-      { snapshotDate: "2026-01-10", patrimonio: 2147483648 },
-    ],
-    [
-      "a non-string note",
-      { snapshotDate: "2026-01-10", patrimonio: 2500000, notes: 1 },
-    ],
-  ])("rejects %s with 400", (_label, body) => {
-    expect(validateLegacySnapshot(body, cutoff)).toMatchObject({
-      ok: false,
-      status: 400,
-    });
-  });
-
-  it("rejects dates on or after the cutoff with 409", () => {
-    for (const snapshotDate of ["2026-03-05", "2026-03-06"]) {
-      const result = validateLegacySnapshot(
-        { snapshotDate, patrimonio: 2500000 },
-        cutoff
+  it.each(["2026-03-05", "2026-03-06"])(
+    "rejects %s, on or after the cutoff",
+    (snapshotDate) => {
+      expect(legacyDateError(snapshotDate, cutoff)).toContain(
+        "before 2026-03-05"
       );
-      expect(result).toMatchObject({ ok: false, status: 409 });
-      expect(!result.ok && result.error).toContain("before 2026-03-05");
     }
-  });
+  );
 });

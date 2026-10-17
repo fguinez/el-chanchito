@@ -36,9 +36,11 @@ coverage/
 # Local files
 local/
 .fintual_session.json
+.banchile_session.json*
 .bci_lider_chrome_profile/
 .agents/*local*
-.claude/
+**/.claude/*
+!/.claude/skills/
 .gemini/
 .cursor/
 .lavish/

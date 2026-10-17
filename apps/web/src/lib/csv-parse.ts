@@ -77,12 +77,19 @@ export function parseAmount(raw: string): number {
   return Math.round(parseFloat(amountStr) || 0);
 }
 
-/** Rewrites DD/MM/YYYY or DD-MM-YYYY as YYYY-MM-DD; any other value is
- *  returned unchanged. */
+/** Rewrites DD/MM/YYYY or DD-MM-YYYY as YYYY-MM-DD, and a leading
+ *  YYYY/MM/DD or YYYY-MM-DD (dropping any trailing time) as YYYY-MM-DD;
+ *  any other value is returned unchanged. */
 export function parseDate(raw: string): string {
   const ddmmyyyy = raw.match(/(\d{1,2})[/-](\d{1,2})[/-](\d{4})/);
-  if (!ddmmyyyy) return raw;
-  return `${ddmmyyyy[3]}-${ddmmyyyy[2].padStart(2, "0")}-${ddmmyyyy[1].padStart(2, "0")}`;
+  if (ddmmyyyy) {
+    return `${ddmmyyyy[3]}-${ddmmyyyy[2].padStart(2, "0")}-${ddmmyyyy[1].padStart(2, "0")}`;
+  }
+  const yyyymmdd = raw.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})/);
+  if (yyyymmdd) {
+    return `${yyyymmdd[1]}-${yyyymmdd[2].padStart(2, "0")}-${yyyymmdd[3].padStart(2, "0")}`;
+  }
+  return raw;
 }
 
 /** Reads each data row through the mapping, dropping rows with no

@@ -10,7 +10,7 @@
 // available, so past days convert at today's prices.
 
 import type { ProductMetrics } from "@chanchito/product-model";
-import type { ClpRates } from "@/lib/rates";
+import type { RateBook } from "@/lib/rates";
 import { formatLocalDate } from "./dates";
 import { evaluateMonitor, type ProductInfo } from "./evaluate";
 import type {
@@ -43,7 +43,7 @@ export type ReplayOptions = {
   snapshots: SnapshotRow[];
   /** Current product rows; per-day balance/metrics are overlaid from snapshots. */
   products: Map<string, ProductInfo>;
-  rates: ClpRates;
+  rates: RateBook;
   /** YYYY-MM-DD inclusive; defaults to the first snapshot date. */
   from?: string;
   /** YYYY-MM-DD inclusive; defaults to the last snapshot date. */

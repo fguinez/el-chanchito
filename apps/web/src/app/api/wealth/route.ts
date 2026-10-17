@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import {
   wealthSnapshots,
@@ -8,20 +8,22 @@ import {
   institutions,
 } from "@/lib/db/schema";
 import { eq, asc, max } from "drizzle-orm";
-import { getClpRates } from "@/lib/rates";
+import { getRateBook } from "@/lib/rate-book";
 import {
   buildWealthSeries,
   derivedSeriesStart,
+  legacyDateError,
   legacyEntryCutoff,
-  validateLegacySnapshot,
 } from "@/lib/wealth";
-
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+import { withJsonBody } from "@/lib/api/validation";
+import {
+  createWealthSnapshotSchema,
+  deleteWealthSnapshotSchema,
+} from "@/lib/api/schemas";
 
 /** GET /api/wealth: the wealth series with derived metrics (see lib/wealth). */
 export async function GET() {
-  const rates = await getClpRates();
+  const book = await getRateBook();
 
   const legacy = await db
     .select()
@@ -45,7 +47,7 @@ export async function GET() {
     .innerJoin(institutions, eq(accounts.institutionId, institutions.id))
     .orderBy(asc(productSnapshots.asOf));
 
-  return NextResponse.json(buildWealthSeries(legacy, snapshots, rates));
+  return NextResponse.json(buildWealthSeries(legacy, snapshots, book));
 }
 
 /**
@@ -55,16 +57,9 @@ export async function GET() {
  * legacy history are always accepted. 409 otherwise, and for a date that
  * already has one.
  */
-export async function POST(request: NextRequest) {
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-  }
-
+export const POST = withJsonBody(createWealthSnapshotSchema, async (body) => {
   // No SQL filter: the rule lives in derivedSeriesStart alone.
-  const [[{ lastLegacyDate }], snapshots] = await Promise.all([
+  const [[latest], snapshots] = await Promise.all([
     db
       .select({ lastLegacyDate: max(wealthSnapshots.snapshotDate) })
       .from(wealthSnapshots),
@@ -72,63 +67,45 @@ export async function POST(request: NextRequest) {
       .select({ asOf: productSnapshots.asOf, source: productSnapshots.source })
       .from(productSnapshots),
   ]);
-  const derivedStart = derivedSeriesStart(snapshots, lastLegacyDate);
+  const derivedStart = derivedSeriesStart(
+    snapshots,
+    latest?.lastLegacyDate ?? null
+  );
 
-  const result = validateLegacySnapshot(
-    body,
+  const dateError = legacyDateError(
+    body.snapshotDate,
     legacyEntryCutoff(derivedStart, new Date())
   );
-  if (!result.ok) {
-    return NextResponse.json(
-      { error: result.error },
-      { status: result.status }
-    );
+  if (dateError) {
+    return NextResponse.json({ error: dateError }, { status: 409 });
   }
 
   const [created] = await db
     .insert(wealthSnapshots)
-    .values(result.value)
+    .values({
+      snapshotDate: body.snapshotDate,
+      patrimonio: body.patrimonio,
+      deuda: body.deuda ?? 0,
+      fintualBalance: body.fintualBalance ?? null,
+      mercadopagoBalance: body.mercadopagoBalance ?? null,
+      banchileSavings: body.banchileSavings ?? null,
+      notes: body.notes ?? null,
+    })
     .onConflictDoNothing({ target: wealthSnapshots.snapshotDate })
     .returning();
   if (!created) {
     return NextResponse.json(
-      {
-        error: `A legacy snapshot already exists for ${result.value.snapshotDate}`,
-      },
+      { error: `A legacy snapshot already exists for ${body.snapshotDate}` },
       { status: 409 }
     );
   }
 
   return NextResponse.json(created, { status: 201 });
-}
+});
 
 /** DELETE /api/wealth: delete a legacy snapshot by id (computed points are
  *  derived; 400 for them or a malformed id, 404 for an unknown one). */
-export async function DELETE(request: NextRequest) {
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-  }
-  const id =
-    typeof body === "object" && body !== null && "id" in body
-      ? body.id
-      : undefined;
-
-  if (!id) {
-    return NextResponse.json({ error: "Missing id" }, { status: 400 });
-  }
-  if (typeof id === "string" && id.startsWith("computed-")) {
-    return NextResponse.json(
-      { error: "Computed points are derived from product balances and cannot be deleted" },
-      { status: 400 }
-    );
-  }
-  if (typeof id !== "string" || !UUID_RE.test(id)) {
-    return NextResponse.json({ error: "Invalid id" }, { status: 400 });
-  }
-
+export const DELETE = withJsonBody(deleteWealthSnapshotSchema, async ({ id }) => {
   const deleted = await db
     .delete(wealthSnapshots)
     .where(eq(wealthSnapshots.id, id))
@@ -137,4 +114,4 @@ export async function DELETE(request: NextRequest) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
   return NextResponse.json({ ok: true });
-}
+});

@@ -3,10 +3,12 @@
 import asyncio
 import json
 import logging
+import math
 import os
 import signal
 import sys
 import threading
+from collections.abc import Callable
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -19,13 +21,17 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from db.connection import close_pool, database_url
 from db.writer import (
+    UnresolvedRateScope,
+    delete_superseded_transactions,
     finish_scraper_run,
     start_scraper_run,
+    upsert_exchange_rate,
     upsert_product,
-    upsert_transactions,
+    write_transactions,
 )
+from scrapers.backends import banchile_web
 from scrapers.backends.email import get_session as get_email_session
-from scrapers.base import BaseScraper
+from scrapers.base import BaseScraper, ScrapedExchangeRate
 from scrapers.institutions import (
     BanChileScraper,
     BciLiderScraper,
@@ -50,11 +56,15 @@ async def run_scraper(scraper: BaseScraper) -> None:
     must not stop the other. BanChile in particular reads both from one browser
     session (the transactions leg opens it and caches the products half), so a
     session that crashes must still leave the balances refreshable: its products
-    leg falls back to a balance-only login of its own.
+    leg falls back to a balance-only session of its own, which reuses the
+    cached one while it's live (a second full login inside BanChile's login
+    cooldown is refused).
 
     The products leg can also report non-fatal warnings (e.g. a BanChile
     surface that failed all its retries): a run with warnings but no errors is
-    recorded as `partial`, with the warnings as its message.
+    recorded as `partial`, with the warnings as its message. The exchange
+    rates it read are written after its products, each on its own: a rate
+    that names an unknown product, or fails to write, is a warning too.
     """
     run_id = start_scraper_run(scraper.method, scraper.institution)
     logger.info("Starting scraper: %s (run=%s)", scraper.name, run_id)
@@ -68,20 +78,38 @@ async def run_scraper(scraper: BaseScraper) -> None:
     try:
         transactions = await scraper.scrape_transactions()
         n_tx = len(transactions)
-        inserted = upsert_transactions(transactions)
+        written = write_transactions(transactions)
+        inserted = written.inserted
     except Exception as e:
         logger.exception("Scraper %s: transactions failed", scraper.name)
         errors.append(f"transactions: {e}")
+    else:
+        # Only rows whose replacement this write stored; a failure here is a
+        # warning, since the scrape itself succeeded.
+        try:
+            superseded = scraper.superseded_transactions()
+            if superseded:
+                delete_superseded_transactions(
+                    superseded,
+                    written.persisted_external_ids,
+                    {t.external_id for t in transactions},
+                )
+        except Exception as e:
+            logger.exception("Scraper %s: superseded-row cleanup failed", scraper.name)
+            warnings.append(f"cleanup: {e}")
 
+    rates: list[ScrapedExchangeRate] = []
     try:
         result = await scraper.scrape_products()
         n_prod = len(result.products)
         warnings.extend(result.warnings)
+        rates = list(result.exchange_rates)
         for sp in result.products:
             upsert_product(sp)
     except Exception as e:
         logger.exception("Scraper %s: products failed", scraper.name)
         errors.append(f"products: {e}")
+    warnings.extend(_write_exchange_rates(scraper, rates))
 
     logger.info(
         "Scraper %s: %d transactions (%d new), %d products",
@@ -102,6 +130,30 @@ async def run_scraper(scraper: BaseScraper) -> None:
         )
     else:
         finish_scraper_run(run_id, "success", transactions_imported=inserted)
+
+
+def _write_exchange_rates(
+    scraper: BaseScraper, rates: list[ScrapedExchangeRate]
+) -> list[str]:
+    """Write each rate on its own; return a warning per rate that wasn't written.
+
+    A rate is auxiliary to the products it prices, so neither an unresolvable
+    scope nor a write error may cost the run its other results.
+    """
+    warnings: list[str] = []
+    for rate in rates:
+        label = f"{rate.base_currency}/{rate.quote_currency}"
+        try:
+            upsert_exchange_rate(rate)
+        except UnresolvedRateScope as e:
+            logger.warning(
+                "Scraper %s: exchange rate %s skipped: %s", scraper.name, label, e
+            )
+            warnings.append(f"exchange rate {label}: {e}")
+        except Exception as e:
+            logger.exception("Scraper %s: exchange rate %s failed", scraper.name, label)
+            warnings.append(f"exchange rate {label}: {e}")
+    return warnings
 
 
 def build_scrapers() -> dict[str, BaseScraper]:
@@ -163,8 +215,21 @@ _SCHEDULES: dict[str, dict] = {
     "tenpo":        {"minutes": _EMAIL_INTERVAL_MINUTES, "label": "Tenpo email (every 30m)"},
 }
 
+# Manual-refresh cooldowns: slug -> the seconds until a manual trigger may run,
+# or None when it may run now. Kept out of _SCHEDULES, whose entries become
+# IntervalTrigger kwargs. The bank throttles full logins (issue #28), so
+# BanChile refuses only a run that would certainly need one inside its login
+# cooldown; anything its cached session can serve goes through.
+_REFRESH_COOLDOWNS: dict[str, Callable[[], float | None]] = {
+    "banchile": banchile_web.login_cooldown_retry_after,
+}
 
-def _make_control_handler(scheduler: AsyncIOScheduler, scraper_keys: set[str]):
+
+def _make_control_handler(
+    scheduler: AsyncIOScheduler,
+    scraper_keys: set[str],
+    cooldowns: dict[str, Callable[[], float | None]] | None = None,
+):
     """Build the HTTP handler for the internal scraper control server.
 
     Triggering a scrape means moving a scheduled job's next run time to now:
@@ -172,7 +237,20 @@ def _make_control_handler(scheduler: AsyncIOScheduler, scraper_keys: set[str]):
     job's `coalesce` / `max_instances=1` guards so a manual trigger can't
     overlap a scheduled or in-flight run. `job.modify()` is thread-safe, so
     it's fine to call from this handler's thread.
+
+    Those guards stop overlap, not frequency, so `cooldowns` maps a slug to
+    the seconds until it may be triggered again (None: now). Until then
+    `POST /refresh/{slug}` answers 429 with `Retry-After`, and `POST /refresh`
+    triggers the rest and lists it under `skipped`. The startup run isn't a
+    job, so a trigger during it isn't absorbed (BanChile's login gate still
+    stops a second login).
     """
+    cooldowns = cooldowns or {}
+
+    def seconds_left(slug: str) -> int:
+        retry_after = cooldowns.get(slug)
+        wait = retry_after() if retry_after else None
+        return math.ceil(wait) if wait and wait > 0 else 0
 
     def trigger(slug: str) -> bool:
         job = scheduler.get_job(slug)
@@ -183,11 +261,15 @@ def _make_control_handler(scheduler: AsyncIOScheduler, scraper_keys: set[str]):
         return True
 
     class ControlHandler(BaseHTTPRequestHandler):
-        def _send(self, code: int, payload: dict) -> None:
+        def _send(
+            self, code: int, payload: dict, headers: dict[str, str] | None = None
+        ) -> None:
             body = json.dumps(payload).encode()
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(body)
 
@@ -208,11 +290,34 @@ def _make_control_handler(scheduler: AsyncIOScheduler, scraper_keys: set[str]):
 
         def do_POST(self) -> None:  # noqa: N802
             if self.path == "/refresh":
-                triggered = sorted(s for s in scraper_keys if trigger(s))
-                self._send(202, {"triggered": triggered})
+                triggered: list[str] = []
+                skipped: list[dict] = []
+                for slug in sorted(s for s in scraper_keys if scheduler.get_job(s)):
+                    wait = seconds_left(slug)
+                    if wait:
+                        logger.info(
+                            "Manual trigger for %s skipped: cooldown, %ds left", slug, wait
+                        )
+                        skipped.append({"slug": slug, "retry_after_seconds": wait})
+                    elif trigger(slug):
+                        triggered.append(slug)
+                self._send(202, {"triggered": triggered, "skipped": skipped})
             elif self.path.startswith("/refresh/"):
                 slug = self.path[len("/refresh/") :]
-                if trigger(slug):
+                wait = seconds_left(slug) if scheduler.get_job(slug) else 0
+                if wait:
+                    logger.info(
+                        "Manual trigger for %s refused: cooldown, %ds left", slug, wait
+                    )
+                    self._send(
+                        429,
+                        {
+                            "error": f"{slug} is cooling down; retry in {wait}s",
+                            "skipped": [{"slug": slug, "retry_after_seconds": wait}],
+                        },
+                        {"Retry-After": str(wait)},
+                    )
+                elif trigger(slug):
                     self._send(202, {"triggered": [slug]})
                 else:
                     self._send(404, {"error": f"unknown scraper: {slug}"})
@@ -239,7 +344,7 @@ def _start_control_server(
     if not port:
         return None
 
-    handler = _make_control_handler(scheduler, scraper_keys)
+    handler = _make_control_handler(scheduler, scraper_keys, _REFRESH_COOLDOWNS)
     server = ThreadingHTTPServer(("0.0.0.0", int(port)), handler)
     thread = threading.Thread(
         target=server.serve_forever, name="scraper-control", daemon=True

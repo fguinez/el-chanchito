@@ -5,8 +5,8 @@ import { wealthSnapshots } from "@/lib/db/schema";
 
 // POST /api/wealth wiring: the cutoff comes from the latest legacy date and
 // the product observations after it, the body goes through
-// validateLegacySnapshot, and a duplicate date is a conflict rather than an
-// overwrite. The db is a stub that answers the queries POST issues:
+// createWealthSnapshotSchema, and a duplicate date is a conflict rather than
+// an overwrite. The db is a stub that answers the queries POST issues:
 // `select ... from` (max(snapshot_date), or every snapshot's asOf/source),
 // `insert ... onConflictDoNothing ... returning` and
 // `delete ... where ... returning`.
