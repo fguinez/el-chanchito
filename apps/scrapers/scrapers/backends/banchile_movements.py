@@ -951,12 +951,22 @@ _BILLED_ROUTE = "#/tarjeta-credito/consultar/facturados"
 
 # The movements route opens a Material dialog ("Seleccione una cuenta") that
 # defaults to the USD account, and `getCartola` does not fire until it is
-# cleared: pick the currency, pick the account radio, press Aceptar.
+# cleared: pick the currency, pick the account radio, press Aceptar. The
+# options read "(USD)" and "(CLP)"; the radios only list the accounts of the
+# picked currency. The USD radio was observed unchecked, labelled "Cuenta
+# Corriente ... (USD)", with an id that changes between renders, so it is found
+# by that label and clicked through its own `label` child, never by id.
 _CURRENCY_SELECT_SELECTOR = "mat-select[name=monedas]"
 _CURRENCY_OPTION_SELECTOR = "mat-option"
 _ACCOUNT_RADIO_SELECTOR = "mat-radio-button"
 _MODAL_ACCEPT_SELECTOR = "#modalPrimaryBtn button"
-_CLP_OPTION_RE = re.compile(r"\bCLP\b", re.I)
+_CURRENCY_OPTION_RES = {
+    "CLP": re.compile(r"\bCLP\b", re.I),
+    "USD": re.compile(r"\bUSD\b", re.I),
+}
+# Only the USD drive filters radios by label; the CLP one keeps its positional
+# pick, unchanged since issue #57.
+_ACCOUNT_LABEL_RES = {"USD": re.compile(r"\(\s*USD\s*\)", re.I)}
 
 # Movement surfaces are slower than a balance read (the cartola arrives after a
 # dialog round trip), so they reuse banchile_web's escalating render budgets.
@@ -1085,36 +1095,130 @@ def _post_json(page, url: str, body: dict) -> tuple[int, Optional[dict]]:
 # --- Checking: the cartola behind the account dialog --------------------------
 
 
-def _select_clp_currency(page, timeout_ms: int) -> bool:
-    """Open the dialog's currency select and pick CLP (it defaults to USD)."""
+# The dialog drive, step by step. Each step reports how it went instead of a
+# bare bool, so a failing drive names the step that failed (issue #82: the
+# first USD attempt failed every retry and the logs could not say where).
+_STEP_OK = "ok"
+_STEP_ABSENT = "absent"  # the dialog has nothing in this currency
+_STEP_FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class _StepResult:
+    status: str
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class _RadioPick:
+    """What the account step found: how many radios, and whether it clicked."""
+
+    count: int
+    status: str
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class _CartolaDrive:
+    """One dialog drive. `no_account` means the currency has no account at all."""
+
+    payload: Optional[dict] = None
+    accounts: int = 0
+    no_account: bool = False
+
+
+def matching_option_index(option_texts: list[str], currency: str) -> Optional[int]:
+    """Which currency option to click (None when no option is `currency`'s)."""
+    option_re = _CURRENCY_OPTION_RES[currency]
+    for index, text in enumerate(option_texts):
+        if option_re.search(text or ""):
+            return index
+    return None
+
+
+def matching_radio_indices(radio_labels: list[str], currency: str) -> list[int]:
+    """The radios that belong to `currency`'s accounts, in dialog order.
+
+    Every radio for CLP (its positional pick predates labels and stays as it
+    was); only the radios whose label carries "(USD)" for USD.
+    """
+    label_re = _ACCOUNT_LABEL_RES.get(currency)
+    if label_re is None:
+        return list(range(len(radio_labels)))
+    return [i for i, label in enumerate(radio_labels) if label_re.search(label or "")]
+
+
+def _select_currency(page, currency: str, timeout_ms: int) -> _StepResult:
+    """Open the dialog's currency select and pick `currency` (it defaults to USD).
+
+    USD is picked explicitly too rather than trusted as the default, so both
+    drives go through the same steps. `_STEP_ABSENT` means the list opened and
+    none of its options is `currency`'s; an empty or unreadable list is a
+    failure, since that is what a slow render looks like.
+    """
     try:
         select = page.locator(_CURRENCY_SELECT_SELECTOR).first
-        select.wait_for(state="visible", timeout=timeout_ms)
+        try:
+            select.wait_for(state="visible", timeout=timeout_ms)
+        except Exception:
+            logger.debug("BanChile: currency select never became visible", exc_info=True)
+            return _StepResult(_STEP_FAILED, "currency select not visible")
         select.click()
         page.wait_for_timeout(_DIALOG_SETTLE_MS)
         options = page.locator(_CURRENCY_OPTION_SELECTOR)
-        for index in range(options.count()):
-            option = options.nth(index)
-            if _CLP_OPTION_RE.search(option.inner_text() or ""):
-                option.click()
-                page.wait_for_timeout(_DIALOG_SETTLE_MS)
-                return True
-    except Exception:
+        texts = [options.nth(i).inner_text() or "" for i in range(options.count())]
+        logger.debug("BanChile: currency options offered: %s", texts)
+        if not texts:
+            return _StepResult(_STEP_FAILED, "currency list did not open")
+        index = matching_option_index(texts, currency)
+        if index is None:
+            return _StepResult(_STEP_ABSENT, f"no {currency} option")
+        options.nth(index).click()
+        page.wait_for_timeout(_DIALOG_SETTLE_MS)
+        return _StepResult(_STEP_OK)
+    except Exception as error:
         logger.debug("BanChile: currency select not usable", exc_info=True)
-    return False
+        return _StepResult(_STEP_FAILED, f"currency select raised {type(error).__name__}")
 
 
-def _click_account_radio(page, index: int) -> int:
-    """Select the index-th account radio; returns how many the dialog offers.
+def _click_account_radio(
+    page, index: int, currency: str = "CLP", timeout_ms: int = 0
+) -> _RadioPick:
+    """Select the index-th account radio of `currency`; report how many it offers.
 
-    Returns 0 when the radios aren't there or the index is out of range, which
-    the caller reads as "no account to open".
+    CLP is unchanged since issue #57: the radios are counted after the settle
+    pause and picked by position, through `#<id> label`. USD waits for the
+    radios to render and keeps only the ones labelled "(USD)", then clicks the
+    picked radio's own `label` child (its id changes between renders, so it is
+    never looked up again). Zero USD radios after the wait is `_STEP_ABSENT`:
+    there is no USD account to read.
     """
+    labelled = currency in _ACCOUNT_LABEL_RES
     try:
         radios = page.locator(_ACCOUNT_RADIO_SELECTOR)
+        if labelled:
+            try:
+                radios.first.wait_for(state="visible", timeout=timeout_ms)
+            except Exception:
+                logger.debug("BanChile: no account radio rendered", exc_info=True)
+                return _RadioPick(0, _STEP_ABSENT, f"no {currency} account radio")
+            labels = [radios.nth(i).inner_text() or "" for i in range(radios.count())]
+            # Only the count is logged: a radio's label carries the account number.
+            logger.debug("BanChile: %d account radio(s) rendered", len(labels))
+            matching = matching_radio_indices(labels, currency)
+            if not matching:
+                return _RadioPick(0, _STEP_ABSENT, f"no {currency} account radio")
+            if index >= len(matching):
+                return _RadioPick(len(matching), _STEP_OK)
+            radios.nth(matching[index]).locator("label").first.click()
+            page.wait_for_timeout(_DIALOG_SETTLE_MS)
+            return _RadioPick(len(matching), _STEP_OK)
+
         count = radios.count()
+        if not count:
+            return _RadioPick(0, _STEP_FAILED, "no account radio rendered")
         if index >= count:
-            return count
+            return _RadioPick(count, _STEP_OK)
         radio = radios.nth(index)
         radio_id = radio.get_attribute("id")
         # The radio's own input is covered by its label, which is what the SPA
@@ -1122,38 +1226,84 @@ def _click_account_radio(page, index: int) -> int:
         target = page.locator(f"#{radio_id} label").first if radio_id else radio
         target.click()
         page.wait_for_timeout(_DIALOG_SETTLE_MS)
-        return count
-    except Exception:
+        return _RadioPick(count, _STEP_OK)
+    except Exception as error:
         logger.debug("BanChile: account radio %d not usable", index, exc_info=True)
-        return 0
+        return _RadioPick(0, _STEP_FAILED, f"account radio raised {type(error).__name__}")
 
 
-def _open_cartola(page, index: int, timeout_ms: int) -> tuple[Optional[dict], int]:
-    """Drive the account dialog for account `index` and capture its cartola.
+def _drive_failed(
+    currency: str, step: str, reason: str, index: int, attempt: int, accounts: int = 0
+) -> _CartolaDrive:
+    """Log which dialog step failed and why, and return the failed drive."""
+    logger.info(
+        "BanChile: %s cartola dialog failed at the %s step (account %d, attempt %d): %s",
+        currency,
+        step,
+        index + 1,
+        attempt + 1,
+        reason,
+    )
+    return _CartolaDrive(accounts=accounts)
 
-    Returns (payload, account_count). The whole route is re-driven per account
-    because no control for re-opening the selector in place was observed; a
-    re-drive that fails simply ends the loop with whatever was already read.
+
+def _open_cartola(
+    page, index: int, timeout_ms: int, currency: str = "CLP", attempt: int = 0
+) -> _CartolaDrive:
+    """Drive the account dialog for `currency`'s account `index`; capture its cartola.
+
+    The whole route is re-driven per account because no control for re-opening
+    the selector in place was observed; a re-drive that fails simply ends the
+    loop with whatever was already read. The steps are route, currency select,
+    account radio, accept and cartola wait; a failure in any of them is logged
+    at INFO naming the step (DEBUG carries the detail). A currency with no
+    option, or no account radio once picked, comes back as `no_account`, which
+    is a reading and not a failure.
     """
     _recover_to_home(page)
     if not _ensure_on_portal(page):
-        return None, 0
+        return _drive_failed(currency, "route", "not on the portal", index, attempt)
     with _JsonCapture(page, _CARTOLA_FRAGMENT) as capture:
         try:
             page.evaluate(
                 "route => { window.location.hash = route; }", _MOVIMIENTOS_ROUTE
             )
-        except Exception:
+        except Exception as error:
             logger.debug("BanChile: could not route to the movements view", exc_info=True)
-            return None, 0
-        if not _select_clp_currency(page, timeout_ms):
-            return None, 0
-        count = _click_account_radio(page, index)
-        if not count or index >= count:
-            return None, count
+            return _drive_failed(
+                currency, "route", f"routing raised {type(error).__name__}", index, attempt
+            )
+
+        selected = _select_currency(page, currency, timeout_ms)
+        if selected.status == _STEP_ABSENT and currency != "CLP":
+            logger.info("BanChile: no %s checking account (%s)", currency, selected.reason)
+            return _CartolaDrive(no_account=True)
+        if selected.status != _STEP_OK:
+            return _drive_failed(
+                currency, "currency select", selected.reason, index, attempt
+            )
+
+        pick = _click_account_radio(page, index, currency, timeout_ms)
+        if pick.status == _STEP_ABSENT:
+            logger.info("BanChile: no %s checking account (%s)", currency, pick.reason)
+            return _CartolaDrive(no_account=True)
+        if pick.status != _STEP_OK:
+            return _drive_failed(currency, "account radio", pick.reason, index, attempt)
+        if index >= pick.count:
+            # Past the last account: the loop is done, nothing failed.
+            return _CartolaDrive(accounts=pick.count)
+
         if not _click_first(page, [_MODAL_ACCEPT_SELECTOR], timeout=timeout_ms):
-            return None, count
-        return _wait_for_payload(page, capture, timeout_ms), count
+            return _drive_failed(
+                currency, "accept", "Aceptar not clickable", index, attempt, pick.count
+            )
+        payload = _wait_for_payload(page, capture, timeout_ms)
+        if payload is None:
+            reason = "left the portal" if not _on_portal(page) else (
+                f"no getCartola response within {timeout_ms} ms"
+            )
+            return _drive_failed(currency, "cartola wait", reason, index, attempt, pick.count)
+        return _CartolaDrive(payload=payload, accounts=pick.count)
 
 
 def _operation_ids_for(
@@ -1193,7 +1343,7 @@ def _operation_ids_for(
 
 
 def _movements_from_cartola(
-    page, payload: dict, budget: int
+    page, payload: dict, budget: int, currency: str = "CLP"
 ) -> tuple[list[BanChileMovement], int]:
     """Shape one `getCartola` payload into movements, ids fetched as needed."""
     raw_movements = payload.get("movimientos")
@@ -1212,26 +1362,32 @@ def _movements_from_cartola(
             movements.append(movement)
     with_id = sum(1 for m in movements if m.operation_id)
     logger.info(
-        "BanChile: %d checking movements (%d with an operation id)",
+        "BanChile: %d %s checking movements (%d with an operation id)",
         len(movements),
+        currency,
         with_id,
     )
     return movements, remaining
 
 
-def _read_checking_movements(page, attempt: int) -> Optional[list[BanChileMovement]]:
-    """Read every CLP checking account's cartola (one attempt).
+def _read_checking_movements(
+    page, attempt: int, currency: str = "CLP"
+) -> Optional[list[BanChileMovement]]:
+    """Read every `currency` checking account's cartola (one attempt).
 
     The dialog lists one radio per account of the chosen currency, and this
-    account also holds a USD one, so the currency is picked explicitly first.
-    Accounts are read one dialog drive each: the SPA offers no observed way to
-    switch accounts without re-opening the selector, so the route is re-driven
-    per index and the results deduped. A re-drive that lands back on an account
-    already read is reported and stops the loop: silently deduping it away would
-    hide the fact that the other account's movements were never read.
+    customer holds both a CLP and a USD one, so the currency is picked
+    explicitly first. Accounts are read one dialog drive each: the SPA offers
+    no observed way to switch accounts without re-opening the selector, so the
+    route is re-driven per index and the results deduped. A re-drive that lands
+    back on an account already read is reported and stops the loop: silently
+    deduping it away would hide the fact that the other account's movements
+    were never read.
 
     Returns None when the first drive never produced a cartola (the surface
-    failed and is worth retrying); a list, possibly empty, once one did.
+    failed and is worth retrying); a list, possibly empty, once one did. A
+    currency the customer holds no account in is an empty list too, so a
+    customer without a USD account never sees a `partial` run for it.
     """
     budget = _budget(_RENDER_TIMEOUTS_MS, attempt)
     collected: list[BanChileMovement] = []
@@ -1240,9 +1396,14 @@ def _read_checking_movements(page, attempt: int) -> Optional[list[BanChileMoveme
     accounts = 1
     index = 0
     while index < min(accounts, _MAX_CHECKING_ACCOUNTS):
-        payload, count = _open_cartola(page, index, budget)
-        if count:
-            accounts = count
+        drive = _open_cartola(page, index, budget, currency, attempt)
+        if drive.no_account:
+            if index == 0:
+                return []
+            break
+        if drive.accounts:
+            accounts = drive.accounts
+        payload = drive.payload
         if payload is None:
             if index == 0:
                 return None
@@ -1259,7 +1420,7 @@ def _read_checking_movements(page, attempt: int) -> Optional[list[BanChileMoveme
             break
         seen_accounts.add(account)
         movements, glosa_calls_left = _movements_from_cartola(
-            page, payload, glosa_calls_left
+            page, payload, glosa_calls_left, currency
         )
         collected.extend(movements)
         index += 1

@@ -1368,3 +1368,220 @@ class TestReadSession:
         assert result.products == [product]
         assert result.movements == [movement]
         assert result.failed_surfaces == ("línea", "tipo de cambio", "movimientos")
+
+
+# --- The account dialog, step by step (issue #82) -----------------------------
+#
+# Every label, account number and payload below is synthetic.
+
+_USD_RADIO = "Cuenta Corriente 00-000-00000-02 (USD)"
+_CLP_RADIO = "Cuenta Corriente 00-000-00000-01 (CLP)"
+
+
+class TestCurrencyHelpers:
+    def test_option_index(self):
+        options = ["(USD)", "(CLP)"]
+        assert movements_mod.matching_option_index(options, "USD") == 0
+        assert movements_mod.matching_option_index(options, "CLP") == 1
+        assert movements_mod.matching_option_index(["(CLP)"], "USD") is None
+        assert movements_mod.matching_option_index([], "CLP") is None
+
+    def test_usd_radios_are_found_by_label(self):
+        labels = [_CLP_RADIO, _USD_RADIO]
+        assert movements_mod.matching_radio_indices(labels, "USD") == [1]
+        assert movements_mod.matching_radio_indices(labels[:1], "USD") == []
+
+    def test_clp_radios_keep_their_positional_pick(self):
+        labels = ["Cuenta Corriente 00-000-00000-01", "Cuenta Vista 00-000-00000-03"]
+        assert movements_mod.matching_radio_indices(labels, "CLP") == [0, 1]
+
+
+class _DialogLocator:
+    """One selector on the fake account dialog (see `_FakeDialogPage`)."""
+
+    def __init__(self, page, selector, index=0):
+        self.page = page
+        self.selector = selector
+        self.index = index
+
+    def _items(self):
+        page = self.page
+        if self.selector == movements_mod._CURRENCY_SELECT_SELECTOR:
+            return ["select"] if page.select_visible else []
+        if self.selector == movements_mod._CURRENCY_OPTION_SELECTOR:
+            return list(page.options) if page.select_open else []
+        if self.selector == movements_mod._ACCOUNT_RADIO_SELECTOR:
+            return list(page.radios.get(page.chosen, []))
+        if self.selector == movements_mod._MODAL_ACCEPT_SELECTOR:
+            return [] if page.chosen in page.accept_fails_for else ["accept"]
+        if self.selector.endswith(" label") or self.selector.startswith("radio-label:"):
+            return ["label"]
+        return []
+
+    @property
+    def first(self):
+        return _DialogLocator(self.page, self.selector, 0)
+
+    def nth(self, index):
+        return _DialogLocator(self.page, self.selector, index)
+
+    def count(self):
+        return len(self._items())
+
+    def wait_for(self, **kwargs):
+        if self.index >= len(self._items()):
+            raise RuntimeError("not visible")
+
+    def inner_text(self):
+        return self._items()[self.index]
+
+    def get_attribute(self, name):
+        return f"mat-radio-{self.index}"
+
+    def locator(self, selector):
+        return _DialogLocator(self.page, f"radio-label:{self.index}")
+
+    def click(self):
+        page = self.page
+        if self.selector == movements_mod._CURRENCY_SELECT_SELECTOR:
+            page.select_open = True
+        elif self.selector == movements_mod._CURRENCY_OPTION_SELECTOR:
+            page.chosen = "USD" if "USD" in self.inner_text() else "CLP"
+            page.select_open = False
+        elif self.selector.startswith("radio-label:"):
+            page.picked = int(self.selector.split(":")[1])
+        elif self.selector.startswith("#mat-radio-"):
+            page.picked = int(self.selector.split()[0].rsplit("-", 1)[1])
+        elif self.selector == movements_mod._MODAL_ACCEPT_SELECTOR:
+            page.fire_cartola()
+        else:
+            raise RuntimeError("not clickable")
+
+
+class _FakeDialogPage:
+    """The movements route's "Seleccione una cuenta" dialog, all synthetic.
+
+    `radios` maps a currency to the radio labels it lists, `cartolas` maps it
+    to the `getCartola` payload Aceptar makes the SPA load. The select defaults
+    to USD, as on the portal.
+    """
+
+    def __init__(
+        self,
+        options=("(USD)", "(CLP)"),
+        radios=None,
+        cartolas=None,
+        accept_fails_for=(),
+        cartola_fires=True,
+        select_visible=True,
+    ):
+        self.url = "https://portalpersonas.bancochile.cl/mibancochile-web/#/home"
+        self.options = options
+        self.radios = radios if radios is not None else {"CLP": [_CLP_RADIO], "USD": [_USD_RADIO]}
+        self.cartolas = cartolas or {}
+        self.accept_fails_for = set(accept_fails_for)
+        self.cartola_fires = cartola_fires
+        self.select_visible = select_visible
+        self.select_open = False
+        self.chosen = "USD"
+        self.picked = None
+        self.handlers = {}
+
+    def on(self, event, handler):
+        self.handlers.setdefault(event, []).append(handler)
+
+    def remove_listener(self, event, handler):
+        self.handlers.get(event, []).remove(handler)
+
+    def fire_cartola(self):
+        if not self.cartola_fires or self.picked is None:
+            return
+        payload = self.cartolas.get(self.chosen, {"movimientos": []})
+        response = _FakeResponse(
+            "https://portalpersonas.bancochile.cl/x/movimientos/getCartola", payload
+        )
+        for handler in list(self.handlers.get("response", [])):
+            handler(response)
+
+    def locator(self, selector):
+        return _DialogLocator(self, selector)
+
+    def evaluate(self, script, arg=None):
+        return None
+
+    def wait_for_timeout(self, ms):
+        return None
+
+    def goto(self, url, **kwargs):
+        self.url = url
+
+
+def _read_usd_dialog(page, attempt=0):
+    return movements_mod._read_checking_movements(page, attempt, currency="USD")
+
+
+class TestDialogSteps:
+    @pytest.fixture(autouse=True)
+    def _no_waiting(self, monkeypatch):
+        monkeypatch.setattr(movements_mod, "_RENDER_TIMEOUTS_MS", (0,))
+
+    def test_the_clp_drive_still_picks_clp_by_position(self):
+        page = _FakeDialogPage(cartolas={"CLP": {"movimientos": [_cartola_row()]}})
+
+        found = movements_mod._read_checking_movements(page, attempt=0)
+
+        assert page.chosen == "CLP"
+        assert page.picked == 0
+        assert [(m.currency, m.amount) for m in found] == [("CLP", Decimal(1000000))]
+
+    def test_the_usd_radio_is_found_by_its_label_not_its_position(self):
+        page = _FakeDialogPage(radios={"USD": [_CLP_RADIO, _USD_RADIO]})
+
+        assert _read_usd_dialog(page) == []
+        assert (page.chosen, page.picked) == ("USD", 1)
+
+    def test_no_usd_option_means_no_account(self, caplog):
+        page = _FakeDialogPage(options=("(CLP)",))
+
+        with caplog.at_level("INFO", logger=movements_mod.__name__):
+            found = _read_usd_dialog(page)
+
+        assert found == []
+        assert "no USD checking account (no USD option)" in caplog.text
+
+    def test_no_usd_radio_means_no_account(self):
+        assert _read_usd_dialog(_FakeDialogPage(radios={"USD": []})) == []
+
+    def test_only_clp_radios_means_no_account(self):
+        assert _read_usd_dialog(_FakeDialogPage(radios={"USD": [_CLP_RADIO]})) == []
+
+    def test_a_missing_clp_option_is_still_a_failure(self, caplog):
+        """Every customer has a CLP account, so its absence is a broken drive."""
+        page = _FakeDialogPage(options=("(USD)",))
+
+        with caplog.at_level("INFO", logger=movements_mod.__name__):
+            assert movements_mod._read_checking_movements(page, attempt=0) is None
+
+        assert "CLP cartola dialog failed at the currency select step" in caplog.text
+
+    @pytest.mark.parametrize(
+        ("page_kwargs", "step"),
+        [
+            ({"select_visible": False}, "currency select"),
+            ({"options": ()}, "currency select"),
+            ({"accept_fails_for": {"USD"}}, "accept"),
+            ({"cartola_fires": False}, "cartola wait"),
+        ],
+        ids=["select-hidden", "list-empty", "accept", "cartola-wait"],
+    )
+    def test_a_failing_step_is_named_and_is_a_failure(self, caplog, page_kwargs, step):
+        page = _FakeDialogPage(**page_kwargs)
+
+        with caplog.at_level("INFO", logger=movements_mod.__name__):
+            found = _read_usd_dialog(page, attempt=1)
+
+        assert found is None
+        assert f"USD cartola dialog failed at the {step} step (account 1, attempt 2)" in (
+            caplog.text
+        )
+
