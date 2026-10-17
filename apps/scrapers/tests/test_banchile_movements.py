@@ -1407,13 +1407,18 @@ class _DialogLocator:
     def _items(self):
         page = self.page
         if self.selector == movements_mod._CURRENCY_SELECT_SELECTOR:
-            return ["select"] if page.select_visible else []
+            return ["select"] if page.dialog_open and page.select_visible else []
         if self.selector == movements_mod._CURRENCY_OPTION_SELECTOR:
             return list(page.options) if page.select_open else []
         if self.selector == movements_mod._ACCOUNT_RADIO_SELECTOR:
-            return list(page.radios.get(page.chosen, []))
+            return list(page.radios.get(page.chosen, [])) if page.dialog_open else []
         if self.selector == movements_mod._MODAL_ACCEPT_SELECTOR:
-            return [] if page.chosen in page.accept_fails_for else ["accept"]
+            if not page.dialog_open or page.chosen in page.accept_fails_for:
+                return []
+            return ["accept"]
+        if self.selector == movements_mod._REOPEN_DIALOG_SELECTOR:
+            shown = page.on_movements and page.remembered and not page.dialog_open
+            return ["reopen"] if shown else []
         if self.selector.endswith(" label") or self.selector.startswith("radio-label:"):
             return ["label"]
         return []
@@ -1427,6 +1432,9 @@ class _DialogLocator:
 
     def count(self):
         return len(self._items())
+
+    def is_visible(self):
+        return self.index < len(self._items())
 
     def wait_for(self, **kwargs):
         if self.index >= len(self._items()):
@@ -1453,17 +1461,37 @@ class _DialogLocator:
         elif self.selector.startswith("#mat-radio-"):
             page.picked = int(self.selector.split()[0].rsplit("-", 1)[1])
         elif self.selector == movements_mod._MODAL_ACCEPT_SELECTOR:
-            page.fire_cartola()
+            page.accept()
+        elif self.selector == movements_mod._REOPEN_DIALOG_SELECTOR:
+            page.reopen_clicks += 1
+            page.dialog_open = True
+            page.chosen = "USD"  # the dialog opens on its USD default again
         else:
             raise RuntimeError("not clickable")
 
 
+class _FakeKeyboard:
+    def __init__(self, page):
+        self.page = page
+
+    def press(self, key):
+        if key != "Escape":
+            return
+        if self.page.select_open:
+            self.page.select_open = False
+        elif self.page.dialog_open:
+            self.page.dialog_open = False
+
+
 class _FakeDialogPage:
-    """The movements route's "Seleccione una cuenta" dialog, all synthetic.
+    """The movements route and its "Seleccione una cuenta" dialog, all synthetic.
 
     `radios` maps a currency to the radio labels it lists, `cartolas` maps it
-    to the `getCartola` payload Aceptar makes the SPA load. The select defaults
-    to USD, as on the portal.
+    to the `getCartola` payload Aceptar makes the SPA load (or to a list of
+    them, one per radio). The select defaults to USD, as on the portal. Like
+    the SPA, the page remembers the account once one is accepted: the route
+    then shows that cartola and a "SELECCIONAR OTRA CUENTA" button instead of
+    the dialog.
     """
 
     def __init__(
@@ -1474,6 +1502,7 @@ class _FakeDialogPage:
         accept_fails_for=(),
         cartola_fires=True,
         select_visible=True,
+        remembered=False,
     ):
         self.url = "https://portalpersonas.bancochile.cl/mibancochile-web/#/home"
         self.options = options
@@ -1482,10 +1511,15 @@ class _FakeDialogPage:
         self.accept_fails_for = set(accept_fails_for)
         self.cartola_fires = cartola_fires
         self.select_visible = select_visible
+        self.remembered = remembered
+        self.on_movements = False
+        self.dialog_open = False
         self.select_open = False
         self.chosen = "USD"
         self.picked = None
+        self.reopen_clicks = 0
         self.handlers = {}
+        self.keyboard = _FakeKeyboard(self)
 
     def on(self, event, handler):
         self.handlers.setdefault(event, []).append(handler)
@@ -1493,10 +1527,14 @@ class _FakeDialogPage:
     def remove_listener(self, event, handler):
         self.handlers.get(event, []).remove(handler)
 
-    def fire_cartola(self):
+    def accept(self):
         if not self.cartola_fires or self.picked is None:
             return
+        self.dialog_open = False
+        self.remembered = True
         payload = self.cartolas.get(self.chosen, {"movimientos": []})
+        if isinstance(payload, list):
+            payload = payload[self.picked]
         response = _FakeResponse(
             "https://portalpersonas.bancochile.cl/x/movimientos/getCartola", payload
         )
@@ -1507,6 +1545,9 @@ class _FakeDialogPage:
         return _DialogLocator(self, selector)
 
     def evaluate(self, script, arg=None):
+        if arg == movements_mod._MOVIMIENTOS_ROUTE:
+            self.on_movements = True
+            self.dialog_open = not self.remembered
         return None
 
     def wait_for_timeout(self, ms):
@@ -1514,6 +1555,9 @@ class _FakeDialogPage:
 
     def goto(self, url, **kwargs):
         self.url = url
+        self.on_movements = False
+        self.dialog_open = False
+        self.select_open = False
 
 
 def _read_usd_dialog(page, attempt=0):
@@ -1533,6 +1577,39 @@ class TestDialogSteps:
         assert page.chosen == "CLP"
         assert page.picked == 0
         assert [(m.currency, m.amount) for m in found] == [("CLP", Decimal(1000000))]
+
+    def test_a_remembered_account_reopens_the_dialog_with_its_button(self):
+        """Once an account is remembered the route shows no dialog by itself."""
+        page = _FakeDialogPage(
+            remembered=True, cartolas={"CLP": {"movimientos": [_cartola_row()]}}
+        )
+
+        found = movements_mod._read_checking_movements(page, attempt=0)
+
+        assert page.reopen_clicks == 1
+        assert [m.currency for m in found] == ["CLP"]
+
+    def test_a_second_clp_account_is_read_through_the_reopen_button(self):
+        second = dict(_cartola_row(saldo="999.999"), numeroCuenta="00-000-00000-03")
+        second["id"] = "CTD00-000-00000-03:20260820 12:41:33:1000000:abono:1"
+        page = _FakeDialogPage(
+            radios={"CLP": [_CLP_RADIO, "Cuenta Vista 00-000-00000-03 (CLP)"]},
+            cartolas={
+                "CLP": [{"movimientos": [_cartola_row()]}, {"movimientos": [second]}]
+            },
+        )
+
+        found = movements_mod._read_checking_movements(page, attempt=0)
+
+        assert page.reopen_clicks == 1  # the first drive found the dialog open
+        assert [m.fingerprint[1] for m in found] == ["2.500.000", "999.999"]
+
+    def test_the_usd_drive_after_the_clp_one_reopens_the_dialog(self):
+        page = _FakeDialogPage(cartolas={"CLP": {"movimientos": [_cartola_row()]}})
+
+        assert len(movements_mod._read_checking_movements(page, attempt=0)) == 1
+        assert _read_usd_dialog(page) == []
+        assert (page.reopen_clicks, page.chosen, page.picked) == (1, "USD", 0)
 
     def test_the_usd_radio_is_found_by_its_label_not_its_position(self):
         page = _FakeDialogPage(radios={"USD": [_CLP_RADIO, _USD_RADIO]})
@@ -1567,7 +1644,7 @@ class TestDialogSteps:
     @pytest.mark.parametrize(
         ("page_kwargs", "step"),
         [
-            ({"select_visible": False}, "currency select"),
+            ({"select_visible": False}, "dialog open"),
             ({"options": ()}, "currency select"),
             ({"accept_fails_for": {"USD"}}, "accept"),
             ({"cartola_fires": False}, "cartola wait"),

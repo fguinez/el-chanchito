@@ -1025,7 +1025,17 @@ _BILLED_ROUTE = "#/tarjeta-credito/consultar/facturados"
 # picked currency. The USD radio was observed unchecked, labelled "Cuenta
 # Corriente ... (USD)", with an id that changes between renders, so it is found
 # by that label and clicked through its own `label` child, never by id.
+#
+# The dialog only opens by itself until an account has been chosen once: the
+# SPA then remembers that account for the rest of the browser session, and the
+# route (a hash change, a return home, even a reload) renders that account's
+# cartola straight away with no dialog. The cartola page's "SELECCIONAR OTRA
+# CUENTA" button reopens the same dialog, so every drive after the first goes
+# through it.
 _CURRENCY_SELECT_SELECTOR = "mat-select[name=monedas]"
+_REOPEN_DIALOG_SELECTOR = 'button:has-text("SELECCIONAR OTRA CUENTA")'
+# How often the dialog step looks for the select or the reopen button.
+_DIALOG_POLL_MS = 250
 _CURRENCY_OPTION_SELECTOR = "mat-option"
 _ACCOUNT_RADIO_SELECTOR = "mat-radio-button"
 _MODAL_ACCEPT_SELECTOR = "#modalPrimaryBtn button"
@@ -1046,8 +1056,8 @@ _DIALOG_SETTLE_MS = 600
 # licence to hammer.
 _GLOSA_PAUSE_MS = 300
 _MAX_GLOSA_CALLS = 80
-# One radio per account of the chosen currency. The dialog has to be re-driven
-# per account (see `_read_checking_movements`), so this bounds the re-drives.
+# One radio per account of the chosen currency. The dialog is driven once per
+# account (see `_read_checking_movements`), so this bounds the drives.
 _MAX_CHECKING_ACCOUNTS = 4
 # How far back the billed leg reads. The unbilled leg only covers the current
 # cycle, so reading the newest two statements covers a charge that crossed the
@@ -1217,6 +1227,41 @@ def matching_radio_indices(radio_labels: list[str], currency: str) -> list[int]:
     return [i for i, label in enumerate(radio_labels) if label_re.search(label or "")]
 
 
+def _visible_now(page, selector: str) -> bool:
+    """True when `selector`'s first match is visible right now (never raises)."""
+    try:
+        return bool(page.locator(selector).first.is_visible())
+    except Exception:
+        return False
+
+
+def _open_dialog(page, timeout_ms: int) -> _StepResult:
+    """Make sure the account dialog is open, reopening it when it is not.
+
+    The route shows the dialog by itself only while no account is remembered
+    (see `_REOPEN_DIALOG_SELECTOR`); otherwise it renders the remembered
+    account's cartola, whose "SELECCIONAR OTRA CUENTA" button opens the same
+    dialog. Waits for whichever of the two shows first within the budget.
+    """
+    deadline = time.monotonic() + timeout_ms / 1000
+    while True:
+        if _visible_now(page, _CURRENCY_SELECT_SELECTOR):
+            return _StepResult(_STEP_OK)
+        if _visible_now(page, _REOPEN_DIALOG_SELECTOR):
+            logger.debug("BanChile: an account is remembered; reopening the dialog")
+            if not _click_first(page, [_REOPEN_DIALOG_SELECTOR], timeout=_DIALOG_SETTLE_MS):
+                return _StepResult(_STEP_FAILED, "reopen button not clickable")
+            page.wait_for_timeout(_DIALOG_SETTLE_MS)
+            return _StepResult(_STEP_OK)
+        if not _on_portal(page):
+            return _StepResult(_STEP_FAILED, "left the portal")
+        if time.monotonic() >= deadline:
+            return _StepResult(
+                _STEP_FAILED, "dialog did not open; reopen button not found"
+            )
+        page.wait_for_timeout(_DIALOG_POLL_MS)
+
+
 def _select_currency(page, currency: str, timeout_ms: int) -> _StepResult:
     """Open the dialog's currency select and pick `currency` (it defaults to USD).
 
@@ -1321,13 +1366,14 @@ def _open_cartola(
 ) -> _CartolaDrive:
     """Drive the account dialog for `currency`'s account `index`; capture its cartola.
 
-    The whole route is re-driven per account because no control for re-opening
-    the selector in place was observed; a re-drive that fails simply ends the
-    loop with whatever was already read. The steps are route, currency select,
-    account radio, accept and cartola wait; a failure in any of them is logged
-    at INFO naming the step (DEBUG carries the detail). A currency with no
-    option, or no account radio once picked, comes back as `no_account`, which
-    is a reading and not a failure.
+    Each drive routes to the movements view and opens the dialog, by itself
+    on a first drive or through "SELECCIONAR OTRA CUENTA" once the SPA
+    remembers an account (`_open_dialog`); a re-drive that fails simply ends
+    the loop with whatever was already read. The steps are route, dialog open,
+    currency select, account radio, accept and cartola wait; a failure in any
+    of them is logged at INFO naming the step (DEBUG carries the detail). A
+    currency with no option, or no account radio once picked, comes back as
+    `no_account`, which is a reading and not a failure.
     """
     _recover_to_home(page)
     if not _ensure_on_portal(page):
@@ -1342,6 +1388,10 @@ def _open_cartola(
             return _drive_failed(
                 currency, "route", f"routing raised {type(error).__name__}", index, attempt
             )
+
+        opened = _open_dialog(page, timeout_ms)
+        if opened.status != _STEP_OK:
+            return _drive_failed(currency, "dialog open", opened.reason, index, attempt)
 
         selected = _select_currency(page, currency, timeout_ms)
         if selected.status == _STEP_ABSENT and currency != "CLP":
@@ -1446,12 +1496,11 @@ def _read_checking_movements(
 
     The dialog lists one radio per account of the chosen currency, and this
     customer holds both a CLP and a USD one, so the currency is picked
-    explicitly first. Accounts are read one dialog drive each: the SPA offers
-    no observed way to switch accounts without re-opening the selector, so the
-    route is re-driven per index and the results deduped. A re-drive that lands
-    back on an account already read is reported and stops the loop: silently
-    deduping it away would hide the fact that the other account's movements
-    were never read.
+    explicitly first. Accounts are read one dialog drive each, reopening the
+    dialog per index ("SELECCIONAR OTRA CUENTA"), and the results deduped. A
+    re-drive that lands back on an account already read is reported and stops
+    the loop: silently deduping it away would hide the fact that the other
+    account's movements were never read.
 
     Returns None when the first drive never produced a cartola (the surface
     failed and is worth retrying); a list, possibly empty, once one did. A

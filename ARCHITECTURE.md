@@ -548,7 +548,10 @@ columns; a location the user set or cleared in the dashboard
 
 Three more surfaces feed its transactions (`banchile_movements.py`, issue #57):
 the checking cartola, reached by driving the account-selection dialog that
-defaults to the USD account; the card's unbilled movements, which the SPA loads
+defaults to the USD account (it opens by itself only until an account is
+chosen; the SPA then remembers that account for the browser session and the
+route shows its cartola directly, so later drives reopen the dialog with the
+"SELECCIONAR OTRA CUENTA" button); the card's unbilled movements, which the SPA loads
 when the card page opens; and the card's billed statements, the newest two,
 read by replaying the SPA's own statement request with a different
 `fechaFacturacion`. Only calls whose body is fully known are composed (the
