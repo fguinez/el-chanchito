@@ -990,6 +990,25 @@ def cartola_account_number(payload) -> str:
     return ""
 
 
+def cartola_mismatch(payload, currency: str, read_accounts=frozenset()) -> str:
+    """Why a captured `getCartola` payload is not the one a drive asked for.
+
+    "" when it is. Once the SPA remembers an account it fetches that
+    account's cartola by itself whenever the route renders, so a capture can
+    hold a payload for the wrong account: a USD drive must never take a CLP
+    cartola (its rows would be stored as USD), and a later CLP drive must not
+    take an account already read. A payload without `moneda` is not judged
+    on it (every payload observed carried one).
+    """
+    moneda = _text(payload.get("moneda")).upper() if isinstance(payload, dict) else ""
+    if moneda and moneda != currency:
+        return f"stale cartola (moneda {moneda})"
+    account = cartola_account_number(payload)
+    if account and account in read_accounts:
+        return "stale cartola (an account already read)"
+    return ""
+
+
 def dedupe_movements(movements: list[BanChileMovement]) -> list[BanChileMovement]:
     """Drop movements repeated within one read, keeping the first of each.
 
@@ -1164,6 +1183,34 @@ def _wait_for_payload(page, capture: _JsonCapture, timeout_ms: int) -> Optional[
             return None
         if time.monotonic() >= deadline:
             return None
+        page.wait_for_timeout(500)
+
+
+def _wait_for_cartola(
+    page, capture: _JsonCapture, timeout_ms: int, currency: str, read_accounts
+) -> tuple[Optional[dict], str]:
+    """Wait for the drive's own `getCartola` payload; (None, reason) if none came.
+
+    Payloads that `cartola_mismatch` rejects are skipped and the wait goes on,
+    so a late automatic fetch of the remembered account cannot stand in for
+    the one Aceptar asked for. A mismatched payload is never returned.
+    """
+    deadline = time.monotonic() + timeout_ms / 1000
+    checked = 0
+    stale = ""
+    while True:
+        while checked < len(capture.payloads):
+            payload = capture.payloads[checked]
+            checked += 1
+            mismatch = cartola_mismatch(payload, currency, read_accounts)
+            if not mismatch:
+                return payload, ""
+            logger.debug("BanChile: skipping a captured cartola: %s", mismatch)
+            stale = mismatch
+        if not _on_portal(page):
+            return None, "left the portal"
+        if time.monotonic() >= deadline:
+            return None, stale or f"no getCartola response within {timeout_ms} ms"
         page.wait_for_timeout(500)
 
 
@@ -1407,7 +1454,12 @@ def _drive_failed(
 
 
 def _open_cartola(
-    page, index: int, timeout_ms: int, currency: str = "CLP", attempt: int = 0
+    page,
+    index: int,
+    timeout_ms: int,
+    currency: str = "CLP",
+    attempt: int = 0,
+    read_accounts=frozenset(),
 ) -> _CartolaDrive:
     """Drive the account dialog for `currency`'s account `index`; capture its cartola.
 
@@ -1419,6 +1471,10 @@ def _open_cartola(
     of them is logged at INFO naming the step (DEBUG carries the detail). A
     currency with no option in the list comes back as `no_account`, which is
     a reading and not a failure.
+
+    The capture is emptied right before Aceptar and every payload after it is
+    checked (`cartola_mismatch`): a remembered account's automatic fetch must
+    never be read as the chosen account's cartola.
     """
     _recover_to_home(page)
     if not _ensure_on_portal(page):
@@ -1454,15 +1510,16 @@ def _open_cartola(
             # Past the last account: the loop is done, nothing failed.
             return _CartolaDrive(accounts=pick.count)
 
+        capture.payloads.clear()
+        capture.requests.clear()
         if not _click_first(page, [_MODAL_ACCEPT_SELECTOR], timeout=timeout_ms):
             return _drive_failed(
                 currency, "accept", "Aceptar not clickable", index, attempt, pick.count
             )
-        payload = _wait_for_payload(page, capture, timeout_ms)
+        payload, reason = _wait_for_cartola(
+            page, capture, timeout_ms, currency, read_accounts
+        )
         if payload is None:
-            reason = "left the portal" if not _on_portal(page) else (
-                f"no getCartola response within {timeout_ms} ms"
-            )
             return _drive_failed(currency, "cartola wait", reason, index, attempt, pick.count)
         return _CartolaDrive(payload=payload, accounts=pick.count)
 
@@ -1577,7 +1634,9 @@ def _read_checking_accounts(
     accounts = 1
     index = 0
     while index < min(accounts, _MAX_CHECKING_ACCOUNTS):
-        drive = _open_cartola(page, index, budget, currency, attempt)
+        drive = _open_cartola(
+            page, index, budget, currency, attempt, frozenset(seen_accounts - {""})
+        )
         if drive.no_account:
             if index == 0:
                 return []

@@ -1378,6 +1378,24 @@ _USD_RADIO = "Cuenta Corriente 00-000-00000-02 (USD)"
 _CLP_RADIO = "Cuenta Corriente 00-000-00000-01 (CLP)"
 
 
+class TestCartolaMismatch:
+    def test_the_currency_must_match(self):
+        assert movements_mod.cartola_mismatch({"moneda": "USD"}, "USD") == ""
+        assert movements_mod.cartola_mismatch({"moneda": "clp"}, "USD") == (
+            "stale cartola (moneda CLP)"
+        )
+
+    def test_an_account_already_read_is_stale(self):
+        payload = {"moneda": "CLP", "movimientos": [_cartola_row()]}
+        assert movements_mod.cartola_mismatch(payload, "CLP", {ACCOUNT}) == (
+            "stale cartola (an account already read)"
+        )
+        assert movements_mod.cartola_mismatch(payload, "CLP", set()) == ""
+
+    def test_a_payload_without_moneda_is_not_judged_on_it(self):
+        assert movements_mod.cartola_mismatch({"movimientos": []}, "USD") == ""
+
+
 class TestCurrencyHelpers:
     def test_option_index(self):
         options = ["(USD)", "(CLP)"]
@@ -1470,6 +1488,25 @@ class _DialogLocator:
             raise RuntimeError("not clickable")
 
 
+class _FakeClock:
+    """Stands in for `time` in the movements module: only the page's waits
+    move it, so every budget is real but no test ever sleeps."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+
+_CLOCK = _FakeClock()
+
+
+def _use_fake_clock(monkeypatch):
+    _CLOCK.now = 1000.0
+    monkeypatch.setattr(movements_mod, "time", _CLOCK)
+
+
 class _FakeKeyboard:
     def __init__(self, page):
         self.page = page
@@ -1503,6 +1540,7 @@ class _FakeDialogPage:
         cartola_fires=True,
         select_visible=True,
         remembered=False,
+        accept_answers_remembered=False,
     ):
         self.url = "https://portalpersonas.bancochile.cl/mibancochile-web/#/home"
         self.options = options
@@ -1518,6 +1556,9 @@ class _FakeDialogPage:
         self.chosen = "USD"
         self.picked = None
         self.reopen_clicks = 0
+        self.remembered_as = None
+        self.pending = []
+        self.accept_answers_remembered = accept_answers_remembered
         self.handlers = {}
         self.keyboard = _FakeKeyboard(self)
 
@@ -1532,9 +1573,18 @@ class _FakeDialogPage:
             return
         self.dialog_open = False
         self.remembered = True
-        payload = self.cartolas.get(self.chosen, {"movimientos": []})
+        if self.accept_answers_remembered and self.remembered_as is not None:
+            self.pending.append(self.remembered_as)
+            return
+        self.remembered_as = (self.chosen, self.picked)
+        # The response arrives later, while the scraper waits, as on the portal.
+        self.pending.append((self.chosen, self.picked))
+
+    def fire_cartola(self, currency, picked):
+        payload = self.cartolas.get(currency, {"movimientos": []})
         if isinstance(payload, list):
-            payload = payload[self.picked]
+            payload = payload[picked]
+        payload = {"moneda": currency, **payload}  # every live payload has one
         response = _FakeResponse(
             "https://portalpersonas.bancochile.cl/x/movimientos/getCartola", payload
         )
@@ -1548,10 +1598,16 @@ class _FakeDialogPage:
         if arg == movements_mod._MOVIMIENTOS_ROUTE:
             self.on_movements = True
             self.dialog_open = not self.remembered
+            if self.remembered and self.remembered_as is not None:
+                # The SPA fetches the remembered account's cartola by itself.
+                self.fire_cartola(*self.remembered_as)
         return None
 
     def wait_for_timeout(self, ms):
-        return None
+        _CLOCK.now += ms / 1000
+        pending, self.pending = self.pending, []
+        for currency, picked in pending:
+            self.fire_cartola(currency, picked)
 
     def goto(self, url, **kwargs):
         self.url = url
@@ -1566,8 +1622,8 @@ def _read_usd_dialog(page, attempt=0):
 
 class TestDialogSteps:
     @pytest.fixture(autouse=True)
-    def _no_waiting(self, monkeypatch):
-        monkeypatch.setattr(movements_mod, "_RENDER_TIMEOUTS_MS", (0,))
+    def _fake_time(self, monkeypatch):
+        _use_fake_clock(monkeypatch)
 
     def test_the_clp_drive_still_picks_clp_by_position(self):
         page = _FakeDialogPage(cartolas={"CLP": {"movimientos": [_cartola_row()]}})
@@ -1635,6 +1691,18 @@ class TestDialogSteps:
 
         assert not (page.select_open or page.dialog_open or page.on_movements)
         assert page.url == banchile_web_mod._PORTAL_HOME
+
+    def test_a_clp_cartola_is_never_read_as_the_usd_one(self, caplog):
+        """Aceptar answered only by the remembered CLP account's cartola."""
+        page = _FakeDialogPage(cartolas={"CLP": {"movimientos": [_cartola_row()]}})
+        assert len(movements_mod._read_checking_movements(page, attempt=0)) == 1
+        page.accept_answers_remembered = True
+
+        with caplog.at_level("INFO", logger=movements_mod.__name__):
+            assert _read_usd_dialog(page) is None
+
+        assert "failed at the cartola wait step" in caplog.text
+        assert "stale cartola (moneda CLP)" in caplog.text
 
     def test_the_usd_radio_is_found_by_its_label_not_its_position(self):
         page = _FakeDialogPage(radios={"USD": [_CLP_RADIO, _USD_RADIO]})
@@ -1860,8 +1928,8 @@ class TestUsdAndClpNeverCollide:
 
 class TestUsdCheckingSurface:
     @pytest.fixture(autouse=True)
-    def _no_waiting(self, monkeypatch):
-        monkeypatch.setattr(movements_mod, "_RENDER_TIMEOUTS_MS", (0,))
+    def _fake_time(self, monkeypatch):
+        _use_fake_clock(monkeypatch)
 
     def test_reads_the_usd_cartola_with_cents(self):
         page = _FakeDialogPage(cartolas={"USD": _usd_cartola([_usd_cartola_row()])})
