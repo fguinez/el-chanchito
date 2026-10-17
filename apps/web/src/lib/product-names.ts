@@ -33,3 +33,21 @@ export function displayProductName(
   }
   return cleaned;
 }
+
+/**
+ * What the edit dialog's Nombre field sends as `name`: undefined for no
+ * change, null to reset to the default name, or the new name. An empty field,
+ * or one holding exactly the default's display label (the placeholder), means
+ * "use the default", so typing the placeholder never pins a rename.
+ */
+export function nameFieldPatch(
+  input: string,
+  product: { name: string; defaultName: string },
+  defaultLabel: string
+): string | null | undefined {
+  const trimmed = input.trim();
+  if (!trimmed || trimmed === defaultLabel) {
+    return product.name !== product.defaultName ? null : undefined;
+  }
+  return trimmed !== product.name ? trimmed : undefined;
+}

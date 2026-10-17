@@ -15,6 +15,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { normalizeSlug } from "@/lib/db/slug";
+import { nameFieldPatch } from "@/lib/product-names";
 import {
   DISPLAY_ORDER_LIMIT,
   PRODUCT_NAME_MAX,
@@ -145,7 +146,6 @@ export function ProductEditDialog({
 
   async function saveDetails(event: React.FormEvent) {
     event.preventDefault();
-    const trimmed = name.trim();
     const order = Number(displayOrder);
     if (
       !displayOrder.trim() ||
@@ -157,12 +157,8 @@ export function ProductEditDialog({
     }
 
     const body: Record<string, unknown> = {};
-    // An empty field means the default name: `null` asks the API to reset.
-    if (!trimmed) {
-      if (product.name !== product.defaultName) body.name = null;
-    } else if (trimmed !== product.name) {
-      body.name = trimmed;
-    }
+    const namePatch = nameFieldPatch(name, product, defaultLabel);
+    if (namePatch !== undefined) body.name = namePatch;
     if ((parentId || null) !== product.parentProductId) {
       body.parentProductId = parentId || null;
     }

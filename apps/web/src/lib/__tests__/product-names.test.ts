@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { displayProductName } from "@/lib/product-names";
+import { displayProductName, nameFieldPatch } from "@/lib/product-names";
 
 describe("displayProductName", () => {
   it("replaces an auto-name with the friendly kind label", () => {
@@ -30,5 +30,26 @@ describe("displayProductName", () => {
   it("leaves a human name with a dash untouched", () => {
     const product = { name: "Ahorro - vacaciones", kind: "savings" as const, currency: "CLP" };
     expect(displayProductName(product, "Banco de Chile")).toBe("Ahorro - vacaciones");
+  });
+});
+
+describe("nameFieldPatch", () => {
+  // Synthetic names only.
+  const unrenamed = {
+    name: "Banco Sintetico - credit_card",
+    defaultName: "Banco Sintetico - credit_card",
+  };
+  const renamed = { ...unrenamed, name: "Mi tarjeta de ejemplo" };
+  const label = "Tarjeta de crédito";
+
+  it.each([
+    ["an empty field on an unrenamed product", "  ", unrenamed, undefined],
+    ["an empty field on a renamed product", "", renamed, null],
+    ["the placeholder label on an unrenamed product", ` ${label} `, unrenamed, undefined],
+    ["the placeholder label on a renamed product", label, renamed, null],
+    ["the current rename, unchanged", "Mi tarjeta de ejemplo", renamed, undefined],
+    ["a new name", " Tarjeta Sintetica ", unrenamed, "Tarjeta Sintetica"],
+  ])("maps %s", (_label, input, product, expected) => {
+    expect(nameFieldPatch(input, product, label)).toBe(expected);
   });
 });
