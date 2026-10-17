@@ -1414,6 +1414,9 @@ class TestCurrencyHelpers:
         assert movements_mod.matching_radio_indices(labels, "CLP") == [0, 1]
 
 
+_REOPEN = "role=button[name=SELECCIONAR OTRA CUENTA]"
+
+
 class _DialogLocator:
     """One selector on the fake account dialog (see `_FakeDialogPage`)."""
 
@@ -1434,7 +1437,7 @@ class _DialogLocator:
             if not page.dialog_open or page.chosen in page.accept_fails_for:
                 return []
             return ["accept"]
-        if self.selector == movements_mod._REOPEN_DIALOG_SELECTOR:
+        if self.selector == _REOPEN:
             shown = page.on_movements and page.remembered and not page.dialog_open
             return ["reopen"] if shown else []
         if self.selector.endswith(" label") or self.selector.startswith("radio-label:"):
@@ -1467,7 +1470,10 @@ class _DialogLocator:
     def locator(self, selector):
         return _DialogLocator(self.page, f"radio-label:{self.index}")
 
-    def click(self):
+    def filter(self, visible=None):
+        return self
+
+    def click(self, **kwargs):
         page = self.page
         if self.selector == movements_mod._CURRENCY_SELECT_SELECTOR:
             page.select_open = True
@@ -1480,10 +1486,8 @@ class _DialogLocator:
             page.picked = int(self.selector.split()[0].rsplit("-", 1)[1])
         elif self.selector == movements_mod._MODAL_ACCEPT_SELECTOR:
             page.accept()
-        elif self.selector == movements_mod._REOPEN_DIALOG_SELECTOR:
-            page.reopen_clicks += 1
-            page.dialog_open = True
-            page.chosen = "USD"  # the dialog opens on its USD default again
+        elif self.selector == _REOPEN:
+            page.click_reopen()
         else:
             raise RuntimeError("not clickable")
 
@@ -1541,6 +1545,9 @@ class _FakeDialogPage:
         select_visible=True,
         remembered=False,
         accept_answers_remembered=False,
+        auto_fetch_polls=0,
+        reopen_ready_polls=0,
+        dialog_delay_polls=0,
     ):
         self.url = "https://portalpersonas.bancochile.cl/mibancochile-web/#/home"
         self.options = options
@@ -1559,6 +1566,17 @@ class _FakeDialogPage:
         self.remembered_as = None
         self.pending = []
         self.accept_answers_remembered = accept_answers_remembered
+        # The remembered view: its own cartola arrives `auto_fetch_polls`
+        # waits after the route, its button only works once that fetch landed
+        # and `reopen_ready_polls` waits passed, and the dialog then takes
+        # `dialog_delay_polls` waits to show.
+        self.auto_fetch_polls = auto_fetch_polls
+        self.reopen_ready_polls = reopen_ready_polls
+        self.dialog_delay_polls = dialog_delay_polls
+        self.polls_since_route = 0
+        self.auto_fetch_in = None
+        self.dialog_opens_in = None
+        self.ignored_reopen_clicks = 0
         self.handlers = {}
         self.keyboard = _FakeKeyboard(self)
 
@@ -1598,22 +1616,69 @@ class _FakeDialogPage:
         if arg == movements_mod._MOVIMIENTOS_ROUTE:
             self.on_movements = True
             self.dialog_open = not self.remembered
+            self.polls_since_route = 0
             if self.remembered and self.remembered_as is not None:
                 # The SPA fetches the remembered account's cartola by itself.
-                self.fire_cartola(*self.remembered_as)
+                self.auto_fetch_in = self.auto_fetch_polls
+                self._tick_auto_fetch(advance=False)
         return None
+
+    def get_by_role(self, role, name=None):
+        assert role == "button" and name.search("SELECCIONAR OTRA CUENTA")
+        return _DialogLocator(self, _REOPEN)
+
+    def _tick_auto_fetch(self, advance=True):
+        if self.auto_fetch_in is None:
+            return
+        if advance:
+            self.auto_fetch_in -= 1
+        if self.auto_fetch_in <= 0:
+            self.auto_fetch_in = None
+            self.fire_cartola(*self.remembered_as)
+
+    def click_reopen(self):
+        self.reopen_clicks += 1
+        settled = self.auto_fetch_in is None
+        if not settled or self.polls_since_route < self.reopen_ready_polls:
+            self.ignored_reopen_clicks += 1  # the view is still rendering
+            return
+        self.chosen = "USD"  # the dialog opens on its USD default again
+        self.dialog_opens_in = self.dialog_delay_polls
+        self._tick_dialog(advance=False)
+
+    def _tick_dialog(self, advance=True):
+        if self.dialog_opens_in is None:
+            return
+        if advance:
+            self.dialog_opens_in -= 1
+        if self.dialog_opens_in <= 0:
+            self.dialog_opens_in = None
+            self.dialog_open = True
 
     def wait_for_timeout(self, ms):
         _CLOCK.now += ms / 1000
+        self.polls_since_route += 1
+        self._tick_auto_fetch()
+        self._tick_dialog()
         pending, self.pending = self.pending, []
         for currency, picked in pending:
             self.fire_cartola(currency, picked)
 
     def goto(self, url, **kwargs):
         self.url = url
+        self.auto_fetch_in = None
+        self.dialog_opens_in = None
         self.on_movements = False
         self.dialog_open = False
         self.select_open = False
+
+
+def _remembered_page(**kwargs):
+    """A page whose SPA already remembers the (synthetic) CLP account."""
+    page = _FakeDialogPage(cartolas={"CLP": {"movimientos": [_cartola_row()]}}, **kwargs)
+    page.remembered = True
+    page.remembered_as = ("CLP", 0)
+    return page
 
 
 def _read_usd_dialog(page, attempt=0):
@@ -1703,6 +1768,37 @@ class TestDialogSteps:
 
         assert "failed at the cartola wait step" in caplog.text
         assert "stale cartola (moneda CLP)" in caplog.text
+
+    def test_the_reopen_click_waits_for_the_remembered_cartola(self):
+        """Clicking while the remembered view still fetches does nothing."""
+        page = _remembered_page(auto_fetch_polls=6)
+
+        assert _read_usd_dialog(page) == []
+        assert (page.reopen_clicks, page.ignored_reopen_clicks) == (1, 0)
+
+    def test_an_ignored_reopen_click_is_retried(self):
+        page = _remembered_page(reopen_ready_polls=8)
+
+        assert _read_usd_dialog(page) == []
+        assert (page.reopen_clicks, page.ignored_reopen_clicks) == (2, 1)
+
+    def test_a_slow_dialog_is_waited_for_not_clicked_again(self):
+        page = _remembered_page(dialog_delay_polls=4)
+
+        assert _read_usd_dialog(page) == []
+        assert page.reopen_clicks == 1
+
+    def test_a_button_that_never_opens_the_dialog_fails_the_step(self, caplog):
+        page = _remembered_page(reopen_ready_polls=10**6)
+
+        with caplog.at_level("INFO", logger=movements_mod.__name__):
+            assert _read_usd_dialog(page) is None
+
+        assert page.reopen_clicks == movements_mod._REOPEN_CLICKS
+        assert (
+            "failed at the dialog open step (account 1, attempt 1): reopen button "
+            "did not open the dialog after 3 click(s)"
+        ) in caplog.text
 
     def test_the_usd_radio_is_found_by_its_label_not_its_position(self):
         page = _FakeDialogPage(radios={"USD": [_CLP_RADIO, _USD_RADIO]})

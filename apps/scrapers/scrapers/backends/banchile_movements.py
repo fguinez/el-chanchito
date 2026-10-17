@@ -1063,11 +1063,18 @@ _BILLED_ROUTE = "#/tarjeta-credito/consultar/facturados"
 # route (a hash change, a return home, even a reload) renders that account's
 # cartola straight away with no dialog. The cartola page's "SELECCIONAR OTRA
 # CUENTA" button reopens the same dialog, so every drive after the first goes
-# through it.
+# through it. The button is only live once that view has settled (it fetches
+# the remembered account's cartola first): a click while it still renders does
+# nothing, so the click waits for that fetch and is retried, bounded.
 _CURRENCY_SELECT_SELECTOR = "mat-select[name=monedas]"
-_REOPEN_DIALOG_SELECTOR = 'button:has-text("SELECCIONAR OTRA CUENTA")'
+_REOPEN_DIALOG_NAME_RE = re.compile(r"SELECCIONAR\s+OTRA\s+CUENTA", re.I)
 # How often the dialog step looks for the select or the reopen button.
 _DIALOG_POLL_MS = 250
+# The longest wait for the remembered view's own cartola before clicking.
+_REMEMBERED_SETTLE_MS = 4_000
+# After a reopen click, how long the select gets to show before a retry.
+_DIALOG_OPEN_WAIT_MS = 5_000
+_REOPEN_CLICKS = 3
 _CURRENCY_OPTION_SELECTOR = "mat-option"
 _ACCOUNT_RADIO_SELECTOR = "mat-radio-button"
 _MODAL_ACCEPT_SELECTOR = "#modalPrimaryBtn button"
@@ -1295,24 +1302,50 @@ def _visible_now(page, selector: str) -> bool:
         return False
 
 
-def _open_dialog(page, timeout_ms: int) -> _StepResult:
+def _reopen_button(page):
+    """The visible "SELECCIONAR OTRA CUENTA" button (a hidden twin is skipped)."""
+    return page.get_by_role("button", name=_REOPEN_DIALOG_NAME_RE).filter(visible=True).first
+
+
+def _reopen_button_visible(page) -> bool:
+    try:
+        return bool(_reopen_button(page).is_visible())
+    except Exception:
+        return False
+
+
+def _ms_left(deadline: float) -> int:
+    return max(0, int((deadline - time.monotonic()) * 1000))
+
+
+def _wait_until(page, condition: Callable[[], bool], timeout_ms: int) -> bool:
+    """Poll `condition` through the page clock until it holds or time runs out."""
+    deadline = time.monotonic() + timeout_ms / 1000
+    while True:
+        if condition():
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        page.wait_for_timeout(_DIALOG_POLL_MS)
+
+
+def _open_dialog(page, capture: "_JsonCapture", timeout_ms: int) -> _StepResult:
     """Make sure the account dialog is open, reopening it when it is not.
 
     The route shows the dialog by itself only while no account is remembered
-    (see `_REOPEN_DIALOG_SELECTOR`); otherwise it renders the remembered
+    (see `_REOPEN_DIALOG_NAME_RE`); otherwise it renders the remembered
     account's cartola, whose "SELECCIONAR OTRA CUENTA" button opens the same
-    dialog. Waits for whichever of the two shows first within the budget.
+    dialog. Waits for whichever of the two shows first within the budget. On
+    the remembered path it first lets that view settle (its automatic
+    `getCartola` captured, or `_REMEMBERED_SETTLE_MS`), then clicks and checks
+    that the select appeared, retrying up to `_REOPEN_CLICKS` times.
     """
     deadline = time.monotonic() + timeout_ms / 1000
     while True:
         if _visible_now(page, _CURRENCY_SELECT_SELECTOR):
             return _StepResult(_STEP_OK)
-        if _visible_now(page, _REOPEN_DIALOG_SELECTOR):
-            logger.debug("BanChile: an account is remembered; reopening the dialog")
-            if not _click_first(page, [_REOPEN_DIALOG_SELECTOR], timeout=_DIALOG_SETTLE_MS):
-                return _StepResult(_STEP_FAILED, "reopen button not clickable")
-            page.wait_for_timeout(_DIALOG_SETTLE_MS)
-            return _StepResult(_STEP_OK)
+        if _reopen_button_visible(page):
+            break
         if not _on_portal(page):
             return _StepResult(_STEP_FAILED, "left the portal")
         if time.monotonic() >= deadline:
@@ -1320,6 +1353,34 @@ def _open_dialog(page, timeout_ms: int) -> _StepResult:
                 _STEP_FAILED, "dialog did not open; reopen button not found"
             )
         page.wait_for_timeout(_DIALOG_POLL_MS)
+
+    logger.debug("BanChile: an account is remembered; reopening the dialog")
+    if not _wait_until(
+        page,
+        lambda: bool(capture.payloads),
+        min(_REMEMBERED_SETTLE_MS, _ms_left(deadline)),
+    ):
+        logger.debug("BanChile: the remembered cartola did not arrive; clicking anyway")
+    page.wait_for_timeout(_DIALOG_SETTLE_MS)
+    clicks = 0
+    while clicks < _REOPEN_CLICKS and _ms_left(deadline) > 0:
+        clicks += 1
+        try:
+            _reopen_button(page).click(timeout=max(1_000, _ms_left(deadline)))
+        except Exception:
+            logger.debug("BanChile: reopen click %d raised", clicks, exc_info=True)
+            page.wait_for_timeout(_DIALOG_SETTLE_MS)
+            continue
+        if _wait_until(
+            page,
+            lambda: _visible_now(page, _CURRENCY_SELECT_SELECTOR),
+            min(_DIALOG_OPEN_WAIT_MS, _ms_left(deadline)),
+        ):
+            return _StepResult(_STEP_OK)
+        logger.debug("BanChile: reopen click %d did not open the dialog", clicks)
+    return _StepResult(
+        _STEP_FAILED, f"reopen button did not open the dialog after {clicks} click(s)"
+    )
 
 
 def _select_currency(page, currency: str, timeout_ms: int) -> _StepResult:
@@ -1490,7 +1551,7 @@ def _open_cartola(
                 currency, "route", f"routing raised {type(error).__name__}", index, attempt
             )
 
-        opened = _open_dialog(page, timeout_ms)
+        opened = _open_dialog(page, capture, timeout_ms)
         if opened.status != _STEP_OK:
             return _drive_failed(currency, "dialog open", opened.reason, index, attempt)
 
