@@ -99,7 +99,9 @@ export async function PUT() {
       WITH m AS MATERIALIZED (
         SELECT id, category_for_description(description) AS category_id
         FROM transactions
-        WHERE category_id IS NULL AND NOT is_manually_categorized
+        WHERE category_id IS NULL
+          AND NOT is_manually_categorized
+          AND deleted_at IS NULL
       )
       UPDATE transactions t
       SET category_id = m.category_id, updated_at = now()
