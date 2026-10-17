@@ -16,6 +16,7 @@ from product_model import (
     ScrapedProduct,
     ScrapedTransaction,
     TermDepositAttributes,
+    TransactionLocation,
 )
 
 METRICS_ADAPTER = TypeAdapter(ProductMetrics)
@@ -361,3 +362,65 @@ class TestTransactionAmount:
     def test_a_string_off_the_wire_pattern_is_rejected(self, raw):
         with pytest.raises(ValidationError):
             _usd_txn(raw)
+
+
+def _located_txn(location) -> ScrapedTransaction:
+    """A synthetic movement carrying `location` (a dict, a model or None)."""
+    return ScrapedTransaction(
+        institution="banchile",
+        product_kind="credit_card",
+        description="COMPRA SINTETICA",
+        amount=-999_999,
+        transaction_date=date(2026, 8, 21),
+        external_id="bch_ref_00000000000",
+        location=location,
+    )
+
+
+class TestTransactionLocation:
+    """`location` is optional, every field independent (V025)."""
+
+    def test_location_defaults_to_none(self):
+        assert _located_txn(None).location is None
+
+    def test_fields_are_trimmed_and_blank_means_absent(self):
+        location = _located_txn(
+            {"name": "  Tienda Ficticia ", "city": " CIUDAD FICTICIA", "country": "   "}
+        ).location
+
+        assert location == TransactionLocation(
+            name="Tienda Ficticia", city="CIUDAD FICTICIA"
+        )
+        assert location.country is None
+
+    def test_text_is_not_recased(self):
+        """Stored as the source spells it, like descriptions."""
+        assert _located_txn({"city": "CIUDAD FICTICIA"}).location.city == "CIUDAD FICTICIA"
+
+    def test_an_all_blank_location_collapses_to_none(self):
+        assert _located_txn({"city": "", "country": " "}).location is None
+
+    def test_coordinates_round_to_the_stored_scale(self):
+        location = _located_txn({"latitude": -33.0000004, "longitude": -70.0}).location
+
+        assert location.latitude == -33.0
+        assert location.longitude == -70.0
+
+    @pytest.mark.parametrize(
+        "coordinates",
+        [
+            {"latitude": -33.0},
+            {"longitude": -70.0},
+            {"latitude": 90.5, "longitude": 0},
+            {"latitude": 0, "longitude": -180.5},
+        ],
+    )
+    def test_bad_coordinates_are_rejected(self, coordinates):
+        with pytest.raises(ValidationError):
+            _located_txn(coordinates)
+
+    def test_overlong_text_and_unknown_keys_are_rejected(self):
+        with pytest.raises(ValidationError):
+            _located_txn({"city": "X" * 201})
+        with pytest.raises(ValidationError):
+            _located_txn({"street": "Calle Ficticia 123"})

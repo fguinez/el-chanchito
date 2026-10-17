@@ -33,7 +33,12 @@ from .display import (
     resolve_columns,
     validate_display_specs,
 )
-from .envelopes import ScrapedProduct, ScrapedTransaction
+from .envelopes import (
+    LOCATION_TEXT_MAX_LENGTH,
+    ScrapedProduct,
+    ScrapedTransaction,
+    TransactionLocation,
+)
 from .kinds import (
     PRODUCT_FAMILIES,
     PRODUCT_KINDS,
@@ -124,4 +129,6 @@ __all__ = [
     "validate_display_specs",
     "ScrapedProduct",
     "ScrapedTransaction",
+    "TransactionLocation",
+    "LOCATION_TEXT_MAX_LENGTH",
 ]
