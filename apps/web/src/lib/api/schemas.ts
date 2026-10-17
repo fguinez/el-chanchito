@@ -182,6 +182,25 @@ export const updateTransferSchema = z.object({
   notes,
 });
 
+/** A transfer side's transaction: a row id (lowercased, as Postgres returns
+ *  it), null to clear the link, or omitted to leave it as it is. */
+const transferLink = rowId
+  .transform((id) => id.toLowerCase())
+  .nullable()
+  .optional();
+
+/** PUT /api/transfers/[id]/links: set or clear either side, at least one. */
+export const transferLinksSchema = z
+  .object({
+    fromTransactionId: transferLink,
+    toTransactionId: transferLink,
+  })
+  .refine(
+    (body) =>
+      body.fromTransactionId !== undefined || body.toTransactionId !== undefined,
+    { error: "Expected fromTransactionId and/or toTransactionId" }
+  );
+
 /** A legacy total: patrimonio and deuda are sums, never negative. */
 const wealthTotal = clpAmount.pipe(z.number().nonnegative());
 

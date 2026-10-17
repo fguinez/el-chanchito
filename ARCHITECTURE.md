@@ -289,7 +289,7 @@ transactions ──────────┐
   source                        id PK
   external_id (unique w/       keyword
     product_id)                 category_id FK ──────>
-  is_internal_transfer
+  is_internal_transfer        -- set while a transfer links it
   is_manually_categorized
   location_name, _city,
     _country (nullable text)
@@ -330,7 +330,11 @@ fixed_expenses                internal_transfers
   amount                        amount
   is_shared                     from_product_id FK
   shared_ratio                  to_product_id FK
-  active_from/to                transfer_date
+  active_from/to                from_transaction_id FK (V028)
+                                to_transaction_id FK (V028)
+                                  -- unique, ON DELETE SET NULL;
+                                  -- the scraped legs it accounts for
+                                transfer_date
                                 status (pending|resolved)
 
 
@@ -398,6 +402,7 @@ the same function over the rows that are still uncategorized.
 | `V023__transactions_amount_numeric.sql` | `transactions.amount` integer -> NUMERIC(18, 2) so foreign-currency movements keep their cents; existing values unchanged |
 | `V024__exchange_rates.sql` | exchange_rates: the latest scraped rate per institution or product and currency pair |
 | `V025__transactions_location.sql` | optional transaction location: name, city, country, a range-checked lat/lng pair, and `location_is_manual`; no backfill |
+| `V028__internal_transfer_transaction_links.sql` | internal_transfers gain `from_transaction_id` / `to_transaction_id`: nullable, unique FKs (ON DELETE SET NULL) to the scraped rows a transfer accounts for; no backfill |
 | `V029__seed_skipo_institution.sql` | seeds the `skipo` institution (display name, kind, site) |
 
 ## Scraper Architecture
@@ -1154,7 +1159,7 @@ el-chanchito/
 │
 ├── packages/
 │   ├── db-schema/                    # Shared SQL migrations
-│   │   ├── migrations/               # V001 through V020, V022, V023, V025
+│   │   ├── migrations/               # V001 through V025, V027, V028
 │   │   └── migrate.mjs               # Migration runner
 │   └── product-model/                # Product-kind registry (pydantic v2)
 │       ├── product_model/            # kinds, attributes, metrics, display, envelopes

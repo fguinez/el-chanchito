@@ -16,6 +16,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { TransactionDetailSheet } from "@/components/transactions/transaction-detail-sheet";
 import { useSelectedTransaction } from "@/components/transactions/use-selected-transaction";
@@ -118,6 +119,11 @@ function TransactionsList({
                     </TableCell>
                     <TableCell className="whitespace-normal break-words">
                       {txn.description}
+                      {txn.isInternalTransfer && (
+                        <Badge variant="secondary" className="ml-2 text-xs">
+                          Transferencia interna
+                        </Badge>
+                      )}
                       {txn.location && (
                         <span className="block text-xs text-muted-foreground">
                           {txn.location}

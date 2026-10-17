@@ -71,13 +71,22 @@ export function createFakeDb() {
       return chain;
     };
 
+  const builders = {
+    select: start("select"),
+    insert: start("insert"),
+    update: start("update"),
+    delete: start("delete"),
+  };
+  const db = {
+    ...builders,
+    /** Runs the callback on the same recorder; a throw propagates as a
+     *  rollback would. */
+    transaction: <T>(fn: (tx: typeof builders) => Promise<T>): Promise<T> =>
+      fn(builders),
+  };
+
   return {
-    db: {
-      select: start("select"),
-      insert: start("insert"),
-      update: start("update"),
-      delete: start("delete"),
-    },
+    db,
     queries,
     respondWith(responder: Responder) {
       respond = responder;

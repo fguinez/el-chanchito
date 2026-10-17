@@ -52,6 +52,9 @@ export interface ProductTransaction {
   externalId: string | null;
   /** "Lugar · Ciudad, País" when a location is stored (V025), else null. */
   location: string | null;
+  /** Linked to an internal transfer: left out of Ingresos/Gastos, still part
+   *  of the balance. */
+  isInternalTransfer: boolean;
 }
 
 /** The product this one hangs from (debit card -> checking, línea -> cta. cte.). */
@@ -133,6 +136,7 @@ export async function GET(_request: Request, { params }: Context) {
         transactionDate: transactions.transactionDate,
         source: transactions.source,
         externalId: transactions.externalId,
+        isInternalTransfer: transactions.isInternalTransfer,
         locationName: transactions.locationName,
         locationCity: transactions.locationCity,
         locationCountry: transactions.locationCountry,
@@ -182,6 +186,7 @@ export async function GET(_request: Request, { params }: Context) {
       transactionDate: new Date(t.transactionDate).toISOString().slice(0, 10),
       source: t.source,
       externalId: t.externalId,
+      isInternalTransfer: t.isInternalTransfer,
       location: formatLocationText({
         name: t.locationName,
         city: t.locationCity,

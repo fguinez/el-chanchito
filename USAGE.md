@@ -144,7 +144,7 @@ For the email parser, you need a Gmail App Password (not your regular password):
 | **Gastos** | `/expenses` | Transaction list, manual entry form, CSV import |
 | **Categorías** | `/categories` | Categories and keyword rules for automatic categorization |
 | **Gastos Fijos** | `/fixed` | Monthly fixed expenses with shared ratio (69%) |
-| **Transferencias** | `/transfers` | Internal money movements between two of your CLP products (pending/resolved) |
+| **Transferencias** | `/transfers` | Internal money movements between two of your CLP products (pending/resolved); "Vincular" links each one to the scraped debit and credit that moved the money |
 | **Instituciones** | `/institutions` | Every institution and its products with balances; edit institutions, accounts and products from their detail pages |
 | **Configuracion** | `/settings` | Budget parameters, income split calculator, monthly reset |
 
@@ -425,6 +425,26 @@ Rules only fill in missing categories: they never overwrite a category that is
 already set (including one chosen by hand), and editing or deleting a rule does
 not undo the categories it already assigned.
 
+## Internal transfers
+
+A transfer on `/transfers` records money moving between two of your own CLP
+products, for example paying a credit card from checking. When the scrapers
+import both legs, link them with **Vincular**: pick the outgoing transaction on
+the source product and the incoming one on the target. Only rows with exactly
+the transfer amount (no fee tolerance), the right sign, and a date within 5
+days of the transfer are offered, and a row can serve one transfer at most.
+
+Linked rows are flagged as internal transfers: they stay in every list with a
+"Transferencia interna" badge but drop out of the Gastos / Ingresos / Neto
+totals on `/expenses` and the monthly Ingresos/Gastos on a product page. The
+product balance chart still counts them, since the balance really moved.
+Unlinking (or deleting the transfer) clears the flag.
+
+A pending transfer turns resolved by itself once every side whose product has
+transactions is linked. A side whose product has none (a fund, a term
+deposit) stays unlinked; resolve that transfer by hand with the check button.
+Unlinking never moves a transfer back to pending.
+
 ## Net-worth history
 
 **Historial** charts patrimonio, deuda and ahorro (patrimonio minus deuda).
@@ -488,7 +508,9 @@ All API routes are under `/api/`:
 | PATCH/DELETE | `/api/categories/rules/[id]` | Update or delete a rule |
 | GET | `/api/categories/rules/preview` | Transactions a keyword would match (`?keyword=`) |
 | GET/POST/PUT/DELETE | `/api/fixed-expenses` | Fixed expenses CRUD |
-| GET/POST/PUT/DELETE | `/api/transfers` | Internal transfers (POST needs distinct CLP `fromProductId` + `toProductId`) |
+| GET/POST/PUT/DELETE | `/api/transfers` | Internal transfers (POST needs distinct CLP `fromProductId` + `toProductId`); GET includes the linked `fromTransaction` / `toTransaction` |
+| PUT | `/api/transfers/[id]/links` | Set or clear the linked transactions: `{ fromTransactionId?, toTransactionId? }` (null clears, omitted keeps) |
+| GET | `/api/transfers/[id]/candidates` | Per side, the unlinked transactions a transfer may link (same amount, right sign, within 5 days) |
 | GET/POST/DELETE | `/api/wealth` | Net-worth series (GET); backdate a legacy snapshot before the derived series starts (POST); delete a legacy snapshot (DELETE) |
 | POST | `/api/auth/login` | Exchange `DASHBOARD_PASSWORD` for a session cookie |
 | POST | `/api/auth/logout` | Clear the session cookie (public) |
