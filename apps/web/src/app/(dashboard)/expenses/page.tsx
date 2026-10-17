@@ -369,6 +369,7 @@ function ExpensesView() {
       <TransactionDetailSheet
         transactionId={selectedTxnId}
         onClose={() => selectTransaction(null)}
+        onTransferChanged={loadTransactions}
       />
     </div>
   );

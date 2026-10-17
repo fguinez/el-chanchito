@@ -33,6 +33,8 @@ interface ProductTransactionsCardProps {
   transactions: ProductTransaction[];
   /** The endpoint capped the list and older transactions were left out. */
   truncated: boolean;
+  /** A transfer link changed in the detail panel: reload the list. */
+  onTransferChanged?: () => void;
 }
 
 /**
@@ -70,6 +72,7 @@ function TransactionsList({
   currency,
   transactions,
   truncated,
+  onTransferChanged,
 }: ProductTransactionsCardProps) {
   const { selectedTxnId, selectTransaction, rowProps } =
     useSelectedTransaction();
@@ -178,6 +181,7 @@ function TransactionsList({
       <TransactionDetailSheet
         transactionId={selectedTxnId}
         onClose={() => selectTransaction(null)}
+        onTransferChanged={onTransferChanged}
       />
     </TransactionsShell>
   );

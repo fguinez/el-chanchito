@@ -41,14 +41,18 @@ type LoadResult =
  * Side panel with everything stored for one transaction; only the location
  * can be edited from here. Open while
  * `transactionId` is set; `onClose` should clear it (the caller owns the id,
- * e.g. in the URL).
+ * e.g. in the URL). `onTransferChanged` tells the caller a transfer link
+ * changed under the panel (an automatic link made or undone), so it can
+ * reload its list.
  */
 export function TransactionDetailSheet({
   transactionId,
   onClose,
+  onTransferChanged,
 }: {
   transactionId: string | null;
   onClose: () => void;
+  onTransferChanged?: () => void;
 }) {
   const [result, setResult] = useState<LoadResult | null>(null);
   const [attempt, setAttempt] = useState(0);
@@ -103,7 +107,10 @@ export function TransactionDetailSheet({
     setAttempt((n) => n + 1);
   };
   // Refetch in place (the transfer link changed): no loading state.
-  const reload = () => setAttempt((n) => n + 1);
+  const reload = () => {
+    setAttempt((n) => n + 1);
+    onTransferChanged?.();
+  };
 
   return (
     <Sheet

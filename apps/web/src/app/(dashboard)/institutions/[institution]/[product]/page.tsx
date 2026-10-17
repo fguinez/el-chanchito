@@ -369,6 +369,7 @@ export default function ProductDetailPage() {
         currency={product.currency}
         transactions={transactions}
         truncated={transactionsTruncated}
+        onTransferChanged={() => setReloadKey((k) => k + 1)}
       />
     </div>
   );
