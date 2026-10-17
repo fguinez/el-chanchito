@@ -144,6 +144,9 @@ export async function GET(_request: Request, { params }: Context) {
         locationCountry: transactions.locationCountry,
       })
       .from(transactions)
+      // displayDescription resolves an alias against products.currency (V035),
+      // so this list must join products even though it filters by product id.
+      .innerJoin(products, eq(transactions.productId, products.id))
       // Soft-deleted rows (V033) drop out of the product's movement list.
       .where(
         and(eq(transactions.productId, row.productId), notDeleted)
