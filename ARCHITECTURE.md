@@ -86,6 +86,7 @@
         ┌────────────────────────────────────┐
         │         ScrapedTransaction         │
         │         ScrapedProduct             │
+        │         ScrapedExchangeRate        │
         │   (pydantic envelopes from         │
         │    packages/product-model)         │
         └──────────────────┬─────────────────┘
@@ -95,6 +96,7 @@
         │  DB Writer                         │
         │  - upsert_transactions()           │
         │  - upsert_product()                │
+        │  - upsert_exchange_rate()          │
         │  - start/finish_scraper_run()      │
         │  - ON CONFLICT DO NOTHING (dedup)  │
         └──────────────────┬─────────────────┘
@@ -178,6 +180,49 @@ through `/api/monitors/[id]/adjustments`.
 
 `lib/budget-engine.ts` survives only as two helpers: `calcWealthMetrics`
 (Historial) and `calcPersonalAmount` (Gastos Fijos).
+
+## Exchange rates
+
+Every CLP figure of a non-CLP product (its "≈ CLP" balance, the institution
+subtotals and net-worth totals, the `/api/wealth` series, monitor references)
+converts with a rate resolved **per product** in `apps/web/src/lib/rates.ts`,
+most specific first:
+
+1. **product**: an `exchange_rates` row for that product and currency;
+2. **institution**: a row of the product's institution with `product_id` NULL;
+3. **provider**: `getClpRates()`, open.er-api fiat FX pivoted to CLP plus
+   Buda's tickers for crypto, cached in memory for 5 minutes.
+
+`exchange_rates` (V024) holds the rates institutions publish themselves (a
+bank's "Tipo de cambio" for its card), read by their scrapers: one current
+value per (institution, product or NULL, base currency, quote currency), with
+`rate` in quote units per base unit, a Spanish `source` label, the
+`reported_as_of` validity date when the institution prints one, and
+`observed_at`, which every scrape that reads the value moves forward. There is
+no history: past balances are valued at today's resolved rate, as they were
+with provider rates alone. The web reads only CLP-quoted rows.
+
+Each request loads one `RateBook` (`lib/rate-book.ts` `getRateBook()`: the
+provider rates and every override, in parallel) and converts a product with
+`ratesFor(book, { productId, institutionSlug })`, which returns plain
+`ClpRates`, so `toClp` and the `lib/networth` helpers are unchanged. A monitor
+reference converts both legs of its cross rate with the referenced product's
+rates. A failed `exchange_rates` read is logged and degrades to provider rates.
+
+**Staleness**: an override is stale when its `observed_at` falls on an earlier
+calendar day than now, both read in `America/Santiago` explicitly
+(`isRateStale`, via `Intl` with a `timeZone`, so the process timezone does not
+matter). A stale override is still used, never silently swapped for the
+provider rate; the UI warns instead. Provider rates are never flagged.
+
+The institutions and product endpoints return the rate behind each non-CLP
+product as `product.exchangeRate` (`RateInfo`: `currency`, `rate`, `scope`
+product/institution/provider, `source`, `observedAt`, `reportedAsOf`, `stale`;
+null for CLP products and unconvertible currencies). The product page shows it
+in a "Tipo de cambio" card with a "Desactualizado: no es de hoy" warning, and
+the family tables mark a stale "≈ CLP" with an amber icon. The card has no
+refresh of its own: the control server has no per-surface scoping, so an
+institution rate is reread by the institution page's "Actualizar".
 
 ## Database Schema (ER Diagram)
 
@@ -292,6 +337,19 @@ scraper_runs
   status       (running|success|partial|error)
   transactions_imported
   error_message
+
+
+exchange_rates (V024)
+  id PK
+  institution_id FK (cascade)
+  product_id FK (cascade; NULL = institution-wide)
+  base_currency, quote_currency ('CLP')
+  rate NUMERIC(20,8), > 0     -- quote units per 1 base
+  source                      -- Spanish UI label
+  reported_as_of              -- date the institution prints, if any
+  observed_at                 -- last scrape that read it
+  UNIQUE (institution_id, COALESCE(product_id, nil uuid),
+          base_currency, quote_currency)
 ```
 
 New transactions are categorized in the database itself (V021): a `BEFORE
@@ -301,6 +359,9 @@ scrapers' DB writer, CSV import, manual entry) gets it without code of its own.
 Rows that arrive with a category, or flagged `is_manually_categorized`, are
 left alone. The dashboard's "Categorizar ahora" (`PUT /api/categories`) runs
 the same function over the rows that are still uncategorized.
+
+`exchange_rates` semantics, resolution order and staleness: see
+[Exchange rates](#exchange-rates).
 
 ## Migrations
 
@@ -329,6 +390,7 @@ the same function over the rows that are still uncategorized.
 | `V021__auto_categorize_transactions.sql` | `category_for_description()` + a BEFORE INSERT trigger on transactions that fills a missing category from category_rules |
 | `V022__monitor_adjustments.sql` | monitor_adjustments: dated variaciones that shift a monitor's thresholds until month end |
 | `V023__transactions_amount_numeric.sql` | `transactions.amount` integer -> NUMERIC(18, 2) so foreign-currency movements keep their cents; existing values unchanged |
+| `V024__exchange_rates.sql` | exchange_rates: the latest scraped rate per institution or product and currency pair |
 | `V025__transactions_location.sql` | optional transaction location: name, city, country, a range-checked lat/lng pair, and `location_is_manual`; no backfill |
 
 ## Scraper Architecture
@@ -344,12 +406,14 @@ Scrapers are split into **agnostic backends** (how we scrape) and
 ```
 apps/scrapers/scrapers/
   base.py                  # BaseScraper; re-exports the ScrapedProduct /
-                           # ScrapedTransaction envelopes from product_model
+                           # ScrapedTransaction / ScrapedExchangeRate
+                           # envelopes from product_model
   backends/
     email.py               # ImapSession (shared login + NOOP keepalive),
                            # EmailPattern, fetch_transactions_for_pattern
     banchile_web.py        # own BdC Playwright login -> fetch_balances()
     banchile_movements.py  # BdC movements + the shared session -> fetch_session()
+    banchile_fx.py         # BdC USD card exchange rate (fetch-only surface)
     bci_lider_web.py       # real Chrome over CDP -> scrape_card() / save_login_session()
   institutions/
     mach.py  mercadopago.py  tenpo.py       -> consume backends/email
@@ -390,6 +454,21 @@ parsing stays unusable on the final attempt, the depósitos/fondos surfaces
 fall back to a single summed roll-up per kind (the listing header total),
 shaped like the products issue #36 retired; the DB writer keeps the roll-up
 and per-holding representations mutually exclusive so neither double-counts.
+
+One more surface reads the rate the bank bills the USD card's debt at
+(`banchile_fx.py`, "tipo de cambio"): the "Tipo de cambio" of the international
+card payment page, which is neither lib/rates' market reference nor the
+observed dollar of the home's indicators. It is fetch-only and runs between the
+product and movement surfaces: one in-page script GETs the product selector,
+builds the body of the payment page's display call
+(`tarjeta-credito-digital/pago/calcular-pago-internacional`) from it and POSTs
+it, returning only the rate, its date and a status code, so the customer's
+name, RUT and card id never reach Python, logs or warnings. It never routes to
+the payment pages or calls a payment endpoint. The rate becomes a
+product-scoped `ScrapedExchangeRate` for the USD card, carried on
+`BanChileSessionResult.exchange_rates` (not merged into the products); a read
+that never yields a usable rate is a failed surface like the others. The
+balance-only fallback does not read it.
 
 BanChile is also the only source that reports two dates per movement, so
 `transactions` carries both (V019): `transaction_date` is when the movement
@@ -508,6 +587,7 @@ class BaseScraper(ABC):
     institution: str                             # "mach" | "banchile" | "buda" | ...
     scrape_transactions() -> list[ScrapedTransaction]
     scrape_products() -> ProductScrapeResult     # products + non-fatal warnings
+                                                 # + exchange rates read
 ```
 
 Both `method` and `institution` are stored per `scraper_runs` row, and
@@ -526,6 +606,17 @@ currency becomes its own `crypto` product. `upsert_product`
 shallow-merges `attributes`, always refreshes
 `products.current_balance`/`metrics`/`balance_as_of`, and appends a
 `product_snapshots` history row only when the metrics payload changed.
+
+`ScrapedExchangeRate` is the third envelope: a rate an institution applies
+(`base_currency` priced in `quote_currency`, CLP by default), scoped to one of
+its products through a `ProductRef` (kind, currency, external_ref) or
+institution-wide (`product` = None), with a Spanish `source` label and the
+`reported_as_of` date the institution prints. `run_scraper` writes a leg's
+`exchange_rates` after its products with `upsert_exchange_rate`, which looks the
+product up by the same identity rule but never creates anything: a rate naming
+an unknown institution or product raises `UnresolvedRateScope` and becomes a
+run warning (`partial`), as does a failed write. A re-scrape updates the row in
+place (see [Exchange rates](#exchange-rates)).
 
 | Institution | Method | Source | Auth | Schedule |
 |---|---|---|---|---|
@@ -589,7 +680,8 @@ products table per family), `generated/product-model.schema.json`
 with placement rationale). A codegen drift test under `make test-py`
 regenerates to a temp dir and diffs against the committed output, so the
 artifacts can't silently fall behind the registry. The `ScrapedProduct` /
-`ScrapedTransaction` envelopes are that wire contract in motion: today they
+`ScrapedTransaction` / `ScrapedExchangeRate` envelopes are that wire contract
+in motion: today they
 travel in-process from scraper to `db/writer.py`, and the plan is to put the
 same validation behind a REST ingest API so non-Python scrapers can submit
 data without direct DB access.

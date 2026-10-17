@@ -16,6 +16,10 @@ see #82). Before that, the USD charges in the card's unbilled list were stored
 on the CLP card with their USD figure read as pesos; `superseded_transactions`
 names those rows so the run removes them once their USD replacements are
 written.
+
+The same session also reads the rate the bank bills that USD debt at
+(`backends/banchile_fx.py`), which the products leg hands on as
+`ProductScrapeResult.exchange_rates` for `run_scraper` to store.
 """
 
 import hashlib
@@ -289,6 +293,11 @@ class BanChileScraper(BaseScraper):
         that stayed empty after all their retries (product *and* movement ones,
         since one session read both) become warnings too, so the run records
         `partial` coverage instead of silently losing figures.
+
+        The USD card's exchange rate comes from the shared session only. The
+        balance-only fallback skips it: that path runs only after the
+        transactions leg already failed the run, and a rate missed for a day
+        just shows as stale on the dashboard.
         """
         session, self._session = self._session, None
         if session is None:
@@ -298,10 +307,12 @@ class BanChileScraper(BaseScraper):
                 logger.exception("BanChile balance scrape failed")
                 return ProductScrapeResult([], [f"BanChile: product scrape crashed: {e}"])
             products, failed = result.products, result.failed_surfaces
+            rates = []
         else:
             products, failed = session.products, session.failed_surfaces
+            rates = list(session.exchange_rates)
         warnings = [
             f"BanChile: {surface} surface failed after {_SURFACE_ATTEMPTS} attempts"
             for surface in failed
         ]
-        return ProductScrapeResult(products, warnings)
+        return ProductScrapeResult(products, warnings, rates)
