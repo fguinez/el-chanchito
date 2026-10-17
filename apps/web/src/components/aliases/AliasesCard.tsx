@@ -31,25 +31,38 @@ import {
 import { AliasPreview } from "./AliasPreview";
 import { AliasRow } from "./AliasRow";
 import {
+  CURRENCY_OPTIONS,
   MATCH_TYPE_LABELS,
   PRIORITY_ERROR,
   SELECT_CLASS,
+  isConditionalAlias,
   parsePriority,
   plural,
+  readAmountCondition,
   readApiError,
   type ApiAlias,
 } from "./shared";
 
 type AliasSortKey = "descripcion" | "tipo" | "alias" | "prioridad";
 
-/** The order aliases apply in: priority desc, then oldest first, then id. */
+/** The order aliases apply in: conditional first, then priority desc, then
+ *  oldest first, then id. */
 function byApplicationOrder(a: ApiAlias, b: ApiAlias): number {
+  const conditional =
+    Number(isConditionalAlias(b)) - Number(isConditionalAlias(a));
+  if (conditional !== 0) return conditional;
   if (a.priority !== b.priority) return b.priority - a.priority;
   if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? -1 : 1;
   return a.id < b.id ? -1 : 1;
 }
 
-type PreviewTarget = { matchDescription: string; matchType: MatchType };
+type PreviewTarget = {
+  matchDescription: string;
+  matchType: MatchType;
+  amountMin: number | null;
+  amountMax: number | null;
+  currency: string | null;
+};
 
 function AddAliasForm({
   version,
@@ -68,6 +81,9 @@ function AddAliasForm({
   const [matchType, setMatchType] = useState<MatchType>(initialMatchType);
   const [alias, setAlias] = useState("");
   const [priority, setPriority] = useState("0");
+  const [amountMin, setAmountMin] = useState("");
+  const [amountMax, setAmountMax] = useState("");
+  const [currency, setCurrency] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -78,8 +94,17 @@ function AddAliasForm({
       setError("Escribe una descripción para probarla");
       return;
     }
+    const condition = readAmountCondition(amountMin, amountMax, currency);
+    if ("error" in condition) {
+      setError(condition.error);
+      return;
+    }
     setError(null);
-    setPreview({ matchDescription: matchDescription.trim(), matchType });
+    setPreview({
+      matchDescription: matchDescription.trim(),
+      matchType,
+      ...condition,
+    });
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -97,6 +122,11 @@ function AddAliasForm({
       setError(PRIORITY_ERROR);
       return;
     }
+    const condition = readAmountCondition(amountMin, amountMax, currency);
+    if ("error" in condition) {
+      setError(condition.error);
+      return;
+    }
     setSaving(true);
     setError(null);
     setNotice(null);
@@ -109,6 +139,7 @@ function AddAliasForm({
           matchType,
           alias,
           priority: parsedPriority,
+          ...condition,
         }),
       });
       if (!res.ok) {
@@ -119,6 +150,9 @@ function AddAliasForm({
       setAlias("");
       setPriority("0");
       setMatchType("exact");
+      setAmountMin("");
+      setAmountMax("");
+      setCurrency("");
       setPreview(null);
       setNotice("Alias agregado. Ya se aplica a las transacciones que coinciden.");
       onCreated();
@@ -217,6 +251,86 @@ function AddAliasForm({
             {saving ? "Guardando..." : "Agregar"}
           </Button>
         </div>
+        <fieldset className="mt-3 space-y-2">
+          <legend className="text-sm text-muted-foreground">
+            Condición de monto (opcional)
+          </legend>
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="w-40">
+              <label
+                htmlFor="new-alias-amount-min"
+                className="mb-1 block text-sm text-muted-foreground"
+              >
+                Monto mínimo
+              </label>
+              <Input
+                id="new-alias-amount-min"
+                type="number"
+                step="any"
+                inputMode="decimal"
+                value={amountMin}
+                onChange={(e) => {
+                  setAmountMin(e.target.value);
+                  setError(null);
+                  setNotice(null);
+                }}
+                placeholder="Ej: 1000000"
+              />
+            </div>
+            <div className="w-40">
+              <label
+                htmlFor="new-alias-amount-max"
+                className="mb-1 block text-sm text-muted-foreground"
+              >
+                Monto máximo
+              </label>
+              <Input
+                id="new-alias-amount-max"
+                type="number"
+                step="any"
+                inputMode="decimal"
+                value={amountMax}
+                onChange={(e) => {
+                  setAmountMax(e.target.value);
+                  setError(null);
+                  setNotice(null);
+                }}
+                placeholder="Ej: 2500000"
+              />
+            </div>
+            <div className="w-32">
+              <label
+                htmlFor="new-alias-currency"
+                className="mb-1 block text-sm text-muted-foreground"
+              >
+                Moneda
+              </label>
+              <select
+                id="new-alias-currency"
+                value={currency}
+                onChange={(e) => {
+                  setCurrency(e.target.value);
+                  setError(null);
+                  setNotice(null);
+                }}
+                className={SELECT_CLASS}
+              >
+                <option value="">Sin condición</option>
+                {CURRENCY_OPTIONS.map((code) => (
+                  <option key={code} value={code}>
+                    {code}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Para &quot;monto es Y&quot;, usa el mismo valor en mínimo y máximo;
+            para un rango, ambos; para &quot;Y o entre W y Z&quot;, crea dos alias
+            con el mismo texto. El monto se compara con signo (los gastos son
+            negativos) y solo aplica a la moneda elegida.
+          </p>
+        </fieldset>
         {error && <p className="mt-1 text-sm text-destructive">{error}</p>}
         {notice && <p className="mt-1 text-sm text-muted-foreground">{notice}</p>}
       </form>
@@ -225,6 +339,9 @@ function AddAliasForm({
           key={`${preview.matchType}:${preview.matchDescription}`}
           matchDescription={preview.matchDescription}
           matchType={preview.matchType}
+          amountMin={preview.amountMin}
+          amountMax={preview.amountMax}
+          currency={preview.currency}
           version={version}
           onClose={() => setPreview(null)}
         />
@@ -317,6 +434,7 @@ export function AliasesCard({
                     {...sortProps("descripcion")}
                   />
                   <SortableTableHead label="Tipo" {...sortProps("tipo")} />
+                  <TableHead>Condición</TableHead>
                   <SortableTableHead label="Alias" {...sortProps("alias")} />
                   <SortableTableHead
                     label="Prioridad"

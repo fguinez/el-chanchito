@@ -26,27 +26,36 @@ type PreviewState =
   | { status: "done"; result: AliasPreviewResult };
 
 function summary({ total }: AliasPreviewResult): string {
+  // A higher-priority alias can still win at display time, so this says the rows
+  // match this alias, not that they will be relabeled.
   return `${plural(
     total,
-    "transacción cambiaría",
-    "transacciones cambiarían"
-  )} de nombre con este alias.`;
+    "transacción coincide",
+    "transacciones coinciden"
+  )} con este alias.`;
 }
 
 /**
- * What an alias with `matchDescription`/`matchType` would relabel: the count
- * plus the most recent matches with their original (scraped) description.
- * Refetches when `version` (bumped on every data reload) changes; callers key
- * it by the match so switching the input remounts it.
+ * What an alias with `matchDescription`/`matchType` and the optional amount
+ * condition would match: the count plus the most recent matches with their
+ * original (scraped) description. Refetches when `version` (bumped on every data
+ * reload) or any input changes; callers key it by the match so switching the
+ * description remounts it.
  */
 export function AliasPreview({
   matchDescription,
   matchType,
+  amountMin,
+  amountMax,
+  currency,
   version,
   onClose,
 }: {
   matchDescription: string;
   matchType: MatchType;
+  amountMin: number | null;
+  amountMax: number | null;
+  currency: string | null;
   version: number;
   onClose: () => void;
 }) {
@@ -54,10 +63,13 @@ export function AliasPreview({
 
   useEffect(() => {
     const controller = new AbortController();
-    const query = `matchDescription=${encodeURIComponent(
-      matchDescription
-    )}&matchType=${encodeURIComponent(matchType)}`;
-    fetch(`/api/aliases/preview?${query}`, { signal: controller.signal })
+    const params = new URLSearchParams({ matchDescription, matchType });
+    if (amountMin !== null) params.set("amountMin", String(amountMin));
+    if (amountMax !== null) params.set("amountMax", String(amountMax));
+    if (currency !== null && currency !== "") params.set("currency", currency);
+    fetch(`/api/aliases/preview?${params.toString()}`, {
+      signal: controller.signal,
+    })
       .then(async (res) => {
         if (!res.ok) {
           const error = await readApiError(res, "No se pudo probar el alias");
@@ -72,7 +84,7 @@ export function AliasPreview({
         }
       });
     return () => controller.abort();
-  }, [matchDescription, matchType, version]);
+  }, [matchDescription, matchType, amountMin, amountMax, currency, version]);
 
   return (
     <div className="space-y-3 rounded-md border bg-muted/30 p-4">

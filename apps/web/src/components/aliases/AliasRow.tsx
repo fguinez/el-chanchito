@@ -15,10 +15,13 @@ import {
 } from "@/lib/aliases";
 import { AliasPreview } from "./AliasPreview";
 import {
+  CURRENCY_OPTIONS,
   MATCH_TYPE_LABELS,
   PRIORITY_ERROR,
   SELECT_CLASS,
+  formatAmountCondition,
   parsePriority,
+  readAmountCondition,
   readApiError,
   type ApiAlias,
 } from "./shared";
@@ -30,10 +33,19 @@ type AliasDraft = {
   matchType: MatchType;
   alias: string;
   priority: string;
+  amountMin: string;
+  amountMax: string;
+  currency: string;
 };
 
 /** The match under test, or null when the preview is closed. */
-type PreviewTarget = { matchDescription: string; matchType: MatchType };
+type PreviewTarget = {
+  matchDescription: string;
+  matchType: MatchType;
+  amountMin: number | null;
+  amountMax: number | null;
+  currency: string | null;
+};
 
 export function AliasRow({
   alias,
@@ -58,6 +70,9 @@ export function AliasRow({
       matchType: alias.matchType,
       alias: alias.alias,
       priority: String(alias.priority),
+      amountMin: alias.amountMin === null ? "" : String(alias.amountMin),
+      amountMax: alias.amountMax === null ? "" : String(alias.amountMax),
+      currency: alias.currency ?? "",
     });
   }
 
@@ -74,9 +89,21 @@ export function AliasRow({
       setError("Escribe una descripción para probarla");
       return;
     }
+    const condition = draft
+      ? readAmountCondition(draft.amountMin, draft.amountMax, draft.currency)
+      : {
+          amountMin: alias.amountMin,
+          amountMax: alias.amountMax,
+          currency: alias.currency,
+        };
+    if ("error" in condition) {
+      setError(condition.error);
+      return;
+    }
     setPreview({
       matchDescription,
       matchType: draft?.matchType ?? alias.matchType,
+      ...condition,
     });
   }
 
@@ -97,13 +124,29 @@ export function AliasRow({
       setError(PRIORITY_ERROR);
       return;
     }
-    const patch: Record<string, string | number> = {};
+    const condition = readAmountCondition(
+      draft.amountMin,
+      draft.amountMax,
+      draft.currency
+    );
+    if ("error" in condition) {
+      setError(condition.error);
+      return;
+    }
+    const patch: Record<string, string | number | null> = {};
     if (matchDescription !== alias.matchDescription) {
       patch.matchDescription = matchDescription;
     }
     if (draft.matchType !== alias.matchType) patch.matchType = draft.matchType;
     if (aliasText !== alias.alias) patch.alias = aliasText;
     if (priority !== alias.priority) patch.priority = priority;
+    if (condition.amountMin !== alias.amountMin) {
+      patch.amountMin = condition.amountMin;
+    }
+    if (condition.amountMax !== alias.amountMax) {
+      patch.amountMax = condition.amountMax;
+    }
+    if (condition.currency !== alias.currency) patch.currency = condition.currency;
     if (Object.keys(patch).length === 0) {
       stopEditing();
       return;
@@ -217,6 +260,57 @@ export function AliasRow({
         </TableCell>
         <TableCell>
           {draft ? (
+            <div className="flex flex-wrap items-center gap-1">
+              <Input
+                aria-label="Monto mínimo"
+                type="number"
+                step="any"
+                inputMode="decimal"
+                placeholder="mín"
+                value={draft.amountMin}
+                onChange={(e) =>
+                  setDraft({ ...draft, amountMin: e.target.value })
+                }
+                onKeyDown={onKeyDown}
+                className="w-24"
+              />
+              <Input
+                aria-label="Monto máximo"
+                type="number"
+                step="any"
+                inputMode="decimal"
+                placeholder="máx"
+                value={draft.amountMax}
+                onChange={(e) =>
+                  setDraft({ ...draft, amountMax: e.target.value })
+                }
+                onKeyDown={onKeyDown}
+                className="w-24"
+              />
+              <select
+                aria-label="Moneda de la condición"
+                value={draft.currency}
+                onChange={(e) =>
+                  setDraft({ ...draft, currency: e.target.value })
+                }
+                className={`${SELECT_CLASS} w-24`}
+              >
+                <option value="">Sin</option>
+                {CURRENCY_OPTIONS.map((code) => (
+                  <option key={code} value={code}>
+                    {code}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : (
+            <span className="text-sm text-muted-foreground tabular-nums">
+              {formatAmountCondition(alias)}
+            </span>
+          )}
+        </TableCell>
+        <TableCell>
+          {draft ? (
             <Input
               aria-label="Alias"
               value={draft.alias}
@@ -297,11 +391,14 @@ export function AliasRow({
       </TableRow>
       {preview !== null && (
         <TableRow className="hover:bg-transparent">
-          <TableCell colSpan={5} className="whitespace-normal">
+          <TableCell colSpan={6} className="whitespace-normal">
             <AliasPreview
               key={`${preview.matchType}:${preview.matchDescription}`}
               matchDescription={preview.matchDescription}
               matchType={preview.matchType}
+              amountMin={preview.amountMin}
+              amountMax={preview.amountMax}
+              currency={preview.currency}
               version={version}
               onClose={() => setPreview(null)}
             />
