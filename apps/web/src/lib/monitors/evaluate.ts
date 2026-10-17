@@ -9,7 +9,7 @@ import {
   type ProductKind,
   type ProductMetrics,
 } from "@chanchito/product-model";
-import type { ClpRates } from "@/lib/rates";
+import { ratesFor, type RateBook } from "@/lib/rates";
 import { formatLocalDate } from "./dates";
 import {
   ExprError,
@@ -43,8 +43,9 @@ export type EvalContext = {
   /** Evaluation date; DAY_OF_MONTH/DAYS_IN_MONTH use its LOCAL date parts. */
   date: Date;
   products: Map<string, ProductInfo>;
-  /** CLP per unit of each currency (see lib/rates getClpRates). */
-  rates: ClpRates;
+  /** Provider rates plus institution/product overrides; each reference
+   *  converts with its own product's rates (see lib/rates ratesFor). */
+  rates: RateBook;
   /** Monitor currency: currency-denominated refs convert into it. */
   currency: string;
 };
@@ -100,7 +101,8 @@ function refLabel(ref: RefExpr, product?: ProductInfo): string {
   return `@{${ref.productId}:${ref.field}}`;
 }
 
-function resolveRef(ref: RefExpr, ctx: EvalContext): EvalResult {
+/** One reference's value in the monitor currency, as the evaluation sums it. */
+export function resolveRef(ref: RefExpr, ctx: EvalContext): EvalResult {
   if (ref.productId == null) {
     return {
       ok: false,
@@ -140,14 +142,20 @@ function resolveRef(ref: RefExpr, ctx: EvalContext): EvalResult {
   const productCurrency = product.currency.toUpperCase();
   const monitorCurrency = ctx.currency.toUpperCase();
   if (productCurrency === monitorCurrency) return { ok: true, value: amount };
-  const productRate = ctx.rates[productCurrency];
+  // Both legs come from the referenced product's rates, so an institution's
+  // own rate converts its products whichever side of the cross it is on.
+  const rates = ratesFor(ctx.rates, {
+    productId: product.id,
+    institutionSlug: product.institutionSlug,
+  });
+  const productRate = rates[productCurrency];
   if (productRate == null) {
     return {
       ok: false,
       reason: `No rate for ${product.currency} (reference ${label})`,
     };
   }
-  const monitorRate = ctx.rates[monitorCurrency];
+  const monitorRate = rates[monitorCurrency];
   if (monitorRate == null) {
     return {
       ok: false,

@@ -26,6 +26,7 @@ from product_model import (
     ColumnFormat,
     ColumnSource,
     ResolvedColumn,
+    ScrapedExchangeRate,
     ScrapedProduct,
     ScrapedTransaction,
     family_kinds,
@@ -340,7 +341,11 @@ def _render_index_ts() -> str:
 
 
 def _render_schema_json() -> str:
-    models: list[type[BaseModel]] = [ScrapedProduct, ScrapedTransaction]
+    models: list[type[BaseModel]] = [
+        ScrapedProduct,
+        ScrapedTransaction,
+        ScrapedExchangeRate,
+    ]
     for kind in PRODUCT_KINDS:
         models.append(REGISTRY[kind].attributes_cls)
         models.append(REGISTRY[kind].metrics_cls)
@@ -352,8 +357,9 @@ def _render_schema_json() -> str:
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "chanchito product model",
         "description": (
-            "Ingest contract for scraped products and transactions; "
-            "ScrapedProduct and ScrapedTransaction are the envelope models."
+            "Ingest contract for scraped products, transactions and exchange "
+            "rates; ScrapedProduct, ScrapedTransaction and ScrapedExchangeRate "
+            "are the envelope models."
         ),
         "$defs": defs["$defs"],
     }
@@ -404,7 +410,11 @@ Promotion rationale: only universal fields get real columns. No kind-specific
 field is aggregated in SQL (all product math lives in JS), so per-kind fields
 stay in JSONB typed by this registry rather than widening the table per kind.
 Scrapers submit data through the `ScrapedProduct` / `ScrapedTransaction`
-envelopes — the generated JSON Schema is the future REST wire contract.
+envelopes; the generated JSON Schema is the future REST wire contract. A third
+envelope, `ScrapedExchangeRate`, carries a rate an institution applies (scoped
+to one of its products through a `ProductRef`, or institution-wide); the writer
+keeps the latest one per scope in `exchange_rates` and never creates a product
+for it.
 
 Conventions: snake_case keys; CLP amounts `int`, USD/crypto amounts `float`;
 dates as ISO `YYYY-MM-DD` strings; percentages as percent numbers (4.2 = 4.2%).

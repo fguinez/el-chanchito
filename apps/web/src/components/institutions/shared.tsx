@@ -7,6 +7,7 @@
 
 import Link from "next/link";
 import { useCallback, useMemo } from "react";
+import { AlertTriangle } from "lucide-react";
 import {
   Table,
   TableBody,
@@ -33,6 +34,7 @@ import type {
   ProductKind,
   ProductMetrics,
 } from "@chanchito/product-model";
+import type { RateInfo } from "@/lib/rates";
 
 export interface InstitutionProduct {
   id: string;
@@ -45,6 +47,8 @@ export interface InstitutionProduct {
   currency: string;
   currentBalance: number | null;
   currentBalanceClp: number | null;
+  /** The rate behind currentBalanceClp; null for CLP or unconvertible. */
+  exchangeRate: RateInfo | null;
   balanceAsOf: string | null;
   externalRef: string | null;
   attributes: ProductAttributes | Record<string, never>;
@@ -415,11 +419,26 @@ function ProductColumnCell({
           {isHeadline ? "sin dato" : "—"}
         </span>
       )}
+      {cell.clpStale && cell.clp == null && <StaleRateMarker />}
       {cell.clp != null && (
         <div className="text-xs font-normal text-muted-foreground">
           ≈ {formatCLP(cell.clp)}
+          {cell.clpStale && <StaleRateMarker />}
         </div>
       )}
     </TableCell>
+  );
+}
+
+/** Amber marker next to a CLP figure converted with a stale rate. */
+function StaleRateMarker() {
+  return (
+    <span
+      className="ml-1 inline-flex align-[-2px] text-amber-600"
+      title="Tipo de cambio desactualizado"
+    >
+      <AlertTriangle className="h-3 w-3" aria-hidden />
+      <span className="sr-only">Tipo de cambio desactualizado</span>
+    </span>
   );
 }

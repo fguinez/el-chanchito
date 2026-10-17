@@ -12,7 +12,7 @@ import {
   type ProductCatalog,
   type ProductInfo,
 } from "@/lib/monitors";
-import type { ClpRates } from "@/lib/rates";
+import type { RateBook } from "@/lib/rates";
 
 // All figures and identifiers below are synthetic (see the repo's personal
 // data policy): fake uuids, fake CLP/USD amounts, fake slugs.
@@ -26,7 +26,7 @@ const EUR_WALLET_ID = "77777777-7777-4777-8777-777777777777";
 const CLOSED_ID = "88888888-8888-4888-8888-888888888888";
 const UNKNOWN_ID = "99999999-9999-4999-8999-999999999999";
 
-const rates: ClpRates = { CLP: 1, USD: 900 };
+const rates: RateBook = { provider: { CLP: 1, USD: 900 }, overrides: [] };
 
 type Overrides = Partial<ProductInfo> &
   Pick<ProductInfo, "id" | "kind" | "slug" | "institutionSlug">;
@@ -193,6 +193,36 @@ describe("reference resolution and conversion", () => {
     );
     // USD product into USD monitor: no conversion.
     expect(value("banchile:tarjeta_usd:owed", usdCtx)).toBe(100);
+  });
+
+  it("converts with the referenced product's own institution rate", () => {
+    const override = {
+      institutionId: "00000000-0000-4000-8000-0000000000b1",
+      institutionSlug: "banchile",
+      currency: "USD",
+      source: "Fuente de prueba",
+      reportedAsOf: null,
+      observedAt: new Date("2026-07-15T12:00:00Z"),
+    };
+    const overridden = ctx({
+      rates: {
+        provider: rates.provider,
+        overrides: [
+          { ...override, productId: null, rate: 950 },
+          { ...override, productId: CARD_USD_ID, rate: 999.99 },
+        ],
+      },
+    });
+    // Product rate wins: 100 USD * 999.99.
+    expect(value("banchile:tarjeta_usd:owed", overridden)).toBeCloseTo(99999, 6);
+    // Institution rate for its other USD products: 1000 USD * 950.
+    expect(value("banchile:credito:owed", overridden)).toBe(950000);
+    // Another institution keeps the provider rate: 1000 USD * 900.
+    expect(value("fintual:fondo_a:nav", overridden)).toBe(900000);
+    // The CLP-to-USD leg of a banchile product uses banchile's rate too.
+    expect(
+      value("banchile:cuenta_corriente:balance", { ...overridden, currency: "USD" })
+    ).toBeCloseTo(2500000 / 950, 6);
   });
 
   it("same product and monitor currency needs no rate", () => {

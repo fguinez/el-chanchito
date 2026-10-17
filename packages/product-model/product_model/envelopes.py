@@ -2,8 +2,9 @@
 
 These are the ingest contract — today validated in-process, tomorrow the REST
 wire format for external scrapers (the generated JSON Schema is the spec).
-Neither envelope carries an `as_of`: the writer stamps `now()` at persist
-time; bank-printed dates travel inside metrics as `reported_as_of`.
+No envelope carries an `as_of`: the writer stamps `now()` at persist time;
+bank-printed dates travel as `reported_as_of` (inside metrics for a product,
+on the envelope for an exchange rate).
 """
 
 import datetime
@@ -122,6 +123,25 @@ class TransactionLocation(BaseModel):
                 self.longitude,
             )
         )
+
+
+# What `exchange_rates.rate` (NUMERIC(20, 8), CHECK > 0) can hold, spelled out
+# for the wire contract the same way as the transaction amount.
+_RATE_PATTERN = r"^\d{1,12}(\.\d{1,8})?$"
+ExchangeRateValue = Annotated[
+    Decimal,
+    Field(gt=0, max_digits=20, decimal_places=8),
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {"type": "number", "exclusiveMinimum": 0},
+                {"type": "string", "pattern": _RATE_PATTERN},
+            ]
+        }
+    ),
+]
+# An upper-case currency code: ISO 4217 for fiat ("USD"), a ticker for crypto.
+_CURRENCY_CODE_PATTERN = r"^[A-Z]{3,10}$"
 
 
 class ScrapedProduct(BaseModel):
@@ -258,4 +278,98 @@ class ScrapedTransaction(BaseModel):
             self.amount = self.amount.quantize(Decimal(1))
         else:
             self.amount = self.amount.quantize(_CENT)
+        return self
+
+
+class ProductRef(BaseModel):
+    """The identity of one product of the envelope's institution.
+
+    The same (kind, currency, external_ref) triple the writer resolves a
+    `ScrapedProduct` by, so a scraper names a product exactly as it emits it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: ProductKind = Field(description="Kind of the product, e.g. 'credit_card'.")
+    currency: str = Field(
+        description="Upper-case currency code of the product, e.g. 'USD'.",
+        pattern=_CURRENCY_CODE_PATTERN,
+    )
+    external_ref: str | None = Field(
+        None,
+        description="The product's external_ref; None for singleton products.",
+    )
+
+
+class ScrapedExchangeRate(BaseModel):
+    """One exchange rate an institution applies, as a scraper read it.
+
+    Scoped to one product (`product`) or to the whole institution (None). The
+    writer only ever attaches it to an institution and product that already
+    exist: it never creates one to hang a rate on.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    institution: str = Field(
+        description="Institution slug, e.g. 'banchile', 'fintual'."
+    )
+    base_currency: str = Field(
+        description="Upper-case code of the currency being priced, e.g. 'USD'.",
+        pattern=_CURRENCY_CODE_PATTERN,
+    )
+    quote_currency: str = Field(
+        "CLP",
+        description="Upper-case code of the currency the rate is quoted in.",
+        pattern=_CURRENCY_CODE_PATTERN,
+    )
+    rate: ExchangeRateValue = Field(
+        description=(
+            "Quote units per 1 base unit (e.g. CLP per USD); positive, at most "
+            "8 decimals (stored as NUMERIC(20, 8))."
+        ),
+    )
+    product: ProductRef | None = Field(
+        None,
+        description=(
+            "The product of this institution the rate applies to; None for an "
+            "institution-wide rate."
+        ),
+    )
+    source: str = Field(
+        min_length=1,
+        description="Spanish label of where the rate was read, shown in the UI.",
+    )
+    reported_as_of: datetime.date | None = Field(
+        None,
+        description="Validity date the institution prints next to the rate, if any.",
+    )
+
+    @field_validator("rate", mode="before")
+    @classmethod
+    def _rate_string_matches_the_wire_pattern(cls, value):
+        """A string rate must be the schema's form: plain digits, a dot decimal."""
+        if isinstance(value, str) and not re.fullmatch(_RATE_PATTERN, value):
+            raise ValueError(f"rate string {value!r} must match {_RATE_PATTERN}")
+        return value
+
+    @field_validator("source")
+    @classmethod
+    def _source_is_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("source must not be blank")
+        return value
+
+    @model_validator(mode="after")
+    def _currencies_are_consistent(self) -> Self:
+        """A rate prices one currency in another; a product rate prices its own."""
+        if self.base_currency == self.quote_currency:
+            raise ValueError(
+                f"base_currency and quote_currency are both '{self.base_currency}'"
+            )
+        if self.product is not None and self.product.currency != self.base_currency:
+            raise ValueError(
+                f"product currency '{self.product.currency}' does not match "
+                f"base_currency '{self.base_currency}'"
+            )
         return self

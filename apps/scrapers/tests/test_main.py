@@ -14,11 +14,13 @@ import pytest
 from product_model import CheckingMetrics
 
 import main as main_mod
-from db.writer import TransactionWriteResult
+from db.writer import TransactionWriteResult, UnresolvedRateScope
 from main import run_scraper
 from scrapers.base import (
     BaseScraper,
+    ProductRef,
     ProductScrapeResult,
+    ScrapedExchangeRate,
     ScrapedProduct,
     SupersededTransaction,
 )
@@ -31,13 +33,20 @@ class _StubScraper(BaseScraper):
     institution = "stub"
 
     def __init__(
-        self, products=None, warnings=None, tx_exc=None, prod_exc=None, superseded=()
+        self,
+        products=None,
+        warnings=None,
+        tx_exc=None,
+        prod_exc=None,
+        superseded=(),
+        exchange_rates=(),
     ):
         self._products = products or []
         self._warnings = warnings or []
         self._tx_exc = tx_exc
         self._prod_exc = prod_exc
         self._superseded = list(superseded)
+        self._exchange_rates = list(exchange_rates)
 
     def superseded_transactions(self):
         return self._superseded
@@ -50,7 +59,9 @@ class _StubScraper(BaseScraper):
     async def scrape_products(self):
         if self._prod_exc is not None:
             raise self._prod_exc
-        return ProductScrapeResult(self._products, list(self._warnings))
+        return ProductScrapeResult(
+            self._products, list(self._warnings), list(self._exchange_rates)
+        )
 
 
 def _product():
@@ -72,6 +83,7 @@ def finish(monkeypatch):
         MagicMock(return_value=TransactionWriteResult(0, frozenset())),
     )
     monkeypatch.setattr(main_mod, "upsert_product", MagicMock())
+    monkeypatch.setattr(main_mod, "upsert_exchange_rate", MagicMock())
     monkeypatch.setattr(main_mod, "finish_scraper_run", mock)
     monkeypatch.setattr(main_mod, "delete_superseded_transactions", MagicMock())
     return mock
@@ -188,4 +200,87 @@ class TestSupersededCleanup:
 
         finish.assert_called_once_with(
             "run-1", "partial", transactions_imported=0, error_message="cleanup: db down"
+        )
+
+
+def _rate():
+    return ScrapedExchangeRate(
+        institution="banchile",
+        base_currency="USD",
+        rate="950.00",
+        product=ProductRef(kind="credit_card", currency="USD"),
+        source="Pago internacional de tarjeta",
+    )
+
+
+class TestExchangeRates:
+    """The products leg's rates are written after its products, each on its own."""
+
+    def test_written_after_the_products(self, finish, monkeypatch):
+        calls = []
+        rate = _rate()
+        monkeypatch.setattr(
+            main_mod, "upsert_product", lambda sp: calls.append("product")
+        )
+        monkeypatch.setattr(
+            main_mod, "upsert_exchange_rate", lambda fx: calls.append(("rate", fx))
+        )
+
+        scraper = _StubScraper(products=[_product()], exchange_rates=[rate])
+
+        asyncio.run(run_scraper(scraper))
+
+        assert calls == ["product", ("rate", rate)]
+        finish.assert_called_once_with("run-1", "success", transactions_imported=0)
+
+    def test_an_unresolvable_scope_is_a_warning(self, finish, monkeypatch):
+        monkeypatch.setattr(
+            main_mod,
+            "upsert_exchange_rate",
+            MagicMock(side_effect=UnresolvedRateScope("no credit_card product in USD")),
+        )
+
+        asyncio.run(run_scraper(_StubScraper(exchange_rates=[_rate()])))
+
+        finish.assert_called_once_with(
+            "run-1",
+            "partial",
+            transactions_imported=0,
+            error_message="exchange rate USD/CLP: no credit_card product in USD",
+        )
+
+    def test_a_write_failure_costs_only_that_rate(self, finish, monkeypatch):
+        written = []
+
+        def upsert(fx):
+            if not written:
+                written.append(None)
+                raise RuntimeError("db down")
+            written.append(fx)
+
+        monkeypatch.setattr(main_mod, "upsert_exchange_rate", upsert)
+        second = _rate()
+
+        asyncio.run(run_scraper(_StubScraper(exchange_rates=[_rate(), second])))
+
+        assert written == [None, second]
+        finish.assert_called_once_with(
+            "run-1",
+            "partial",
+            transactions_imported=0,
+            error_message="exchange rate USD/CLP: db down",
+        )
+
+    def test_still_written_when_a_product_write_fails(self, finish, monkeypatch):
+        monkeypatch.setattr(
+            main_mod, "upsert_product", MagicMock(side_effect=RuntimeError("db down"))
+        )
+
+        scraper = _StubScraper(products=[_product()], exchange_rates=[_rate()])
+
+        asyncio.run(run_scraper(scraper))
+
+        main_mod.upsert_exchange_rate.assert_called_once()
+        finish.assert_called_once_with(
+            "run-1", "error", transactions_imported=0, error_message="products: db down"
         )

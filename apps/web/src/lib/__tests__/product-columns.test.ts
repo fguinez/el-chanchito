@@ -149,9 +149,45 @@ describe("resolveColumnCell", () => {
       );
       expect(cell).toEqual({ sortValue: null, text: null, clp: null, tone: null });
     });
+
+    it("flags a CLP sub-line converted with a stale rate", () => {
+      const usd = (stale: boolean) =>
+        product("investment", {
+          currency: "USD",
+          currentBalance: 1234.56,
+          currentBalanceClp: 1_000_000,
+          exchangeRate: { stale },
+        });
+      const valor = column("investment", "valor");
+      expect(resolveColumnCell(usd(true), valor).clpStale).toBe(true);
+      expect(resolveColumnCell(usd(false), valor).clpStale).toBeUndefined();
+    });
+
+    it("never flags a cell without a CLP figure", () => {
+      const cell = resolveColumnCell(
+        product("investment", {
+          currency: "USD",
+          currentBalance: 1234.56,
+          currentBalanceClp: null,
+          exchangeRate: { stale: true },
+        }),
+        column("investment", "valor")
+      );
+      expect(cell.clpStale).toBeUndefined();
+    });
   });
 
   describe("clp_value", () => {
+    it("flags a CLP value converted with a stale rate", () => {
+      const btc = product("crypto", {
+        currency: "BTC",
+        currentBalance: 0.0421,
+        currentBalanceClp: 999_999,
+        exchangeRate: { stale: true },
+      });
+      expect(resolveColumnCell(btc, column("crypto", "clp")).clpStale).toBe(true);
+    });
+
     it("formats the CLP-converted balance", () => {
       const btc = product("crypto", {
         currency: "BTC",

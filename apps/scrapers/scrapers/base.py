@@ -1,9 +1,9 @@
 """Abstract base class for all scrapers.
 
-The scraped-data contract (the `ScrapedProduct` / `ScrapedTransaction`
-envelopes) lives in the shared `product_model` package — the same pydantic
-models that will validate the future REST ingest API — and is re-exported
-here so scrapers keep a single import point.
+The scraped-data contract (the `ScrapedProduct` / `ScrapedTransaction` /
+`ScrapedExchangeRate` envelopes) lives in the shared `product_model` package,
+the same pydantic models that will validate the future REST ingest API, and is
+re-exported here so scrapers keep a single import point.
 """
 
 from abc import ABC, abstractmethod
@@ -11,11 +11,19 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Optional
 
-from product_model import ScrapedProduct, ScrapedTransaction, TransactionLocation
+from product_model import (
+    ProductRef,
+    ScrapedExchangeRate,
+    ScrapedProduct,
+    ScrapedTransaction,
+    TransactionLocation,
+)
 
 __all__ = [
     "BaseScraper",
+    "ProductRef",
     "ProductScrapeResult",
+    "ScrapedExchangeRate",
     "ScrapedProduct",
     "ScrapedTransaction",
     "SupersededTransaction",
@@ -30,10 +38,15 @@ class ProductScrapeResult:
     Warnings flag partial coverage — e.g. a BanChile surface that stayed empty
     after all its retries — so `run_scraper` can record the run as `partial`
     without failing the leg.
+
+    `exchange_rates` are the rates the institution applies that the leg read
+    (e.g. BanChile's USD card rate); `run_scraper` writes them after the
+    products, so a product-scoped rate finds the product it names.
     """
 
     products: list[ScrapedProduct]
     warnings: list[str] = field(default_factory=list)
+    exchange_rates: list[ScrapedExchangeRate] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

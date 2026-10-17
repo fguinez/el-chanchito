@@ -3,7 +3,8 @@
 test_writer.py pins the writer's decisions with fake connections; these tests
 run the SQL that carries them out: the institution -> account -> product
 resolution chain, transaction dedup and issue #57's in-place re-key, snapshot
-history only on change, the roll-up guards and the scraper run log. Each test
+history only on change, the roll-up guards, the exchange-rate upsert (V024)
+and the scraper run log. Each test
 gets its own freshly migrated database (see conftest.py) and is skipped unless
 TEST_DATABASE_URL is set. Every figure and identifier is synthetic.
 """
@@ -20,9 +21,11 @@ from psycopg.rows import dict_row
 from db import writer
 from tests.conftest import apply_migrations
 from db.writer import (
+    UnresolvedRateScope,
     delete_superseded_transactions,
     finish_scraper_run,
     start_scraper_run,
+    upsert_exchange_rate,
     upsert_product,
     upsert_transactions,
     write_transactions,
@@ -30,7 +33,10 @@ from db.writer import (
 from product_model import (
     CheckingMetrics,
     CreditCardAttributes,
+    CreditCardMetrics,
     DebitCardMetrics,
+    ProductRef,
+    ScrapedExchangeRate,
     ScrapedProduct,
     ScrapedTransaction,
     TermDepositMetrics,
@@ -1043,3 +1049,166 @@ class TestScraperRuns:
             message,
         )
         assert run["finished_at"] > run["started_at"]
+
+
+def _usd_card(external_ref=None):
+    return ScrapedProduct(
+        institution="banchile",
+        kind="credit_card",
+        currency="USD",
+        external_ref=external_ref,
+        metrics=CreditCardMetrics(available=1234.56, limit=2000.0),
+    )
+
+
+def _usd_rate(
+    rate="950.00",
+    product=True,
+    reported_as_of=date(2026, 1, 1),
+    institution="banchile",
+    external_ref=None,
+):
+    """A synthetic USD rate: on the USD card, or institution-wide without `product`."""
+    ref = ProductRef(kind="credit_card", currency="USD", external_ref=external_ref)
+    return ScrapedExchangeRate(
+        institution=institution,
+        base_currency="USD",
+        rate=rate,
+        product=ref if product else None,
+        source="Pago internacional de tarjeta",
+        reported_as_of=reported_as_of,
+    )
+
+
+class TestExchangeRates:
+    """`upsert_exchange_rate` keeps the latest rate per scope (V024)."""
+
+    def _rates(self, conn):
+        return conn.execute(
+            "SELECT * FROM exchange_rates ORDER BY product_id NULLS FIRST"
+        ).fetchall()
+
+    def test_a_product_rate_lands_on_the_existing_product(self, db_conn):
+        upsert_product(_usd_card())
+        card = _only_product(db_conn)
+
+        upsert_exchange_rate(_usd_rate())
+
+        (row,) = self._rates(db_conn)
+        institution_id = db_conn.execute(
+            "SELECT id FROM institutions WHERE slug = 'banchile'"
+        ).fetchone()["id"]
+        assert row["product_id"] == card["id"]
+        assert row["institution_id"] == institution_id
+        assert (row["base_currency"], row["quote_currency"]) == ("USD", "CLP")
+        assert row["rate"] == Decimal("950.00")
+        assert row["source"] == "Pago internacional de tarjeta"
+        assert row["reported_as_of"] == date(2026, 1, 1)
+        assert row["observed_at"] == row["created_at"] == row["updated_at"]
+
+    def test_a_rescrape_updates_the_row_in_place(self, db_conn):
+        upsert_product(_usd_card())
+        upsert_exchange_rate(_usd_rate())
+        (first,) = self._rates(db_conn)
+
+        upsert_exchange_rate(_usd_rate(rate="999.99", reported_as_of=date(2026, 1, 2)))
+
+        (row,) = self._rates(db_conn)
+        assert row["id"] == first["id"]
+        assert row["rate"] == Decimal("999.99")
+        assert row["reported_as_of"] == date(2026, 1, 2)
+        assert row["observed_at"] > first["observed_at"]
+        assert row["updated_at"] == row["observed_at"]
+        assert row["created_at"] == first["created_at"]
+
+    def test_an_unchanged_rate_still_moves_observed_at(self, db_conn):
+        """observed_at means "last read", which is what staleness compares."""
+        upsert_product(_usd_card())
+        upsert_exchange_rate(_usd_rate())
+        (first,) = self._rates(db_conn)
+
+        upsert_exchange_rate(_usd_rate())
+
+        (row,) = self._rates(db_conn)
+        assert row["rate"] == first["rate"]
+        assert row["observed_at"] > first["observed_at"]
+
+    def test_institution_and_product_scopes_coexist(self, db_conn):
+        upsert_product(_usd_card())
+        card = _only_product(db_conn)
+
+        upsert_exchange_rate(_usd_rate(rate="999.99", product=False))
+        upsert_exchange_rate(_usd_rate(rate="950.00"))
+        upsert_exchange_rate(_usd_rate(rate="1234.56", product=False))
+
+        institution_wide, product_scoped = self._rates(db_conn)
+        assert (institution_wide["product_id"], institution_wide["rate"]) == (
+            None,
+            Decimal("1234.56"),
+        )
+        assert (product_scoped["product_id"], product_scoped["rate"]) == (
+            card["id"],
+            Decimal("950.00"),
+        )
+        assert institution_wide["institution_id"] == product_scoped["institution_id"]
+
+    def test_an_unknown_product_is_reported_and_nothing_is_created(self, db_conn):
+        with pytest.raises(UnresolvedRateScope, match="no credit_card product in USD"):
+            upsert_exchange_rate(_usd_rate())
+
+        assert _products(db_conn) == []
+        assert self._rates(db_conn) == []
+
+    def test_the_product_identity_includes_external_ref(self, db_conn):
+        """Same rule as `_resolve_product`: a per-holding product is another one."""
+        upsert_product(_usd_card(external_ref="0000"))
+
+        with pytest.raises(UnresolvedRateScope):
+            upsert_exchange_rate(_usd_rate())
+        upsert_exchange_rate(_usd_rate(external_ref="0000"))
+
+        (row,) = self._rates(db_conn)
+        assert row["product_id"] == _only_product(db_conn)["id"]
+        assert len(_products(db_conn)) == 1
+
+    def test_an_unknown_institution_is_reported_and_not_created(self, db_conn):
+        with pytest.raises(UnresolvedRateScope, match="institution 'sintetico'"):
+            upsert_exchange_rate(_usd_rate(product=False, institution="sintetico"))
+
+        assert (
+            db_conn.execute(
+                "SELECT 1 FROM institutions WHERE slug = 'sintetico'"
+            ).fetchone()
+            is None
+        )
+        assert self._rates(db_conn) == []
+
+    def test_deleting_the_product_drops_its_rate(self, db_conn):
+        upsert_product(_usd_card())
+        upsert_exchange_rate(_usd_rate())
+        upsert_exchange_rate(_usd_rate(product=False))
+
+        db_conn.execute("DELETE FROM product_snapshots")
+        db_conn.execute("DELETE FROM products")
+
+        (row,) = self._rates(db_conn)
+        assert row["product_id"] is None
+
+    @pytest.mark.parametrize(
+        ("column", "value"),
+        [("rate", 0), ("quote_currency", "USD")],
+        ids=["non-positive-rate", "same-currency"],
+    )
+    def test_the_table_rejects_what_the_envelope_rejects(self, db_conn, column, value):
+        institution_id = db_conn.execute(
+            "SELECT id FROM institutions WHERE slug = 'banchile'"
+        ).fetchone()["id"]
+        values = {"rate": Decimal("950.00"), "quote_currency": "CLP", column: value}
+
+        with pytest.raises(psycopg.errors.CheckViolation):
+            db_conn.execute(
+                "INSERT INTO exchange_rates "
+                "(institution_id, base_currency, quote_currency, rate, source) "
+                "VALUES (%s, 'USD', %s, %s, 'Sintetico')",
+                (institution_id, values["quote_currency"], values["rate"]),
+            )

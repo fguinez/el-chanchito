@@ -13,6 +13,8 @@ from product_model import (
     REGISTRY,
     CreditCardAttributes,
     ProductMetrics,
+    ProductRef,
+    ScrapedExchangeRate,
     ScrapedProduct,
     ScrapedTransaction,
     TermDepositAttributes,
@@ -424,3 +426,84 @@ class TestTransactionLocation:
             _located_txn({"city": "X" * 201})
         with pytest.raises(ValidationError):
             _located_txn({"street": "Calle Ficticia 123"})
+
+
+def _usd_rate(**fields) -> ScrapedExchangeRate:
+    """A synthetic product-scoped USD rate; `fields` override the defaults."""
+    values = {
+        "institution": "banchile",
+        "base_currency": "USD",
+        "rate": "950.00",
+        "product": {"kind": "credit_card", "currency": "USD"},
+        "source": "Pago internacional de tarjeta",
+        "reported_as_of": "2026-01-01",
+    }
+    values.update(fields)
+    return ScrapedExchangeRate(**values)
+
+
+class TestScrapedExchangeRate:
+    """The exchange-rate envelope fits `exchange_rates` (V024)."""
+
+    def test_defaults_quote_clp_and_carries_the_product_identity(self):
+        rate = _usd_rate()
+
+        assert rate.quote_currency == "CLP"
+        assert rate.rate == Decimal("950.00")
+        assert rate.reported_as_of == date(2026, 1, 1)
+        assert rate.product == ProductRef(
+            kind="credit_card", currency="USD", external_ref=None
+        )
+
+    def test_an_institution_wide_rate_has_no_product(self):
+        rate = _usd_rate(product=None, reported_as_of=None)
+
+        assert rate.product is None
+        assert rate.reported_as_of is None
+
+    @pytest.mark.parametrize("raw", [999.99, "999.99", Decimal("999.99")])
+    def test_number_string_and_decimal_rates_agree(self, raw):
+        assert _usd_rate(rate=raw).rate == Decimal("999.99")
+
+    @pytest.mark.parametrize(
+        "raw",
+        [0, -1, "0", "1.123456789", 10**12, "NaN", float("inf"), "1,5", "1E+3", True],
+        ids=[
+            "zero", "negative", "zero-string", "nine-decimals", "too-large",
+            "nan", "inf", "comma", "exponent", "bool",
+        ],
+    )
+    def test_rates_the_column_cannot_hold_are_rejected(self, raw):
+        with pytest.raises(ValidationError):
+            _usd_rate(rate=raw)
+
+    def test_a_product_rate_prices_its_own_currency(self):
+        with pytest.raises(ValidationError, match="does not match base_currency"):
+            _usd_rate(product={"kind": "credit_card", "currency": "EUR"})
+
+    def test_base_and_quote_must_differ(self):
+        with pytest.raises(ValidationError, match="are both 'CLP'"):
+            _usd_rate(base_currency="CLP", product=None)
+
+    @pytest.mark.parametrize("code", ["usd", "US", "U$D", ""])
+    def test_currency_codes_are_upper_case(self, code):
+        with pytest.raises(ValidationError):
+            _usd_rate(base_currency=code, product=None)
+
+    @pytest.mark.parametrize("source", ["", "   "])
+    def test_the_source_label_is_required(self, source):
+        with pytest.raises(ValidationError):
+            _usd_rate(source=source)
+
+    def test_unknown_fields_are_rejected(self):
+        with pytest.raises(ValidationError):
+            _usd_rate(nombre="TITULAR SINTETICO")
+        with pytest.raises(ValidationError):
+            _usd_rate(product={"kind": "credit_card", "currency": "USD", "id": "0"})
+
+    def test_the_json_schema_describes_both_wire_forms(self):
+        prop = ScrapedExchangeRate.model_json_schema()["properties"]["rate"]
+
+        assert {"type": "number", "exclusiveMinimum": 0} in prop["anyOf"]
+        (string_form,) = [m for m in prop["anyOf"] if m.get("type") == "string"]
+        assert string_form["pattern"] == r"^\d{1,12}(\.\d{1,8})?$"
