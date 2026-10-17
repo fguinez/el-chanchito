@@ -303,9 +303,25 @@ class TestParseBalances:
 
         assert [(p.currency, p.metrics.units) for p in products] == [("ETH", 0.0)]
 
-    def test_zero_coin_balances_are_dropped_silently(self):
-        """Coins held nowhere yield no product and no warning."""
-        products, warnings = _parse_balances([_balance("BTC"), _balance("NVDAX")], _CLASSES)
+    def test_sold_out_coin_reports_zero_units(self):
+        """A coin at zero is still reported, so a sold-out holding stops counting."""
+        products, warnings = _parse_balances([_balance("BTC")], _CLASSES)
+
+        assert [(p.kind, p.currency, p.metrics.units) for p in products] == [("crypto", "BTC", 0.0)]
+        assert (products[0].metrics.frozen, products[0].metrics.pending) == (None, None)
+        assert warnings == []
+
+    @pytest.mark.parametrize(
+        "symbol",
+        [
+            pytest.param("NVDAX", id="stock"),
+            pytest.param("USD", id="other-fiat"),
+            pytest.param("ZZZ", id="unknown-class"),
+        ],
+    )
+    def test_zero_non_coin_balances_are_dropped_silently(self, symbol):
+        """Holdings that aren't imported anyway yield nothing at zero, not even a warning."""
+        products, warnings = _parse_balances([_balance(symbol)], _CLASSES)
 
         assert products == []
         assert warnings == []
@@ -486,6 +502,7 @@ class TestScrapeProducts:
 
         assert sorted((p.kind, p.currency) for p in result.products) == [
             ("crypto", "BTC"),
+            ("crypto", "ETH"),
             ("wallet", "CLP"),
         ]
         assert [(r.base_currency, r.rate) for r in result.exchange_rates] == [
@@ -551,7 +568,7 @@ class TestScrapeProducts:
 
         result = asyncio.run(self.scraper.scrape_products())
 
-        assert len(result.products) == 2
+        assert len(result.products) == 3
         assert result.warnings == ["Skipo: no CLP price for 1 coin(s)"]
 
     def test_a_rejected_key_on_a_price_still_raises(self, monkeypatch):
@@ -632,7 +649,7 @@ class TestScrapeProducts:
 
         result = asyncio.run(self.scraper.scrape_products())
 
-        assert len(result.products) == 2
+        assert len(result.products) == 3
 
 
 class TestScrapeTransactions:

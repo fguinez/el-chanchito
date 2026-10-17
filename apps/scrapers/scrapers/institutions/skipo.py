@@ -19,11 +19,13 @@ are retried by `scrapers.retry`.
   STABLECOIN or STOCK;
 - `/v2/balances` (a bare JSON array of decimal strings): CLP becomes the
   singleton `wallet` product, always emitted, even at zero, so a drained
-  wallet stops showing its old balance. Each held crypto or stablecoin
+  wallet stops showing its old balance. Each crypto or stablecoin row
   becomes one `crypto` product per symbol (units, frozen, pending), like
-  Buda. Fiat other than CLP is skipped with a warning (`WalletMetrics`
-  holds whole CLP only), as are tokenized stocks (no product kind fits yet)
-  and unclassified symbols. Skipped holdings are counted in the run's
+  Buda, also at zero units so a coin sold out stops counting. A coin the
+  response leaves out can't be zeroed this way: making "absent means zero"
+  a writer rule is a follow-up shared with Buda. Fiat other than CLP is
+  skipped with a warning (`WalletMetrics` holds whole CLP only), as are
+  tokenized stocks (no product kind fits yet) and unclassified symbols. Skipped holdings are counted in the run's
   warnings, so the run is recorded partial;
 - `/v2/markets/{SYMBOL}-CLP/price?side=SELL` for each held coin: Skipo's
   indicative price becomes an institution-scoped `ScrapedExchangeRate`, so
@@ -211,9 +213,10 @@ def _parse_balances(
 ) -> tuple[list[ScrapedProduct], list[str]]:
     """Balance rows as products, plus warnings naming what was left out.
 
-    The CLP row is always emitted (a zero balance is a real observation).
-    Other rows count as held when balance, frozen or pending is non-zero;
-    rows held nowhere are dropped silently. Warnings carry counts, never
+    The CLP and coin rows are always emitted: a zero balance is a real
+    observation, and it is what stops a drained wallet or a sold-out coin
+    from counting. Other rows count only when balance, frozen or pending is
+    non-zero; the rest are dropped silently. Warnings carry counts, never
     amounts.
     """
     products: list[ScrapedProduct] = []
@@ -247,10 +250,9 @@ def _parse_balances(
                 )
             )
             continue
-        if not (balance or frozen or pending):
-            continue
-
         asset_class = classes.get(symbol)
+        if asset_class not in COIN_CLASSES and not (balance or frozen or pending):
+            continue
         if asset_class in COIN_CLASSES:
             products.append(
                 ScrapedProduct(
