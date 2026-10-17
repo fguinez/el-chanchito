@@ -24,8 +24,9 @@ import { verifySessionToken } from "@/lib/auth/session";
 /**
  * Single enforcement point for dashboard auth (see ARCHITECTURE.md).
  *
- * - No DASHBOARD_PASSWORD outside production: transparent, `next dev` is
- *   unchanged.
+ * - Every mode: a mutating API call from another origin is refused.
+ * - No DASHBOARD_PASSWORD outside production: otherwise transparent, `next dev`
+ *   is unchanged.
  * - No DASHBOARD_PASSWORD in production: fail closed, nothing is served.
  * - DASHBOARD_PASSWORD set: a valid signed session is required for every page
  *   and every API route, except the login surfaces.
@@ -51,13 +52,27 @@ function redirect(url: URL) {
 export async function proxy(request: NextRequest) {
   const { pathname, search } = request.nextUrl;
   const mode = currentAuthMode();
-
-  if (mode === "disabled") return NextResponse.next();
-
   const api = isApiPath(pathname);
   // Forwarded headers are believed only where a proxy is declared to exist; see
   // lib/auth/config.ts (parseTrustProxy).
   const trustProxy = trustProxyHeaders();
+
+  // Runs in every auth mode, before the disabled pass-through: without a
+  // password nothing else stands between another site and the write API (bank
+  // logins included), and with one it is defense in depth on top of
+  // SameSite=Lax, which does not stop a same-site cross-origin write (a sibling
+  // subdomain, or any host under a shared public suffix). Both checks are
+  // allow-lists; see lib/auth/csrf.ts.
+  if (api && isMutatingMethod(request.method)) {
+    if (
+      !isAllowedFetchSite(request.headers.get("sec-fetch-site")) ||
+      !isAllowedOrigin(request.headers.get("origin"), request.headers, trustProxy)
+    ) {
+      return jsonError("Cross-site request rejected", 403);
+    }
+  }
+
+  if (mode === "disabled") return NextResponse.next();
 
   if (mode === "misconfigured") {
     if (api) {
@@ -67,18 +82,6 @@ export async function proxy(request: NextRequest) {
       );
     }
     return NextResponse.rewrite(new URL(SETUP_REQUIRED_PATH, request.url));
-  }
-
-  // Defense in depth on top of SameSite=Lax, which does not stop a same-site
-  // cross-origin write (a sibling subdomain, or any host under a shared public
-  // suffix). Both checks are allow-lists; see lib/auth/csrf.ts.
-  if (api && isMutatingMethod(request.method)) {
-    if (
-      !isAllowedFetchSite(request.headers.get("sec-fetch-site")) ||
-      !isAllowedOrigin(request.headers.get("origin"), request.headers, trustProxy)
-    ) {
-      return jsonError("Cross-site request rejected", 403);
-    }
   }
 
   const authenticated = await verifySessionToken(

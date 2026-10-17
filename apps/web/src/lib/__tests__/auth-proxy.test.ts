@@ -93,11 +93,52 @@ describe("proxy: disabled mode", () => {
     expect(response.headers.get("cache-control")).toBeNull();
   });
 
-  it("leaves mutating API calls alone, cross-site header and all", async () => {
+  it("still rejects a cross-site write, since nothing else guards the API here", async () => {
+    // `make dev` runs without a password, so any page the browser visits could
+    // otherwise forge transactions or start a live bank login.
+    for (const headers of <Record<string, string>[]>[
+      { "sec-fetch-site": "cross-site" },
+      { origin: "https://evil.example" },
+      { origin: "https://evil.example", "sec-fetch-site": "cross-site" },
+    ]) {
+      const response = await proxy(
+        makeRequest({ path: "/api/institutions/refresh", method: "POST", headers })
+      );
+      expect(response.status, JSON.stringify(headers)).toBe(403);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+    }
+  });
+
+  it("lets our own pages and non-browser clients write", async () => {
+    for (const headers of <Record<string, string>[]>[
+      { origin: ORIGIN, "sec-fetch-site": "same-origin" },
+      { origin: ORIGIN },
+      // curl and other scripts send neither header.
+      {},
+    ]) {
+      const response = await proxy(
+        makeRequest({ path: "/api/transactions", method: "POST", headers })
+      );
+      expect(response.status, JSON.stringify(headers)).toBe(200);
+    }
+  });
+
+  it("works for a plain-HTTP localhost dev server", async () => {
     const response = await proxy(
       makeRequest({
-        path: "/api/month-reset",
+        path: "/api/transactions",
         method: "POST",
+        origin: "http://localhost:3000",
+        headers: { origin: "http://localhost:3000", "sec-fetch-site": "same-origin" },
+      })
+    );
+    expect(response.status).toBe(200);
+  });
+
+  it("leaves cross-site reads alone", async () => {
+    const response = await proxy(
+      makeRequest({
+        path: "/api/balances",
         headers: { "sec-fetch-site": "cross-site" },
       })
     );
