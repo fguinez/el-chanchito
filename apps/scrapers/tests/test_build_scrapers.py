@@ -21,15 +21,17 @@ _VALUES = {
     "BANCHILE_PASSWORD": "synthetic-password",
     "LIDER_BCI_RUT": "00.000.000-0",
     "LIDER_BCI_PASSWORD": "synthetic-password",
+    "SANTANDER_RUT": "00.000.000-0",
+    "SANTANDER_PASSWORD": "synthetic-password",
     "EMAIL_IMAP_HOST": "imap.example.com",
     "EMAIL_IMAP_USER": "user@example.com",
     "EMAIL_IMAP_PASSWORD": "synthetic-password",
 }
 # Read by the constructors, not the gating; cleared so a stray value can't leak in.
-_CONSTRUCTOR_VARS = ("FINTUAL_SESSION_FILE", "EMAIL_LOOKBACK_DAYS")
+_CONSTRUCTOR_VARS = ("FINTUAL_SESSION_FILE", "EMAIL_LOOKBACK_DAYS", "SANTANDER_HEADLESS")
 
 _EMAIL = ("EMAIL_IMAP_HOST", "EMAIL_IMAP_USER", "EMAIL_IMAP_PASSWORD")
-_ALL = {"fintual", "buda", "banchile", "bci_lider", "mach", "mercadopago", "tenpo"}
+_ALL = {"fintual", "buda", "banchile", "bci_lider", "santander", "mach", "mercadopago", "tenpo"}
 
 
 @pytest.fixture(autouse=True)
@@ -54,6 +56,9 @@ def _clean_env(monkeypatch):
         pytest.param(("BANCHILE_PASSWORD",), set(), id="banchile-password-only"),
         pytest.param(("LIDER_BCI_RUT",), {"bci_lider"}, id="bci-lider-rut-only"),
         pytest.param(("LIDER_BCI_PASSWORD",), set(), id="bci-lider-password-only"),
+        pytest.param(("SANTANDER_RUT", "SANTANDER_PASSWORD"), {"santander"}, id="santander"),
+        pytest.param(("SANTANDER_RUT",), set(), id="santander-rut-only"),
+        pytest.param(("SANTANDER_PASSWORD",), set(), id="santander-password-only"),
         pytest.param(_EMAIL, {"mach", "mercadopago", "tenpo"}, id="email-trio"),
         pytest.param(_EMAIL[:2], set(), id="email-no-password"),
         pytest.param(_EMAIL[1:], set(), id="email-no-host"),
