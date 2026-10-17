@@ -69,7 +69,10 @@ export interface SuggestionTransactionLeg {
   productId: string;
   /** What the dashboard calls the product (displayProductName). */
   productName: string;
+  /** With institutionSlug, the product page: /institutions/<i>/<p>. */
+  productSlug: string;
   institutionName: string;
+  institutionSlug: string;
   /** YYYY-MM-DD. */
   date: string;
   description: string;
@@ -83,7 +86,9 @@ export interface SuggestionProductLeg {
   transactionId: null;
   productId: string;
   productName: string;
+  productSlug: string;
   institutionName: string;
+  institutionSlug: string;
   date: null;
   description: null;
   amount: null;
@@ -345,6 +350,20 @@ export function buildSuggestions(
       id: suggestionId(candidate),
       amount: Math.abs(candidate.source.amount),
     }))
+  );
+}
+
+/** The suggestions that use `transactionId` on either side. */
+export function suggestionsForTransaction<
+  T extends {
+    source: { transactionId: string };
+    target: { transactionId: string | null };
+  },
+>(suggestions: readonly T[], transactionId: string): T[] {
+  return suggestions.filter(
+    (s) =>
+      s.source.transactionId === transactionId ||
+      s.target.transactionId === transactionId
   );
 }
 

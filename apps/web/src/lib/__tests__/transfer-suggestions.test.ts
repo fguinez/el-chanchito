@@ -22,6 +22,7 @@ import {
   normalizeText,
   scoreSuggestion,
   sortSuggestions,
+  suggestionsForTransaction,
   type ConfirmedPattern,
   type OneSidedCandidate,
   type PairCandidate,
@@ -44,7 +45,9 @@ function leg(
     transactionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     productId: CHECKING_ID,
     productName: "Cuenta corriente",
+    productSlug: "cuenta-corriente",
     institutionName: "Banco de Prueba",
+    institutionSlug: "banco-de-prueba",
     date: "2026-09-15",
     description: "Compra comercio de prueba",
     amount: -AMOUNT,
@@ -79,7 +82,9 @@ function oneSided(overrides: Partial<OneSidedCandidate> = {}): OneSidedCandidate
       transactionId: null,
       productId: FUND_ID,
       productName: "Fondo de prueba",
+      productSlug: "fondo-de-prueba",
       institutionName: "Fintual",
+      institutionSlug: "fintual",
       date: null,
       description: null,
       amount: null,
@@ -350,5 +355,17 @@ describe("buildSuggestions and sortSuggestions", () => {
     const newer = { id: "b", score: 10, source: { date: "2026-09-10" } };
 
     expect(sortSuggestions([older, newer])).toEqual([newer, older]);
+  });
+});
+
+describe("suggestionsForTransaction", () => {
+  const suggestions = buildSuggestions([pair(), oneSided()]);
+
+  it.each([
+    ["the shared source", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", 2],
+    ["a pair's target", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", 1],
+    ["an unrelated row", "cccccccc-cccc-4ccc-8ccc-cccccccccccc", 0],
+  ])("keeps the suggestions using %s", (_, id, count) => {
+    expect(suggestionsForTransaction(suggestions, id)).toHaveLength(count);
   });
 });

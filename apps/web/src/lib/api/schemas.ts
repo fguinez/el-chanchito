@@ -204,6 +204,11 @@ export const transferLinksSchema = z
 /** A suggestion leg's row or product id, lowercased as Postgres returns it. */
 const suggestionId = rowId.transform((id) => id.toLowerCase());
 
+/** GET /api/transfers/suggestions: optionally only those using one row. */
+export const suggestionsQuerySchema = z.object({
+  transactionId: suggestionId.optional(),
+});
+
 /** POST /api/transfers/suggestions/confirm: the outgoing row and either the
  *  incoming row (a pair) or the target product (one-sided), not both. */
 export const confirmSuggestionSchema = z

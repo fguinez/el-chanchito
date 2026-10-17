@@ -87,8 +87,8 @@ type TxnColumns = Record<
   | "isInternalTransfer",
   AnyPgColumn
 >;
-type ProductColumns = Record<"name" | "kind" | "currency", AnyPgColumn>;
-type InstitutionColumns = Record<"name", AnyPgColumn>;
+type ProductColumns = Record<"name" | "slug" | "kind" | "currency", AnyPgColumn>;
+type InstitutionColumns = Record<"name" | "slug", AnyPgColumn>;
 
 /** A row a suggestion may use: CLP, recent, not flagged and not linked. */
 function openRow(
@@ -114,8 +114,10 @@ function legColumns(
     transactionId: txn.id,
     productId: txn.productId,
     productName: product.name,
+    productSlug: product.slug,
     productKind: product.kind,
     institutionName: institution.name,
+    institutionSlug: institution.slug,
     date: txn.transactionDate,
     description: txn.description,
     amount: txn.amount,
@@ -127,8 +129,10 @@ interface LegRow {
   transactionId: string;
   productId: string;
   productName: string;
+  productSlug: string;
   productKind: ProductKind;
   institutionName: string;
+  institutionSlug: string;
   date: string;
   description: string;
   amount: number;
@@ -143,7 +147,9 @@ function toLeg(row: LegRow): SuggestionTransactionLeg {
       { name: row.productName, kind: row.productKind, currency: row.currency },
       row.institutionName
     ),
+    productSlug: row.productSlug,
     institutionName: row.institutionName,
+    institutionSlug: row.institutionSlug,
     date: row.date,
     description: row.description,
     amount: Number(row.amount),
@@ -231,10 +237,12 @@ async function loadFeedlessProducts(): Promise<FeedlessProduct[]> {
     .select({
       id: products.id,
       name: products.name,
+      slug: products.slug,
       kind: products.kind,
       currency: products.currency,
       institutionId: institutions.id,
       institutionName: institutions.name,
+      institutionSlug: institutions.slug,
     })
     .from(products)
     .innerJoin(accounts, eq(products.accountId, accounts.id))
@@ -254,7 +262,9 @@ async function loadFeedlessProducts(): Promise<FeedlessProduct[]> {
         transactionId: null,
         productId: row.id,
         productName,
+        productSlug: row.slug,
         institutionName: row.institutionName,
+        institutionSlug: row.institutionSlug,
         date: null,
         description: null,
         amount: null,
