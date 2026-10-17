@@ -27,6 +27,8 @@ import {
   formatTimestampEs,
 } from "@/lib/utils";
 import type { TransactionDetail } from "@/app/api/transactions/[id]/route";
+import type { TransactionLocation } from "@/lib/transaction-location";
+import { TransactionLocationField } from "@/components/transactions/transaction-location-field";
 
 type LoadResult =
   | { id: string; status: "ok"; data: TransactionDetail }
@@ -34,7 +36,8 @@ type LoadResult =
   | { id: string; status: "error" };
 
 /**
- * Read-only side panel with everything stored for one transaction. Open while
+ * Side panel with everything stored for one transaction; only the location
+ * can be edited from here. Open while
  * `transactionId` is set; `onClose` should clear it (the caller owns the id,
  * e.g. in the URL).
  */
@@ -78,6 +81,21 @@ export function TransactionDetailSheet({
   const loading = transactionId !== null && result?.id !== transactionId;
   const current = loading ? null : result;
 
+  // Applied only to the transaction it was saved for: the panel may have
+  // moved on to another one while the request was in flight.
+  const locationSaved = (
+    savedId: string,
+    location: TransactionLocation | null
+  ) =>
+    setResult((previous) =>
+      previous?.status === "ok" && previous.id === savedId
+        ? {
+            ...previous,
+            data: { ...previous.data, location, locationIsManual: true },
+          }
+        : previous
+    );
+
   const retry = () => {
     setResult(null);
     setAttempt((n) => n + 1);
@@ -92,7 +110,10 @@ export function TransactionDetailSheet({
     >
       <SheetContent className="gap-0">
         {current?.status === "ok" ? (
-          <TransactionDetailBody txn={current.data} />
+          <TransactionDetailBody
+            txn={current.data}
+            onLocationSaved={locationSaved}
+          />
         ) : (
           <SheetHeader>
             <SheetTitle>
@@ -126,7 +147,16 @@ export function TransactionDetailSheet({
   );
 }
 
-function TransactionDetailBody({ txn }: { txn: TransactionDetail }) {
+function TransactionDetailBody({
+  txn,
+  onLocationSaved,
+}: {
+  txn: TransactionDetail;
+  onLocationSaved: (
+    savedId: string,
+    location: TransactionLocation | null
+  ) => void;
+}) {
   const productHref = `/institutions/${txn.institution.slug}/${txn.product.slug}`;
   const productName = displayProductName(txn.product, txn.institution.name);
   const kindLabel = KIND_INFO[txn.product.kind]?.labelEs ?? txn.product.kind;
@@ -179,6 +209,16 @@ function TransactionDetailBody({ txn }: { txn: TransactionDetail }) {
           <Field label="Transferencia interna">
             {txn.isInternalTransfer ? "Sí" : "No"}
           </Field>
+          <TransactionLocationField
+            key={txn.id}
+            transactionId={txn.id}
+            location={txn.location}
+            isManual={txn.locationIsManual}
+            onSaved={onLocationSaved}
+            renderRow={(label, children) => (
+              <Field label={label}>{children}</Field>
+            )}
+          />
         </Section>
 
         <Separator />

@@ -176,6 +176,7 @@ class BanChileScraper(BaseScraper):
             accounting_date=movement.accounting_date,
             external_id=external_id_for(movement),
             scheduled_month=date(tx_date.year, tx_date.month, 1),
+            location=movement.location,
         )
 
     def _superseded_for(

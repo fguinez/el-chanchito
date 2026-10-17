@@ -25,6 +25,7 @@ import { clpTotals } from "@/lib/transactions";
 import { CsvImport } from "@/components/dashboard/CsvImport";
 import { TransactionDetailSheet } from "@/components/transactions/transaction-detail-sheet";
 import { useSelectedTransaction } from "@/components/transactions/use-selected-transaction";
+import { LOCATION_TEXT_MAX_LENGTH } from "@/lib/transaction-location";
 
 interface Transaction {
   id: string;
@@ -81,6 +82,7 @@ function ExpensesView() {
 
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [description, setDescription] = useState("");
+  const [place, setPlace] = useState("");
   const [amount, setAmount] = useState("");
   const [transactionDate, setTransactionDate] = useState(
     new Date().toISOString().split("T")[0]
@@ -112,11 +114,14 @@ function ExpensesView() {
           description,
           amount: -Math.abs(parseInt(amount)), // expenses are negative
           transactionDate,
+          // Optional; the detail panel edits the rest of the location.
+          ...(place.trim() && { location: { name: place } }),
         }),
       });
 
       if (res.ok) {
         setDescription("");
+        setPlace("");
         setAmount("");
         loadTransactions();
       }
@@ -210,6 +215,17 @@ function ExpensesView() {
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
                 placeholder="Ej: Supermercado"
+              />
+            </div>
+            <div className="w-44">
+              <label className="mb-1 block text-sm text-muted-foreground">
+                Lugar (opcional)
+              </label>
+              <Input
+                value={place}
+                onChange={(e) => setPlace(e.target.value)}
+                placeholder="Ej: Tienda de ejemplo"
+                maxLength={LOCATION_TEXT_MAX_LENGTH}
               />
             </div>
             <div className="w-36">

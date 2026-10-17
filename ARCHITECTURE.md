@@ -210,6 +210,12 @@ transactions ──────────┐
     product_id)                 category_id FK ──────>
   is_internal_transfer
   is_manually_categorized
+  location_name, _city,
+    _country (nullable text)
+  location_latitude,
+    _longitude (numeric(9,6),
+    both or neither)
+  location_is_manual
 
 
 monitors                      monitor_adjustments
@@ -271,6 +277,7 @@ scraper_runs                    transfer_date
 | `V013__retire_banchile_summed_inversiones_products.sql` | deactivates the summed BanChile term_deposit + investment products + drops their snapshots (replaced by per-holding products) |
 | `V022__monitor_adjustments.sql` | monitor_adjustments: dated variaciones that shift a monitor's thresholds until month end |
 | `V023__transactions_amount_numeric.sql` | `transactions.amount` integer -> NUMERIC(18, 2) so foreign-currency movements keep their cents; existing values unchanged |
+| `V025__transactions_location.sql` | optional transaction location: name, city, country, a range-checked lat/lng pair, and `location_is_manual`; no backfill |
 
 ## Scraper Architecture
 
@@ -333,6 +340,15 @@ occurred (`fecha`, and what every chart is built on) and the nullable
 `accounting_date` is when the bank posted it (`fechaContable`). They differ for
 most of a typical window. A movement with only a posting date carries it in
 both; an occurrence date is never invented. Neither is ever part of a dedup key.
+
+Its card legs also say where a purchase happened, which lands in the optional
+location columns (V025): the unbilled leg's `ciudad` and `codigoPaisComercio`
+(a country NAME despite the key), the national statement's `ciudad`, and the
+USD statement's `ciudadComercio` and `pais`. Values are stored as the portal
+spells them (trimmed, not re-cased) and are never identity. The writer inserts
+a location with its row and, on a row already stored, only fills NULL location
+columns; a location the user set or cleared in the dashboard
+(`location_is_manual`) is never touched by a scrape.
 
 Three more surfaces feed its transactions (`banchile_movements.py`, issue #57):
 the checking cartola, reached by driving the account-selection dialog that

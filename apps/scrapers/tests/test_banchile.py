@@ -27,7 +27,7 @@ from scrapers.backends.banchile_movements import (
     parse_unbilled_movement,
 )
 from scrapers.backends.banchile_web import BalanceFetchResult
-from scrapers.base import ScrapedProduct
+from scrapers.base import ScrapedProduct, TransactionLocation
 from scrapers.institutions import banchile as banchile_mod
 from scrapers.institutions.banchile import (
     BanChileScraper,
@@ -432,7 +432,7 @@ def _intl_payload(rows, section="seccionCompras"):
     return {section: {"transaccionesTarjetas": rows}}
 
 
-def _intl_row(numero_documento="2008 " + "1" * 23, monto=1234.56):
+def _intl_row(numero_documento="2008 " + "1" * 23, monto=1234.56, **extra):
     """A synthetic USD statement row."""
     return {
         "numeroDocumento": numero_documento,
@@ -442,6 +442,7 @@ def _intl_row(numero_documento="2008 " + "1" * 23, monto=1234.56):
         "tituloTarjeta": f"****{CARD_LAST4}",
         "totales": False,
         "grupo": "generico",
+        **extra,
     }
 
 
@@ -503,6 +504,25 @@ class TestUsdMapping:
         usd = parse_unbilled_movement(_unbilled_row(monto=12.0, origen="INT"))
         assert external_id_for(clp) != external_id_for(usd)
         assert external_id_for(usd).startswith("bch_fp_")
+
+    def test_a_usd_statement_location_reaches_the_transaction(self):
+        """V025: `ciudadComercio` and `pais` ride onto the USD card's row."""
+        (movement,) = parse_international_billed_movements(
+            _intl_payload(
+                [_intl_row(ciudadComercio=" CIUDAD SINTETICA ", pais="PAIS SINTETICO")]
+            )
+        )
+
+        txn = self.scraper._movement_to_transaction(movement)
+
+        assert (txn.currency, txn.product_kind) == ("USD", "credit_card")
+        assert txn.location == TransactionLocation(
+            city="CIUDAD SINTETICA", country="PAIS SINTETICO"
+        )
+
+    def test_a_row_without_location_maps_to_none(self):
+        (movement,) = parse_international_billed_movements(_intl_payload([_intl_row()]))
+        assert self.scraper._movement_to_transaction(movement).location is None
 
     def test_a_usd_purchase_is_keyed_on_its_reference(self):
         (movement,) = parse_international_billed_movements(_intl_payload([_intl_row()]))

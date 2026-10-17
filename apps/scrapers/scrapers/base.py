@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Optional
 
-from product_model import ScrapedProduct, ScrapedTransaction
+from product_model import ScrapedProduct, ScrapedTransaction, TransactionLocation
 
 __all__ = [
     "BaseScraper",
@@ -19,6 +19,7 @@ __all__ = [
     "ScrapedProduct",
     "ScrapedTransaction",
     "SupersededTransaction",
+    "TransactionLocation",
 ]
 
 

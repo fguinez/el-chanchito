@@ -11,6 +11,7 @@ import { and, eq, desc } from "drizzle-orm";
 import { getClpRates, toClp } from "@/lib/rates";
 import { isRetiredGhost } from "@/lib/retired-products";
 import type { ProductMetrics } from "@/lib/db/schema";
+import { formatLocationText } from "@/lib/transaction-location";
 
 // Next 16: dynamic segment params arrive as a Promise on the context arg.
 type Context = { params: Promise<{ slug: string; product: string }> };
@@ -41,6 +42,8 @@ export interface ProductTransaction {
   source: string;
   /** Source dedup key (the institution's operation id for some sources). */
   externalId: string | null;
+  /** "Lugar · Ciudad, País" when a location is stored (V025), else null. */
+  location: string | null;
 }
 
 /**
@@ -109,6 +112,9 @@ export async function GET(_request: Request, { params }: Context) {
         transactionDate: transactions.transactionDate,
         source: transactions.source,
         externalId: transactions.externalId,
+        locationName: transactions.locationName,
+        locationCity: transactions.locationCity,
+        locationCountry: transactions.locationCountry,
       })
       .from(transactions)
       .where(eq(transactions.productId, row.productId))
@@ -149,6 +155,11 @@ export async function GET(_request: Request, { params }: Context) {
       transactionDate: new Date(t.transactionDate).toISOString().slice(0, 10),
       source: t.source,
       externalId: t.externalId,
+      location: formatLocationText({
+        name: t.locationName,
+        city: t.locationCity,
+        country: t.locationCountry,
+      }),
     }));
 
   const currentBalance =

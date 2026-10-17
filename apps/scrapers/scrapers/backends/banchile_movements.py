@@ -102,7 +102,7 @@ from scrapers.backends.banchile_web import (
     _recover_to_home,
     parse_clp,
 )
-from scrapers.base import ScrapedProduct
+from scrapers.base import ScrapedProduct, TransactionLocation
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +148,10 @@ class BanChileMovement:
     on every other leg). It only tells the cleanup which statements a scrape
     covered and is never identity on its own (the billed fingerprints carry
     their own copy).
+
+    `location` is the merchant's city and country where the card legs report
+    them (None elsewhere). Like the dates, it is recorded data and never
+    identity.
     """
 
     source: str
@@ -162,6 +166,7 @@ class BanChileMovement:
     legacy_fingerprint: tuple[str, ...] = ()
     legacy_amount: Optional[int] = None
     statement_date: str = ""
+    location: Optional[TransactionLocation] = None
 
 
 @dataclass(frozen=True)
@@ -226,6 +231,42 @@ def _usd(value) -> Optional[Decimal]:
     if number is None or not math.isfinite(number):
         return None
     return Decimal(repr(number)).quantize(_CENTS, rounding=ROUND_HALF_UP)
+
+
+def card_location(city, country) -> Optional[TransactionLocation]:
+    """A card row's merchant city and country as a location (None when neither).
+
+    Both are stored as the portal spells them (trimmed, usually upper case),
+    the same way descriptions are. A value the model rejects (too long) drops
+    the location rather than the movement: it is recorded data, not identity.
+    """
+    try:
+        location = TransactionLocation(city=_text(city), country=_text(country))
+    except ValueError:
+        logger.warning("BanChile: ignoring a card location the model rejects")
+        return None
+    return None if location.is_empty() else location
+
+
+def merge_locations(
+    primary: Optional[TransactionLocation], fallback: Optional[TransactionLocation]
+) -> Optional[TransactionLocation]:
+    """`primary`'s location with its gaps filled from `fallback`, field by field.
+
+    A field `primary` sets always wins; the coordinates are one value, taken
+    as a pair from whichever side has them (`primary` first), never mixed.
+    """
+    if primary is None or fallback is None:
+        return primary if primary is not None else fallback
+    has_coordinates = primary.latitude is not None
+    source = primary if has_coordinates else fallback
+    return TransactionLocation(
+        name=primary.name or fallback.name,
+        city=primary.city or fallback.city,
+        country=primary.country or fallback.country,
+        latitude=source.latitude,
+        longitude=source.longitude,
+    )
 
 
 def _legacy_clp_amount(bank_signed: float) -> int:
@@ -488,6 +529,8 @@ def parse_unbilled_movement(raw):
         or "Movimiento"
     )
     clp_fingerprint = tuple(_fingerprint_value(raw.get(key)) for key in _UNBILLED_IDENTITY)
+    # `codigoPaisComercio` holds the country's NAME despite its key.
+    location = card_location(raw.get("ciudad"), raw.get("codigoPaisComercio"))
     if not is_international(raw):
         return BanChileMovement(
             source="card_unbilled",
@@ -497,6 +540,7 @@ def parse_unbilled_movement(raw):
             transaction_date=tx_date,
             operation_id=None,
             fingerprint=clp_fingerprint,
+            location=location,
         )
 
     usd = _usd(raw.get("montoCompra"))
@@ -516,6 +560,7 @@ def parse_unbilled_movement(raw):
         currency="USD",
         legacy_fingerprint=clp_fingerprint,
         legacy_amount=_legacy_clp_amount(monto),
+        location=location,
     )
 
 
@@ -613,6 +658,8 @@ def parse_billed_movement(raw, fecha_facturacion: str = ""):
             _text(fecha_facturacion),
         ),
         statement_date=_text(fecha_facturacion),
+        # The national statement reports the merchant's city, never a country.
+        location=card_location(raw.get("ciudad"), None),
     )
 
 
@@ -691,6 +738,12 @@ def parse_international_billed_movement(
         currency="USD",
         legacy_amount=_legacy_clp_amount(monto),
         statement_date=_text(fecha_facturacion),
+        # `pais` is the country's name; `codigoPais` was null on every row
+        # observed and is only a fallback.
+        location=card_location(
+            raw.get("ciudadComercio"),
+            _text(raw.get("pais")) or _text(raw.get("codigoPais")),
+        ),
     )
 
 
@@ -787,7 +840,9 @@ def drop_unbilled_duplicates(
     USD legs share the date and the signed amount of a charge exactly).
 
     A dropped USD unbilled row hands its legacy key to the billed row that
-    replaced it, so the misrouted-row cleanup can still match it exactly.
+    replaced it, so the misrouted-row cleanup can still match it exactly, and
+    any dropped row fills the gaps in the billed row's location
+    (`merge_locations`).
     """
     def key_of(movement: BanChileMovement) -> tuple:
         return (
@@ -820,6 +875,9 @@ def drop_unbilled_duplicates(
                 legacy_fingerprint=movement.legacy_fingerprint,
                 legacy_amount=movement.legacy_amount,
             )
+        merged = merge_locations(result[twin].location, movement.location)
+        if merged != result[twin].location:
+            result[twin] = replace(result[twin], location=merged)
     kept = [movement for index, movement in enumerate(result) if index not in dropped]
     if dropped:
         logger.info(

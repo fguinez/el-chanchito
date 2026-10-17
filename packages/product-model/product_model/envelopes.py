@@ -41,6 +41,88 @@ TransactionAmount = Annotated[
 ]
 _CENT = Decimal("0.01")
 
+# Longest location text the API accepts; the dashboard enforces the same bound.
+LOCATION_TEXT_MAX_LENGTH = 200
+# `transactions.location_latitude/longitude` are NUMERIC(9, 6).
+_COORDINATE_DECIMALS = 6
+
+
+def _location_text(value):
+    """Trim a location string; blank (or None) becomes None."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("location text must be a string")
+    value = value.strip()
+    return value or None
+
+
+class TransactionLocation(BaseModel):
+    """Where a transaction happened, as far as its source says.
+
+    Every field is optional and independent of the others: a source that
+    reports only a city sends only `city`. Text is trimmed, blank means
+    absent, and nothing is re-cased (descriptions are stored as given too).
+    Coordinates come in pairs. Frozen, so it can ride on hashable records
+    such as a scraper's frozen dataclasses.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str | None = Field(
+        None,
+        max_length=LOCATION_TEXT_MAX_LENGTH,
+        description="Merchant or place name, when it differs from the description.",
+    )
+    city: str | None = Field(
+        None,
+        max_length=LOCATION_TEXT_MAX_LENGTH,
+        description="City, as the source spells it.",
+    )
+    country: str | None = Field(
+        None,
+        max_length=LOCATION_TEXT_MAX_LENGTH,
+        description=(
+            "Country name as the source spells it (e.g. 'Chile'); a source that "
+            "only reports an ISO 3166 code sends the code."
+        ),
+    )
+    latitude: float | None = Field(
+        None, ge=-90, le=90, description="WGS84 latitude in degrees."
+    )
+    longitude: float | None = Field(
+        None, ge=-180, le=180, description="WGS84 longitude in degrees."
+    )
+
+    @field_validator("name", "city", "country", mode="before")
+    @classmethod
+    def _trim(cls, value):
+        return _location_text(value)
+
+    @field_validator("latitude", "longitude")
+    @classmethod
+    def _round_to_stored_scale(cls, value):
+        return None if value is None else round(value, _COORDINATE_DECIMALS)
+
+    @model_validator(mode="after")
+    def _coordinates_come_in_pairs(self) -> Self:
+        if (self.latitude is None) != (self.longitude is None):
+            raise ValueError("latitude and longitude must be given together")
+        return self
+
+    def is_empty(self) -> bool:
+        """True when no field carries a value."""
+        return all(
+            value is None
+            for value in (
+                self.name,
+                self.city,
+                self.country,
+                self.latitude,
+                self.longitude,
+            )
+        )
+
 
 class ScrapedProduct(BaseModel):
     """One scraped observation of a product."""
@@ -138,6 +220,20 @@ class ScrapedTransaction(BaseModel):
             "purchases."
         ),
     )
+    location: TransactionLocation | None = Field(
+        None,
+        description=(
+            "Where the transaction happened, when the source reports it. "
+            "Written only into location columns that are still NULL, and never "
+            "onto a row whose location the user edited."
+        ),
+    )
+
+    @field_validator("location")
+    @classmethod
+    def _empty_location_is_none(cls, value):
+        """A location with no field set is the same as no location."""
+        return None if value is not None and value.is_empty() else value
 
     @field_validator("amount", mode="before")
     @classmethod

@@ -118,6 +118,11 @@ function TransactionsList({
                     </TableCell>
                     <TableCell className="whitespace-normal break-words">
                       {txn.description}
+                      {txn.location && (
+                        <span className="block text-xs text-muted-foreground">
+                          {txn.location}
+                        </span>
+                      )}
                     </TableCell>
                     <TableCell className="hidden md:table-cell">
                       <code
