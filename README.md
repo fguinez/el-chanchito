@@ -12,7 +12,7 @@ El Chanchito (“the piggy bank”) is a self-hosted personal finance tracker. P
 
 ## Highlights
 
-- **Monitors**: an equation over product values (say, the checking balance minus what the cards owe) checked against alert and warning thresholds that can ramp through the month, plus one-off variaciones (a reimbursement, an extra budget) that shift them until month end — evaluated live and replayed day by day from balance history.
+- **Monitors**: an equation over product values (say, the checking balance minus what the cards owe) checked against alert and warning thresholds that can ramp through the month, plus one-off variaciones (a reimbursement, an extra budget) that shift them until month end; evaluated live and replayed day by day from balance history.
 - **Seven institution scrapers** on independent schedules, mixing REST APIs (Fintual, Buda), browser automation (Playwright for Banco de Chile, a real Chrome over CDP for Tarjeta Lider Bci), and Gmail inbox parsing (MACH, MercadoPago, Tenpo).
 - **Typed product registry**: every product kind (checking, credit card, crypto, ...) is declared once in pydantic, grouped into display families with the column specs of their dashboard tables, and code-generated into TypeScript types, a JSON Schema, and per-kind docs.
 - **Net worth from snapshots**: derived from per-product snapshot history, with per-kind asset/liability conventions and multi-currency conversion to CLP.

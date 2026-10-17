@@ -816,7 +816,6 @@ downloads a Playwright browser; no test launches one.
 | Scrapers | Python 3.12 + httpx + Playwright + APScheduler |
 | Product model | pydantic v2 registry, code-generated into TypeScript + JSON Schema |
 | DB Driver (Python) | psycopg3 + psycopg-pool |
-| Tests | Vitest (web) + pytest (scrapers, product model) |
 | Containerization | Docker + Docker Compose |
 | Package Manager | pnpm (workspaces) |
 | Testing | vitest (web) + pytest (scrapers, product-model; DB tests on a throwaway PostgreSQL) |
