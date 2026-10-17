@@ -334,6 +334,35 @@ class TestUpsertTransactions:
         assert inserted == 1
         assert _count(db_conn, "transactions") == 3
 
+    def test_a_failing_row_in_the_middle_keeps_the_rows_around_it(self, db_conn):
+        """Issue #84: a row that trips a constraint is rolled back on its own,
+        so the rows written before and after it still commit. `inserted` counts
+        only those, and the failing key is never reported as persisted, so the
+        run records what actually landed instead of the whole batch (which, in
+        one aborted transaction, Postgres would have quietly rolled back).
+        """
+        db_conn.execute(
+            "ALTER TABLE transactions ADD CONSTRAINT synthetic_failure "
+            "CHECK (description <> 'FALLA SINTETICA')"
+        )
+        failing = _txn("email_mach_0002").model_copy(
+            update={"description": "FALLA SINTETICA"}
+        )
+
+        result = write_transactions(
+            [_txn("email_mach_0001"), failing, _txn("email_mach_0003")]
+        )
+
+        assert (result.inserted, result.failed) == (2, 1)
+        assert result.persisted_external_ids == {"email_mach_0001", "email_mach_0003"}
+        stored = [
+            row["external_id"]
+            for row in db_conn.execute(
+                "SELECT external_id FROM transactions ORDER BY external_id"
+            ).fetchall()
+        ]
+        assert stored == ["email_mach_0001", "email_mach_0003"]
+
     def test_the_same_external_id_on_two_products_is_two_rows(self, db_conn):
         """The dedup key is per product, not global."""
         inserted = upsert_transactions(
