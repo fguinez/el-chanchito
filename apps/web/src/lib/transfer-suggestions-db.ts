@@ -683,7 +683,6 @@ async function confirmIn(
     }
   }
 
-
   const [created] = await tx
     .insert(internalTransfers)
     .values({
