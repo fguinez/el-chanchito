@@ -9,6 +9,7 @@ import {
   SCORE_PATTERN,
   SCORE_PRODUCT_PAIR,
   SCORE_SAME_DAY,
+  SCORE_SHARED_INSTITUTION_MATCH,
   buildSuggestions,
   containsWords,
   dayGapLabel,
@@ -85,6 +86,8 @@ function oneSided(overrides: Partial<OneSidedCandidate> = {}): OneSidedCandidate
       currency: "CLP",
     },
     matchedName: "Fintual",
+    matchedBy: "institution",
+    institutionSiblings: 0,
     balanceMatch: null,
     ...overrides,
   };
@@ -258,6 +261,23 @@ describe("scoreSuggestion", () => {
       score: SCORE_NAME_MATCH,
       evidence: ["La glosa menciona Fintual"],
     });
+  });
+
+  it.each([
+    ["the product's own name", "product", 2, SCORE_NAME_MATCH],
+    ["the only feedless product's institution", "institution", 0, SCORE_NAME_MATCH],
+    [
+      "an institution with several feedless products",
+      "institution",
+      2,
+      SCORE_SHARED_INSTITUTION_MATCH,
+    ],
+  ] as const)("scores a match on %s", (_, matchedBy, siblings, points) => {
+    const result = scoreSuggestion(
+      oneSided({ matchedBy, institutionSiblings: siblings })
+    );
+
+    expect(result.score).toBe(points);
   });
 
   it("boosts a one-sided match backed by a balance rise", () => {

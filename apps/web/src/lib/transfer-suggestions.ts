@@ -52,6 +52,9 @@ export const SCORE_SAME_DAY = 30;
 export const SCORE_DAY_PENALTY = 10;
 export const SCORE_KEYWORD = 15;
 export const SCORE_NAME_MATCH = 25;
+/** An institution-name match when that institution holds several feedless
+ *  products: the name alone cannot tell which one got the money. */
+export const SCORE_SHARED_INSTITUTION_MATCH = 10;
 export const SCORE_BALANCE_MATCH = 30;
 export const SCORE_PRODUCT_PAIR = 20;
 export const SCORE_PATTERN = 50;
@@ -108,6 +111,12 @@ export interface OneSidedCandidate {
   /** The name the source description mentions (as the dashboard shows it), or
    *  null when only a confirmed pattern brought the candidate in. */
   matchedName: string | null;
+  /** What `matchedName` is: the target product's own name, or its
+   *  institution's (null without a name match). */
+  matchedBy: "product" | "institution" | null;
+  /** Other active CLP products without a feed at the target's institution;
+   *  an institution-name match scores lower when there are any. */
+  institutionSiblings: number;
   balanceMatch: BalanceMatch | null;
 }
 
@@ -232,7 +241,9 @@ function dateScore(days: number): number {
  * Score a candidate and explain it. Signals (additive):
  *   - pair: exact amount (SCORE_EXACT_AMOUNT) and date gap (SCORE_SAME_DAY,
  *     minus SCORE_DAY_PENALTY per day)
- *   - one-sided: the description names the target (SCORE_NAME_MATCH), and a
+ *   - one-sided: the description names the target (SCORE_NAME_MATCH; only
+ *     SCORE_SHARED_INSTITUTION_MATCH for an institution name shared by
+ *     several feedless products), and a
  *     balance rise of about the same size (SCORE_BALANCE_MATCH, plus the date
  *     signal for its gap)
  *   - a transfer keyword in either description (SCORE_KEYWORD, once)
@@ -255,7 +266,10 @@ export function scoreSuggestion(
     evidence.push(dayGapLabel(gap));
   } else {
     if (candidate.matchedName) {
-      score += SCORE_NAME_MATCH;
+      const shared =
+        candidate.matchedBy === "institution" &&
+        candidate.institutionSiblings > 0;
+      score += shared ? SCORE_SHARED_INSTITUTION_MATCH : SCORE_NAME_MATCH;
       evidence.push(`La glosa menciona ${candidate.matchedName}`);
     }
     if (candidate.balanceMatch) {

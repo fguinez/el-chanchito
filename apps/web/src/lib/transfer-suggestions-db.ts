@@ -32,6 +32,7 @@ import {
   products,
   transactions,
 } from "@/lib/db/schema";
+import { isForeignKeyViolation } from "@/lib/monitors/adjustments";
 import { formatLocalDate } from "@/lib/monitors/dates";
 import { displayProductName } from "@/lib/product-names";
 import {
@@ -274,13 +275,15 @@ function usableName(name: string): boolean {
  * counts only for a debit at another institution: a bank's own name in its own
  * descriptions says nothing about which of its products got the money.
  */
-function mentionedName(
+export function mentionedName(
   description: string,
   sourceInstitutionId: string,
-  product: FeedlessProduct
-): string | null {
+  product: Pick<FeedlessProduct, "leg" | "institutionId" | "productNames">
+): { name: string; by: "product" | "institution" } | null {
   for (const name of product.productNames) {
-    if (containsWords(description, name)) return product.leg.productName;
+    if (containsWords(description, name)) {
+      return { name: product.leg.productName, by: "product" };
+    }
   }
   const institution = product.leg.institutionName;
   if (
@@ -288,7 +291,7 @@ function mentionedName(
     usableName(institution) &&
     containsWords(description, institution)
   ) {
-    return institution;
+    return { name: institution, by: "institution" };
   }
   return null;
 }
@@ -392,10 +395,18 @@ export async function loadOneSidedCandidates(
       )
     );
 
+  const perInstitution = new Map<string, number>();
+  for (const product of feedless) {
+    perInstitution.set(
+      product.institutionId,
+      (perInstitution.get(product.institutionId) ?? 0) + 1
+    );
+  }
+
   const matches: {
     source: SuggestionTransactionLeg;
     target: FeedlessProduct;
-    name: string | null;
+    name: ReturnType<typeof mentionedName>;
   }[] = [];
   for (const row of debits) {
     const source = toLeg(row.leg as LegRow);
@@ -417,7 +428,9 @@ export async function loadOneSidedCandidates(
     kind: "one_sided",
     source,
     target: target.leg,
-    matchedName: name,
+    matchedName: name?.name ?? null,
+    matchedBy: name?.by ?? null,
+    institutionSiblings: (perInstitution.get(target.institutionId) ?? 1) - 1,
     balanceMatch: findBalanceMatch(
       source,
       rises.get(target.leg.productId) ?? []
@@ -518,6 +531,7 @@ async function confirmIn(
       amount: transactions.amount,
       transactionDate: transactions.transactionDate,
       description: transactions.description,
+      isInternalTransfer: transactions.isInternalTransfer,
     })
     .from(transactions)
     .where(inArray(transactions.id, ids))
@@ -578,7 +592,11 @@ async function confirmIn(
   }
 
   const found = await tx
-    .select({ id: products.id, currency: products.currency })
+    .select({
+      id: products.id,
+      currency: products.currency,
+      isActive: products.isActive,
+    })
     .from(products)
     .where(inArray(products.id, [source.productId, targetProductId]));
   const endpoints = checkTransferEndpoints(
@@ -586,11 +604,25 @@ async function confirmIn(
     found
   );
   if (!endpoints.ok) {
+    // checkTransferEndpoints speaks English for POST /api/transfers; the
+    // suggestions UI shows its errors as they come, so say it in Spanish.
+    const side = endpoints.field === "fromProductId" ? "from" : "to";
+    const product = found.find(
+      (p) => p.id === (side === "from" ? source.productId : targetProductId)
+    );
     return failure(
       400,
-      endpoints.error,
-      sideField(endpoints.field === "fromProductId" ? "from" : "to", input)
+      product
+        ? `Las transferencias son en ${TRANSFER_CURRENCY}; este producto está en ${product.currency}`
+        : "El producto no existe",
+      sideField(side, input)
     );
+  }
+  if (
+    !input.targetTransactionId &&
+    !found.some((p) => p.id === targetProductId && p.isActive)
+  ) {
+    return failure(400, "El producto de destino está inactivo", "targetProductId");
   }
   // The feed check sits in WHERE: in a single-table SELECT list Drizzle drops
   // the table names, so `product_id = id` would compare transactions.id.
@@ -629,6 +661,18 @@ async function confirmIn(
       );
     }
   }
+  // A row flagged by hand (or left flagged) without a link is hidden from
+  // the suggestions too; confirming it would hand it a second meaning.
+  for (const id of ids) {
+    if (byId.get(id)?.isInternalTransfer) {
+      return failure(
+        409,
+        "La transacción ya está marcada como transferencia interna",
+        id === source.id ? "sourceTransactionId" : "targetTransactionId"
+      );
+    }
+  }
+
 
   const [created] = await tx
     .insert(internalTransfers)
@@ -709,7 +753,7 @@ export interface DismissSuggestionInput {
 }
 
 /** Remember a dismissed suggestion; dismissing it again is a no-op. 400 when
- *  a row does not exist. */
+ *  a row does not exist or the source is not a debit. */
 export async function dismissTransferSuggestion(
   input: DismissSuggestionInput
 ): Promise<{ ok: true } | SuggestionFailure> {
@@ -717,23 +761,39 @@ export async function dismissTransferSuggestion(
     (id): id is string => id !== null
   );
   const found = await db
-    .select({ id: transactions.id })
+    .select({ id: transactions.id, amount: transactions.amount })
     .from(transactions)
     .where(inArray(transactions.id, ids));
-  const present = new Set(found.map((row) => row.id));
-  if (!present.has(input.sourceTransactionId)) {
+  const byId = new Map(found.map((row) => [row.id, row]));
+  const source = byId.get(input.sourceTransactionId);
+  if (!source) {
     return failure(400, "La transacción no existe", "sourceTransactionId");
   }
-  if (input.targetTransactionId && !present.has(input.targetTransactionId)) {
+  if (!(Number(source.amount) < 0)) {
+    return failure(
+      400,
+      "La transacción de origen debe ser un cargo (monto negativo)",
+      "sourceTransactionId"
+    );
+  }
+  if (input.targetTransactionId && !byId.has(input.targetTransactionId)) {
     return failure(400, "La transacción no existe", "targetTransactionId");
   }
 
-  await db
-    .insert(dismissedTransferSuggestions)
-    .values({
-      sourceTransactionId: input.sourceTransactionId,
-      targetTransactionId: input.targetTransactionId,
-    })
-    .onConflictDoNothing();
+  try {
+    await db
+      .insert(dismissedTransferSuggestions)
+      .values({
+        sourceTransactionId: input.sourceTransactionId,
+        targetTransactionId: input.targetTransactionId,
+      })
+      .onConflictDoNothing();
+  } catch (error) {
+    // A row deleted between the check and the insert.
+    if (isForeignKeyViolation(error)) {
+      return failure(400, "Una de las transacciones ya no existe");
+    }
+    throw error;
+  }
   return { ok: true };
 }

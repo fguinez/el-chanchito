@@ -36,11 +36,12 @@ const AMOUNT = 1_000_000;
 
 interface World {
   txns: Record<string, unknown>[];
-  products: { id: string; currency: string }[];
+  products: { id: string; currency: string; isActive: boolean }[];
   feedProducts: string[];
   holders: Record<string, unknown>[];
   created: Record<string, unknown> | null;
   linkError?: Error;
+  dismissError?: Error;
 }
 
 let world: World;
@@ -113,6 +114,9 @@ function respond(query: RecordedQuery): unknown {
     };
     return [{ id: FAKE_ROW_ID }];
   }
+  if (query.op === "insert" && target === dismissedTransferSuggestions) {
+    if (world.dismissError) throw world.dismissError;
+  }
   if (query.op === "update" && target === internalTransfers) {
     if (world.linkError) throw world.linkError;
     Object.assign(world.created ?? {}, argOf(query, "set"));
@@ -149,10 +153,10 @@ beforeEach(() => {
   world = {
     txns: [debit, credit],
     products: [
-      { id: CHECKING_ID, currency: "CLP" },
-      { id: CARD_ID, currency: "CLP" },
-      { id: FUND_ID, currency: "CLP" },
-      { id: USD_ID, currency: "USD" },
+      { id: CHECKING_ID, currency: "CLP", isActive: true },
+      { id: CARD_ID, currency: "CLP", isActive: true },
+      { id: FUND_ID, currency: "CLP", isActive: true },
+      { id: USD_ID, currency: "USD", isActive: true },
     ],
     feedProducts: [CHECKING_ID, CARD_ID, USD_ID],
     holders: [],
@@ -298,6 +302,16 @@ describe("POST /api/transfers/suggestions/confirm", () => {
       "targetProductId",
     ],
     [
+      "an inactive one-sided target",
+      () => {
+        world.products = world.products.map((p) =>
+          p.id === FUND_ID ? { ...p, isActive: false } : p
+        );
+      },
+      { targetProductId: FUND_ID },
+      "targetProductId",
+    ],
+    [
       "an unknown target product",
       () => {
         world.products = world.products.filter((p) => p.id !== FUND_ID);
@@ -311,7 +325,9 @@ describe("POST /api/transfers/suggestions/confirm", () => {
     const response = await postConfirm({ sourceTransactionId: DEBIT_ID, ...target });
 
     expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toMatchObject({ field });
+    const json = await response.json();
+    expect(json.field).toBe(field);
+    expect(json.error).not.toMatch(/Transfers are|Unknown product/);
     expect(fake.queries.filter((q) => q.op !== "select")).toHaveLength(0);
   });
 
@@ -329,6 +345,27 @@ describe("POST /api/transfers/suggestions/confirm", () => {
     await expect(response.json()).resolves.toMatchObject({
       error: "La transacción ya está vinculada a otro movimiento",
       field: "targetTransactionId",
+    });
+    expect(writes("insert", internalTransfers)).toHaveLength(0);
+  });
+
+  it.each([
+    ["source", DEBIT_ID, "sourceTransactionId"],
+    ["target", CREDIT_ID, "targetTransactionId"],
+  ])("answers 409 for a flagged but unlinked %s", async (_, flaggedId, field) => {
+    world.txns = world.txns.map((t) =>
+      t.id === flaggedId ? { ...t, isInternalTransfer: true } : t
+    );
+
+    const response = await postConfirm({
+      sourceTransactionId: DEBIT_ID,
+      targetTransactionId: CREDIT_ID,
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "La transacción ya está marcada como transferencia interna",
+      field,
     });
     expect(writes("insert", internalTransfers)).toHaveLength(0);
   });
@@ -382,6 +419,32 @@ describe("POST /api/transfers/suggestions/dismiss", () => {
       field: "targetTransactionId",
     });
     expect(writes("insert", dismissedTransferSuggestions)).toHaveLength(0);
+  });
+
+  it("refuses a source that is not a debit", async () => {
+    const response = await postDismiss({ sourceTransactionId: CREDIT_ID });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      field: "sourceTransactionId",
+    });
+    expect(writes("insert", dismissedTransferSuggestions)).toHaveLength(0);
+  });
+
+  it("answers 400 when a row is deleted before the insert", async () => {
+    world.dismissError = Object.assign(new Error("Failed query"), {
+      cause: { code: "23503" },
+    });
+
+    const response = await postDismiss({
+      sourceTransactionId: DEBIT_ID,
+      targetTransactionId: CREDIT_ID,
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "Una de las transacciones ya no existe",
+    });
   });
 
   it.each([
