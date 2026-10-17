@@ -231,7 +231,7 @@ transactions ──────────┐
   id PK                │      categories
   product_id FK ───────┘        id PK
   description                   name
-  amount (int, CLP)             parent_id FK (self)
+  amount (numeric(18,2))        parent_id FK (self)
   transaction_date              color, icon
   accounting_date (V019)
   category_id FK ─────────────>
@@ -241,6 +241,12 @@ transactions ──────────┐
     product_id)                 category_id FK ──────>
   is_internal_transfer
   is_manually_categorized
+  location_name, _city,
+    _country (nullable text)
+  location_latitude,
+    _longitude (numeric(9,6),
+    both or neither)
+  location_is_manual
 
 
 monitors                      monitor_adjustments
@@ -313,8 +319,15 @@ scraper_runs
 | `V019__transactions_accounting_date.sql` | transactions gain a nullable `accounting_date` (the posting date, where the institution reports one) |
 | `V020__buda_drop_crypto_movements_stored_as_clp.sql` | deletes the crypto movements the old Buda scraper truncated and stored as pesos (CLP movements only now) |
 | `V022__monitor_adjustments.sql` | monitor_adjustments: dated variaciones that shift a monitor's thresholds until month end |
+| `V023__transactions_amount_numeric.sql` | `transactions.amount` integer -> NUMERIC(18, 2) so foreign-currency movements keep their cents; existing values unchanged |
+| `V025__transactions_location.sql` | optional transaction location: name, city, country, a range-checked lat/lng pair, and `location_is_manual`; no backfill |
 
 ## Scraper Architecture
+
+Adding an institution? A step-by-step guide (the acquisition technique
+ladder, an integration checklist, templates and a personal-data scan) lives in
+`.claude/skills/new-institution-scraper/`: start at its `SKILL.md`, which reads
+as plain Markdown and also works as a Claude Code skill.
 
 Scrapers are split into **agnostic backends** (how we scrape) and
 **institution scrapers** (what we scrape):
@@ -376,6 +389,15 @@ occurred (`fecha`, and what every chart is built on) and the nullable
 most of a typical window. A movement with only a posting date carries it in
 both; an occurrence date is never invented. Neither is ever part of a dedup key.
 
+Its card legs also say where a purchase happened, which lands in the optional
+location columns (V025): the unbilled leg's `ciudad` and `codigoPaisComercio`
+(a country NAME despite the key), the national statement's `ciudad`, and the
+USD statement's `ciudadComercio` and `pais`. Values are stored as the portal
+spells them (trimmed, not re-cased) and are never identity. The writer inserts
+a location with its row and, on a row already stored, only fills NULL location
+columns; a location the user set or cleared in the dashboard
+(`location_is_manual`) is never touched by a scrape.
+
 Three more surfaces feed its transactions (`banchile_movements.py`, issue #57):
 the checking cartola, reached by driving the account-selection dialog that
 defaults to the USD account; the card's unbilled movements, which the SPA loads
@@ -392,6 +414,23 @@ pure helpers over raw payload dicts, and the movement surfaces use the same
 bounded-retry, non-fatal machinery as the product ones, except that an empty
 reading counts as success there: a card with no unbilled charges is not a
 failed surface.
+
+The USD products get their movements the same way (issue #79): the unbilled
+list mixes both currencies and `origenTransaccion == "INT"` marks the USD rows;
+the USD statement (`estadocuenta/internacional/resumen-por-fecha`) is a surface
+of its own. USD checking movements are not read yet (see #82).
+Every movement carries its currency, so the writer resolves the USD product,
+and USD amounts keep their cents. Before #79 the unbilled USD charges were
+stored on the CLP card as whole "pesos"; each run deletes those leftovers once
+their USD rows are stored (`superseded_transactions` ->
+`db/writer.py::delete_superseded_transactions`, gated on the keys
+`write_transactions` reports as persisted, so a rolled-back batch deletes
+nothing): by their exact old key when it is reproducible, else by date and old
+amount (only for a USD statement row whose statement the national leg also read
+in that scrape, with both CLP card legs loaded, since the two legs pick their
+statements independently), one row per USD charge, only among rows created
+before V023 was applied (`_migrations.applied_at`; V023 ships with the fix),
+and never a row the user categorised, annotated or paired.
 
 BCI Lider (Tarjeta Lider Bci, the retailcard.cl card co-branded by BCI) has no
 open-banking API for individuals and isn't covered by `fintself`, and its login
@@ -424,8 +463,9 @@ one `crypto` product per currency, `units` kept fractional. Transactions cover
 **CLP deposits and withdrawals only**, minus annulled or rejected ones, paged
 through `meta.total_pages` (capped at 20 pages of 50 per direction, with a
 warning past that). Crypto movements
-are deliberately not imported: `transactions.amount` is integer CLP, and a
-crypto movement has no CLP amount unless it is priced at its date, which would
+are deliberately not imported: `transactions.amount` keeps two decimals (too
+few for crypto units), and a crypto movement has no CLP amount unless it is
+priced at its date, which would
 need a historical price source. Crypto value history comes from the balance
 snapshots instead, converted at lib/rates' current tickers like every other
 crypto figure. A non-CLP amount that still reaches the parser is skipped with a
@@ -560,14 +600,21 @@ Transactions are deduplicated via `UNIQUE(product_id, external_id)`:
     not hashed, so it stays debuggable. An all-zero id is a placeholder, not a
     value.
   - `bch_ref_{numReferencia}`: a billed card row's reference ("DDMM
-    NNNNNNNN"); an all-zero suffix means the bank has none, not a value.
+    NNNNNNNN"; a USD row's `numeroDocumento` is "DDMM" + 23 digits); an
+    all-zero suffix or a bare "DDMM" means the bank has none, not a value.
   - `bch_fp_{md5(fingerprint)[:16]}`: the fallback: checking uses the bank's
     composite `id` plus the running `saldo` (unique and stable together, where
     the composite `id` alone collides for same-second batch credits); the
     card's unbilled leg, which has no id at all, uses posting date +
-    authorisation date/time + amount + card last4 + Transbank merchant code.
-  None of the forms includes a date, the description, the section, or the
-  movement's order or multiplicity within a scrape. Because a movement can
+    authorisation date/time + amount + card last4 + Transbank merchant code;
+    a billed row without a usable reference uses date + amount + card + the
+    statement date, plus (USD only) the raw `numeroDocumento` and the statement
+    section, since a USD payment and credit can share everything else.
+    A USD fingerprint is hashed with the currency in front and its amount as a
+    two-decimal string, so it can never equal a CLP one.
+  None of the forms includes the description or the movement's order or
+  multiplicity within a scrape, and only a closed statement's rows (which
+  never move) carry a date or a section. Because a movement can
   *change* form
   (a checking one acquiring its operation id on a later run, a card charge
   moving from the unbilled leg to the billed one), `upsert_transactions` adopts:

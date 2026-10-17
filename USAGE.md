@@ -376,7 +376,8 @@ All API routes are under `/api/`:
 | GET | `/api/scrapers` | Latest run per scraper |
 | GET | `/api/scrapers/available` | Enabled scraper slugs, from the scraper service |
 | GET | `/api/balances` | Latest balance per product |
-| GET/POST | `/api/transactions` | Transactions (list, create) |
+| GET/POST | `/api/transactions` | Transactions (list, create; create takes an optional `location`) |
+| GET/PATCH | `/api/transactions/[id]` | One transaction with product, institution, category and location; PATCH sets or clears only `{ location }` |
 | POST | `/api/import` | CSV import |
 | GET/POST/PUT | `/api/categories` | Categories with their rules (GET); add a rule (POST); auto-assign (PUT) |
 | GET/POST/PUT/DELETE | `/api/fixed-expenses` | Fixed expenses CRUD |

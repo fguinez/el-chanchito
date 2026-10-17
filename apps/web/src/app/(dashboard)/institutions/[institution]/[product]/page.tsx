@@ -24,14 +24,6 @@ import {
   useTimeSeriesChart,
 } from "@/components/charts/interactive-chart";
 import { TimeRangeControl } from "@/components/charts/time-range-control";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn, formatCLP, formatDateEs } from "@/lib/utils";
@@ -53,6 +45,8 @@ import {
   type ProductHistoryPoint,
   type ProductTransaction,
 } from "@/components/institutions/product-graphs";
+import { BalanceHistorySheet } from "@/components/institutions/balance-history-sheet";
+import { ProductTransactionsCard } from "@/components/institutions/product-transactions";
 
 interface ProductDetailResponse {
   institution: {
@@ -63,6 +57,7 @@ interface ProductDetailResponse {
   product: InstitutionProduct;
   history: ProductHistoryPoint[];
   transactions: ProductTransaction[];
+  transactionsTruncated: boolean;
 }
 
 /** Recharts rows from the balance history, own-currency balance. */
@@ -72,8 +67,6 @@ function buildChartData(history: ProductHistoryPoint[]) {
     Saldo: p.balance,
   }));
 }
-
-const HISTORY_LIST_ROWS = 30;
 
 export default function ProductDetailPage() {
   const { institution: institutionSlug, product: productSlug } = useParams<{
@@ -144,21 +137,18 @@ export default function ProductDetailPage() {
     );
   }
 
-  const { institution, product, history, transactions } = data;
+  const { institution, product, history, transactions, transactionsTruncated } =
+    data;
   const isLiability = KIND_INFO[product.kind].role === "liability";
   const chips = productDetailChips(product);
   const cupo = productLimit(product);
   const chartData = buildChartData(history);
-  const latestHistory = history.slice(-HISTORY_LIST_ROWS).reverse();
+  const latestBalance = history.at(-1)?.balance ?? null;
   const hasHistory = chartData.some((p) => p.Saldo != null);
 
   const isCreditKind =
     product.kind === "credit_card" || product.kind === "line_of_credit";
-  const showWaterfall =
-    TRANSACTION_KINDS.has(product.kind) &&
-    transactions.length >= 2 &&
-    (product.currentBalance ?? latestHistory[0]?.balance ?? null) != null;
-  const anchorBalance = product.currentBalance ?? latestHistory[0]?.balance ?? 0;
+  const anchorBalance = product.currentBalance ?? latestBalance;
 
   return (
     <div className="space-y-6">
@@ -227,7 +217,7 @@ export default function ProductDetailPage() {
             <CardDescription>Cupo</CardDescription>
             <CardTitle className="text-2xl tabular-nums">
               {cupo != null ? (
-                formatCLP(cupo)
+                formatBalance(product.currency, cupo)
               ) : (
                 <span className="text-muted-foreground">—</span>
               )}
@@ -263,7 +253,7 @@ export default function ProductDetailPage() {
       {product.kind === "investment" && (
         <InvestmentCompositionCard product={product} />
       )}
-      {showWaterfall && (
+      {TRANSACTION_KINDS.has(product.kind) && (
         <TransactionWaterfallCard
           product={product}
           transactions={transactions}
@@ -281,75 +271,51 @@ export default function ProductDetailPage() {
           <CardDescription>
             Evolución del saldo según cada cambio reportado
           </CardDescription>
-          <CardAction>
+          <CardAction className="flex flex-wrap items-center justify-end gap-2">
             <TimeRangeControl control={chart.x} allowAll />
+            {history.length > 0 && (
+              <BalanceHistorySheet
+                currency={product.currency}
+                history={history}
+              />
+            )}
           </CardAction>
         </CardHeader>
         <CardContent>
           {hasHistory ? (
-            <>
-              <InteractiveChart {...chart.interactiveProps} height={300}>
-                <LineChart data={chartData}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis {...chart.xAxisProps} />
-                  <YAxis {...chart.yAxisProps} />
-                  <Tooltip
-                    formatter={(value) =>
-                      formatBalance(product.currency, Number(value)) ?? "—"
-                    }
-                    labelFormatter={chart.labelFormatter}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="Saldo"
-                    stroke="#2563eb"
-                    strokeWidth={2}
-                    dot={false}
-                    isAnimationActive={false}
-                  />
-                </LineChart>
-              </InteractiveChart>
-              {product.currency !== "CLP" && (
-                <p className="mt-2 text-xs text-muted-foreground">
-                  Aproximación: el saldo en CLP se convierte con los tipos de
-                  cambio actuales.
-                </p>
-              )}
-
-              <Table className="mt-6">
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Fecha</TableHead>
-                    <TableHead align="right">Saldo</TableHead>
-                    {product.currency !== "CLP" && (
-                      <TableHead align="right">≈ CLP</TableHead>
-                    )}
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {latestHistory.map((p) => (
-                    <TableRow key={p.asOf}>
-                      <TableCell className="text-muted-foreground">
-                        {formatDateEs(p.asOf)}
-                      </TableCell>
-                      <TableCell className="text-right tabular-nums">
-                        {formatBalance(product.currency, p.balance) ?? "—"}
-                      </TableCell>
-                      {product.currency !== "CLP" && (
-                        <TableCell className="text-right tabular-nums text-muted-foreground">
-                          {p.balanceClp != null ? formatCLP(p.balanceClp) : "—"}
-                        </TableCell>
-                      )}
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </>
+            <InteractiveChart {...chart.interactiveProps} height={300}>
+              <LineChart data={chartData}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis {...chart.xAxisProps} />
+                <YAxis {...chart.yAxisProps} />
+                <Tooltip
+                  formatter={(value) =>
+                    formatBalance(product.currency, Number(value)) ?? "—"
+                  }
+                  labelFormatter={chart.labelFormatter}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="Saldo"
+                  stroke="#2563eb"
+                  strokeWidth={2}
+                  dot={false}
+                  isAnimationActive={false}
+                />
+              </LineChart>
+            </InteractiveChart>
           ) : (
             <p className="text-muted-foreground">Sin historial de saldo.</p>
           )}
         </CardContent>
       </Card>
+
+      <ProductTransactionsCard
+        key={product.id}
+        currency={product.currency}
+        transactions={transactions}
+        truncated={transactionsTruncated}
+      />
     </div>
   );
 }

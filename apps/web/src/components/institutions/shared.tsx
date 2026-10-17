@@ -17,7 +17,7 @@ import {
 import { SortableTableHead } from "@/components/ui/sortable-table-head";
 import { Badge } from "@/components/ui/badge";
 import { useSortableData } from "@/lib/use-sortable-data";
-import { formatCLP, cn } from "@/lib/utils";
+import { formatAmount, formatCLP, cn } from "@/lib/utils";
 import {
   groupProductsByFamily,
   resolveColumnCell,
@@ -104,9 +104,8 @@ export const POLL_TIMEOUT_MS = 60000;
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Latest run per institution (slug → status + started_at). `/api/scrapers`
- *  already returns the latest per (method, institution); collapse methods by
- *  keeping the most recent started_at so an institution maps to one entry. */
+/** Latest run per institution (slug → status + started_at), as returned by
+ *  `/api/scrapers`; keeps the most recent started_at should a slug repeat. */
 export async function fetchRunMap(): Promise<Map<string, ScraperRun>> {
   const map = new Map<string, ScraperRun>();
   try {
@@ -133,15 +132,11 @@ export function timeAgo(dateStr: string): string {
   return `hace ${days}d`;
 }
 
-/** Format a balance in its own currency: CLP as pesos, anything else (crypto,
- *  foreign) as a trimmed decimal followed by the currency code. */
+/** Format a balance or transaction amount in its own currency (see
+ *  `formatAmount`); null stays null so callers can show a placeholder. */
 export function formatBalance(currency: string, value: number | null): string | null {
   if (value == null) return null;
-  if (currency === "CLP") return formatCLP(value);
-  const formatted = new Intl.NumberFormat("en-US", {
-    maximumFractionDigits: 8,
-  }).format(value);
-  return `${formatted} ${currency}`;
+  return formatAmount(currency, value);
 }
 
 /**
@@ -152,7 +147,7 @@ export function formatBalance(currency: string, value: number | null): string | 
  * otherwise; anything a human named stays untouched.
  */
 export function displayProductName(
-  product: InstitutionProduct,
+  product: Pick<InstitutionProduct, "name" | "kind" | "currency">,
   institutionName: string
 ): string {
   const prefix = `${institutionName} - `;
