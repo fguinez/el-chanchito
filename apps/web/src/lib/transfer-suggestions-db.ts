@@ -88,7 +88,8 @@ type TxnColumns = Record<
   | "transactionDate"
   | "description"
   | "amount"
-  | "isInternalTransfer",
+  | "isInternalTransfer"
+  | "deletedAt",
   AnyPgColumn
 >;
 type ProductColumns = Record<"name" | "slug" | "kind" | "currency", AnyPgColumn>;
@@ -104,6 +105,8 @@ function openRow(
     eq(product.currency, TRANSFER_CURRENCY),
     gte(txn.transactionDate, since),
     not(txn.isInternalTransfer),
+    // A soft-deleted row (V033) is never suggested as a transfer leg.
+    isNull(txn.deletedAt),
     notLinked(txn.id)
   ) as SQL;
 }
@@ -549,7 +552,8 @@ async function confirmIn(
       isInternalTransfer: transactions.isInternalTransfer,
     })
     .from(transactions)
-    .where(inArray(transactions.id, ids))
+    // A soft-deleted row (V033) cannot take part in a transfer.
+    .where(and(inArray(transactions.id, ids), isNull(transactions.deletedAt)))
     // Held until commit, as applyTransferLinks does: a row deleted mid-confirm
     // would otherwise fail the FK as a 500.
     .for("key share");
@@ -849,7 +853,8 @@ export async function dismissTransferSuggestion(
   const found = await db
     .select({ id: transactions.id, amount: transactions.amount })
     .from(transactions)
-    .where(inArray(transactions.id, ids));
+    // A soft-deleted row (V033) is not a suggestion to dismiss.
+    .where(and(inArray(transactions.id, ids), isNull(transactions.deletedAt)));
   const byId = new Map(found.map((row) => [row.id, row]));
   const source = byId.get(input.sourceTransactionId);
   if (!source) {

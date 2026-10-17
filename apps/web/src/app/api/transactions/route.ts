@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { products, transactions } from "@/lib/db/schema";
 import { resolveProductId } from "@/lib/db/resolve";
-import { eq, desc, and } from "drizzle-orm";
+import { eq, desc, and, isNull } from "drizzle-orm";
 import { parseSearchParams, withJsonBody } from "@/lib/api/validation";
 import {
   createTransactionSchema,
@@ -24,7 +24,8 @@ export async function GET(request: NextRequest) {
   const { month, limit } = query.data;
   const productId = query.data.productId ?? query.data.accountId;
 
-  const conditions = [];
+  // Soft-deleted rows (V033) never appear in any dashboard list.
+  const conditions = [isNull(transactions.deletedAt)];
   if (month) {
     conditions.push(eq(transactions.scheduledMonth, month));
   }
