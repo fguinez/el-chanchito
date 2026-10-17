@@ -34,7 +34,7 @@
                                  ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                     PostgreSQL 16 (Alpine)                      │
-│                        port 5435 (host)                         │
+│                      127.0.0.1:5435 (host)                      │
 │                                                                 │
 │  users | institutions | accounts | products | product_snapshots │
 │  transactions | categories | category_rules | monitors          │
@@ -798,14 +798,17 @@ Browser → web POST /api/institutions/refresh {institution?}
   `skipped: [{slug, retry_after_seconds}]`; `POST /refresh` triggers the rest
   and lists it under `skipped` in its `202`. The dashboard shows either as a
   "consulted recently, try again in N minutes" notice.
-- The server runs on a daemon thread and binds `0.0.0.0` inside the container.
-  It's an **unauthenticated** trigger — keep it internal (Compose `expose`s port
-  `8080` on the private network; never publish it — see #23). The web proxy
+- The server runs on a daemon thread and binds `SCRAPER_CONTROL_HOST`, which
+  defaults to `127.0.0.1` (host-dev); Compose sets `0.0.0.0` inside the
+  container so `web` can reach it. It's an **unauthenticated** trigger: keep it
+  internal (Compose `expose`s port `8080` on the private network; never publish
+  it, see #23). The web proxy
   returns `503` when it's unreachable so the UI can explain the outage.
 
 | Var | Service | Meaning |
 |---|---|---|
 | `SCRAPER_CONTROL_PORT` | scrapers | Port the control server binds (unset ⇒ disabled) |
+| `SCRAPER_CONTROL_HOST` | scrapers | Address the control server binds (default `127.0.0.1`; Compose sets `0.0.0.0`) |
 | `SCRAPER_CONTROL_URL` | web | Base URL the refresh proxy calls (e.g. `http://scrapers:8080`) |
 | `BANCHILE_LOGIN_COOLDOWN_MINUTES` | scrapers | Minimum minutes between full BanChile logins, which also gates manual refreshes (default `10`; `0` disables) |
 

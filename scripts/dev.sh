@@ -38,17 +38,26 @@ ensure_node
 DATABASE_URL="${DATABASE_URL:-postgres://finance:finance@localhost:5435/finance}"
 export DATABASE_URL
 
-# The control server binds 0.0.0.0, so probe the same address. 8080 is a
-# popular port: if another stack already holds it, fall back to the next free
-# one instead of crashing the scraper service (and pointing the dashboard at
-# whatever else is listening there). An explicitly set port is never moved.
+# Everything listens on loopback by default: the control endpoint is an
+# unauthenticated trigger for live bank logins, and the dashboard serves real
+# data with no login under `next dev`. DASHBOARD_HOST=0.0.0.0 opts the
+# dashboard in to LAN access, and only with DASHBOARD_PASSWORD set (see
+# USAGE.md > Reaching the dashboard from another device).
+SCRAPER_CONTROL_HOST="${SCRAPER_CONTROL_HOST:-127.0.0.1}"
+DASHBOARD_HOST="${DASHBOARD_HOST:-127.0.0.1}"
+. ./scripts/require-dashboard-password.sh
+
+# Probe the address the control server binds. 8080 is a popular port: if
+# another stack already holds it, fall back to the next free one instead of
+# crashing the scraper service (and pointing the dashboard at whatever else is
+# listening there). An explicitly set port is never moved.
 port_free() {
   .venv/bin/python -c 'import socket,sys
 s = socket.socket()
 try:
-    s.bind(("0.0.0.0", int(sys.argv[1])))
+    s.bind((sys.argv[1], int(sys.argv[2])))
 except OSError:
-    sys.exit(1)' "$1"
+    sys.exit(1)' "$SCRAPER_CONTROL_HOST" "$1"
 }
 if [ -n "${SCRAPER_CONTROL_PORT:-}" ]; then
   if ! port_free "$SCRAPER_CONTROL_PORT"; then
@@ -76,10 +85,11 @@ echo "==> Running migrations"
 pnpm --filter @chanchito/db-schema migrate
 
 mkdir -p local
-echo "==> Starting scraper service (control endpoint :$SCRAPER_CONTROL_PORT, log: local/scrapers-dev.log)"
+echo "==> Starting scraper service (control endpoint $SCRAPER_CONTROL_HOST:$SCRAPER_CONTROL_PORT, log: local/scrapers-dev.log)"
 (
   cd apps/scrapers
   SCRAPER_MODE=scheduled SCRAPER_CONTROL_PORT="$SCRAPER_CONTROL_PORT" \
+    SCRAPER_CONTROL_HOST="$SCRAPER_CONTROL_HOST" \
     exec ../../.venv/bin/python main.py
 ) >>local/scrapers-dev.log 2>&1 &
 SCRAPERS_PID=$!
@@ -99,6 +109,10 @@ if ! kill -0 "$SCRAPERS_PID" 2>/dev/null; then
   echo "!!  The dashboard still works, but on-demand refresh will be unavailable."
 fi
 
-echo "==> Starting dashboard on http://localhost:3000"
-SCRAPER_CONTROL_URL="${SCRAPER_CONTROL_URL:-http://localhost:$SCRAPER_CONTROL_PORT}" \
-  pnpm --filter @chanchito/web dev
+if [ "$DASHBOARD_HOST" = "127.0.0.1" ]; then
+  echo "==> Starting dashboard on http://localhost:3000"
+else
+  echo "==> Starting dashboard (listening on $DASHBOARD_HOST:3000)"
+fi
+SCRAPER_CONTROL_URL="${SCRAPER_CONTROL_URL:-http://127.0.0.1:$SCRAPER_CONTROL_PORT}" \
+  pnpm --filter @chanchito/web dev --hostname "$DASHBOARD_HOST"

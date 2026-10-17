@@ -33,10 +33,15 @@ make dev
 ```
 
 `make dev` brings up PostgreSQL (Docker), runs migrations, starts the scraper
-service on the host (control endpoint on `:8080`, logs in
+service on the host (control endpoint on `127.0.0.1:8080`, logs in
 `local/scrapers-dev.log`), and runs the Next.js dev server wired to it. Ctrl+C
 stops the dashboard and the scraper service together. To run only the web dev
 server (e.g. pure UI work), use `make dev-web`.
+
+Everything listens on loopback only (PostgreSQL on `127.0.0.1:5435`, the
+dashboard on `127.0.0.1:3000`), so other machines on your network cannot reach
+it. To open the dashboard from your phone, see
+[Reaching the dashboard from another device](#reaching-the-dashboard-from-another-device).
 
 With no scraper configured the scraper service exits right away: `make dev`
 says so and keeps the dashboard running, but it stays empty and on-demand
@@ -313,17 +318,20 @@ throttles logins. A refresh its cached session can serve goes through; one that
 would need a second login inside that window is refused, and the dashboard
 shows the minutes left instead.
 
-Under Docker Compose this is wired automatically (`scrapers` exposes `8080` on the
-compose network, `web` points at `http://scrapers:8080`). For **host-dev**,
-`make dev` wires it automatically too (scrapers on `:8080`, dashboard pointed at
-it). To run the pieces by hand instead:
+The server binds `SCRAPER_CONTROL_HOST`, which defaults to `127.0.0.1`, so on
+the host only local processes can trigger a scrape. Under Docker Compose this is
+wired automatically (`scrapers` sets `SCRAPER_CONTROL_HOST=0.0.0.0` inside its
+container and exposes `8080` on the compose network only, `web` points at
+`http://scrapers:8080`). For **host-dev**, `make dev` wires it automatically too
+(scrapers on `127.0.0.1:8080`, dashboard pointed at it). To run the pieces by
+hand instead:
 
 ```bash
-# terminal 1 — scrapers on a schedule, control endpoint on :8080 (the default)
+# terminal 1: scrapers on a schedule, control endpoint on 127.0.0.1:8080 (the default)
 make scrapers-start
 
-# terminal 2 — dashboard only, reaching the scraper control endpoint
-SCRAPER_CONTROL_URL=http://localhost:8080 make dev-web
+# terminal 2: dashboard only, reaching the scraper control endpoint
+SCRAPER_CONTROL_URL=http://127.0.0.1:8080 make dev-web
 ```
 
 ## CSV Import
@@ -548,6 +556,45 @@ Treat the password as one layer, not the whole story: prefer keeping the
 dashboard off the public internet entirely (Tailscale or another VPN), or behind
 a reverse proxy that terminates TLS and adds its own access control.
 
+### Reaching the dashboard from another device
+
+By default every port listens on `127.0.0.1` only: the dashboard (`3000`),
+PostgreSQL (`5435`) and, outside Compose, the scraper control endpoint
+(`8080`). Nothing is reachable from your LAN, or from the internet on a VPS.
+
+To open the dashboard from a phone or another computer, opt in with
+`DASHBOARD_HOST`, the address the dashboard listens on:
+
+```bash
+# host-dev: both variables from your shell, in the same command
+DASHBOARD_PASSWORD="$(security find-generic-password -a "$USER" -s chanchito.DASHBOARD_PASSWORD -w)" \
+  DASHBOARD_HOST=0.0.0.0 make dev
+
+# make up: DASHBOARD_HOST=0.0.0.0 in .env (or your shell), DASHBOARD_PASSWORD
+# exported as in "Authentication" above
+```
+
+`0.0.0.0` means every interface; a specific address (e.g. your Tailscale or LAN
+IP) limits it to that network. Compose needs an IPv4 address or a bracketed IPv6
+one (`[::]`).
+
+A password is required beyond loopback. `next dev` skips the login when
+`DASHBOARD_PASSWORD` is unset, so `make dev` and `make dev-web` refuse to start
+with a non-loopback `DASHBOARD_HOST` until it is set. It has to come from your
+shell: `next dev` runs in `apps/web` and never reads the root `.env`, and
+`scripts/load-secrets.sh` deliberately skips it. The production build behind
+`make up` already fails closed without it (see "Authentication" above).
+
+`next dev` also blocks hot reload for origins other than `localhost` and the
+address it listens on. When you open it through another address (e.g. your LAN
+IP while listening on `0.0.0.0`), list those hostnames in
+`DASHBOARD_DEV_ORIGINS` (comma-separated) in the same shell:
+`DASHBOARD_DEV_ORIGINS=192.168.0.10`. Production builds ignore it.
+
+PostgreSQL and the scraper control endpoint have no opt-in: they stay on
+loopback (the database password defaults to a public value and the control
+endpoint is unauthenticated).
+
 ### Local (Docker Compose)
 
 ```bash
@@ -555,6 +602,9 @@ make up        # Start everything (postgres + web + scrapers)
 make down      # Stop everything
 make logs      # View logs
 ```
+
+The dashboard is at `http://localhost:3000` on the machine running Compose; see
+above to reach it from elsewhere.
 
 ### Production
 
