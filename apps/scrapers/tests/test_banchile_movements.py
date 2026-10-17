@@ -1626,11 +1626,24 @@ class TestDialogSteps:
         assert found == []
         assert "no USD checking account (no USD option)" in caplog.text
 
-    def test_no_usd_radio_means_no_account(self):
-        assert _read_usd_dialog(_FakeDialogPage(radios={"USD": []})) == []
+    def test_a_usd_option_whose_radios_never_render_is_a_failure(self, caplog):
+        """The option promised an account; a radio wait that times out is a
+        broken drive, not a missing account."""
+        page = _FakeDialogPage(radios={"USD": []})
 
-    def test_only_clp_radios_means_no_account(self):
-        assert _read_usd_dialog(_FakeDialogPage(radios={"USD": [_CLP_RADIO]})) == []
+        with caplog.at_level("INFO", logger=movements_mod.__name__):
+            assert _read_usd_dialog(page) is None
+
+        assert "failed at the account radio step" in caplog.text
+        assert "no account radio rendered" in caplog.text
+
+    def test_a_usd_option_with_only_clp_radios_is_a_failure(self, caplog):
+        page = _FakeDialogPage(radios={"USD": [_CLP_RADIO]})
+
+        with caplog.at_level("INFO", logger=movements_mod.__name__):
+            assert _read_usd_dialog(page) is None
+
+        assert "1 account radio(s), none labelled (USD)" in caplog.text
 
     def test_a_missing_clp_option_is_still_a_failure(self, caplog):
         """Every customer has a CLP account, so its absence is a broken drive."""

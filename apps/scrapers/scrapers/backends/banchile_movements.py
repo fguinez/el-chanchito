@@ -42,10 +42,11 @@ is what routes it to the USD product.
 Issue #82 added the USD checking cartola: the same `getCartola` behind the
 same dialog with USD picked, read as its own surface ("movimientos USD") so a
 failure there never costs the CLP cartola. A customer with no USD account (no
-"(USD)" option, or no "(USD)" radio once it is picked) reads as an empty list,
-not a failure. Every dialog step logs which one failed and why. The USD row
-shape is pending live verification: the one account observed had no
-movements, so it is parsed with the CLP rules plus a defensive amount parser.
+"(USD)" option in the currency list) reads as an empty list, not a failure; a
+USD option with no "(USD)" radio behind it is a failure. Every dialog step
+logs which one failed and why. The USD row shape is pending live
+verification: the one account observed had no movements, so it is parsed
+with the CLP rules plus a defensive amount parser.
 
 Why this is its own module: `banchile_web.py` is 1.6k lines about *balances* and
 its docstring is a map of that surface. Movements are a different read, with
@@ -1304,8 +1305,9 @@ def _click_account_radio(
     pause and picked by position, through `#<id> label`. USD waits for the
     radios to render and keeps only the ones labelled "(USD)", then clicks the
     picked radio's own `label` child (its id changes between renders, so it is
-    never looked up again). Zero USD radios after the wait is `_STEP_ABSENT`:
-    there is no USD account to read.
+    never looked up again). The USD option was there, so an account is
+    expected: radios that never render, or none labelled "(USD)", are a
+    failure (only a missing option means "no account").
     """
     labelled = currency in _ACCOUNT_LABEL_RES
     try:
@@ -1315,13 +1317,17 @@ def _click_account_radio(
                 radios.first.wait_for(state="visible", timeout=timeout_ms)
             except Exception:
                 logger.debug("BanChile: no account radio rendered", exc_info=True)
-                return _RadioPick(0, _STEP_ABSENT, f"no {currency} account radio")
+                return _RadioPick(0, _STEP_FAILED, "no account radio rendered")
             labels = [radios.nth(i).inner_text() or "" for i in range(radios.count())]
             # Only the count is logged: a radio's label carries the account number.
             logger.debug("BanChile: %d account radio(s) rendered", len(labels))
             matching = matching_radio_indices(labels, currency)
             if not matching:
-                return _RadioPick(0, _STEP_ABSENT, f"no {currency} account radio")
+                return _RadioPick(
+                    0,
+                    _STEP_FAILED,
+                    f"{len(labels)} account radio(s), none labelled ({currency})",
+                )
             if index >= len(matching):
                 return _RadioPick(len(matching), _STEP_OK)
             radios.nth(matching[index]).locator("label").first.click()
@@ -1372,8 +1378,8 @@ def _open_cartola(
     the loop with whatever was already read. The steps are route, dialog open,
     currency select, account radio, accept and cartola wait; a failure in any
     of them is logged at INFO naming the step (DEBUG carries the detail). A
-    currency with no option, or no account radio once picked, comes back as
-    `no_account`, which is a reading and not a failure.
+    currency with no option in the list comes back as `no_account`, which is
+    a reading and not a failure.
     """
     _recover_to_home(page)
     if not _ensure_on_portal(page):
@@ -1403,9 +1409,6 @@ def _open_cartola(
             )
 
         pick = _click_account_radio(page, index, currency, timeout_ms)
-        if pick.status == _STEP_ABSENT:
-            logger.info("BanChile: no %s checking account (%s)", currency, pick.reason)
-            return _CartolaDrive(no_account=True)
         if pick.status != _STEP_OK:
             return _drive_failed(currency, "account radio", pick.reason, index, attempt)
         if index >= pick.count:
