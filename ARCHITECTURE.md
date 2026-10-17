@@ -262,6 +262,7 @@ products ──────────────┘      product_snapshots (h
     loan|mortgage|investment|
     crypto|other)
   name, currency, external_ref
+  default_name                -- scrapers' name; name follows it until renamed (V027)
   slug                        -- create-only, unique per institution (V014)
   attributes JSONB            -- typed identity/config, shallow-merged
   metrics JSONB               -- latest typed observation
@@ -721,8 +722,10 @@ data without direct DB access.
 Scrapers own a product's identity: `(account, kind, currency, external_ref)`
 is the `uq_products_identity` key they upsert on, and `attributes`/`metrics`
 are typed by kind. The dashboard owns its display metadata, which the writer
-never overwrites (`name` and `slug` are insert-only there). The management
-routes follow that split, with their rules in `lib/management.ts`:
+never overwrites: `slug` is insert-only there, and `name` moves only while it
+still equals `default_name` (V027), the scrapers' name for the product, which
+the writer refreshes on every scrape. The management routes follow that
+split, with their rules in `lib/management.ts`:
 
 - `PATCH /api/institutions/{slug}/products/{product}` edits `name`, `slug`,
   `parent_product_id`, `is_active` and `display_order`. Kind, currency and

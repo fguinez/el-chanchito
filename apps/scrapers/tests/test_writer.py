@@ -440,7 +440,7 @@ class TestResolveProductSlug:
 
     def test_new_product_gets_suffixed_slug(self):
         """A name whose slug the institution already holds gets the -2 suffix,
-        with columns and params in matching order (name then slug)."""
+        with columns and params in matching order (name, default_name, slug)."""
         conn = _FakeResolveConn(taken_slugs=["cuenta-corriente"])
 
         writer._resolve_product(
@@ -448,9 +448,12 @@ class TestResolveProductSlug:
         )
 
         q, p = self._product_insert(conn)
-        assert "(id, account_id, name, slug, kind, currency, external_ref)" in q
-        assert p[2] == "Cuenta Corriente"
-        assert p[3] == "cuenta-corriente-2"
+        assert (
+            "(id, account_id, name, default_name, slug, kind, currency, "
+            "external_ref)" in q
+        )
+        assert p[2] == p[3] == "Cuenta Corriente"
+        assert p[4] == "cuenta-corriente-2"
 
     def test_first_product_keeps_bare_slug(self):
         """With no slugs taken the bare slugified name is used."""
@@ -461,7 +464,7 @@ class TestResolveProductSlug:
         )
 
         _, p = self._product_insert(conn)
-        assert p[3] == "cuenta-corriente"
+        assert p[4] == "cuenta-corriente"
 
 
 class TestClaimDecision:

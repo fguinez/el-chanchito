@@ -116,6 +116,9 @@ export const products = pgTable(
     ),
     kind: text("kind").$type<ProductKind>().notNull(),
     name: text("name").notNull(),
+    // The scrapers' name for the product (V027), refreshed on every scrape;
+    // `name` equals it until the user renames the product.
+    defaultName: text("default_name").notNull(),
     // Create-only, institution-unique identifier; never changes on rename.
     slug: text("slug").notNull(),
     currency: text("currency").notNull().default("CLP"),

@@ -178,19 +178,62 @@ class TestResolveProduct:
             "CLP",
             None,
         )
-        assert (product["name"], product["slug"]) == (f"{name} - checking", product_slug)
+        assert (product["name"], product["default_name"], product["slug"]) == (
+            f"{name} - checking",
+            f"{name} - checking",
+            product_slug,
+        )
 
     def test_a_second_write_reuses_the_product(self, db_conn):
-        """No new account or product, and `name` is create-only."""
+        """No new account or product; the slug is create-only, while a name
+        the user never changed follows the scraper's (V027)."""
         upsert_product(_checking())
         upsert_product(_checking(balance=1000000, name="Cuenta Sintetica"))
 
         product = _only_product(db_conn)
-        assert (product["name"], product["slug"]) == (
-            "Banco de Chile - checking",
+        assert (product["name"], product["default_name"], product["slug"]) == (
+            "Cuenta Sintetica",
+            "Cuenta Sintetica",
             "banco-de-chile-checking",
         )
         assert _count(db_conn, "accounts") == 1
+
+    def test_a_user_rename_survives_every_later_scrape(self, db_conn):
+        """The default keeps refreshing underneath, but `name` stays put."""
+        upsert_product(_checking())
+        db_conn.execute("UPDATE products SET name = 'Mi cuenta de ejemplo'")
+        upsert_product(_checking(balance=1000000, name="Cuenta Sintetica"))
+
+        product = _only_product(db_conn)
+        assert (product["name"], product["default_name"]) == (
+            "Mi cuenta de ejemplo",
+            "Cuenta Sintetica",
+        )
+
+    def test_a_reset_name_follows_the_scraper_again(self, db_conn):
+        """Resetting (name := default_name, as the dashboard does) re-attaches
+        the name to the scraper's."""
+        upsert_product(_checking())
+        db_conn.execute("UPDATE products SET name = 'Mi cuenta de ejemplo'")
+        db_conn.execute("UPDATE products SET name = default_name")
+        upsert_product(_checking(balance=1000000, name="Cuenta Sintetica"))
+
+        assert _only_product(db_conn)["name"] == "Cuenta Sintetica"
+
+    def test_an_insert_without_default_name_copies_the_name(self, db_conn):
+        """V027's trigger keeps an inserter that predates the column working."""
+        upsert_product(_checking())
+        account_id = _only_product(db_conn)["account_id"]
+        db_conn.execute(
+            "INSERT INTO products (account_id, name, slug, kind, currency) "
+            "VALUES (%s, 'Cuenta de Ejemplo', 'cuenta-de-ejemplo', 'vista', 'CLP')",
+            (account_id,),
+        )
+
+        (row,) = db_conn.execute(
+            "SELECT default_name FROM products WHERE slug = 'cuenta-de-ejemplo'"
+        ).fetchall()
+        assert row["default_name"] == "Cuenta de Ejemplo"
 
     @pytest.mark.parametrize(
         ("identity", "slug"),
@@ -860,9 +903,21 @@ class TestAmountMigration:
             for n, amount in enumerate(amounts)
         ]
         # Staged with SQL of that era: the writer now also writes V025's
-        # location columns, which this schema does not have yet.
+        # location columns and V027's default_name, which this schema does
+        # not have yet.
         with psycopg.connect(unmigrated_db) as conn:
-            product_id = writer._resolve_product(conn, "banchile", "checking", "CLP")
+            (account_id,) = conn.execute(
+                "INSERT INTO accounts (user_id, institution_id) "
+                "SELECT %s, id FROM institutions WHERE slug = 'banchile' "
+                "RETURNING id",
+                (SEEDED_USER_ID,),
+            ).fetchone()
+            (product_id,) = conn.execute(
+                "INSERT INTO products (account_id, name, slug, kind, currency) "
+                "VALUES (%s, 'Banco de Chile - checking', "
+                "'banco-de-chile-checking', 'checking', 'CLP') RETURNING id",
+                (account_id,),
+            ).fetchone()
             for txn in legacy:
                 conn.execute(
                     "INSERT INTO transactions (product_id, description, amount, "
