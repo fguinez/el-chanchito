@@ -7,8 +7,9 @@
 # `next dev` runs in apps/web and never reads the root .env, and
 # scripts/load-secrets.sh deliberately skips DASHBOARD_PASSWORD, so the
 # password has to come from the shell (see USAGE.md).
+# Exact loopback names only: "127.0.0.1.example.com" resolves anywhere.
 case "${DASHBOARD_HOST:-127.0.0.1}" in
-  127.*|localhost|::1|"[::1]") ;;
+  127.0.0.1|localhost|::1|"[::1]") ;;
   *)
     # Whitespace-only counts as unset, as it does in the app.
     if [ -z "$(printf '%s' "${DASHBOARD_PASSWORD:-}" | tr -d '[:space:]')" ]; then
