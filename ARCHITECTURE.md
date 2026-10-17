@@ -52,8 +52,8 @@
 │  │                                                           │  │
 │  │  ┌─────────┐ ┌──────┐ ┌───────────┐ ┌───────────────────┐ │  │
 │  │  │ Fintual │ │ Buda │ │ BanChile  │ │ MACH / MP / Tenpo │ │  │
-│  │  │  (6h)   │ │ (1h) │ │ BCI Lider │ │  shared IMAP 30m  │ │  │
-│  │  │         │ │      │ │   (24h)   │ │                   │ │  │
+│  │  │  (6h)   │ │Skipo │ │ BCI Lider │ │  shared IMAP 30m  │ │  │
+│  │  │         │ │ (1h) │ │   (24h)   │ │                   │ │  │
 │  │  └────┬────┘ └──┬───┘ └─────┬─────┘ └─────────┬─────────┘ │  │
 │  │       │         │           │                 │           │  │
 │  │       ▼         ▼           ▼                 ▼           │  │
@@ -78,7 +78,7 @@
              ▼             ▼             ▼
         ┌──────────┐ ┌───────────┐ ┌───────────┐
         │ Fintual  │ │ BanChile  │ │   MACH    │
-        │   Buda   │ │ BCI Lider │ │ MP, Tenpo │
+        │Buda Skipo│ │ BCI Lider │ │ MP, Tenpo │
         │  (APIs)  │ │ (browser) │ │  (IMAP)   │
         └────┬─────┘ └─────┬─────┘ └─────┬─────┘
              │             │             │
@@ -192,6 +192,10 @@ most specific first:
 2. **institution**: a row of the product's institution with `product_id` NULL;
 3. **provider**: `getClpRates()`, open.er-api fiat FX pivoted to CLP plus
    Buda's tickers for crypto, cached in memory for 5 minutes.
+
+Skipo's scraper fills the institution level for the coins it holds: it
+derives each coin's CLP rate from the balance Skipo values in pesos, so a
+coin Buda's tickers don't cover still converts.
 
 `exchange_rates` (V024) holds the rates institutions publish themselves (a
 bank's "Tipo de cambio" for its card), read by their scrapers: one current
@@ -394,6 +398,7 @@ the same function over the rows that are still uncategorized.
 | `V023__transactions_amount_numeric.sql` | `transactions.amount` integer -> NUMERIC(18, 2) so foreign-currency movements keep their cents; existing values unchanged |
 | `V024__exchange_rates.sql` | exchange_rates: the latest scraped rate per institution or product and currency pair |
 | `V025__transactions_location.sql` | optional transaction location: name, city, country, a range-checked lat/lng pair, and `location_is_manual`; no backfill |
+| `V029__seed_skipo_institution.sql` | seeds the `skipo` institution (display name, kind, site) |
 
 ## Scraper Architecture
 
@@ -421,7 +426,7 @@ apps/scrapers/scrapers/
     mach.py  mercadopago.py  tenpo.py       -> consume backends/email
     banchile.py                              -> banchile_movements (one login: tx + balances)
     bci_lider.py                             -> bci_lider_web (one CDP drive: tx + balances)
-    buda.py  fintual.py                      -> self-contained (HTTP APIs)
+    buda.py  fintual.py  skipo.py            -> self-contained (HTTP APIs)
 ```
 
 BanChile drives **one self-contained Playwright session per run** (issue #57,
@@ -597,6 +602,20 @@ attach to the CLP balance product. That product stays `crypto` rather than
 `units` figure already converts 1:1. V020 deleted the crypto movements the old
 scraper had truncated and stored on it as pesos.
 
+Skipo reads its official REST API (`api.skipo.com/v2`) with a personal
+read-only key sent as a bearer token; every call is a GET. The products leg
+classifies symbols through the asset catalog and reads the balances: CLP
+becomes the singleton `wallet` product (reported even at zero), each held
+crypto or stablecoin one `crypto` product per symbol, like Buda. Fiat other
+than CLP, tokenized stocks and unclassified symbols are left out and counted
+in a run warning. When the account's preferred currency is CLP, each held
+coin's peso value over its units becomes an institution-wide
+`ScrapedExchangeRate`. The transactions leg reads only the CLP ledger, paged
+(capped at 50 pages of 100): DEPOSIT and BUY (a coin sold for pesos) are
+money in, WITHDRAWAL and SELL (pesos spent on a coin) money out. Coin ledgers
+are skipped for Buda's reason. A 401 or 403 fails the leg with the HTTP status
+and the API's problem code, never the key.
+
 **Balance conventions & net worth** are registry-driven: each kind's `role`
 (asset/liability/none) and `balance_convention` (value/available/owed/units)
 live in `packages/product-model` — see `packages/product-model/PRODUCTS.md`
@@ -699,6 +718,7 @@ place (see [Exchange rates](#exchange-rates)).
 |---|---|---|---|---|
 | `fintual` | `http_api` | REST API (`/api/goals`) | Web session + e-mail 2FA (cached; `make fintual-login`) | 6h |
 | `buda` | `http_api` | REST API | HMAC-SHA384 signed requests | 1h |
+| `skipo` | `http_api` | REST API (`/v2`) | Read-only API key (bearer) | 1h |
 | `banchile` | `web` | Browser (Playwright: `banchile_web` + `banchile_movements`) | RUT + password | 24h |
 | `mach` | `email` | IMAP (Gmail) | Shared IMAP session | 30m |
 | `mercadopago` | `email` | IMAP (Gmail) | Shared IMAP session | 30m |
@@ -803,6 +823,7 @@ Transactions are deduplicated via `UNIQUE(product_id, external_id)`:
 
 - Fintual: no transactions (balance-only)
 - Buda: `buda_{deposit/withdrawal_id}` (CLP movements only)
+- Skipo: `skipo_{ledger_entry_id}` (CLP ledger only)
 - BanChile: the bank's own operation id where the portal exposes one, else a
   description-free fingerprint (issue #57). Three forms, each greppable:
   - `bch_op_{transaccionId}`: a checking movement's "ID Transacción", read
@@ -1116,8 +1137,8 @@ el-chanchito/
 │   └── scrapers/                     # Python scraper service
 │       ├── scrapers/
 │       │   ├── backends/             # email, banchile_web, banchile_movements, bci_lider_web
-│       │   └── institutions/         # 7 scrapers: banchile, bci_lider, buda, fintual,
-│       │                             #   mach, mercadopago, tenpo
+│       │   └── institutions/         # 8 scrapers: banchile, bci_lider, buda, fintual,
+│       │                             #   mach, mercadopago, skipo, tenpo
 │       ├── db/                       # Connection pool + writer + slug
 │       ├── tests/                    # pytest (conftest.py: per-test DB fixtures)
 │       ├── main.py                   # Entry point + scheduler + control endpoint
