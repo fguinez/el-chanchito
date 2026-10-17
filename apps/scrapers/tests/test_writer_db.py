@@ -497,6 +497,106 @@ class TestTransactionLocation:
             db_conn.execute(f"UPDATE transactions SET {assignment}")
 
 
+class TestTransferLinks:
+    """V028: a transfer links the scraped rows that moved its money; scraping
+    them again must keep the link and the is_internal_transfer flag.
+
+    The links are written the way PUT /api/transfers/[id]/links does: the FK
+    on internal_transfers plus the flag on the row. A synthetic $ 1.000.000
+    transfer from a checking account to a wallet.
+    """
+
+    def _scrape(self, location=None):
+        upsert_transactions(
+            [
+                _txn(
+                    "bch_op_00000000001",
+                    institution="banchile",
+                    kind="checking",
+                    amount=-1000000,
+                    location=location,
+                ),
+                _txn("email_mach_0001", amount=1000000, location=location),
+            ]
+        )
+
+    def _rows(self, conn):
+        return {
+            row["external_id"]: row
+            for row in conn.execute(
+                "SELECT id, external_id, product_id, is_internal_transfer "
+                "FROM transactions"
+            ).fetchall()
+        }
+
+    def _link(self, conn):
+        rows = self._rows(conn)
+        debit, credit = rows["bch_op_00000000001"], rows["email_mach_0001"]
+        (transfer,) = conn.execute(
+            """
+            INSERT INTO internal_transfers
+                (description, amount, from_product_id, to_product_id,
+                 transfer_date, from_transaction_id, to_transaction_id)
+            VALUES ('Traspaso sintetico', 1000000, %s, %s, '2026-08-20', %s, %s)
+            RETURNING id
+            """,
+            (debit["product_id"], credit["product_id"], debit["id"], credit["id"]),
+        ).fetchall()
+        conn.execute(
+            "UPDATE transactions SET is_internal_transfer = true WHERE id = ANY(%s)",
+            ([debit["id"], credit["id"]],),
+        )
+        return transfer["id"], debit["id"], credit["id"]
+
+    def test_a_rescrape_keeps_the_rows_the_flag_and_the_link(self, db_conn):
+        self._scrape()
+        transfer_id, debit_id, credit_id = self._link(db_conn)
+
+        # Same keys again, this time with a location to fill: the writer
+        # touches the stored rows but must not replace or unflag them.
+        self._scrape(location=TransactionLocation(city="Ciudad Sintetica"))
+
+        rows = self._rows(db_conn)
+        assert _count(db_conn, "transactions") == 2
+        assert rows["bch_op_00000000001"]["id"] == debit_id
+        assert rows["email_mach_0001"]["id"] == credit_id
+        assert all(row["is_internal_transfer"] for row in rows.values())
+        link = db_conn.execute(
+            "SELECT from_transaction_id, to_transaction_id "
+            "FROM internal_transfers WHERE id = %s",
+            (transfer_id,),
+        ).fetchone()
+        assert link == {
+            "from_transaction_id": debit_id,
+            "to_transaction_id": credit_id,
+        }
+
+    def test_one_row_serves_at_most_one_transfer(self, db_conn):
+        self._scrape()
+        _, debit_id, _ = self._link(db_conn)
+
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            db_conn.execute(
+                "INSERT INTO internal_transfers "
+                "(description, amount, transfer_date, from_transaction_id) "
+                "VALUES ('Otro traspaso sintetico', 1000000, '2026-08-20', %s)",
+                (debit_id,),
+            )
+
+    def test_deleting_a_linked_row_keeps_the_transfer(self, db_conn):
+        self._scrape()
+        transfer_id, debit_id, credit_id = self._link(db_conn)
+
+        db_conn.execute("DELETE FROM transactions WHERE id = %s", (debit_id,))
+
+        link = db_conn.execute(
+            "SELECT from_transaction_id, to_transaction_id "
+            "FROM internal_transfers WHERE id = %s",
+            (transfer_id,),
+        ).fetchone()
+        assert link == {"from_transaction_id": None, "to_transaction_id": credit_id}
+
+
 class TestBanChileUsdCardLocation:
     """The #79 USD statement path carries its location all the way to the row."""
 
