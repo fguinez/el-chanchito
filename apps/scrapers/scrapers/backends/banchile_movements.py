@@ -992,17 +992,28 @@ def cartola_account_number(payload) -> str:
     return ""
 
 
+def _currency_code(value) -> str:
+    """`value` as "CLP" or "USD" (any case); "" for anything else.
+
+    Only a recognised code is ever judged: a value we have not seen (a
+    renamed field, a label instead of a code) must not reject a cartola.
+    """
+    code = _text(value).upper()
+    return code if code in _CURRENCY_OPTION_RES else ""
+
+
 def _requested_currency(request_body) -> str:
     """The currency a `getCartola` request asked for ("" when it doesn't say).
 
     The request names the account in `cuentaSeleccionada`, `moneda` included.
+    Unverified on a live USD drive, so only a recognised code counts.
     """
     if not isinstance(request_body, dict):
         return ""
     selected = request_body.get("cuentaSeleccionada")
     if not isinstance(selected, dict):
         return ""
-    return _text(selected.get("moneda")).upper()
+    return _currency_code(selected.get("moneda"))
 
 
 def cartola_mismatch(
@@ -1016,9 +1027,10 @@ def cartola_mismatch(
     cartola (its rows would be stored as USD), and a later CLP drive must not
     take an account already read. The payload's own `moneda` is checked, and
     so is the one its request asked for (`request_body`), which still tells
-    an empty or `moneda`-less payload apart; neither is judged when absent.
+    an empty or `moneda`-less payload apart; neither is judged when absent or
+    not a recognised code ("CLP", "USD").
     """
-    moneda = _text(payload.get("moneda")).upper() if isinstance(payload, dict) else ""
+    moneda = _currency_code(payload.get("moneda")) if isinstance(payload, dict) else ""
     moneda = moneda or _requested_currency(request_body)
     if moneda and moneda != currency:
         return f"stale cartola (moneda {moneda})"

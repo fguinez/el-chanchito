@@ -1412,6 +1412,18 @@ class TestCartolaMismatch:
         assert mismatch(empty, "CLP", set(), usd_request) == "stale cartola (moneda USD)"
         assert mismatch(empty, "USD", set(), usd_request) == ""
 
+    def test_an_unrecognised_moneda_is_never_a_mismatch(self):
+        mismatch = movements_mod.cartola_mismatch
+        empty = {"movimientos": []}
+        odd_request = {"cuentaSeleccionada": {"moneda": "DOLAR"}}
+        assert mismatch({"moneda": "PESOS", "movimientos": []}, "USD") == ""
+        assert mismatch(empty, "CLP", set(), odd_request) == ""
+        # An unrecognised payload value falls back to a recognised request one.
+        clp_request = {"cuentaSeleccionada": {"moneda": "clp"}}
+        assert mismatch({"moneda": "PESOS"}, "USD", set(), clp_request) == (
+            "stale cartola (moneda CLP)"
+        )
+
     def test_a_payload_without_moneda_is_not_judged_on_it(self):
         assert movements_mod.cartola_mismatch({"movimientos": []}, "USD") == ""
 
@@ -1660,8 +1672,10 @@ class _FakeDialogPage:
         payload = self.cartolas.get(currency, {"movimientos": []})
         if isinstance(payload, list):
             payload = payload[picked]
-        if self.payload_moneda:
+        if self.payload_moneda is True:
             payload = {"moneda": currency, **payload}  # every live payload has one
+        elif self.payload_moneda:
+            payload = {"moneda": self.payload_moneda, **payload}
         response = _FakeResponse(self._CARTOLA_URL, payload, request=request)
         for handler in list(self.handlers.get("response", [])):
             handler(response)
@@ -2004,6 +2018,13 @@ class TestDialogSteps:
         found = _read_usd_dialog(page)
 
         assert [(m.currency, m.amount) for m in found] == [("USD", Decimal("-1234.56"))]
+
+    def test_a_drive_reads_payloads_with_an_unrecognised_moneda(self):
+        page = _FakeDialogPage(
+            payload_moneda="DOLARES", cartolas={"USD": {"movimientos": [_usd_cartola_row()]}}
+        )
+
+        assert [m.currency for m in _read_usd_dialog(page)] == ["USD"]
 
     def test_a_drive_reads_payloads_without_moneda(self):
         page = _FakeDialogPage(
