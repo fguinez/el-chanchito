@@ -440,8 +440,9 @@ covered by `fintself`, and Chile's open finance system isn't in force yet. Its
 web app is a single-page app over Firebase, so the scraper reproduces that
 app's sign-in over plain HTTP: Racional's own `authMfaStart` / `authMfaVerify`
 Cloud Functions (a 6-digit code e-mailed to the account), then Firebase Auth's
-`accounts:signInWithPassword`. Only the refresh token is kept
-(`.racional_session.json`, 0600): each run mints an ID token with it and runs,
+`accounts:signInWithPassword`. No password or ID token is kept: the session
+file (`.racional_session.json`, 0600) holds the refresh token, the uid, a
+device id and the public key, and each run mints an ID token and runs,
 through the Firestore REST API, the one query the web app runs itself
 (`portfolios` where `userId` is the signed-in uid). A full sign-in happens
 only through `make racional-login`, or unattended with the code read from IMAP

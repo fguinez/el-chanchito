@@ -195,8 +195,8 @@ Scheduled scrapes only renew that session: no sign-in and no e-mail. When it
 stops working, the run fails with "Racional session expired" and asks you to
 run `make racional-login` again. If `RACIONAL_EMAIL` is also `EMAIL_IMAP_USER`,
 the scraper signs in by itself instead, reading the code from that mailbox. If an
-automatic sign-in ever fails (a changed password, a code that never arrived),
-it stops trying until `make racional-login` succeeds, and each run's error
+automatic sign-in ever fails for anything but a network error (a changed
+password, a code that never arrived), it stops trying until `make racional-login` succeeds, and each run's error
 says what failed, so it can't lock the account by retrying every cycle.
 
 Each portfolio becomes its own investment product: CLP for Racional
