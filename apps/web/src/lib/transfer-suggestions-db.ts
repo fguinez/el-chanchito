@@ -14,6 +14,7 @@ import {
   eq,
   gte,
   inArray,
+  isNull,
   lt,
   ne,
   not,
@@ -687,6 +688,28 @@ async function confirmIn(
     }
   }
 
+  // A load that picked this pair before the user undid or dismissed it must
+  // not bring it back.
+  if (auto) {
+    const dismissed = await tx
+      .select({ id: dismissedTransferSuggestions.id })
+      .from(dismissedTransferSuggestions)
+      .where(
+        and(
+          eq(dismissedTransferSuggestions.sourceTransactionId, source.id),
+          input.targetTransactionId
+            ? eq(
+                dismissedTransferSuggestions.targetTransactionId,
+                input.targetTransactionId
+              )
+            : isNull(dismissedTransferSuggestions.targetTransactionId)
+        )
+      );
+    if (dismissed.length > 0) {
+      return failure(409, "La sugerencia fue descartada", "sourceTransactionId");
+    }
+  }
+
   const [created] = await tx
     .insert(internalTransfers)
     .values({
@@ -779,7 +802,9 @@ export async function confirmTransferSuggestion(
  * through confirmTransferSuggestion, and return what is left to show plus the
  * ids of the transfers created. Idempotent: a linked row drops out of the
  * candidates, and an undone link is dismissed. A confirm that fails (a
- * concurrent load linked the rows first) is skipped; the next load settles it.
+ * concurrent load linked the rows first, or the user dismissed the pair
+ * meanwhile) or throws is skipped, so the list still loads; the next load
+ * settles it.
  */
 export async function autoLinkSuggestions(
   today: string = formatLocalDate(new Date())
@@ -787,14 +812,20 @@ export async function autoLinkSuggestions(
   let suggestions = await loadTransferSuggestions(today);
   const autoLinked: string[] = [];
   for (const suggestion of pickAutoLinks(suggestions)) {
-    const outcome = await confirmTransferSuggestion(
-      {
-        sourceTransactionId: suggestion.source.transactionId,
-        targetTransactionId: suggestion.target.transactionId,
-        targetProductId: null,
-      },
-      { auto: true }
-    );
+    let outcome: ConfirmOutcome;
+    try {
+      outcome = await confirmTransferSuggestion(
+        {
+          sourceTransactionId: suggestion.source.transactionId,
+          targetTransactionId: suggestion.target.transactionId,
+          targetProductId: null,
+        },
+        { auto: true }
+      );
+    } catch (error) {
+      console.error(`Auto-linking suggestion ${suggestion.id} failed:`, error);
+      continue;
+    }
     if (!outcome.ok) continue;
     autoLinked.push(outcome.transferId);
     suggestions = withoutSettled(suggestions, suggestion, "confirm");
