@@ -62,6 +62,10 @@ export const SCORE_BALANCE_MATCH = 30;
 export const SCORE_PRODUCT_PAIR = 20;
 export const SCORE_PATTERN = 50;
 
+/** A pair scoring at least this is linked without asking (see
+ *  pickAutoLinks); one-sided suggestions always wait for the user. */
+export const AUTO_LINK_MIN_SCORE = 85;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -403,6 +407,33 @@ export function withoutSettled<T extends TransferSuggestion>(
         s.kind === "one_sided" &&
         s.source.transactionId === settled.source.transactionId
       )
+  );
+}
+
+/** Whether `suggestion` is confident enough to link on its own: a pair (two
+ *  real rows) scoring at least AUTO_LINK_MIN_SCORE. */
+export function isAutoLinkable(
+  suggestion: Pick<TransferSuggestion, "kind" | "score">
+): boolean {
+  return suggestion.kind === "pair" && suggestion.score >= AUTO_LINK_MIN_SCORE;
+}
+
+/** The suggestions to link without asking: auto-linkable ones that share
+ *  neither row with any other suggestion, since a row with two candidate
+ *  partners is the user's call. They never share rows with each other. */
+export function pickAutoLinks<T extends TransferSuggestion>(
+  suggestions: readonly T[]
+): T[] {
+  const rowsOf = (s: T) =>
+    [s.source.transactionId, s.target.transactionId].filter(
+      (id): id is string => id !== null
+    );
+  const uses = new Map<string, number>();
+  for (const s of suggestions) {
+    for (const id of rowsOf(s)) uses.set(id, (uses.get(id) ?? 0) + 1);
+  }
+  return suggestions.filter(
+    (s) => isAutoLinkable(s) && rowsOf(s).every((id) => uses.get(id) === 1)
   );
 }
 

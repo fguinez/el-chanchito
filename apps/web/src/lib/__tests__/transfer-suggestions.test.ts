@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  AUTO_LINK_MIN_SCORE,
   PATTERN_PREFIX_LENGTH,
   SCORE_BALANCE_MATCH,
   SCORE_DAY_PENALTY,
@@ -16,10 +17,12 @@ import {
   daysBetween,
   descriptionPrefix,
   findTransferKeyword,
+  isAutoLinkable,
   isMatchableName,
   lookbackStart,
   matchesPattern,
   normalizeText,
+  pickAutoLinks,
   scoreSuggestion,
   sortSuggestions,
   suggestionsForTransaction,
@@ -416,5 +419,77 @@ describe("withoutSettled", () => {
     expect(left.map((s) => s.source.transactionId).sort()).toEqual(
       [...sources].sort()
     );
+  });
+});
+
+describe("isAutoLinkable", () => {
+  it.each([
+    ["a pair at the bar", "pair", AUTO_LINK_MIN_SCORE, true],
+    ["a pair above the bar", "pair", AUTO_LINK_MIN_SCORE + 50, true],
+    ["a pair below the bar", "pair", AUTO_LINK_MIN_SCORE - 1, false],
+    ["a one-sided suggestion above the bar", "one_sided", 200, false],
+  ] as const)("%s", (_, kind, score, expected) => {
+    expect(isAutoLinkable({ kind, score })).toBe(expected);
+  });
+
+  it("takes a same-day pair with a transfer keyword", () => {
+    const [suggestion] = buildSuggestions([pair()]);
+
+    expect(suggestion.score).toBe(AUTO_LINK_MIN_SCORE);
+    expect(isAutoLinkable(suggestion)).toBe(true);
+  });
+
+  it("leaves a pair a day apart without a pattern to the user", () => {
+    const [suggestion] = buildSuggestions([pair({}, { date: "2026-09-16" })]);
+
+    expect(isAutoLinkable(suggestion)).toBe(false);
+  });
+});
+
+describe("pickAutoLinks", () => {
+  const OTHER_SOURCE = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const OTHER_TARGET = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  const lone = pair(
+    { transactionId: OTHER_SOURCE },
+    { transactionId: OTHER_TARGET }
+  );
+
+  it("picks an auto-linkable pair that shares no row", () => {
+    const picked = pickAutoLinks(buildSuggestions([pair(), lone]));
+
+    expect(picked.map((s) => s.source.transactionId).sort()).toEqual(
+      ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", OTHER_SOURCE].sort()
+    );
+  });
+
+  it("skips a debit with two possible partners", () => {
+    const suggestions = buildSuggestions([
+      pair(),
+      pair({}, { transactionId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" }),
+      lone,
+    ]);
+
+    expect(pickAutoLinks(suggestions).map((s) => s.source.transactionId)).toEqual(
+      [OTHER_SOURCE]
+    );
+  });
+
+  it("skips a credit two debits could explain", () => {
+    const suggestions = buildSuggestions([
+      pair(),
+      pair({ transactionId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" }),
+    ]);
+
+    expect(pickAutoLinks(suggestions)).toEqual([]);
+  });
+
+  it("skips a pair whose debit also has a one-sided suggestion", () => {
+    expect(pickAutoLinks(buildSuggestions([pair(), oneSided()]))).toEqual([]);
+  });
+
+  it("skips pairs below the bar", () => {
+    const weak = pair({ description: "Compra" }, { description: "Compra devuelta" });
+
+    expect(pickAutoLinks(buildSuggestions([weak]))).toEqual([]);
   });
 });
