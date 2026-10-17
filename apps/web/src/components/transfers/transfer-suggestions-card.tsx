@@ -70,6 +70,12 @@ function LegCell({ leg }: { leg: Leg }) {
   );
 }
 
+/** "transferencia de <origen> a <destino> por <monto>", naming the row for
+ *  screen readers. */
+function suggestionLabel(s: TransferSuggestion): string {
+  return `transferencia de ${s.source.productName} a ${s.target.productName} por ${formatCLP(s.amount)}`;
+}
+
 /** The confirm or dismiss body for a suggestion. */
 function confirmBody(s: TransferSuggestion) {
   return s.kind === "pair"
@@ -280,6 +286,7 @@ export function TransferSuggestionsCard({
                         size="sm"
                         disabled={busy}
                         onClick={() => act(s, "confirm")}
+                        aria-label={`Confirmar ${suggestionLabel(s)}`}
                       >
                         Confirmar
                       </Button>
@@ -288,6 +295,7 @@ export function TransferSuggestionsCard({
                         variant="outline"
                         disabled={busy}
                         onClick={() => act(s, "dismiss")}
+                        aria-label={`Descartar ${suggestionLabel(s)}`}
                       >
                         Descartar
                       </Button>
