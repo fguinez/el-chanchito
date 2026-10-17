@@ -53,15 +53,35 @@ const fixedExpenseSchema = z.object({
   activeTo: isoDate.nullable(),
 });
 
+/** Both bounds given and the window ends before it starts: fails on activeTo.
+ *  PUT also checks the merged window against the stored row. */
+function windowIsOrdered(value: {
+  activeFrom?: string | null;
+  activeTo?: string | null;
+}): boolean {
+  const { activeFrom, activeTo } = value;
+  return activeFrom == null || activeTo == null || activeFrom <= activeTo;
+}
+
+const orderedWindow = {
+  error: "The active window must not end before it starts",
+  path: ["activeTo"],
+};
+
 /** POST /api/fixed-expenses: name and amount are required. */
 export const createFixedExpenseSchema = fixedExpenseSchema
   .partial({ sharedRatio: true, activeFrom: true, activeTo: true })
-  .extend({ isShared: z.boolean().nullish() });
+  .extend({ isShared: z.boolean().nullish() })
+  .refine(windowIsOrdered, orderedWindow);
 
-/** PUT /api/fixed-expenses: any subset of the fields, by id. */
+/** PUT /api/fixed-expenses: a non-empty subset of the fields, by id. */
 export const updateFixedExpenseSchema = fixedExpenseSchema
   .partial()
-  .extend({ id: rowId });
+  .extend({ id: rowId })
+  .refine(windowIsOrdered, orderedWindow)
+  .refine((body) => Object.keys(body).some((key) => key !== "id"), {
+    error: "No updatable fields provided",
+  });
 
 /** POST /api/import. Rows are checked one by one (csvRowSchema) so a bad
  *  line is skipped instead of failing the whole file. */

@@ -265,6 +265,28 @@ describe("POST /api/fixed-expenses", () => {
 });
 
 describe("PUT /api/fixed-expenses", () => {
+  // PUT reads the stored row before writing; a shared one keeps the ratio
+  // rules of mergeFixedExpenseUpdate in play.
+  beforeEach(() => {
+    fake.respondWith((query) => {
+      if (query.op === "select") {
+        return [
+          {
+            id: ROW_ID,
+            isShared: true,
+            sharedRatio: "0.5000",
+            activeFrom: null,
+            activeTo: null,
+          },
+        ];
+      }
+      if (query.op === "update") {
+        return [{ id: ROW_ID, ...(argOf(query, "set") as object) }];
+      }
+      return [];
+    });
+  });
+
   it("writes only the named fields, zeros included", async () => {
     const response = await fixedExpenses.PUT(
       jsonRequest("PUT", {
@@ -283,7 +305,9 @@ describe("PUT /api/fixed-expenses", () => {
 
   it.each([
     [{ sharedRatio: 0.5 }, "0.5"],
-    [{ sharedRatio: null }, null],
+    // Still shared, so a cleared ratio falls back to the default.
+    [{ sharedRatio: null }, "0.6900"],
+    [{ isShared: false }, null],
     [{ name: "Gasto de prueba" }, undefined],
   ])("maps %j to a sharedRatio of %j", async (fields, expected) => {
     await fixedExpenses.PUT(jsonRequest("PUT", { id: ROW_ID, ...fields }));
@@ -307,6 +331,7 @@ describe("PUT /api/fixed-expenses", () => {
     [{ name: "Gasto de prueba" }, "id"],
     [{ id: "7", name: "Gasto de prueba" }, "id"],
     [{ id: ROW_ID, name: "" }, "name"],
+    [{ id: ROW_ID, activeFrom: "2026-09-02", activeTo: "2026-09-01" }, "activeTo"],
   ])("rejects %j on %s", async (body, field) => {
     await expectRejected(await fixedExpenses.PUT(jsonRequest("PUT", body)), field);
   });
