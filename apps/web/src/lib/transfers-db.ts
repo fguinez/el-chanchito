@@ -18,6 +18,7 @@ import {
   type SQL,
 } from "drizzle-orm";
 import { db } from "@/lib/db";
+import { notDeleted } from "@/lib/db/transactions";
 import { isUniqueViolation } from "@/lib/management";
 import {
   accounts,
@@ -108,6 +109,8 @@ export async function loadTransfers(where?: SQL) {
         institutionSlug: toInstitution.slug,
         institutionName: toInstitution.name,
       },
+      // The linked-row display stays the raw scraped description for now; the
+      // V034 custom override is out of Phase 1's transfer scope.
       fromTxn: {
         id: fromTxn.id,
         transactionDate: fromTxn.transactionDate,
@@ -262,7 +265,7 @@ export async function applyTransferLinks(
       })
       .from(transactions)
       // A soft-deleted row (V033) is not a valid link target.
-      .where(and(inArray(transactions.id, requestedIds), isNull(transactions.deletedAt)))
+      .where(and(inArray(transactions.id, requestedIds), notDeleted))
       // Held until commit: a row deleted between this check and the UPDATE
       // below would otherwise fail the FK (23503) as a 500. KEY SHARE is
       // what the FK itself takes, so scraper updates are not blocked.
@@ -440,7 +443,7 @@ export async function loadTransferCandidates(transferId: string) {
             and(
               eq(transactions.productId, productId),
               // Soft-deleted rows (V033) are never offered as link candidates.
-              isNull(transactions.deletedAt),
+              notDeleted,
               or(
                 and(
                   eq(
@@ -463,12 +466,7 @@ export async function loadTransferCandidates(transferId: string) {
         db
           .select({ id: transactions.id })
           .from(transactions)
-          .where(
-            and(
-              eq(transactions.productId, productId),
-              isNull(transactions.deletedAt)
-            )
-          )
+          .where(and(eq(transactions.productId, productId), notDeleted))
           .limit(1),
       ]);
       const candidates: TransferCandidate[] = rows.map((row) => ({

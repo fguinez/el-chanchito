@@ -8,7 +8,8 @@ import {
   productSnapshots,
   transactions,
 } from "@/lib/db/schema";
-import { and, eq, desc, isNull } from "drizzle-orm";
+import { and, eq, desc } from "drizzle-orm";
+import { displayDescription, notDeleted } from "@/lib/db/transactions";
 import { rateInfoFor, ratesFor, toClp } from "@/lib/rates";
 import { getRateBook } from "@/lib/rate-book";
 import { isRetiredGhost } from "@/lib/retired-products";
@@ -131,7 +132,8 @@ export async function GET(_request: Request, { params }: Context) {
     db
       .select({
         id: transactions.id,
-        description: transactions.description,
+        // Show the custom override when set, else the scraped text (V034).
+        description: displayDescription,
         amount: transactions.amount,
         transactionDate: transactions.transactionDate,
         source: transactions.source,
@@ -144,10 +146,7 @@ export async function GET(_request: Request, { params }: Context) {
       .from(transactions)
       // Soft-deleted rows (V033) drop out of the product's movement list.
       .where(
-        and(
-          eq(transactions.productId, row.productId),
-          isNull(transactions.deletedAt)
-        )
+        and(eq(transactions.productId, row.productId), notDeleted)
       )
       // createdAt breaks same-day ties so the order is stable across loads.
       .orderBy(

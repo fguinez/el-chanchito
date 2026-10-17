@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { and, eq, isNull, or } from "drizzle-orm";
+import { and, eq, or } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   accounts,
@@ -10,6 +10,7 @@ import {
   transactions,
   type TransferStatus,
 } from "@/lib/db/schema";
+import { displayDescription, notDeleted } from "@/lib/db/transactions";
 import { UUID_RE } from "@/lib/monitors/validate";
 import type { ProductKind } from "@chanchito/product-model";
 import {
@@ -29,7 +30,12 @@ export interface TransactionDetail {
   id: string;
   productId: string;
   categoryId: string | null;
+  /** The scraped (or manual) original, kept immutable for scraped rows (V034). */
   description: string;
+  /** The one-time override the user set, or null; `description` otherwise. */
+  customDescription: string | null;
+  /** What to show: the custom override when set, else `description` (V034). */
+  displayDescription: string;
   /** Signed amount in the product's currency: negative = expense. */
   amount: number;
   /** Plain YYYY-MM-DD dates. */
@@ -76,6 +82,8 @@ const detailColumns = {
   productId: transactions.productId,
   categoryId: transactions.categoryId,
   description: transactions.description,
+  customDescription: transactions.customDescription,
+  displayDescription: displayDescription,
   amount: transactions.amount,
   transactionDate: transactions.transactionDate,
   accountingDate: transactions.accountingDate,
@@ -135,7 +143,7 @@ async function loadTransactionDetail(id: string) {
     .innerJoin(institutions, eq(accounts.institutionId, institutions.id))
     .leftJoin(categories, eq(transactions.categoryId, categories.id))
     // A soft-deleted row (V033) is gone as far as the dashboard is concerned.
-    .where(and(eq(transactions.id, id), isNull(transactions.deletedAt)))
+    .where(and(eq(transactions.id, id), notDeleted))
     .limit(1);
 
   if (!row) {
@@ -169,6 +177,8 @@ async function loadTransactionDetail(id: string) {
     productId: row.productId,
     categoryId: row.categoryId,
     description: row.description,
+    customDescription: row.customDescription,
+    displayDescription: row.displayDescription,
     amount: row.amount,
     transactionDate: row.transactionDate,
     accountingDate: row.accountingDate,
@@ -218,6 +228,7 @@ async function loadTransactionDetail(id: string) {
 // update can be built from only the fields the body carries.
 type TransactionUpdate = Partial<{
   description: string;
+  customDescription: string | null;
   amount: number;
   transactionDate: string;
   categoryId: string | null;
@@ -236,9 +247,18 @@ type TransactionUpdate = Partial<{
 
 /**
  * PATCH /api/transactions/[id]: edit a transaction. The body is a non-empty
- * subset of `description`, `amount` (signed CLP; negative = expense),
- * `transactionDate`, `scheduledMonth` (null unassigns it), `categoryId` (null
- * clears the category), `isInternalTransfer`, `productId` and `location`.
+ * subset of `description`, `customDescription`, `amount` (signed CLP; negative =
+ * expense), `transactionDate`, `scheduledMonth` (null unassigns it), `categoryId`
+ * (null clears the category), `isInternalTransfer`, `productId` and `location`.
+ *
+ * Description redirect (V034): a scraped row (one with an `external_id`) keeps
+ * its `description` as the immutable bank text, so an edit to `description`
+ * lands on `custom_description` instead (the one-time override); a manual row
+ * (no `external_id`) edits `description` directly. An explicit
+ * `customDescription` always writes the override (null clears it, restoring the
+ * original) and wins when both are present. Either one preloads the row's
+ * `external_id` to pick the target, so a missing/deleted row 404s before the
+ * write.
  *
  * `location` keeps the contract the detail panel's location field relies on:
  * `{ name?, city?, country?, latitude?, longitude? } | null` replaces the
@@ -279,7 +299,37 @@ export async function PATCH(request: NextRequest, { params }: Context) {
   const body = parsed.data;
 
   const update: TransactionUpdate = { updatedAt: new Date() };
-  if (body.description !== undefined) update.description = body.description;
+
+  // A `description` or `customDescription` edit needs the row's external_id to
+  // route it (V034): a scraped row keeps `description` immutable. Only these
+  // bodies preload it, so an unrelated edit keeps its current query sequence.
+  if (body.description !== undefined || body.customDescription !== undefined) {
+    const [row] = await db
+      .select({ externalId: transactions.externalId })
+      .from(transactions)
+      .where(and(eq(transactions.id, id), notDeleted))
+      .limit(1);
+    if (!row) {
+      return NextResponse.json(
+        { error: "Transaction not found" },
+        { status: 404 }
+      );
+    }
+    if (body.customDescription !== undefined) {
+      // An explicit override wins over a `description` edit, and null clears it
+      // (restoring the scraped/manual original).
+      update.customDescription = body.customDescription;
+    } else if (body.description !== undefined) {
+      const scraped = row.externalId !== null && row.externalId !== "";
+      if (scraped) {
+        // The scraped text stays as it is; the edit lands on the override.
+        update.customDescription = body.description;
+      } else {
+        update.description = body.description;
+      }
+    }
+  }
+
   if (body.amount !== undefined) update.amount = body.amount;
   if (body.transactionDate !== undefined)
     update.transactionDate = body.transactionDate;
@@ -321,7 +371,7 @@ export async function PATCH(request: NextRequest, { params }: Context) {
       .update(transactions)
       .set(update)
       // Never edit a soft-deleted row.
-      .where(and(eq(transactions.id, id), isNull(transactions.deletedAt)))
+      .where(and(eq(transactions.id, id), notDeleted))
       .returning({ id: transactions.id });
     if (!updated) {
       return NextResponse.json(
@@ -362,7 +412,7 @@ export async function DELETE(_request: Request, { params }: Context) {
     const [row] = await db
       .select({ externalId: transactions.externalId })
       .from(transactions)
-      .where(and(eq(transactions.id, id), isNull(transactions.deletedAt)))
+      .where(and(eq(transactions.id, id), notDeleted))
       .limit(1);
     if (!row) {
       return NextResponse.json(

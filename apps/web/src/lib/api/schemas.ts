@@ -145,12 +145,16 @@ export const createTransactionSchema = z.object({
 
 /** PATCH /api/transactions/[id]: a non-empty subset of a transaction's
  *  editable fields (the id comes from the URL). `categoryId` null clears the
- *  category; `scheduledMonth` null unassigns the budget month. `location` is
- *  passed through untouched and checked by validateLocationInput in the route,
- *  as POST /api/transactions does. */
+ *  category; `scheduledMonth` null unassigns the budget month.
+ *  `customDescription` is the one-time override (V034): a non-empty string sets
+ *  it, null clears it (restoring the original); an empty string is rejected.
+ *  `location` is passed through untouched and checked by validateLocationInput
+ *  in the route, as POST /api/transactions does. */
 export const updateTransactionSchema = z
   .object({
     description: requiredText,
+    // Non-empty to set the one-time override, null to clear it (V034).
+    customDescription: z.string().trim().min(1).nullable(),
     // Kept to 2 decimals so a USD row keeps its cents; CLP rounds to pesos.
     amount: moneyAmount,
     transactionDate: isoDate,

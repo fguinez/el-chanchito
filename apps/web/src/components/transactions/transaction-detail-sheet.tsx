@@ -171,6 +171,21 @@ export function TransactionDetailSheet({
   );
 }
 
+/** The row carries a non-empty one-time override (V034). */
+function hasCustomDescription(txn: TransactionDetail): boolean {
+  return txn.customDescription !== null && txn.customDescription !== "";
+}
+
+/** Whether to surface the scraped original: a custom override is in effect, or
+ *  a scraped row has one set (even if it happens to read the same). */
+function showOriginalDescription(txn: TransactionDetail): boolean {
+  const scraped = txn.externalId !== null && txn.externalId !== "";
+  return (
+    txn.description !== txn.displayDescription ||
+    (scraped && hasCustomDescription(txn))
+  );
+}
+
 function TransactionDetailBody({
   txn,
   onLocationSaved,
@@ -194,7 +209,7 @@ function TransactionDetailBody({
     <>
       <SheetHeader className="border-b">
         <SheetTitle className="text-lg leading-snug break-words">
-          {txn.description}
+          {txn.displayDescription}
         </SheetTitle>
         <p
           className={cn(
@@ -237,6 +252,16 @@ function TransactionDetailBody({
           )}
           {!editing && (
           <>
+          {showOriginalDescription(txn) && (
+            <Field label="Descripción original">
+              <span className="inline-flex flex-wrap items-center gap-2">
+                {txn.description}
+                {hasCustomDescription(txn) && (
+                  <Badge variant="secondary">personalizada</Badge>
+                )}
+              </span>
+            </Field>
+          )}
           <Field label="Fecha de transacción">
             {formatPlainDateEs(txn.transactionDate)}
           </Field>

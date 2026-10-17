@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { and, count, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, count, desc, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { products, transactions } from "@/lib/db/schema";
+import { notDeleted } from "@/lib/db/transactions";
 import { failureBody, normalizeKeyword } from "@/lib/categories";
 
 const PREVIEW_LIMIT = 20;
@@ -25,9 +26,10 @@ export async function GET(request: NextRequest) {
     }
 
     // A soft-deleted row (V033) is not a match a rule could ever categorize.
+    // The rule matches the raw scraped `description`, not the custom override.
     const matches = and(
       sql`strpos(lower(${transactions.description}), lower(${keyword.value})) > 0`,
-      isNull(transactions.deletedAt)
+      notDeleted
     );
     const uncategorized = sql<number>`count(*) FILTER (
       WHERE ${transactions.categoryId} IS NULL
