@@ -33,6 +33,7 @@ import type {
   ProductKind,
   ProductMetrics,
 } from "@chanchito/product-model";
+import type { RateInfo } from "@/lib/rates";
 
 export interface InstitutionProduct {
   id: string;
@@ -45,6 +46,8 @@ export interface InstitutionProduct {
   currency: string;
   currentBalance: number | null;
   currentBalanceClp: number | null;
+  /** The rate behind currentBalanceClp; null for CLP or unconvertible. */
+  exchangeRate: RateInfo | null;
   balanceAsOf: string | null;
   externalRef: string | null;
   attributes: ProductAttributes | Record<string, never>;
