@@ -34,6 +34,9 @@ export const TRANSFER_KEYWORDS = [
   "Pago TC",
 ] as const;
 
+/** The /transfers anchor of the Sugeridas card (the detail panel links it). */
+export const SUGGESTIONS_ANCHOR = "sugeridas";
+
 /** Characters of the normalised description kept as a pattern prefix. */
 export const PATTERN_PREFIX_LENGTH = 20;
 

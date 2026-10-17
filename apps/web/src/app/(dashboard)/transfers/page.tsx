@@ -31,6 +31,7 @@ import {
 } from "@/lib/transfers";
 import { hrefWithSearchParam, TXN_PARAM } from "@/lib/transaction-selection";
 import { TransferLinksDialog } from "@/components/transfers/transfer-links-dialog";
+import { TransferSuggestionsCard } from "@/components/transfers/transfer-suggestions-card";
 import { Trash2, Check, Link2 } from "lucide-react";
 
 interface InternalTransfer {
@@ -180,6 +181,14 @@ export default function TransfersPage() {
     loadTransfers();
   }, []);
 
+  // Any change to the transfers can change the suggestions (a deleted or
+  // unlinked transfer frees its rows), so both lists reload together.
+  const [suggestionsKey, setSuggestionsKey] = useState(0);
+  const refreshAll = () => {
+    loadTransfers();
+    setSuggestionsKey((n) => n + 1);
+  };
+
   // A `#transfer-<id>` link (from the transaction detail panel) names a row
   // that only exists once the list has loaded: scroll to it then, once, and
   // highlight it briefly.
@@ -259,7 +268,7 @@ export default function TransfersPage() {
       setDescription("");
       setAmount("");
       setNotes("");
-      loadTransfers();
+      refreshAll();
     } catch {
       setError("No se pudo registrar el movimiento");
     } finally {
@@ -273,7 +282,7 @@ export default function TransfersPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id, status: "resolved" }),
     });
-    loadTransfers();
+    refreshAll();
   };
 
   const handleDelete = async (id: string) => {
@@ -282,7 +291,7 @@ export default function TransfersPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id }),
     });
-    loadTransfers();
+    refreshAll();
   };
 
   const pending = transfers.filter((t) => t.status === "pending");
@@ -430,6 +439,12 @@ export default function TransfersPage() {
         </CardContent>
       </Card>
 
+      {/* Suggested transfers (hidden when there are none) */}
+      <TransferSuggestionsCard
+        reloadKey={suggestionsKey}
+        onConfirmed={loadTransfers}
+      />
+
       {/* Pending transfers */}
       <Card>
         <CardHeader>
@@ -556,7 +571,7 @@ export default function TransfersPage() {
                       <div className="flex items-center gap-1">
                         <TransferLinksDialog
                           transfer={t}
-                          onSaved={loadTransfers}
+                          onSaved={refreshAll}
                         />
                         <button
                           onClick={() => handleResolve(t.id)}
@@ -700,7 +715,7 @@ export default function TransfersPage() {
                       <div className="flex items-center gap-1">
                         <TransferLinksDialog
                           transfer={t}
-                          onSaved={loadTransfers}
+                          onSaved={refreshAll}
                         />
                         <button
                           onClick={() => handleDelete(t.id)}
