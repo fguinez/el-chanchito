@@ -551,8 +551,10 @@ the checking cartola, reached by driving the account-selection dialog that
 defaults to the USD account (it opens by itself only until an account is
 chosen; the SPA then remembers that account for the browser session and the
 route shows its cartola directly, so later drives reopen the dialog with the
-"SELECCIONAR OTRA CUENTA" button); the card's unbilled movements, which the SPA loads
-when the card page opens; and the card's billed statements, the newest two,
+"SELECCIONAR OTRA CUENTA" button once that view has settled, and skip the
+remembered account's automatic `getCartola`: a payload whose `moneda` or account
+is not the drive's is never read); the card's unbilled movements, which the SPA
+loads when the card page opens (the checking reads hand it a rendered dashboard); and the card's billed statements, the newest two,
 read by replaying the SPA's own statement request with a different
 `fechaFacturacion`. Only calls whose body is fully known are composed (the
 per-movement `cartola/detalle-glosa` that carries the operation id, spaced and
