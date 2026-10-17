@@ -70,6 +70,19 @@ export function formatDateEs(iso: string): string {
   return new Date(iso).toLocaleDateString("es-CL");
 }
 
+/** es-CL local date plus 24-hour time from an ISO timestamp
+ *  ("09-07-2026, 14:00"); es-CL defaults to a 12-hour clock, hence h23. */
+export function formatDateTimeEs(iso: string): string {
+  return new Date(iso).toLocaleString("es-CL", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+}
+
 /** Short es-CL date and time for an ISO timestamp. */
 export function formatTimestampEs(iso: string): string {
   return new Date(iso).toLocaleString("es-CL", {
