@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import {
   wealthSnapshots,
@@ -15,6 +15,11 @@ import { ratesFor } from "@/lib/rates";
 import { getRateBook } from "@/lib/rate-book";
 import { assetClp, debtClp } from "@/lib/networth";
 import { formatLocalDate } from "@/lib/monitors/history";
+import { withJsonBody } from "@/lib/api/validation";
+import {
+  createWealthSnapshotSchema,
+  deleteWealthSnapshotSchema,
+} from "@/lib/api/schemas";
 
 interface WealthPoint {
   id: string;
@@ -197,58 +202,25 @@ export async function GET() {
 }
 
 /** POST /api/wealth — create a manual wealth snapshot */
-export async function POST(request: NextRequest) {
-  const body = await request.json();
-
-  const {
-    snapshotDate,
-    patrimonio,
-    deuda,
-    fintualBalance,
-    mercadopagoBalance,
-    banchileSavings,
-    notes,
-  } = body;
-
-  if (!snapshotDate || patrimonio === undefined) {
-    return NextResponse.json(
-      { error: "Missing required fields: snapshotDate, patrimonio" },
-      { status: 400 }
-    );
-  }
-
+export const POST = withJsonBody(createWealthSnapshotSchema, async (body) => {
   const [created] = await db
     .insert(wealthSnapshots)
     .values({
-      snapshotDate,
-      patrimonio: Math.round(patrimonio),
-      deuda: Math.round(deuda ?? 0),
-      fintualBalance: fintualBalance != null ? Math.round(fintualBalance) : null,
-      mercadopagoBalance:
-        mercadopagoBalance != null ? Math.round(mercadopagoBalance) : null,
-      banchileSavings:
-        banchileSavings != null ? Math.round(banchileSavings) : null,
-      notes: notes ?? null,
+      snapshotDate: body.snapshotDate,
+      patrimonio: body.patrimonio,
+      deuda: body.deuda ?? 0,
+      fintualBalance: body.fintualBalance ?? null,
+      mercadopagoBalance: body.mercadopagoBalance ?? null,
+      banchileSavings: body.banchileSavings ?? null,
+      notes: body.notes ?? null,
     })
     .returning();
 
   return NextResponse.json(created, { status: 201 });
-}
+});
 
 /** DELETE /api/wealth — delete a manual snapshot (computed points are derived) */
-export async function DELETE(request: NextRequest) {
-  const { id } = await request.json();
-
-  if (!id) {
-    return NextResponse.json({ error: "Missing id" }, { status: 400 });
-  }
-  if (typeof id === "string" && id.startsWith("computed-")) {
-    return NextResponse.json(
-      { error: "Computed points are derived from product balances and cannot be deleted" },
-      { status: 400 }
-    );
-  }
-
+export const DELETE = withJsonBody(deleteWealthSnapshotSchema, async ({ id }) => {
   await db.delete(wealthSnapshots).where(eq(wealthSnapshots.id, id));
   return NextResponse.json({ ok: true });
-}
+});

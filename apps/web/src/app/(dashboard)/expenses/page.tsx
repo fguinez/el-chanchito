@@ -20,7 +20,12 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useSortableData } from "@/lib/use-sortable-data";
-import { formatAmount, formatCLP, formatPlainDateEs } from "@/lib/utils";
+import {
+  formatAmount,
+  formatCLP,
+  formatPlainDateEs,
+  parseNumberInput,
+} from "@/lib/utils";
 import { clpTotals } from "@/lib/transactions";
 import { CsvImport } from "@/components/dashboard/CsvImport";
 import { TransactionDetailSheet } from "@/components/transactions/transaction-detail-sheet";
@@ -103,7 +108,8 @@ function ExpensesView() {
   }, []);
 
   const handleAdd = async () => {
-    if (!description || !amount) return;
+    const parsedAmount = parseNumberInput(amount);
+    if (!description || parsedAmount === null) return;
 
     setSaving(true);
     try {
@@ -112,7 +118,7 @@ function ExpensesView() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           description,
-          amount: -Math.abs(parseInt(amount)), // expenses are negative
+          amount: -Math.abs(Math.round(parsedAmount)), // expenses are negative
           transactionDate,
           // Optional; the detail panel edits the rest of the location.
           ...(place.trim() && { location: { name: place } }),

@@ -21,7 +21,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { DEFAULT_SHARED_RATIO } from "@/lib/fixed-expenses";
 import { useSortableData } from "@/lib/use-sortable-data";
-import { formatCLP } from "@/lib/utils";
+import { formatCLP, parseNumberInput } from "@/lib/utils";
 import { calcPersonalAmount } from "@/lib/budget-engine";
 import { Trash2 } from "lucide-react";
 
@@ -57,7 +57,11 @@ export default function FixedExpensesPage() {
   }, []);
 
   const handleAdd = async () => {
-    if (!name || !amount) return;
+    const parsedAmount = parseNumberInput(amount);
+    // A blank ratio goes out as null, which the API fills with its default.
+    const parsedRatio = isShared ? parseNumberInput(sharedRatio) : null;
+    if (!name || parsedAmount === null) return;
+    if (parsedRatio !== null && (parsedRatio < 0 || parsedRatio > 1)) return;
 
     setSaving(true);
     try {
@@ -66,9 +70,9 @@ export default function FixedExpensesPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name,
-          amount: parseInt(amount),
+          amount: Math.round(parsedAmount),
           isShared,
-          sharedRatio: isShared ? parseFloat(sharedRatio) : null,
+          sharedRatio: parsedRatio,
         }),
       });
 
@@ -189,6 +193,8 @@ export default function FixedExpensesPage() {
                 <Input
                   type="number"
                   step="0.01"
+                  min="0"
+                  max="1"
                   value={sharedRatio}
                   onChange={(e) => setSharedRatio(e.target.value)}
                 />
