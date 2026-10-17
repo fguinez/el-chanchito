@@ -9,6 +9,7 @@ gets its own freshly migrated database (see conftest.py) and is skipped unless
 TEST_DATABASE_URL is set. Every figure and identifier is synthetic.
 """
 
+import os
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID
@@ -219,6 +220,33 @@ class TestResolveProduct:
         upsert_product(_checking(balance=1000000, name="Cuenta Sintetica"))
 
         assert _only_product(db_conn)["name"] == "Cuenta Sintetica"
+
+    def test_a_nameless_resolve_keeps_the_scrapers_name(self, db_conn):
+        """The transaction path resolves without a name; it must not flip a
+        named product back to the generic default on every scrape."""
+        upsert_product(_checking(name="Tarjeta Sintetica"))
+        with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
+            writer._resolve_product(conn, "banchile", "checking", "CLP")
+
+        product = _only_product(db_conn)
+        assert (product["name"], product["default_name"]) == (
+            "Tarjeta Sintetica",
+            "Tarjeta Sintetica",
+        )
+
+    def test_a_nameless_first_write_takes_the_generic_default(self, db_conn):
+        """A product first created by the transaction path picks up the
+        scraper's name on the next named upsert."""
+        with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
+            writer._resolve_product(conn, "banchile", "checking", "CLP")
+        assert _only_product(db_conn)["default_name"] == "Banco de Chile - checking"
+
+        upsert_product(_checking(name="Tarjeta Sintetica"))
+        product = _only_product(db_conn)
+        assert (product["name"], product["default_name"]) == (
+            "Tarjeta Sintetica",
+            "Tarjeta Sintetica",
+        )
 
     def test_an_insert_without_default_name_copies_the_name(self, db_conn):
         """V027's trigger keeps an inserter that predates the column working."""

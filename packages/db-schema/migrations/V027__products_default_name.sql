@@ -14,9 +14,13 @@
 --                  step; once the user renames it, the writer leaves it alone.
 --                  Resetting from the dashboard copies default_name back.
 --
--- BACKFILL: default_name = name for every existing row. No product has been
--- renamed through the dashboard yet, so every stored name is still the
--- writer's default.
+-- BACKFILL: default_name = name for every existing row, i.e. every stored
+-- name is treated as the default (no product has been renamed through the
+-- dashboard yet). Some legacy names do not match what the writer would
+-- generate today (pre-V009 rows were named "<slug> - <account_type>", and
+-- older non-CLP rows lack the " (USD)" suffix); the next named scrape may
+-- normalize those, and displayProductName already shows such generic names
+-- as the kind label.
 --
 -- The BEFORE INSERT trigger fills a missing default_name from name, so an
 -- inserter that predates this column (a scraper process started before the
