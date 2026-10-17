@@ -9,6 +9,7 @@ import {
   numeric,
   jsonb,
   uniqueIndex,
+  unique,
   index,
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
@@ -396,6 +397,62 @@ export const internalTransfers = pgTable("internal_transfers", {
     .notNull()
     .defaultNow(),
 });
+
+// Transfer suggestions the user dismissed (V031): the outgoing row and the
+// incoming one of a pair, or a null target for a one-sided suggestion. One row
+// per (source, target), the null target included.
+export const dismissedTransferSuggestions = pgTable(
+  "dismissed_transfer_suggestions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceTransactionId: uuid("source_transaction_id")
+      .notNull()
+      .references(() => transactions.id, { onDelete: "cascade" }),
+    targetTransactionId: uuid("target_transaction_id").references(
+      () => transactions.id,
+      { onDelete: "cascade" }
+    ),
+    dismissedAt: timestamp("dismissed_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    unique("uq_dismissed_transfer_suggestions_pair")
+      .on(table.sourceTransactionId, table.targetTransactionId)
+      .nullsNotDistinct(),
+    index("idx_dismissed_transfer_suggestions_target").on(
+      table.targetTransactionId
+    ),
+  ]
+);
+
+// Confirmed transfer suggestions, kept as patterns (V031): later rows with the
+// same products and description prefix (see lib/transfer-suggestions
+// descriptionPrefix) rank first.
+export const confirmedTransferPatterns = pgTable(
+  "confirmed_transfer_patterns",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceProductId: uuid("source_product_id")
+      .notNull()
+      .references(() => products.id, { onDelete: "cascade" }),
+    targetProductId: uuid("target_product_id")
+      .notNull()
+      .references(() => products.id, { onDelete: "cascade" }),
+    descriptionPrefix: text("description_prefix").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    unique("uq_confirmed_transfer_patterns").on(
+      table.sourceProductId,
+      table.targetProductId,
+      table.descriptionPrefix
+    ),
+    index("idx_confirmed_transfer_patterns_target").on(table.targetProductId),
+  ]
+);
 
 // Scraper runs
 export const scraperRuns = pgTable(
