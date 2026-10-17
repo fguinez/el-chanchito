@@ -252,6 +252,36 @@ export const categoryRules = pgTable(
   (table) => [index("idx_category_rules_priority").on(table.priority)]
 );
 
+// How an alias matches a scraped description (V035). No CHECK beyond the
+// migration's, so the API validates against this list.
+export const MATCH_TYPES = ["exact", "substring"] as const;
+export type MatchType = (typeof MATCH_TYPES)[number];
+
+// Reusable description aliases (V035). Unlike category rules, which materialize
+// their decision onto the row, an alias is resolved at READ time by
+// `alias_for_transaction`, so editing or deleting one updates every list right
+// away with no backfill. The scraped `description` is never overwritten; the
+// alias only changes what is shown. Matching is case-insensitive: exact =
+// trimmed whole-string equality, substring = literal strpos. Ties: priority
+// desc, then oldest, then id. (Phase 3 will add amountMin/amountMax/currency.)
+export const descriptionAliases = pgTable(
+  "description_aliases",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    matchDescription: text("match_description").notNull(),
+    matchType: text("match_type").$type<MatchType>().notNull().default("exact"),
+    alias: text("alias").notNull(),
+    priority: integer("priority").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [index("idx_description_aliases_priority").on(table.priority)]
+);
+
 // Transactions: one money movement on a product
 export const transactions = pgTable(
   "transactions",
