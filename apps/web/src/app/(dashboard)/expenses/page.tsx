@@ -134,19 +134,34 @@ function ExpensesView() {
   // CLP-only products for the manual form, like the transfers picker.
   const { institutions } = useActiveProducts(CLP);
 
-  // Any day of the picked month: the API reads the month off the string.
-  const loadTransactions = useCallback(() => {
-    fetch(`/api/transactions?month=${month}-01&limit=${limit}`)
-      .then((res) => res.json())
-      .then((rows: Transaction[]) => {
-        setTransactions(rows);
-        setHasMore(rows.length >= limit);
-      })
-      .catch(console.error);
-  }, [month, limit]);
+  // Any day of the picked month: the API reads the month off the string. The
+  // optional AbortSignal drops a slower older response (e.g. after a rapid
+  // month switch) so it cannot overwrite a newer one.
+  const loadTransactions = useCallback(
+    (signal?: AbortSignal) => {
+      fetch(`/api/transactions?month=${month}-01&limit=${limit}`, { signal })
+        .then((res) => {
+          // A 4xx/5xx body is { error, ... }, not an array: throw so it never
+          // reaches the list state, which would otherwise break the page.
+          if (!res.ok) throw new Error(`GET /api/transactions ${res.status}`);
+          return res.json();
+        })
+        .then((rows: Transaction[]) => {
+          if (signal?.aborted) return;
+          setTransactions(rows);
+          setHasMore(rows.length >= limit);
+        })
+        .catch((error) => {
+          if (!signal?.aborted) console.error(error);
+        });
+    },
+    [month, limit]
+  );
 
   useEffect(() => {
-    loadTransactions();
+    const controller = new AbortController();
+    loadTransactions(controller.signal);
+    return () => controller.abort();
   }, [loadTransactions]);
 
   const handleAdd = async () => {
