@@ -29,12 +29,15 @@ export async function POST(request: NextRequest) {
   // there must be labelled JSON, so a cross-origin form post cannot start a
   // live bank login (the proxy's Origin check is the other half).
   let institution: string | undefined;
+  // Checked before the body is read, so a forged one is never even buffered.
+  const unsupported = requireJsonContentType(request);
+  if (unsupported && request.headers.has("content-type")) return unsupported;
   const raw = await request.text();
-  if (raw.trim() !== "" || request.headers.has("content-type")) {
-    const unsupported = requireJsonContentType(request);
+  if (raw.trim() !== "") {
+    // A body with no content type at all.
     if (unsupported) return unsupported;
     try {
-      const body = raw.trim() === "" ? {} : JSON.parse(raw);
+      const body = JSON.parse(raw);
       if (typeof body?.institution === "string") institution = body.institution;
     } catch {
       return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
