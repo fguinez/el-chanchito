@@ -1,33 +1,18 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { fixedExpenses } from "@/lib/db/schema";
 import { asc, eq } from "drizzle-orm";
+import { failureBody, withJsonBody } from "@/lib/api/validation";
 import {
+  createFixedExpenseSchema,
+  idSchema,
+  updateFixedExpenseSchema,
+} from "@/lib/api/schemas";
+import {
+  DEFAULT_SHARED_RATIO,
   mergeFixedExpenseUpdate,
-  validateFixedExpenseId,
-  validateFixedExpenseInput,
+  type FixedExpenseFields,
 } from "@/lib/fixed-expenses";
-
-type ReadJson = { ok: true; body: unknown } | { ok: false; response: NextResponse };
-
-/** The parsed body, or the 400 to answer when it is not valid JSON. */
-async function readJson(request: NextRequest): Promise<ReadJson> {
-  try {
-    return { ok: true, body: await request.json() };
-  } catch {
-    return {
-      ok: false,
-      response: NextResponse.json({ error: "Invalid JSON body" }, { status: 400 }),
-    };
-  }
-}
-
-function badRequest(failure: { error: string; field?: string }) {
-  return NextResponse.json(
-    { error: failure.error, field: failure.field },
-    { status: 400 }
-  );
-}
 
 /** GET /api/fixed-expenses: every fixed expense by name, including ended and
  *  scheduled ones; the page decides which are active on the local day. */
@@ -41,29 +26,34 @@ export async function GET() {
 }
 
 /** POST /api/fixed-expenses: create a fixed expense */
-export async function POST(request: NextRequest) {
-  const json = await readJson(request);
-  if (!json.ok) return json.response;
-
-  const result = validateFixedExpenseInput(json.body, "create");
-  if (!result.ok) return badRequest(result);
+export const POST = withJsonBody(createFixedExpenseSchema, async (body) => {
+  const { name, amount, isShared, sharedRatio, activeFrom, activeTo } = body;
 
   const [created] = await db
     .insert(fixedExpenses)
-    .values(result.value)
+    .values({
+      name,
+      amount,
+      isShared: isShared ?? false,
+      sharedRatio: isShared
+        ? (sharedRatio?.toString() ?? DEFAULT_SHARED_RATIO)
+        : null,
+      activeFrom: activeFrom ?? null,
+      activeTo: activeTo ?? null,
+    })
     .returning();
 
   return NextResponse.json(created, { status: 201 });
-}
+});
 
-/** PUT /api/fixed-expenses: update a fixed expense */
-export async function PUT(request: NextRequest) {
-  const json = await readJson(request);
-  if (!json.ok) return json.response;
-
-  const result = validateFixedExpenseInput(json.body, "update");
-  if (!result.ok) return badRequest(result);
-  const { id, fields } = result.value;
+/** PUT /api/fixed-expenses: update a fixed expense, checked against the
+ *  stored row (see mergeFixedExpenseUpdate) */
+export const PUT = withJsonBody(updateFixedExpenseSchema, async (body) => {
+  const { id, sharedRatio, ...rest } = body;
+  const fields: FixedExpenseFields = { ...rest };
+  if (sharedRatio !== undefined) {
+    fields.sharedRatio = sharedRatio?.toString() ?? null;
+  }
 
   const [existing] = await db
     .select()
@@ -74,7 +64,9 @@ export async function PUT(request: NextRequest) {
   }
 
   const merged = mergeFixedExpenseUpdate(existing, fields);
-  if (!merged.ok) return badRequest(merged);
+  if (!merged.ok) {
+    return NextResponse.json(failureBody(merged), { status: 400 });
+  }
 
   const [updated] = await db
     .update(fixedExpenses)
@@ -87,17 +79,11 @@ export async function PUT(request: NextRequest) {
   }
 
   return NextResponse.json(updated);
-}
+});
 
 /** DELETE /api/fixed-expenses: delete a fixed expense */
-export async function DELETE(request: NextRequest) {
-  const json = await readJson(request);
-  if (!json.ok) return json.response;
-
-  const result = validateFixedExpenseId(json.body);
-  if (!result.ok) return badRequest(result);
-
-  await db.delete(fixedExpenses).where(eq(fixedExpenses.id, result.value.id));
+export const DELETE = withJsonBody(idSchema, async ({ id }) => {
+  await db.delete(fixedExpenses).where(eq(fixedExpenses.id, id));
 
   return NextResponse.json({ ok: true });
-}
+});

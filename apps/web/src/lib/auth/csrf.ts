@@ -69,9 +69,12 @@ export function requestHost(
  * latter reflects the internal scheme and port (`http://localhost:3000`) while
  * the browser sends the external origin (`https://dashboard.example`), so
  * comparing the two would reject every legitimate write in a normal proxied
- * deployment. Comparing hosts keeps the protection intact, because a genuine
- * same-origin request always addresses the host it came from: an attacker page
- * still sends our host in `Host` and its own in `Origin`, which mismatches.
+ * deployment. Comparing hosts stops an attacker page that addresses us by our
+ * own name: it sends our host in `Host` and its own in `Origin`, which
+ * mismatches. It does not stop DNS rebinding, where the attacker's name is
+ * re-pointed at us and `Host` and `Origin` both carry it; that page is then
+ * genuinely same-origin. With auth enforced the session cookie (bound to our
+ * name) is what keeps it out; with auth disabled `isLoopbackHost` does.
  *
  * The scheme is not compared for the same reason (`X-Forwarded-Proto` is not
  * guaranteed to be present or accurate); HTTPS enforcement belongs to the proxy
@@ -95,4 +98,27 @@ export function isAllowedOrigin(
 
   const host = requestHost(headers, trustProxy);
   return host !== undefined && originHost === host;
+}
+
+/** Host names a local dev server is reached by. */
+const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * Whether the raw `Host` header names this machine's loopback interface (any
+ * port). With auth disabled this is the DNS rebinding guard: a page on
+ * `attacker.example` re-pointed at 127.0.0.1 still sends `attacker.example` as
+ * its `Host`, so it is refused before it can read or write anything.
+ * `X-Forwarded-Host` is deliberately ignored: it is client-writable.
+ */
+export function isLoopbackHost(raw: string | null | undefined): boolean {
+  // Userinfo, a path, a query or a fragment would let the URL parser pick a
+  // different hostname than the header names (`evil@localhost`).
+  if (!raw || /[@/\\?#]/.test(raw)) return false;
+  let hostname: string;
+  try {
+    hostname = new URL(`http://${raw.trim()}`).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return LOOPBACK_HOSTNAMES.has(hostname);
 }

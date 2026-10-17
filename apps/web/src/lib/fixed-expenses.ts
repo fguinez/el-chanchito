@@ -1,8 +1,7 @@
 // Fixed expenses: the active window (vigente desde/hasta), the monthly totals,
-// request validation for /api/fixed-expenses and the form parsing shared by
-// the add form and the edit dialog. Pure (no db, no next imports) so it
-// unit-tests in isolation; every API failure already carries the HTTP shape
-// the route returns (`{ error, field? }` with status 400).
+// the stored-row checks of PUT /api/fixed-expenses and the form parsing shared
+// by the add form and the edit dialog. Pure (no db, no next imports) so it
+// unit-tests in isolation.
 //
 // Dates are YYYY-MM-DD strings (the DATE columns), compared as strings;
 // `today` is the caller's local day (formatLocalDate), never the UTC date.
@@ -33,9 +32,6 @@ export const DEFAULT_SHARED_RATIO = "0.6900";
 const INT32_MIN = -2_147_483_648;
 const INT32_MAX = 2_147_483_647;
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
-// Loose on purpose (any version): seeded rows are not RFC 4122.
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Both bounds are inclusive: an expense ending today is still active. */
 export function fixedExpenseStatus(
@@ -130,21 +126,18 @@ export function isCalendarDate(value: unknown): value is string {
 }
 
 // ---------------------------------------------------------------------------
-// API validation
+// PUT /api/fixed-expenses: the checks against the stored row (the body
+// itself is validated by updateFixedExpenseSchema in lib/api/schemas)
 
-export type NewFixedExpense = {
+/** The fields of a PUT body, as the columns store them (ratio as a string). */
+export type FixedExpenseFields = Partial<{
   name: string;
   amount: number;
   isShared: boolean;
   sharedRatio: string | null;
   activeFrom: string | null;
   activeTo: string | null;
-};
-
-/** The recognized fields of a PUT body, validated; only those present. */
-export type FixedExpenseFields = Partial<NewFixedExpense>;
-
-export type FixedExpenseUpdate = { id: string; fields: FixedExpenseFields };
+}>;
 
 export type StoredFixedExpense = ActiveWindow & {
   isShared: boolean;
@@ -155,29 +148,6 @@ function fail(error: string, field?: string): ValidationFailure {
   return { ok: false, status: 400, error, field };
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function validateId(value: unknown): ValidationResult<string> {
-  if (value === undefined) return fail("Field 'id' is required", "id");
-  if (typeof value !== "string" || !UUID_RE.test(value)) {
-    return fail("Field 'id' must be a uuid", "id");
-  }
-  return { ok: true, value };
-}
-
-function validateDate(
-  value: unknown,
-  field: "activeFrom" | "activeTo"
-): ValidationResult<string | null> {
-  if (value === null) return { ok: true, value: null };
-  if (!isCalendarDate(value)) {
-    return fail(`Field '${field}' must be a YYYY-MM-DD date or null`, field);
-  }
-  return { ok: true, value };
-}
-
 function windowFailure(
   { activeFrom, activeTo }: ActiveWindow,
   field: "activeFrom" | "activeTo"
@@ -186,146 +156,6 @@ function windowFailure(
     return fail("The active window must not end before it starts", field);
   }
   return null;
-}
-
-type ParsedFields = Omit<FixedExpenseFields, "sharedRatio"> & {
-  sharedRatio?: number | null;
-};
-
-/** `sharedRatio` stays a number here; the create/update rules turn it into
- *  the column value. */
-function parseFields(
-  body: Record<string, unknown>
-): ValidationResult<ParsedFields> {
-  const out: ParsedFields = {};
-
-  if (body.name !== undefined) {
-    if (typeof body.name !== "string" || body.name.trim() === "") {
-      return fail("Field 'name' must be a non-empty string", "name");
-    }
-    out.name = body.name.trim();
-  }
-
-  if (body.amount !== undefined) {
-    if (typeof body.amount !== "number" || !Number.isFinite(body.amount)) {
-      return fail("Field 'amount' must be a finite number", "amount");
-    }
-    const amount = Math.round(body.amount);
-    if (amount < INT32_MIN || amount > INT32_MAX) {
-      return fail("Field 'amount' is out of range", "amount");
-    }
-    out.amount = amount;
-  }
-
-  if (body.isShared !== undefined) {
-    if (typeof body.isShared !== "boolean") {
-      return fail("Field 'isShared' must be a boolean", "isShared");
-    }
-    out.isShared = body.isShared;
-  }
-
-  if (body.sharedRatio !== undefined) {
-    const ratio = body.sharedRatio;
-    if (
-      ratio !== null &&
-      (typeof ratio !== "number" ||
-        !Number.isFinite(ratio) ||
-        ratio < 0 ||
-        ratio > 1)
-    ) {
-      return fail(
-        "Field 'sharedRatio' must be a number between 0 and 1, or null",
-        "sharedRatio"
-      );
-    }
-    out.sharedRatio = ratio;
-  }
-
-  for (const field of ["activeFrom", "activeTo"] as const) {
-    if (body[field] === undefined) continue;
-    const date = validateDate(body[field], field);
-    if (!date.ok) return date;
-    out[field] = date.value;
-  }
-
-  if (out.activeFrom !== undefined && out.activeTo !== undefined) {
-    const failure = windowFailure(
-      { activeFrom: out.activeFrom, activeTo: out.activeTo },
-      "activeTo"
-    );
-    if (failure) return failure;
-  }
-
-  return { ok: true, value: out };
-}
-
-/**
- * Validate a fixed-expense write. Create requires `name` and `amount` and
- * returns insert-ready values (not shared, no window by default; a shared
- * expense without a ratio gets DEFAULT_SHARED_RATIO). Update requires a
- * uuid `id` and returns only the recognized fields present, unknown keys
- * dropped; the ratio rules and the stored window are applied later by
- * mergeFixedExpenseUpdate.
- */
-export function validateFixedExpenseInput(
-  body: unknown,
-  mode: "create"
-): ValidationResult<NewFixedExpense>;
-export function validateFixedExpenseInput(
-  body: unknown,
-  mode: "update"
-): ValidationResult<FixedExpenseUpdate>;
-export function validateFixedExpenseInput(
-  body: unknown,
-  mode: "create" | "update"
-): ValidationResult<NewFixedExpense | FixedExpenseUpdate> {
-  if (!isPlainObject(body)) {
-    return fail("Request body must be a JSON object");
-  }
-  return mode === "create" ? validateCreate(body) : validateUpdate(body);
-}
-
-function validateCreate(
-  body: Record<string, unknown>
-): ValidationResult<NewFixedExpense> {
-  const parsed = parseFields(body);
-  if (!parsed.ok) return parsed;
-  const { name, amount, isShared = false, sharedRatio } = parsed.value;
-  if (name === undefined) return fail("Field 'name' is required", "name");
-  if (amount === undefined) {
-    return fail("Field 'amount' is required", "amount");
-  }
-  return {
-    ok: true,
-    value: {
-      name,
-      amount,
-      isShared,
-      sharedRatio: isShared
-        ? (sharedRatio?.toString() ?? DEFAULT_SHARED_RATIO)
-        : null,
-      activeFrom: parsed.value.activeFrom ?? null,
-      activeTo: parsed.value.activeTo ?? null,
-    },
-  };
-}
-
-function validateUpdate(
-  body: Record<string, unknown>
-): ValidationResult<FixedExpenseUpdate> {
-  const id = validateId(body.id);
-  if (!id.ok) return id;
-  const parsed = parseFields(body);
-  if (!parsed.ok) return parsed;
-  const { sharedRatio, ...rest } = parsed.value;
-  const fields: FixedExpenseFields = { ...rest };
-  if (sharedRatio !== undefined) {
-    fields.sharedRatio = sharedRatio?.toString() ?? null;
-  }
-  if (Object.keys(fields).length === 0) {
-    return fail("No updatable fields provided");
-  }
-  return { ok: true, value: { id: id.value, fields } };
 }
 
 /**
@@ -360,17 +190,6 @@ export function mergeFixedExpenseUpdate(
     values.sharedRatio = sharedRatio;
   }
   return { ok: true, value: values };
-}
-
-export function validateFixedExpenseId(
-  body: unknown
-): ValidationResult<{ id: string }> {
-  if (!isPlainObject(body)) {
-    return fail("Request body must be a JSON object");
-  }
-  const id = validateId(body.id);
-  if (!id.ok) return id;
-  return { ok: true, value: { id: id.value } };
 }
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getClpRates } from "@/lib/rates";
+import { getRateBook } from "@/lib/rate-book";
 import { evaluateMonitor } from "@/lib/monitors/evaluate";
 import {
   loadMonitorAdjustments,
@@ -7,6 +7,7 @@ import {
 } from "@/lib/monitors/catalog";
 import { UUID_RE, validateMonitorInput } from "@/lib/monitors/validate";
 import { enrichMonitor } from "@/lib/monitors/serialize";
+import { readJsonBody } from "@/lib/api/validation";
 
 /**
  * POST /api/monitors/preview: validate a create body and evaluate it now
@@ -18,12 +19,9 @@ import { enrichMonitor } from "@/lib/monitors/serialize";
  */
 export async function POST(request: NextRequest) {
   try {
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-    }
+    const read = await readJsonBody(request);
+    if (!read.ok) return read.response;
+    const body = read.body;
 
     // null or absent: a new monitor. A well-formed id with no stored
     // monitor simply has no adjustments.
@@ -44,7 +42,7 @@ export async function POST(request: NextRequest) {
 
     const [catalog, rates, adjustments] = await Promise.all([
       loadProductCatalog(),
-      getClpRates(),
+      getRateBook(),
       monitorId !== undefined ? loadMonitorAdjustments(monitorId) : [],
     ]);
     const result = validateMonitorInput(body, catalog);

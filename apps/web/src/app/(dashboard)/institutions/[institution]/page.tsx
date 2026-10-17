@@ -10,7 +10,14 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatCLP, cn } from "@/lib/utils";
-import { AlertTriangle, ArrowLeft, Building2, ExternalLink, RefreshCw } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  Building2,
+  Clock,
+  ExternalLink,
+  RefreshCw,
+} from "lucide-react";
 import {
   INSTITUTION_KIND_LABELS,
   formatBalance,
@@ -18,6 +25,7 @@ import {
   type ApiInstitution,
 } from "@/components/institutions/shared";
 import { useInstitutionRefresh } from "@/components/institutions/use-institution-refresh";
+import { InstitutionEditDialog } from "@/components/institutions/institution-edit-dialog";
 
 export default function InstitutionDetailPage() {
   const { institution: slug } = useParams<{ institution: string }>();
@@ -48,7 +56,7 @@ export default function InstitutionDetailPage() {
     loadInstitution();
   }, [loadInstitution]);
 
-  const { syncing, scrapers, serviceError, refresh } =
+  const { syncing, scrapers, serviceError, notice, refresh } =
     useInstitutionRefresh(loadInstitution);
 
   if (notFound) {
@@ -123,6 +131,10 @@ export default function InstitutionDetailPage() {
               Sitio <ExternalLink className="h-3.5 w-3.5" />
             </a>
           )}
+          <InstitutionEditDialog
+            institution={institution}
+            onSaved={loadInstitution}
+          />
           <Button
             variant="outline"
             size="sm"
@@ -146,6 +158,13 @@ export default function InstitutionDetailPage() {
         <div className="flex items-start gap-3 rounded-md border border-red-200 bg-red-50 p-3 dark:border-red-900 dark:bg-red-950">
           <AlertTriangle className="mt-0.5 h-4 w-4 text-red-600" />
           <p className="text-sm text-red-800 dark:text-red-200">{serviceError}</p>
+        </div>
+      )}
+
+      {notice && (
+        <div className="flex items-start gap-3 rounded-md border border-amber-200 bg-amber-50 p-3 dark:border-amber-900 dark:bg-amber-950">
+          <Clock className="mt-0.5 h-4 w-4 text-amber-600" />
+          <p className="text-sm text-amber-800 dark:text-amber-200">{notice}</p>
         </div>
       )}
 

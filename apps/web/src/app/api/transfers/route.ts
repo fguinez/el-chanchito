@@ -1,7 +1,13 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { internalTransfers } from "@/lib/db/schema";
 import { eq, desc } from "drizzle-orm";
+import { withJsonBody } from "@/lib/api/validation";
+import {
+  createTransferSchema,
+  idSchema,
+  updateTransferSchema,
+} from "@/lib/api/schemas";
 
 /** GET /api/transfers — list all internal transfers */
 export async function GET() {
@@ -14,24 +20,16 @@ export async function GET() {
 }
 
 /** POST /api/transfers — create an internal transfer */
-export async function POST(request: NextRequest) {
-  const body = await request.json();
+export const POST = withJsonBody(createTransferSchema, async (body) => {
   const { description, amount, transferDate, notes } = body;
   const fromProductId = body.fromProductId ?? body.fromAccountId ?? null;
   const toProductId = body.toProductId ?? body.toAccountId ?? null;
-
-  if (!description || amount === undefined || !transferDate) {
-    return NextResponse.json(
-      { error: "Missing required fields: description, amount, transferDate" },
-      { status: 400 }
-    );
-  }
 
   const [created] = await db
     .insert(internalTransfers)
     .values({
       description,
-      amount: Math.round(amount),
+      amount,
       fromProductId,
       toProductId,
       transferDate,
@@ -40,24 +38,16 @@ export async function POST(request: NextRequest) {
     .returning();
 
   return NextResponse.json(created, { status: 201 });
-}
+});
 
 /** PUT /api/transfers — update transfer status */
-export async function PUT(request: NextRequest) {
-  const body = await request.json();
+export const PUT = withJsonBody(updateTransferSchema, async (body) => {
   const { id, status, notes } = body;
-
-  if (!id) {
-    return NextResponse.json({ error: "Missing id" }, { status: 400 });
-  }
-
-  const updates: Record<string, unknown> = { updatedAt: new Date() };
-  if (status) updates.status = status;
-  if (notes !== undefined) updates.notes = notes;
 
   const [updated] = await db
     .update(internalTransfers)
-    .set(updates)
+    // Drizzle skips undefined keys, so an absent status or notes stays as is.
+    .set({ status, notes, updatedAt: new Date() })
     .where(eq(internalTransfers.id, id))
     .returning();
 
@@ -66,16 +56,10 @@ export async function PUT(request: NextRequest) {
   }
 
   return NextResponse.json(updated);
-}
+});
 
 /** DELETE /api/transfers — delete a transfer */
-export async function DELETE(request: NextRequest) {
-  const { id } = await request.json();
-
-  if (!id) {
-    return NextResponse.json({ error: "Missing id" }, { status: 400 });
-  }
-
+export const DELETE = withJsonBody(idSchema, async ({ id }) => {
   await db.delete(internalTransfers).where(eq(internalTransfers.id, id));
   return NextResponse.json({ ok: true });
-}
+});

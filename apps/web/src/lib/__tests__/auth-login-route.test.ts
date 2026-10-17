@@ -69,6 +69,21 @@ function passThrough() {
   );
 }
 
+describe("POST /api/auth/login content type", () => {
+  it("answers 415 with no-store to a text/plain body, before the throttle", async () => {
+    const response = await POST(
+      loginRequest(PASSWORD, { "content-type": "text/plain;charset=UTF-8" })
+    );
+
+    expect(response.status).toBe(415);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    await expect(response.json()).resolves.toEqual({
+      error: "Content-Type must be application/json",
+    });
+    expect(runMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("POST /api/auth/login throttle wiring", () => {
   it("runs every password check inside the throttle", async () => {
     passThrough();

@@ -99,6 +99,7 @@ export async function resolveProductId(
         currency,
         externalRef,
         name,
+        defaultName: name,
         slug: uniqueSlug(slugify(name, kind), taken),
       })
       .returning();

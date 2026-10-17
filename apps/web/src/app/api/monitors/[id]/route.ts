@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { monitors } from "@/lib/db/schema";
-import { getClpRates } from "@/lib/rates";
+import { getRateBook } from "@/lib/rate-book";
 import { evaluateMonitor } from "@/lib/monitors/evaluate";
 import { replayHistory } from "@/lib/monitors/history";
 import {
@@ -17,6 +17,7 @@ import {
   referencedProductIds,
   resolveHistoryRange,
 } from "@/lib/monitors/serialize";
+import { readJsonBody } from "@/lib/api/validation";
 
 // Next 16: dynamic segment params arrive as a Promise on the context arg.
 type Context = { params: Promise<{ id: string }> };
@@ -60,16 +61,17 @@ export async function GET(request: NextRequest, { params }: Context) {
 
     const [catalog, rates, adjustments] = await Promise.all([
       loadProductCatalog(),
-      getClpRates(),
+      getRateBook(),
       loadMonitorAdjustments(id),
     ]);
     const def = { ...row, adjustments };
-    const evaluation = evaluateMonitor(def, {
+    const ctx = {
       date: now,
       products: catalog.byId,
       rates,
       currency: row.currency,
-    });
+    };
+    const evaluation = evaluateMonitor(def, ctx);
     const snapshots = await loadSnapshotsForProducts(referencedProductIds(row));
     const history = replayHistory(def, {
       snapshots,
@@ -78,7 +80,7 @@ export async function GET(request: NextRequest, { params }: Context) {
       from: range.from,
       to: range.to,
     });
-    const references = buildReferences(row, catalog.byId);
+    const references = buildReferences(row, ctx);
 
     return NextResponse.json({
       ...enrichMonitor(row, catalog, evaluation),
@@ -101,12 +103,9 @@ export async function PUT(request: NextRequest, { params }: Context) {
       return NextResponse.json({ error: "Invalid id" }, { status: 400 });
     }
 
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-    }
+    const read = await readJsonBody(request);
+    if (!read.ok) return read.response;
+    const body = read.body;
 
     const catalog = await loadProductCatalog();
     const result = validateMonitorInput(body, catalog, { partial: true });
@@ -127,7 +126,7 @@ export async function PUT(request: NextRequest, { params }: Context) {
     }
 
     const [rates, adjustments] = await Promise.all([
-      getClpRates(),
+      getRateBook(),
       loadMonitorAdjustments(id),
     ]);
     const evaluation = evaluateMonitor(

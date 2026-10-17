@@ -2,15 +2,23 @@
 
 import json
 import logging
+from collections.abc import Collection
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 
 from psycopg.types.json import Jsonb
 
-from db.connection import get_pool
+from db.connection import get_pool, with_db_retry
 from db.slug import slugify, unique_slug
-from scrapers.base import ScrapedProduct, ScrapedTransaction
+from scrapers.base import (
+    ScrapedExchangeRate,
+    ScrapedProduct,
+    ScrapedTransaction,
+    SupersededTransaction,
+    TransactionLocation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,18 +30,30 @@ def start_scraper_run(method: str, institution: str) -> str:
     'open_banking'); `institution` is the platform being scraped.
     """
     run_id = str(uuid4())
+    _insert_scraper_run(run_id, method, institution, datetime.now(timezone.utc))
+    return run_id
+
+
+@with_db_retry
+def _insert_scraper_run(
+    run_id: str, method: str, institution: str, started_at: datetime
+) -> None:
+    """The id is minted by the caller, so a retry after a commit whose
+    acknowledgement was lost finds its own row instead of adding a second one
+    that would stay `running` forever."""
     pool = get_pool()
     with pool.connection() as conn:
         conn.execute(
             """
             INSERT INTO scraper_runs (id, method, institution, started_at, status)
             VALUES (%s, %s, %s, %s, 'running')
+            ON CONFLICT (id) DO NOTHING
             """,
-            (run_id, method, institution, datetime.now(timezone.utc)),
+            (run_id, method, institution, started_at),
         )
-    return run_id
 
 
+@with_db_retry
 def finish_scraper_run(
     run_id: str,
     status: str,
@@ -125,8 +145,11 @@ def _resolve_product(
     Walks the chain institution -> account -> product, creating missing links.
     Single-user deployment: everything attaches to the oldest user. The product
     step upserts on the identity index so concurrent writers can't race a
-    SELECT-then-INSERT; `name` and `slug` are only used for the INSERT values
-    (create-only), so a user rename is never overwritten and slugs stay stable.
+    SELECT-then-INSERT. The slug is create-only, so it stays stable. A
+    scraper-supplied `name` refreshes `default_name` and moves `name` with it
+    only while the user has not renamed the product. Without one (the
+    transaction path resolves by identity alone) both columns are left as they
+    are, so the generic default never flips a scraper's name back and forth.
     """
     row = conn.execute(
         "SELECT id, name FROM institutions WHERE slug = %s", (institution_slug,)
@@ -188,21 +211,30 @@ def _resolve_product(
     slug = unique_slug(slugify(product_name, kind), taken)
     product_row = conn.execute(
         """
-        INSERT INTO products (id, account_id, name, slug, kind, currency,
-                              external_ref)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO products (id, account_id, name, default_name, slug, kind,
+                              currency, external_ref)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (account_id, kind, currency, COALESCE(external_ref, ''))
-        DO UPDATE SET updated_at = now()
+        DO UPDATE SET
+            name = CASE WHEN %s AND products.name = products.default_name
+                        THEN EXCLUDED.default_name
+                        ELSE products.name END,
+            default_name = CASE WHEN %s THEN EXCLUDED.default_name
+                                ELSE products.default_name END,
+            updated_at = now()
         RETURNING id
         """,
         (
             str(uuid4()),
             account_id,
             product_name,
+            product_name,
             slug,
             kind,
             currency,
             external_ref,
+            name is not None,
+            name is not None,
         ),
     ).fetchone()
     return product_row[0]
@@ -402,8 +434,195 @@ def _sibling_rows(conn, product_id: str, txn: ScrapedTransaction, source: str) -
     ).fetchall()
 
 
+def _location_values(location: TransactionLocation | None) -> tuple:
+    """The five location columns' values, in table order (all None for none)."""
+    if location is None:
+        return (None, None, None, None, None)
+    return (
+        location.name,
+        location.city,
+        location.country,
+        location.latitude,
+        location.longitude,
+    )
+
+
+def _fill_location(conn, row_id, location: TransactionLocation | None) -> None:
+    """Fill the stored row's NULL location columns from a scraped location.
+
+    A non-NULL column is never overwritten, whoever wrote it, and a row whose
+    location the user set or cleared (`location_is_manual`, V025) is never
+    touched at all. This is how rows stored before V025, or before their
+    source reported a location, gain one on the next scrape. The coordinates
+    move as a pair: both are filled only while the stored latitude is NULL
+    (the schema keeps the two NULL together). A row with nothing to fill is
+    not written, so `updated_at` only moves when something changed.
+    """
+    if location is None:
+        return
+    name, city, country, latitude, longitude = _location_values(location)
+    sets: list[str] = []
+    gaps: list[str] = []
+    params: list = []
+    for column, value in (
+        ("location_name", name),
+        ("location_city", city),
+        ("location_country", country),
+    ):
+        if value is not None:
+            sets.append(f"{column} = COALESCE({column}, %s)")
+            gaps.append(f"{column} IS NULL")
+            params.append(value)
+    if latitude is not None and longitude is not None:
+        # Every expression of an UPDATE reads the row as it was, so both
+        # CASEs test the stored latitude.
+        sets.append(
+            "location_latitude = CASE WHEN location_latitude IS NULL "
+            "THEN %s ELSE location_latitude END"
+        )
+        sets.append(
+            "location_longitude = CASE WHEN location_latitude IS NULL "
+            "THEN %s ELSE location_longitude END"
+        )
+        gaps.append("location_latitude IS NULL")
+        params.extend((latitude, longitude))
+    if not sets:
+        return
+    conn.execute(
+        "UPDATE transactions SET "
+        + ", ".join(sets)
+        + ", updated_at = now() WHERE id = %s AND NOT location_is_manual AND ("
+        + " OR ".join(gaps)
+        + ")",
+        (*params, row_id),
+    )
+
+
+def _write_transaction(
+    conn,
+    txn: ScrapedTransaction,
+    product_id: str,
+    claimed: set,
+    incoming_ids: set[str],
+) -> tuple[str, str | None]:
+    """Store one scraped transaction and say what became of it.
+
+    Returns the outcome and the stored row it claims, if any. The outcome is
+    "inserted" for a new row, "stored" when its key already holds a row
+    (found, adopted, or taken by a concurrent insert) and "kept" when a stored
+    row with a bank id keeps the movement out (see `_claim_decision`). A
+    movement already stored under its key is only claimed; one that adopts a
+    stored row (see `write_transactions`) re-keys it in place. `claimed` is
+    only read: the caller records the claim once this row's block commits.
+    """
+    source = f"scraper_{txn.institution}"
+    row = conn.execute(
+        "SELECT id FROM transactions "
+        "WHERE product_id = %s AND external_id = %s",
+        (product_id, txn.external_id),
+    ).fetchone()
+    if row:
+        _fill_location(conn, row[0], txn.location)
+        return "stored", row[0]
+
+    if _adopts_stored_rows(txn.external_id):
+        action, row_id = _claim_decision(
+            txn.external_id,
+            _sibling_rows(conn, product_id, txn, source),
+            claimed,
+            incoming_ids,
+        )
+        if action == "rekey":
+            # The dates move with the key: a legacy row is sitting under its
+            # posting date, and leaving it there would show the movement on the
+            # wrong day and force the same decision again on every later run.
+            conn.execute(
+                "UPDATE transactions SET external_id = %s, "
+                "transaction_date = %s, accounting_date = %s, "
+                "scheduled_month = %s, updated_at = now() "
+                "WHERE id = %s",
+                (
+                    txn.external_id,
+                    txn.transaction_date,
+                    txn.accounting_date,
+                    txn.scheduled_month,
+                    row_id,
+                ),
+            )
+            _fill_location(conn, row_id, txn.location)
+            logger.info(
+                "Adopted stored transaction %s onto %s",
+                row_id,
+                txn.external_id,
+            )
+            return "stored", row_id
+        if action == "keep":
+            logger.warning(
+                "Transaction %s (%s, %s) has no bank id this run and "
+                "matches stored row %s, which has one; left as it is "
+                "and not imported",
+                txn.external_id,
+                txn.transaction_date,
+                txn.amount,
+                row_id,
+            )
+            return "kept", row_id
+
+    cur = conn.execute(
+        """
+        INSERT INTO transactions
+            (id, product_id, description, amount, transaction_date,
+             accounting_date, scheduled_month, source, external_id,
+             location_name, location_city, location_country,
+             location_latitude, location_longitude)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s)
+        ON CONFLICT (product_id, external_id) DO NOTHING
+        """,
+        (
+            str(uuid4()),
+            product_id,
+            txn.description,
+            txn.amount,
+            txn.transaction_date,
+            txn.accounting_date,
+            txn.scheduled_month,
+            source,
+            txn.external_id,
+            *_location_values(txn.location),
+        ),
+    )
+    # A conflict means the row is already stored under this key.
+    return ("inserted" if cur.rowcount and cur.rowcount > 0 else "stored"), None
+
+
+@dataclass(frozen=True)
+class TransactionWriteResult:
+    """What one `write_transactions` call did.
+
+    `inserted` counts rows newly inserted and `failed` the transactions that
+    raised and were skipped. `persisted_external_ids` holds the keys a stored
+    row carries once the call returns: inserted, already stored, or adopted
+    onto.
+    """
+
+    inserted: int = 0
+    failed: int = 0
+    persisted_external_ids: frozenset[str] = frozenset()
+
+
 def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
     """Insert transactions, skipping duplicates. Returns count of new rows.
+
+    See `write_transactions`, which also reports failures and which keys were
+    persisted.
+    """
+    return write_transactions(transactions).inserted
+
+
+@with_db_retry
+def write_transactions(transactions: list[ScrapedTransaction]) -> TransactionWriteResult:
+    """Insert transactions, skipping duplicates, and report what was persisted.
 
     For institutions that re-key their stored rows (see `_adopts_stored_rows`),
     a movement whose key matches nothing is first offered the stored rows it
@@ -412,129 +631,263 @@ def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
     rewritten in place. Everything else keeps the plain
     `ON CONFLICT (product_id, external_id) DO NOTHING` insert.
 
+    A movement that is already stored (or adopted) only ever FILLS its row's
+    location: NULL location columns take the scraped values, non-NULL ones and
+    rows the user edited the location of are left alone (`_fill_location`).
+
     A row that never gets adopted, because its movement fell out of the bank's
     window before the first post-#57 scrape, keeps the date it was imported with
     (BanChile's legacy rows hold the *posting* date) and a NULL
     `accounting_date`. Neither is derivable from anything stored, so nothing
     backfills them.
+
+    Each product resolution and each transaction runs in its own
+    `conn.transaction()` block, so one that fails (a serialization failure
+    included) is rolled back alone and counted in `failed` instead of leaving
+    the connection in an aborted transaction that fails every row after it. A
+    dropped connection is the exception: it re-raises, and `with_db_retry`
+    replays the batch, which is safe because every step is idempotent (rows the
+    lost attempt committed are found, not re-inserted, so they are missing from
+    `inserted`).
     """
     if not transactions:
-        return 0
+        return TransactionWriteResult()
 
     pool = get_pool()
     inserted = 0
+    failed = 0
+    persisted: set[str] = set()
 
     with pool.connection() as conn:
         products: dict[tuple, str] = {}
 
-        def product_of(txn: ScrapedTransaction) -> str:
-            key = (txn.institution, txn.product_kind, txn.currency)
-            if key not in products:
-                products[key] = _resolve_product(
-                    conn, txn.institution, txn.product_kind, txn.currency
-                )
-            return products[key]
-
         # Every key this scrape carries, per product: a stored row already
         # holding one of them belongs to that movement and is never adopted.
-        # Resolution failures are logged and skipped here exactly as they are
-        # below, so one unresolvable transaction can't abort the batch.
+        # Only a product whose block committed is cached.
         incoming: dict[str, set[str]] = {}
         for txn in transactions:
+            key = (txn.institution, txn.product_kind, txn.currency)
             try:
-                incoming.setdefault(product_of(txn), set()).add(txn.external_id)
+                if key not in products:
+                    with conn.transaction():
+                        product_id = _resolve_product(
+                            conn, txn.institution, txn.product_kind, txn.currency
+                        )
+                    products[key] = product_id
             except Exception:
+                if conn.broken:
+                    raise
                 logger.exception(
                     "Failed to resolve the product for: %s", txn.external_id
                 )
+                continue
+            incoming.setdefault(products[key], set()).add(txn.external_id)
 
         claimed: set = set()
         for txn in transactions:
+            key = (txn.institution, txn.product_kind, txn.currency)
+            product_id = products.get(key)
+            if product_id is None:
+                # Its product failed to resolve, and was logged, above.
+                failed += 1
+                continue
             try:
-                product_id = product_of(txn)
-                source = f"scraper_{txn.institution}"
-                row = conn.execute(
-                    "SELECT id FROM transactions "
-                    "WHERE product_id = %s AND external_id = %s",
-                    (product_id, txn.external_id),
-                ).fetchone()
-                if row:
-                    claimed.add(row[0])
-                    continue
-
-                if _adopts_stored_rows(txn.external_id):
-                    action, row_id = _claim_decision(
-                        txn.external_id,
-                        _sibling_rows(conn, product_id, txn, source),
-                        claimed,
-                        incoming.get(product_id, set()),
+                with conn.transaction():
+                    outcome, claim = _write_transaction(
+                        conn, txn, product_id, claimed, incoming.get(product_id, set())
                     )
-                    if action != "insert":
-                        claimed.add(row_id)
-                    if action == "rekey":
-                        # The dates move with the key: a legacy row is sitting
-                        # under its posting date, and leaving it there would
-                        # show the movement on the wrong day and force the same
-                        # decision again on every later run.
-                        conn.execute(
-                            "UPDATE transactions SET external_id = %s, "
-                            "transaction_date = %s, accounting_date = %s, "
-                            "scheduled_month = %s, updated_at = now() "
-                            "WHERE id = %s",
-                            (
-                                txn.external_id,
-                                txn.transaction_date,
-                                txn.accounting_date,
-                                txn.scheduled_month,
-                                row_id,
-                            ),
-                        )
-                        logger.info(
-                            "Adopted stored transaction %s onto %s",
-                            row_id,
-                            txn.external_id,
-                        )
-                        continue
-                    if action == "keep":
-                        logger.warning(
-                            "Transaction %s (%s, %s) has no bank id this run and "
-                            "matches stored row %s, which has one; left as it is "
-                            "and not imported",
-                            txn.external_id,
-                            txn.transaction_date,
-                            txn.amount,
-                            row_id,
-                        )
-                        continue
-
-                cur = conn.execute(
-                    """
-                    INSERT INTO transactions
-                        (id, product_id, description, amount, transaction_date,
-                         accounting_date, scheduled_month, source, external_id)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (product_id, external_id) DO NOTHING
-                    """,
-                    (
-                        str(uuid4()),
-                        product_id,
-                        txn.description,
-                        txn.amount,
-                        txn.transaction_date,
-                        txn.accounting_date,
-                        txn.scheduled_month,
-                        source,
-                        txn.external_id,
-                    ),
-                )
-                if cur.rowcount and cur.rowcount > 0:
-                    inserted += 1
             except Exception:
+                if conn.broken:
+                    raise
+                failed += 1
                 logger.exception("Failed to insert transaction: %s", txn.external_id)
+                continue
+            if claim is not None:
+                claimed.add(claim)
+            if outcome != "kept":
+                persisted.add(txn.external_id)
+            if outcome == "inserted":
+                inserted += 1
 
-    return inserted
+    return TransactionWriteResult(
+        inserted=inserted,
+        failed=failed,
+        persisted_external_ids=frozenset(persisted),
+    )
 
 
+def _like_prefix(prefix: str) -> str:
+    """`prefix` as a LIKE pattern, its wildcards escaped (backslash, as above)."""
+    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"{escaped}%"
+
+
+def _carries_user_edits(
+    is_manually_categorized, is_internal_transfer, notes, location_is_manual=False
+) -> bool:
+    """True for a row the user touched: categorised, annotated, paired or located."""
+    return bool(
+        is_manually_categorized
+        or is_internal_transfer
+        or (notes or "").strip()
+        or location_is_manual
+    )
+
+
+def delete_superseded_transactions(
+    superseded: list[SupersededTransaction],
+    persisted_external_ids: Collection[str],
+    protected_external_ids: Collection[str] = frozenset(),
+) -> int:
+    """Delete the stored rows a scrape has replaced (issue #79). Returns the count.
+
+    Only an item whose `replacement_external_id` is in `persisted_external_ids`
+    (`TransactionWriteResult.persisted_external_ids` of this run's write) is
+    acted on: a twin is never deleted unless its replacement is stored.
+
+    Each `SupersededTransaction` removes at most one row of its institution's
+    (kind, currency) product, one-to-one and oldest first, among the rows its
+    own scraper wrote whose `external_id` starts with `external_id_prefix` and
+    whose date and amount match exactly. With an `external_id`, only the row
+    under that very key qualifies; without one, any such row does. Exact keys
+    are claimed first, so a date-and-amount match can never take a row an
+    exact key names.
+
+    A row whose key is in `protected_external_ids` (this scrape's own keys) is
+    never a candidate: it is a movement the bank still lists, not a leftover.
+    Nor is a row created at or after the moment the item's
+    `created_before_migration` was applied (per `_migrations.applied_at`); an
+    item whose migration is not recorded matches nothing.
+    A matching row the user categorised, annotated, gave a location to (or
+    cleared one on) or marked as an internal transfer is left in place and
+    logged instead.
+    """
+    replaced = [
+        item for item in superseded if item.replacement_external_id in persisted_external_ids
+    ]
+    if len(replaced) < len(superseded):
+        logger.warning(
+            "%d superseded transaction(s) left in place: their replacement was "
+            "not stored this run",
+            len(superseded) - len(replaced),
+        )
+    superseded = replaced
+    if not superseded:
+        return 0
+
+    pool = get_pool()
+    deleted = 0
+    kept: list = []
+    claimed: set = set()
+    with pool.connection() as conn:
+        products: dict[tuple, list] = {}
+
+        def products_of(item: SupersededTransaction) -> list:
+            key = (item.institution, item.product_kind, item.currency)
+            if key not in products:
+                products[key] = [
+                    row[0]
+                    for row in conn.execute(
+                        """
+                        SELECT p.id FROM products p
+                        JOIN accounts a ON p.account_id = a.id
+                        JOIN institutions i ON a.institution_id = i.id
+                        WHERE i.slug = %s AND p.kind = %s AND p.currency = %s
+                          AND p.external_ref IS NULL
+                        """,
+                        key,
+                    ).fetchall()
+                ]
+            return products[key]
+
+        cutoffs: dict = {}
+
+        def cutoff_of(item: SupersededTransaction):
+            name = item.created_before_migration
+            if name not in cutoffs:
+                row = conn.execute(
+                    "SELECT applied_at FROM _migrations WHERE name = %s", (name,)
+                ).fetchone()
+                cutoffs[name] = row[0] if row else None
+                if cutoffs[name] is None:
+                    logger.warning(
+                        "Migration %s is not recorded; superseded rows bound to "
+                        "it are left in place",
+                        name,
+                    )
+            return cutoffs[name]
+
+        # Exact keys first: they name their row, so a looser match must not
+        # take it from them.
+        ordered = sorted(superseded, key=lambda item: item.external_id is None)
+        for item in ordered:
+            product_ids = products_of(item)
+            cutoff = cutoff_of(item)
+            if not product_ids or cutoff is None:
+                continue
+            exact = item.external_id is not None
+            rows = conn.execute(
+                """
+                SELECT id, external_id, is_manually_categorized,
+                       is_internal_transfer, notes, location_is_manual
+                FROM transactions
+                WHERE product_id = ANY(%s) AND source = %s
+                  AND transaction_date = %s AND amount = %s
+                  AND external_id LIKE %s
+                  AND (%s::text IS NULL OR external_id = %s)
+                  AND created_at < %s
+                ORDER BY created_at, id
+                """,
+                (
+                    product_ids,
+                    f"scraper_{item.institution}",
+                    item.transaction_date,
+                    item.amount,
+                    _like_prefix(item.external_id_prefix),
+                    item.external_id,
+                    item.external_id,
+                    cutoff,
+                ),
+            ).fetchall()
+            row = next(
+                (
+                    candidate
+                    for candidate in rows
+                    if candidate[0] not in claimed
+                    and candidate[1] not in protected_external_ids
+                ),
+                None,
+            )
+            if row is None:
+                continue
+            row_id, _, *edits = row
+            claimed.add(row_id)
+            if _carries_user_edits(*edits):
+                kept.append(row_id)
+                logger.warning(
+                    "Superseded transaction %s left in place: it carries user "
+                    "edits (category, notes, transfer pairing or location)",
+                    row_id,
+                )
+                continue
+            conn.execute("DELETE FROM transactions WHERE id = %s", (row_id,))
+            deleted += 1
+            logger.debug(
+                "Deleted superseded transaction %s (%s match)",
+                row_id,
+                "key" if exact else "date and amount",
+            )
+
+    if deleted or kept:
+        logger.info(
+            "Deleted %d superseded transaction(s); %d skipped for user edits",
+            deleted,
+            len(kept),
+        )
+    return deleted
+
+
+@with_db_retry
 def upsert_product(sp: ScrapedProduct) -> None:
     """Record one scraped product observation.
 
@@ -659,4 +1012,118 @@ def upsert_product(sp: ScrapedProduct) -> None:
             sp.kind,
             sp.currency,
             metrics_dict,
+        )
+
+
+# --- Exchange rates (V024) -----------------------------------------------------
+
+
+class UnresolvedRateScope(LookupError):
+    """An exchange rate names an institution or product the database lacks.
+
+    `run_scraper` turns it into a run warning: the rate is dropped, and nothing
+    is created to hang it on.
+    """
+
+
+def _lookup_product(
+    conn,
+    institution_id,
+    kind: str,
+    currency: str,
+    external_ref: str | None,
+):
+    """The id of the existing product with this identity, or None.
+
+    The identity rule of `_resolve_product` (the writer's account at the
+    institution, i.e. the oldest user's first one, then kind, currency and
+    COALESCE(external_ref, '')), but lookup-only: no link of the chain is
+    ever created.
+    """
+    row = conn.execute(
+        """
+        SELECT p.id FROM products p
+        WHERE p.account_id = (
+            SELECT a.id FROM accounts a
+            WHERE a.institution_id = %s
+              AND a.user_id = (SELECT id FROM users ORDER BY created_at LIMIT 1)
+            ORDER BY a.display_order LIMIT 1
+        )
+          AND p.kind = %s AND p.currency = %s
+          AND COALESCE(p.external_ref, '') = COALESCE(%s, '')
+        """,
+        (institution_id, kind, currency, external_ref),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def upsert_exchange_rate(rate: ScrapedExchangeRate) -> None:
+    """Record the latest reading of one institution or product exchange rate.
+
+    One row per (institution, product or none, base, quote): a re-scrape
+    updates the rate, source and `reported_as_of` in place and moves
+    `observed_at`, which is what the dashboard's staleness warning reads.
+    Raises `UnresolvedRateScope` when the institution or the product the
+    rate names does not exist yet.
+    """
+    pool = get_pool()
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT id FROM institutions WHERE slug = %s", (rate.institution,)
+        ).fetchone()
+        if not row:
+            raise UnresolvedRateScope(f"institution '{rate.institution}' not found")
+        institution_id = row[0]
+
+        product_id = None
+        if rate.product is not None:
+            ref = rate.product
+            product_id = _lookup_product(
+                conn, institution_id, ref.kind, ref.currency, ref.external_ref
+            )
+            if product_id is None:
+                raise UnresolvedRateScope(
+                    f"no {ref.kind} product in {ref.currency}"
+                    + (" with that external_ref" if ref.external_ref else "")
+                    + f" at '{rate.institution}'"
+                )
+
+        now = datetime.now(timezone.utc)
+        conn.execute(
+            """
+            INSERT INTO exchange_rates
+                (institution_id, product_id, base_currency, quote_currency, rate,
+                 source, reported_as_of, observed_at, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (
+                institution_id,
+                COALESCE(product_id, '00000000-0000-0000-0000-000000000000'::uuid),
+                base_currency,
+                quote_currency
+            )
+            DO UPDATE SET rate = EXCLUDED.rate, source = EXCLUDED.source,
+                          reported_as_of = EXCLUDED.reported_as_of,
+                          observed_at = EXCLUDED.observed_at,
+                          updated_at = EXCLUDED.updated_at
+            """,
+            (
+                institution_id,
+                product_id,
+                rate.base_currency,
+                rate.quote_currency,
+                rate.rate,
+                rate.source,
+                rate.reported_as_of,
+                now,
+                now,
+                now,
+            ),
+        )
+        logger.info(
+            "Exchange rate %s %s/%s (%s) = %s",
+            rate.institution,
+            rate.base_currency,
+            rate.quote_currency,
+            "product" if product_id is not None else "institution",
+            rate.rate,
         )

@@ -4,12 +4,13 @@
 // always arrive via the context (no fetching here).
 
 import {
+  KIND_INFO,
   METRIC_FIELDS,
   type MetricDenomination,
   type ProductKind,
   type ProductMetrics,
 } from "@chanchito/product-model";
-import type { ClpRates } from "@/lib/rates";
+import { ratesFor, type RateBook } from "@/lib/rates";
 import { formatLocalDate } from "./dates";
 import {
   ExprError,
@@ -43,12 +44,14 @@ export type EvalContext = {
   /** Evaluation date; DAY_OF_MONTH/DAYS_IN_MONTH use its LOCAL date parts. */
   date: Date;
   products: Map<string, ProductInfo>;
-  /** CLP per unit of each currency (see lib/rates getClpRates). */
-  rates: ClpRates;
+  /** Provider rates plus institution/product overrides; each reference
+   *  converts with its own product's rates (see lib/rates ratesFor). */
+  rates: RateBook;
   /** Monitor currency: currency-denominated refs convert into it. */
   currency: string;
 };
 
+/** A value, or why it can't be computed (a Spanish, user-facing reason). */
 export type EvalResult =
   | { ok: true; value: number }
   | { ok: false; reason: string };
@@ -100,39 +103,43 @@ function refLabel(ref: RefExpr, product?: ProductInfo): string {
   return `@{${ref.productId}:${ref.field}}`;
 }
 
-function resolveRef(ref: RefExpr, ctx: EvalContext): EvalResult {
+/** One reference's value in the monitor currency, as the evaluation sums it. */
+export function resolveRef(ref: RefExpr, ctx: EvalContext): EvalResult {
   if (ref.productId == null) {
     return {
       ok: false,
-      reason: `Reference ${refLabel(ref)} is not bound to a product`,
+      reason: `La referencia ${refLabel(ref)} no está asociada a un producto`,
     };
   }
   const product = ctx.products.get(ref.productId);
   if (!product) {
     return {
       ok: false,
-      reason: `Unknown product for reference ${refLabel(ref)}`,
+      reason: `La referencia ${refLabel(ref)} apunta a un producto que ya no existe`,
     };
   }
   const label = refLabel(ref, product);
   if (!product.isActive) {
-    return { ok: false, reason: `Product ${label} is inactive` };
+    return { ok: false, reason: `El producto ${label} está inactivo` };
   }
 
   const fieldInfo = METRIC_FIELDS[product.kind][ref.field];
   if (!fieldInfo) {
     return {
       ok: false,
-      reason: `Field '${ref.field}' is not valid for kind '${product.kind}' (reference ${label})`,
+      reason: `El campo '${ref.field}' no es válido para productos de tipo '${KIND_INFO[product.kind].labelEs}' (referencia ${label})`,
     };
   }
   const denomination: MetricDenomination = fieldInfo.denomination;
   if (product.metrics == null) {
-    return { ok: false, reason: `Product ${label} has no metrics` };
+    return {
+      ok: false,
+      reason: `Todavía no hay datos para ${label} (actualiza su institución)`,
+    };
   }
   const amount = readMetricField(product.metrics, ref.field);
   if (amount == null) {
-    return { ok: false, reason: `Field '${ref.field}' is missing for ${label}` };
+    return { ok: false, reason: `Falta el campo '${ref.field}' en ${label}` };
   }
 
   // Only currency-denominated values convert; percent/count pass raw.
@@ -140,18 +147,24 @@ function resolveRef(ref: RefExpr, ctx: EvalContext): EvalResult {
   const productCurrency = product.currency.toUpperCase();
   const monitorCurrency = ctx.currency.toUpperCase();
   if (productCurrency === monitorCurrency) return { ok: true, value: amount };
-  const productRate = ctx.rates[productCurrency];
+  // Both legs come from the referenced product's rates, so an institution's
+  // own rate converts its products whichever side of the cross it is on.
+  const rates = ratesFor(ctx.rates, {
+    productId: product.id,
+    institutionSlug: product.institutionSlug,
+  });
+  const productRate = rates[productCurrency];
   if (productRate == null) {
     return {
       ok: false,
-      reason: `No rate for ${product.currency} (reference ${label})`,
+      reason: `No hay tipo de cambio para ${product.currency} (referencia ${label})`,
     };
   }
-  const monitorRate = ctx.rates[monitorCurrency];
+  const monitorRate = rates[monitorCurrency];
   if (monitorRate == null) {
     return {
       ok: false,
-      reason: `No rate for monitor currency ${ctx.currency} (reference ${label})`,
+      reason: `No hay tipo de cambio para la moneda del monitor ${ctx.currency} (referencia ${label})`,
     };
   }
   // Cross rate through CLP: CLP-per-productCurrency over CLP-per-monitorCurrency.
@@ -194,7 +207,7 @@ export function evaluateExpression(expr: Expr, ctx: EvalContext): EvalResult {
           return { ok: true, value: left.value * right.value };
         case "/":
           if (right.value === 0) {
-            return { ok: false, reason: "Division by zero" };
+            return { ok: false, reason: "División por cero" };
           }
           return { ok: true, value: left.value / right.value };
       }
@@ -271,7 +284,7 @@ export function evaluateMonitor(
   const leftParsed = parseSource(def.expression);
   const leftResult: EvalResult = leftParsed.expr
     ? evaluateExpression(leftParsed.expr, ctx)
-    : { ok: false, reason: `Invalid expression: ${leftParsed.error}` };
+    : { ok: false, reason: `Expresión inválida: ${leftParsed.error}` };
 
   let noDataReason = leftResult.ok ? null : leftResult.reason;
   const refs: RefExpr[] = leftParsed.expr ? collectRefs(leftParsed.expr) : [];
@@ -284,7 +297,7 @@ export function evaluateMonitor(
     if (parsed.expr) refs.push(...collectRefs(parsed.expr));
     const result: EvalResult = parsed.expr
       ? evaluateExpression(parsed.expr, ctx)
-      : { ok: false, reason: `Invalid threshold expression: ${parsed.error}` };
+      : { ok: false, reason: `Umbral inválido: ${parsed.error}` };
     if (!result.ok && noDataReason == null) noDataReason = result.reason;
     const value = result.ok ? result.value + adjustment : null;
 

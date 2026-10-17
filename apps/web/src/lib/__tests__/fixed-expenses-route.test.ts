@@ -91,6 +91,21 @@ describe("POST /api/fixed-expenses", () => {
     expect(fakeDb.insert).not.toHaveBeenCalled();
   });
 
+  it("refuses a window that ends before it starts", async () => {
+    const response = await POST(
+      request("POST", {
+        name: "Arriendo",
+        amount: 1_000_000,
+        activeFrom: "2026-09-02",
+        activeTo: "2026-09-01",
+      })
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ field: "activeTo" });
+    expect(fakeDb.insert).not.toHaveBeenCalled();
+  });
+
   it("inserts the normalized values", async () => {
     const response = await POST(
       request("POST", { name: " Arriendo ", amount: 2_500_000, isShared: true })
@@ -111,6 +126,15 @@ describe("POST /api/fixed-expenses", () => {
 });
 
 describe("PUT /api/fixed-expenses", () => {
+  it("answers 400 when no updatable field is given", async () => {
+    const response = await PUT(
+      request("PUT", { id: ID, createdAt: "2020-01-01T00:00:00Z" })
+    );
+
+    expect(response.status).toBe(400);
+    expect(fakeDb.select).not.toHaveBeenCalled();
+  });
+
   it("answers 404 for an unknown row", async () => {
     const response = await PUT(request("PUT", { id: ID, name: "Arriendo" }));
 

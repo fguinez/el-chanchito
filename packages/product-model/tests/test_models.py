@@ -1,6 +1,8 @@
 """Tests for the per-kind payload models, unions, and ingest envelopes."""
 
+import re
 from datetime import date
+from decimal import Decimal
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
@@ -11,9 +13,12 @@ from product_model import (
     REGISTRY,
     CreditCardAttributes,
     ProductMetrics,
+    ProductRef,
+    ScrapedExchangeRate,
     ScrapedProduct,
     ScrapedTransaction,
     TermDepositAttributes,
+    TransactionLocation,
 )
 
 METRICS_ADAPTER = TypeAdapter(ProductMetrics)
@@ -268,3 +273,237 @@ def test_transaction_keeps_a_separate_posting_date():
 
     assert txn.transaction_date == date(2026, 8, 21)
     assert txn.accounting_date == date(2026, 8, 24)
+
+
+def _usd_txn(amount, currency="USD") -> ScrapedTransaction:
+    """A synthetic card movement; only the amount (and currency) varies."""
+    return ScrapedTransaction(
+        institution="banchile",
+        product_kind="credit_card",
+        description="COMPRA SINTETICA USD",
+        amount=amount,
+        transaction_date=date(2026, 8, 21),
+        external_id="bch_ref_00000000000",
+        currency=currency,
+    )
+
+
+class TestTransactionAmount:
+    """`amount` is a Decimal that fits NUMERIC(18, 2) (issue #79)."""
+
+    def test_an_integer_validates_to_the_exact_decimal(self):
+        """CLP producers keep sending ints; nothing about them changes."""
+        amount = _usd_txn(-999_999, currency="CLP").amount
+
+        assert isinstance(amount, Decimal)
+        assert amount == Decimal("-999999") == -999_999
+        assert str(amount) == "-999999"
+        assert hash(amount) == hash(-999_999)
+
+    @pytest.mark.parametrize("raw", ["-1234.56", -1234.56, Decimal("-1234.56")])
+    def test_cents_are_kept(self, raw):
+        """USD 1.234,56 keeps its cents whether it arrives as str, float or Decimal."""
+        assert _usd_txn(raw).amount == Decimal("-1234.56")
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "1234.567",  # a third decimal does not fit the column
+            0.1 + 0.2,  # float noise is rejected, never silently rounded
+            10**16,  # 17 integer digits
+            "NaN",
+            float("inf"),
+            True,
+        ],
+        ids=["three-decimals", "float-noise", "too-large", "nan", "inf", "bool"],
+    )
+    def test_amounts_the_column_cannot_hold_are_rejected(self, raw):
+        with pytest.raises(ValidationError):
+            _usd_txn(raw)
+
+    def test_the_json_schema_describes_both_wire_forms(self):
+        prop = ScrapedTransaction.model_json_schema()["properties"]["amount"]
+
+        assert {"type": "number"} in prop["anyOf"]
+        (string_form,) = [m for m in prop["anyOf"] if m.get("type") == "string"]
+        assert string_form["pattern"] == r"^-?\d{1,16}(\.\d{1,2})?$"
+
+    @pytest.mark.parametrize("raw", ["-12.5", -12.5, Decimal("-0.5")])
+    def test_a_clp_fraction_is_rejected_not_rounded(self, raw):
+        with pytest.raises(ValidationError, match="must be whole"):
+            _usd_txn(raw, currency="CLP")
+
+    @pytest.mark.parametrize(
+        "raw, canonical",
+        [
+            (-999_999, "-999999"),
+            (Decimal("-999999.00"), "-999999"),
+            (Decimal("1E+6"), "1000000"),
+        ],
+    )
+    def test_clp_is_canonical_whole_units(self, raw, canonical):
+        assert str(_usd_txn(raw, currency="CLP").amount) == canonical
+
+    @pytest.mark.parametrize(
+        "raw, canonical",
+        [
+            (-12, "-12.00"),
+            ("-1234.5", "-1234.50"),
+            (-1234.56, "-1234.56"),
+            (Decimal("1.2E+3"), "1200.00"),
+            (Decimal("-0.1E-1"), "-0.01"),
+        ],
+    )
+    def test_other_currencies_are_canonical_cents(self, raw, canonical):
+        amount = _usd_txn(raw).amount
+
+        assert str(amount) == canonical
+        assert re.fullmatch(r"^-?\d{1,16}(\.\d{1,2})?$", str(amount))
+
+    @pytest.mark.parametrize("raw", ["1E+3", "+12.30", " 12.30", "12.", ".5", "1,234.56"])
+    def test_a_string_off_the_wire_pattern_is_rejected(self, raw):
+        with pytest.raises(ValidationError):
+            _usd_txn(raw)
+
+
+def _located_txn(location) -> ScrapedTransaction:
+    """A synthetic movement carrying `location` (a dict, a model or None)."""
+    return ScrapedTransaction(
+        institution="banchile",
+        product_kind="credit_card",
+        description="COMPRA SINTETICA",
+        amount=-999_999,
+        transaction_date=date(2026, 8, 21),
+        external_id="bch_ref_00000000000",
+        location=location,
+    )
+
+
+class TestTransactionLocation:
+    """`location` is optional, every field independent (V025)."""
+
+    def test_location_defaults_to_none(self):
+        assert _located_txn(None).location is None
+
+    def test_fields_are_trimmed_and_blank_means_absent(self):
+        location = _located_txn(
+            {"name": "  Tienda Ficticia ", "city": " CIUDAD FICTICIA", "country": "   "}
+        ).location
+
+        assert location == TransactionLocation(
+            name="Tienda Ficticia", city="CIUDAD FICTICIA"
+        )
+        assert location.country is None
+
+    def test_text_is_not_recased(self):
+        """Stored as the source spells it, like descriptions."""
+        assert _located_txn({"city": "CIUDAD FICTICIA"}).location.city == "CIUDAD FICTICIA"
+
+    def test_an_all_blank_location_collapses_to_none(self):
+        assert _located_txn({"city": "", "country": " "}).location is None
+
+    def test_coordinates_round_to_the_stored_scale(self):
+        location = _located_txn({"latitude": -33.0000004, "longitude": -70.0}).location
+
+        assert location.latitude == -33.0
+        assert location.longitude == -70.0
+
+    @pytest.mark.parametrize(
+        "coordinates",
+        [
+            {"latitude": -33.0},
+            {"longitude": -70.0},
+            {"latitude": 90.5, "longitude": 0},
+            {"latitude": 0, "longitude": -180.5},
+        ],
+    )
+    def test_bad_coordinates_are_rejected(self, coordinates):
+        with pytest.raises(ValidationError):
+            _located_txn(coordinates)
+
+    def test_overlong_text_and_unknown_keys_are_rejected(self):
+        with pytest.raises(ValidationError):
+            _located_txn({"city": "X" * 201})
+        with pytest.raises(ValidationError):
+            _located_txn({"street": "Calle Ficticia 123"})
+
+
+def _usd_rate(**fields) -> ScrapedExchangeRate:
+    """A synthetic product-scoped USD rate; `fields` override the defaults."""
+    values = {
+        "institution": "banchile",
+        "base_currency": "USD",
+        "rate": "950.00",
+        "product": {"kind": "credit_card", "currency": "USD"},
+        "source": "Pago internacional de tarjeta",
+        "reported_as_of": "2026-01-01",
+    }
+    values.update(fields)
+    return ScrapedExchangeRate(**values)
+
+
+class TestScrapedExchangeRate:
+    """The exchange-rate envelope fits `exchange_rates` (V024)."""
+
+    def test_defaults_quote_clp_and_carries_the_product_identity(self):
+        rate = _usd_rate()
+
+        assert rate.quote_currency == "CLP"
+        assert rate.rate == Decimal("950.00")
+        assert rate.reported_as_of == date(2026, 1, 1)
+        assert rate.product == ProductRef(
+            kind="credit_card", currency="USD", external_ref=None
+        )
+
+    def test_an_institution_wide_rate_has_no_product(self):
+        rate = _usd_rate(product=None, reported_as_of=None)
+
+        assert rate.product is None
+        assert rate.reported_as_of is None
+
+    @pytest.mark.parametrize("raw", [999.99, "999.99", Decimal("999.99")])
+    def test_number_string_and_decimal_rates_agree(self, raw):
+        assert _usd_rate(rate=raw).rate == Decimal("999.99")
+
+    @pytest.mark.parametrize(
+        "raw",
+        [0, -1, "0", "1.123456789", 10**12, "NaN", float("inf"), "1,5", "1E+3", True],
+        ids=[
+            "zero", "negative", "zero-string", "nine-decimals", "too-large",
+            "nan", "inf", "comma", "exponent", "bool",
+        ],
+    )
+    def test_rates_the_column_cannot_hold_are_rejected(self, raw):
+        with pytest.raises(ValidationError):
+            _usd_rate(rate=raw)
+
+    def test_a_product_rate_prices_its_own_currency(self):
+        with pytest.raises(ValidationError, match="does not match base_currency"):
+            _usd_rate(product={"kind": "credit_card", "currency": "EUR"})
+
+    def test_base_and_quote_must_differ(self):
+        with pytest.raises(ValidationError, match="are both 'CLP'"):
+            _usd_rate(base_currency="CLP", product=None)
+
+    @pytest.mark.parametrize("code", ["usd", "US", "U$D", ""])
+    def test_currency_codes_are_upper_case(self, code):
+        with pytest.raises(ValidationError):
+            _usd_rate(base_currency=code, product=None)
+
+    @pytest.mark.parametrize("source", ["", "   "])
+    def test_the_source_label_is_required(self, source):
+        with pytest.raises(ValidationError):
+            _usd_rate(source=source)
+
+    def test_unknown_fields_are_rejected(self):
+        with pytest.raises(ValidationError):
+            _usd_rate(nombre="TITULAR SINTETICO")
+        with pytest.raises(ValidationError):
+            _usd_rate(product={"kind": "credit_card", "currency": "USD", "id": "0"})
+
+    def test_the_json_schema_describes_both_wire_forms(self):
+        prop = ScrapedExchangeRate.model_json_schema()["properties"]["rate"]
+
+        assert {"type": "number", "exclusiveMinimum": 0} in prop["anyOf"]
+        (string_form,) = [m for m in prop["anyOf"] if m.get("type") == "string"]
+        assert string_form["pattern"] == r"^\d{1,12}(\.\d{1,8})?$"

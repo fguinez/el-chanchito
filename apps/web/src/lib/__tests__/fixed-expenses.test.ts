@@ -9,8 +9,6 @@ import {
   parseFixedExpenseForm,
   ratioInput,
   sortByStatus,
-  validateFixedExpenseId,
-  validateFixedExpenseInput,
   type FixedExpense,
   type FixedExpenseFormInput,
   type StoredFixedExpense,
@@ -121,154 +119,6 @@ describe("isCalendarDate", () => {
   });
 });
 
-describe("validateFixedExpenseInput (create)", () => {
-  it("applies the defaults and trims the name", () => {
-    const value = expectOk(
-      validateFixedExpenseInput({ name: "  Arriendo  ", amount: 1_000_000 }, "create")
-    );
-    expect(value).toEqual({
-      name: "Arriendo",
-      amount: 1_000_000,
-      isShared: false,
-      sharedRatio: null,
-      activeFrom: null,
-      activeTo: null,
-    });
-  });
-
-  it("rounds the amount", () => {
-    const value = expectOk(
-      validateFixedExpenseInput({ name: "Internet", amount: 999_999.4 }, "create")
-    );
-    expect(value.amount).toBe(999_999);
-  });
-
-  it("stores the given ratio, or the default, only when shared", () => {
-    const given = expectOk(
-      validateFixedExpenseInput(
-        { name: "Arriendo", amount: 2_500_000, isShared: true, sharedRatio: 0.5 },
-        "create"
-      )
-    );
-    expect(given.sharedRatio).toBe("0.5");
-
-    const fallback = expectOk(
-      validateFixedExpenseInput(
-        { name: "Arriendo", amount: 2_500_000, isShared: true },
-        "create"
-      )
-    );
-    expect(fallback.sharedRatio).toBe(DEFAULT_SHARED_RATIO);
-
-    const unshared = expectOk(
-      validateFixedExpenseInput(
-        { name: "Arriendo", amount: 2_500_000, isShared: false, sharedRatio: 0.5 },
-        "create"
-      )
-    );
-    expect(unshared.sharedRatio).toBeNull();
-  });
-
-  it("keeps a valid active window", () => {
-    const value = expectOk(
-      validateFixedExpenseInput(
-        {
-          name: "Internet",
-          amount: 999_999,
-          activeFrom: "2026-01-01",
-          activeTo: "2026-12-31",
-        },
-        "create"
-      )
-    );
-    expect(value).toMatchObject({ activeFrom: "2026-01-01", activeTo: "2026-12-31" });
-  });
-
-  it("drops unknown keys", () => {
-    const value = expectOk(
-      validateFixedExpenseInput(
-        { name: "Internet", amount: 999_999, createdAt: "2020-01-01", id: ID },
-        "create"
-      )
-    );
-    expect(value).not.toHaveProperty("createdAt");
-    expect(value).not.toHaveProperty("id");
-  });
-
-  it.each<[string, unknown, string]>([
-    ["a non-object body", [], "(none)"],
-    ["a missing name", { amount: 1_000_000 }, "name"],
-    ["a blank name", { name: "   ", amount: 1_000_000 }, "name"],
-    ["a non-string name", { name: 42, amount: 1_000_000 }, "name"],
-    ["a missing amount", { name: "Arriendo" }, "amount"],
-    ["a string amount", { name: "Arriendo", amount: "1000000" }, "amount"],
-    ["an amount over int32", { name: "Arriendo", amount: 2_147_483_648 }, "amount"],
-    ["an amount under int32", { name: "Arriendo", amount: -2_147_483_649 }, "amount"],
-    ["a non-boolean isShared", { name: "Arriendo", amount: 1_000_000, isShared: "yes" }, "isShared"],
-    ["a ratio above 1", { name: "Arriendo", amount: 1_000_000, sharedRatio: 1.5 }, "sharedRatio"],
-    ["a negative ratio", { name: "Arriendo", amount: 1_000_000, sharedRatio: -0.1 }, "sharedRatio"],
-    ["a string ratio", { name: "Arriendo", amount: 1_000_000, sharedRatio: "0.5" }, "sharedRatio"],
-    ["an impossible date", { name: "Arriendo", amount: 1_000_000, activeFrom: "2026-02-30" }, "activeFrom"],
-    ["an unpadded date", { name: "Arriendo", amount: 1_000_000, activeTo: "2026-9-1" }, "activeTo"],
-    ["a numeric date", { name: "Arriendo", amount: 1_000_000, activeTo: 20260901 }, "activeTo"],
-    [
-      "a window that ends before it starts",
-      { name: "Arriendo", amount: 1_000_000, activeFrom: "2026-09-02", activeTo: "2026-09-01" },
-      "activeTo",
-    ],
-  ])("refuses %s", (_label, body, field) => {
-    const failure = expectFailure(validateFixedExpenseInput(body, "create"));
-    expect(failure.status).toBe(400);
-    expect(failure.field ?? "(none)").toBe(field);
-  });
-});
-
-describe("validateFixedExpenseInput (update)", () => {
-  it("returns only the recognized fields present", () => {
-    const value = expectOk(
-      validateFixedExpenseInput(
-        {
-          id: ID,
-          amount: 2_500_000.6,
-          sharedRatio: 0.5,
-          activeTo: null,
-          createdAt: "2020-01-01T00:00:00Z",
-          updatedAt: "2020-01-01T00:00:00Z",
-        },
-        "update"
-      )
-    );
-    expect(value).toEqual({
-      id: ID,
-      fields: { amount: 2_500_001, sharedRatio: "0.5", activeTo: null },
-    });
-  });
-
-  it("accepts a uuid-shaped id that is not RFC 4122", () => {
-    const seeded = "00000000-0000-0000-0000-000000000001";
-    const value = expectOk(
-      validateFixedExpenseInput({ id: seeded, name: "Internet" }, "update")
-    );
-    expect(value.id).toBe(seeded);
-  });
-
-  it.each<[string, unknown, string]>([
-    ["a missing id", { name: "Internet" }, "id"],
-    ["a non-uuid id", { id: "1", name: "Internet" }, "id"],
-    ["a numeric id", { id: 1, name: "Internet" }, "id"],
-    ["no recognized field", { id: ID, createdAt: "2020-01-01" }, "(none)"],
-    ["a blank name", { id: ID, name: "" }, "name"],
-    [
-      "a window that ends before it starts",
-      { id: ID, activeFrom: "2026-09-02", activeTo: "2026-09-01" },
-      "activeTo",
-    ],
-  ])("refuses %s", (_label, body, field) => {
-    const failure = expectFailure(validateFixedExpenseInput(body, "update"));
-    expect(failure.field ?? "(none)").toBe(field);
-  });
-});
-
 describe("mergeFixedExpenseUpdate", () => {
   const stored: StoredFixedExpense = {
     isShared: false,
@@ -347,20 +197,6 @@ describe("mergeFixedExpenseUpdate", () => {
       )
     );
     expect(values).toEqual({ isShared: false, sharedRatio: null });
-  });
-});
-
-describe("validateFixedExpenseId", () => {
-  it("accepts a uuid", () => {
-    expect(expectOk(validateFixedExpenseId({ id: ID }))).toEqual({ id: ID });
-  });
-
-  it.each<[string, unknown]>([
-    ["a missing id", {}],
-    ["a non-uuid id", { id: "abc" }],
-    ["a non-object body", "abc"],
-  ])("refuses %s", (_label, body) => {
-    expect(expectFailure(validateFixedExpenseId(body)).status).toBe(400);
   });
 });
 

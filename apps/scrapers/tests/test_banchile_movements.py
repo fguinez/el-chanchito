@@ -8,10 +8,21 @@ fabricated (see the repo's personal-data policy).
 """
 
 import datetime
+import time
+from contextlib import contextmanager
+from decimal import Decimal
+from unittest.mock import MagicMock
+
+import pytest
 
 from scrapers.backends import banchile_movements as movements_mod
+from scrapers.backends import banchile_web as banchile_web_mod
 from scrapers.backends.banchile_movements import (
     BanChileMovement,
+    card_location,
+    merge_locations,
+    _read_card_billed,
+    _read_card_billed_usd,
     _read_card_unbilled,
     billed_reference,
     cartola_account_number,
@@ -19,15 +30,28 @@ from scrapers.backends.banchile_movements import (
     dedupe_movements,
     drop_unbilled_duplicates,
     detail_glosa_body,
+    international_statement_dates,
+    is_international,
     needs_detail_glosa,
     operation_id_from_detail,
     operation_id_from_glosa,
     parse_billed_movements,
     parse_cartola_movement,
+    parse_international_billed_movements,
     parse_unbilled_movement,
     parse_unbilled_movements,
+    read_movement_surfaces,
+    read_session,
     statement_dates,
 )
+from scrapers.backends.banchile_web import BalanceFetchResult, LoginCooldownError
+from scrapers.base import (
+    ProductRef,
+    ScrapedExchangeRate,
+    ScrapedProduct,
+    TransactionLocation,
+)
+from scrapers.institutions.banchile import external_id_for
 
 # --- Synthetic payload builders ------------------------------------------------
 
@@ -71,9 +95,13 @@ def _unbilled_row(
     fecha_auth="20/08/2026",
     comercio="COMERCIO SINTETICO",
     tbk="000000000001",
+    origen="NAC",
+    ciudad="CIUDAD SINTETICA",
+    pais="PAIS SINTETICO",
 ):
+    """One unbilled row; `origen="INT"` makes it a USD row (synthetic)."""
     return {
-        "origenTransaccion": "PRESENCIAL",
+        "origenTransaccion": origen,
         "fechaTransaccion": 1755000000000,
         "fechaTransaccionString": fecha,
         "montoCompra": monto,
@@ -82,8 +110,9 @@ def _unbilled_row(
         "codigoComercioINT": "000001",
         "nombreComercio": comercio,
         "rubroComercio": "RETAIL",
-        "codigoPaisComercio": "CL",
-        "ciudad": "SANTIAGO",
+        # The portal puts the country's NAME under this key.
+        "codigoPaisComercio": pais,
+        "ciudad": ciudad,
         "fechaAutorizacion": 1755000000000,
         "horaAutorizacion": hora,
         "numeroTarjeta": CARD_LAST4,
@@ -105,6 +134,7 @@ def _billed_row(
     descripcion="COMERCIO SINTETICO",
     grupo="avancesCompras",
     totales=False,
+    ciudad="CIUDAD SINTETICA",
 ):
     return {
         "numReferencia": referencia,
@@ -113,7 +143,7 @@ def _billed_row(
         "fechaTransaccionString": fecha,
         "montoTransaccion": monto,
         "descripcion": descripcion,
-        "ciudad": "SANTIAGO",
+        "ciudad": ciudad,
         "cuotas": "",
         "comercio": descripcion,
         "rubro": "RETAIL",
@@ -255,6 +285,8 @@ class TestCartolaPaging:
         payload = {"movimientos": [], "pagina": [{"masPaginas": False}]}
         assert cartola_has_more_pages(payload) is False
         assert cartola_has_more_pages({"movimientos": []}) is False
+        assert cartola_has_more_pages({"pagina": [{"masPaginas": "N"}]}) is False
+        assert cartola_has_more_pages({"pagina": [{"masPaginas": "S"}]}) is True
 
 
 class TestParseUnbilled:
@@ -678,3 +710,661 @@ class TestCartolaAccountNumber:
     def test_empty_payloads(self):
         assert cartola_account_number({"movimientos": []}) == ""
         assert cartola_account_number(None) == ""
+
+
+class TestSharedSession:
+    """`_session_sync` authenticates through banchile_web's session cache."""
+
+    def test_both_reads_run_inside_the_cached_session(self, monkeypatch):
+        events = []
+        page = MagicMock()
+
+        @contextmanager
+        def authenticated_session(browser, rut, password):
+            events.append("authenticated")
+            yield page
+            events.append("session saved")
+
+        @contextmanager
+        def sync_playwright():
+            yield MagicMock()
+
+        def read_products(p):
+            events.append("products")
+            return BalanceFetchResult(products=[], failed_surfaces=("card",))
+
+        def read_rate(p):
+            events.append("rate")
+            return [], ()
+
+        def read_movements(p):
+            events.append("movements")
+            return [], ("tarjeta facturados",)
+
+        monkeypatch.setattr("playwright.sync_api.sync_playwright", sync_playwright)
+        monkeypatch.setattr(movements_mod, "_authenticated_session", authenticated_session)
+        monkeypatch.setattr(movements_mod, "_dismiss_popup", lambda p: None)
+        monkeypatch.setattr(movements_mod, "_read_all_surfaces", read_products)
+        monkeypatch.setattr(movements_mod, "read_exchange_rate_surface", read_rate)
+        monkeypatch.setattr(movements_mod, "read_movement_surfaces", read_movements)
+
+        result = movements_mod._session_sync("11.111.111-1", "synthetic-password", True)
+
+        # The post-read save sees the cookies every read may have rotated.
+        assert events == [
+            "authenticated",
+            "products",
+            "rate",
+            "movements",
+            "session saved",
+        ]
+        assert result.failed_surfaces == ("card", "tarjeta facturados")
+
+    def test_a_certain_login_is_refused_before_launching_chromium(
+        self, tmp_path, monkeypatch
+    ):
+        """A login attempt just now and no cached session: nothing to launch."""
+        monkeypatch.setenv("BANCHILE_SESSION_FILE", str(tmp_path / ".banchile_session.json"))
+        monkeypatch.delenv("BANCHILE_LOGIN_COOLDOWN_MINUTES", raising=False)
+        monkeypatch.setattr(banchile_web_mod, "_last_login_attempt", time.monotonic())
+        sync_playwright = MagicMock()
+        monkeypatch.setattr("playwright.sync_api.sync_playwright", sync_playwright)
+
+        with pytest.raises(LoginCooldownError):
+            movements_mod._session_sync("11.111.111-1", "synthetic-password", True)
+
+        sync_playwright.assert_not_called()
+
+
+# --- Issue #79: the USD side of the same products ------------------------------
+#
+# Every USD figure below is synthetic (1234.56, 12.30, ...), as are the card
+# last-4 and every reference.
+
+
+class TestUnbilledCurrency:
+    """`origenTransaccion` is the only currency mark on the unbilled leg."""
+
+    def test_an_int_row_is_usd_with_exact_cents(self):
+        movement = parse_unbilled_movement(_unbilled_row(monto=1234.56, origen="INT"))
+
+        assert movement.currency == "USD"
+        assert movement.amount == Decimal("-1234.56")
+        assert str(movement.amount) == "-1234.56"
+
+    def test_a_nac_row_stays_whole_clp(self):
+        movement = parse_unbilled_movement(_unbilled_row(monto=999999, origen="NAC"))
+
+        assert movement.currency == "CLP"
+        assert movement.amount == -999999
+
+    def test_anything_but_int_stays_clp(self):
+        """What every row was before #79; only "INT" is known to mean USD."""
+        assert parse_unbilled_movement(_unbilled_row(origen="")).currency == "CLP"
+        assert parse_unbilled_movement(_unbilled_row(origen="OTRO")).currency == "CLP"
+        assert is_international(_unbilled_row(origen="int")) is True
+
+    def test_the_merchant_currency_fields_are_ignored(self):
+        """840 was reported on rows whose origin figure was in pesos."""
+        row = _unbilled_row(monto=999999, origen="NAC")
+        row["codigoMonedaOrigen"] = "840"
+        assert parse_unbilled_movement(row).currency == "CLP"
+
+    def test_a_usd_payment_is_income(self):
+        """Same sign convention as the CLP rows: negative is a payment."""
+        movement = parse_unbilled_movement(_unbilled_row(monto=-1234.56, origen="INT"))
+        assert movement.amount == Decimal("1234.56")
+
+    def test_float_noise_never_reaches_the_cents(self):
+        movement = parse_unbilled_movement(
+            _unbilled_row(monto=0.1 + 0.2, origen="INT")
+        )
+        assert movement.amount == Decimal("-0.30")
+
+    def test_usd_fingerprint_renders_the_amount_canonically(self):
+        """12.3, 12.30 and the same figure as a whole number never re-key."""
+        tenths = parse_unbilled_movement(_unbilled_row(monto=12.3, origen="INT"))
+        whole = parse_unbilled_movement(_unbilled_row(monto=12, origen="INT"))
+        whole_float = parse_unbilled_movement(_unbilled_row(monto=12.0, origen="INT"))
+
+        assert tenths.fingerprint[3] == "12.30"
+        assert whole.fingerprint == whole_float.fingerprint
+        assert whole.fingerprint[3] == "12.00"
+
+    def test_a_usd_row_records_what_the_clp_only_code_stored(self):
+        """Its key fields and its amount, rounded the way that code rounded."""
+        movement = parse_unbilled_movement(_unbilled_row(monto=1234.56, origen="INT"))
+
+        assert movement.legacy_fingerprint == (
+            "20/08/2026",
+            "20/08/2026",
+            "12:41:33",
+            "1234.56",
+            CARD_LAST4,
+            "000000000001",
+        )
+        assert movement.legacy_amount == -1235
+
+    def test_legacy_rounding_is_bankers_rounding(self):
+        """Python's round(12.5) is 12; the legacy rows hold exactly that."""
+        assert parse_unbilled_movement(
+            _unbilled_row(monto=12.5, origen="INT")
+        ).legacy_amount == -12
+        assert parse_unbilled_movement(
+            _unbilled_row(monto=13.5, origen="INT")
+        ).legacy_amount == -14
+
+    def test_clp_rows_carry_no_legacy_fields(self):
+        movement = parse_unbilled_movement(_unbilled_row())
+        assert movement.legacy_fingerprint == ()
+        assert movement.legacy_amount is None
+
+    def test_one_list_holds_both_currencies(self):
+        payload = {
+            "listaMovNoFactur": [
+                _unbilled_row(monto=999999),
+                _unbilled_row(monto=1234.56, origen="INT"),
+            ]
+        }
+        assert [m.currency for m in parse_unbilled_movements(payload)] == [
+            "CLP",
+            "USD",
+        ]
+
+
+class TestBilledReferenceShapes:
+    def test_a_usd_purchase_reference_is_kept(self):
+        reference = "2008 " + "1" * 23
+        assert billed_reference(reference) == reference
+
+    def test_a_bare_ddmm_is_no_reference(self):
+        """A posting day on payment and commission rows; every one would share it."""
+        assert billed_reference("2008") is None
+        assert billed_reference(" 2008 ") is None
+
+
+def _intl_row(
+    numero_documento="2008 " + "1" * 23,
+    monto=1234.56,
+    fecha="20/08/2026",
+    descripcion="COMERCIO SINTETICO",
+    grupo="generico",
+    totales=False,
+    ciudad="CIUDAD SINTETICA",
+    pais="PAIS SINTETICO",
+):
+    """One USD statement row, every value synthetic."""
+    return {
+        "numeroDocumento": numero_documento,
+        "fechaTransaccion": None if totales else 1755000000000,
+        "fechaTransaccionString": None if totales else fecha,
+        "descripcion": descripcion,
+        "codigoPais": None,
+        "ciudadComercio": ciudad,
+        "pais": pais,
+        "montoDolar": monto,
+        "montoMonedaOrigen": monto,
+        "tituloTarjeta": f"****{CARD_LAST4}",
+        "nombreTitular": "PERSONA SINTETICA",
+        "totales": totales,
+        "grupo": grupo,
+        "idMovimiento": "session-token-1",
+        "idComprobante": "session-token-2",
+        "montoDolarTemp": monto,
+    }
+
+
+def _intl_section(rows, count=None):
+    return {
+        "totalTransacciones": 0,
+        "numeroDeTransacciones": len(rows or []) + 1 if count is None else count,
+        "mensajeSinTransacciones": None if rows else "Sin transacciones",
+        "transaccionesTarjetas": rows,
+    }
+
+
+def _intl_payload(pagos=None, compras=None, comisiones=None):
+    return {
+        "existeEstadoCuenta": True,
+        "resumen": {"montoFacturado": 1234.56},
+        "seccionPagos": _intl_section(pagos),
+        "seccionCompras": _intl_section(compras),
+        "seccionComisiones": _intl_section(comisiones),
+    }
+
+
+class TestInternationalBilled:
+    def test_every_section_is_read(self):
+        payload = _intl_payload(
+            pagos=[_intl_row(numero_documento="2008", monto=-1234.56, grupo="pagos")],
+            compras=[_intl_row(monto=12.3)],
+            comisiones=[_intl_row(numero_documento="2108", monto=-1.5)],
+        )
+
+        parsed = parse_international_billed_movements(payload, "2026-08-25")
+
+        assert [m.amount for m in parsed] == [
+            Decimal("1234.56"),
+            Decimal("-12.30"),
+            Decimal("1.50"),
+        ]
+        assert {m.currency for m in parsed} == {"USD"}
+        assert {m.source for m in parsed} == {"card_billed"}
+        assert {m.product_kind for m in parsed} == {"credit_card"}
+
+    def test_the_sign_comes_from_the_amount_not_the_section(self):
+        """A commissions row was a credit; `grupo` says nothing about direction."""
+        payload = _intl_payload(
+            comisiones=[_intl_row(numero_documento="2108", monto=-1.5)],
+            compras=[_intl_row(monto=1.5, grupo="pagos")],
+        )
+        amounts = [m.amount for m in parse_international_billed_movements(payload)]
+        assert sorted(amounts) == [Decimal("-1.50"), Decimal("1.50")]
+
+    def test_a_null_section_is_empty_not_an_error(self):
+        payload = _intl_payload(compras=[_intl_row()])
+        assert payload["seccionComisiones"]["transaccionesTarjetas"] is None
+
+        assert len(parse_international_billed_movements(payload)) == 1
+
+    def test_missing_sections_and_bad_payloads(self):
+        assert parse_international_billed_movements({"existeEstadoCuenta": False}) == []
+        assert parse_international_billed_movements(None) == []
+
+    def test_totales_rows_are_dropped(self):
+        payload = _intl_payload(
+            compras=[
+                _intl_row(),
+                _intl_row(numero_documento="", totales=True, grupo="TOTAL DE COMPRAS"),
+            ]
+        )
+        assert len(parse_international_billed_movements(payload)) == 1
+
+    def test_the_row_count_field_is_never_trusted(self):
+        """`numeroDeTransacciones` was off by one even on empty sections."""
+        payload = _intl_payload(compras=[_intl_row()])
+        payload["seccionCompras"]["numeroDeTransacciones"] = 7
+        assert len(parse_international_billed_movements(payload)) == 1
+
+    def test_a_purchase_is_keyed_on_its_reference(self):
+        (movement,) = parse_international_billed_movements(
+            _intl_payload(compras=[_intl_row()])
+        )
+        assert movement.operation_id == "2008 " + "1" * 23
+
+    def test_payments_fall_back_to_a_fingerprint(self):
+        payload = _intl_payload(
+            pagos=[
+                _intl_row(numero_documento="2008", monto=-1234.56, grupo="pagos"),
+                _intl_row(numero_documento="2108 00000000", monto=-12.3, grupo="pagos"),
+            ]
+        )
+        first, second = parse_international_billed_movements(payload, "2026-08-25")
+
+        assert first.operation_id is None and second.operation_id is None
+        assert first.fingerprint == (
+            "20/08/2026",
+            "-1234.56",
+            f"****{CARD_LAST4}",
+            "2026-08-25",
+            "2008",
+            "seccionPagos",
+        )
+        assert second.fingerprint[1] == "-12.30"
+        assert second.fingerprint[4] == "2108 00000000"
+
+    def test_a_payment_and_a_credit_alike_in_all_else_both_survive(self):
+        """Same date, signed amount and card, neither with a usable reference."""
+        payload = _intl_payload(
+            pagos=[_intl_row(numero_documento="2008 00000000", monto=-12.3, grupo="pagos")],
+            comisiones=[_intl_row(numero_documento="2008", monto=-12.3)],
+        )
+
+        parsed = dedupe_movements(parse_international_billed_movements(payload, "2026-08-25"))
+
+        assert len(parsed) == 2
+        assert {m.operation_id for m in parsed} == {None}
+        assert len({external_id_for(m) for m in parsed}) == 2
+
+    def test_the_section_tells_apart_rows_with_the_same_document(self):
+        payload = _intl_payload(
+            pagos=[_intl_row(numero_documento="2008", monto=-12.3, grupo="pagos")],
+            comisiones=[_intl_row(numero_documento="2008", monto=-12.3)],
+        )
+
+        parsed = dedupe_movements(parse_international_billed_movements(payload, "2026-08-25"))
+
+        assert [m.fingerprint[5] for m in parsed] == ["seccionPagos", "seccionComisiones"]
+
+    def test_no_date_comes_from_the_ddmm_prefix(self):
+        row = _intl_row(numero_documento="0101 " + "1" * 23, fecha="20/08/2026")
+        (movement,) = parse_international_billed_movements(_intl_payload(compras=[row]))
+        assert movement.transaction_date == datetime.date(2026, 8, 20)
+        assert movement.accounting_date is None
+
+    def test_session_tokens_never_reach_the_identity(self):
+        row = _intl_row(numero_documento="2008")
+        other = dict(row, idMovimiento="session-token-9", idComprobante="token-9")
+        parse = parse_international_billed_movements
+        assert (
+            parse(_intl_payload(pagos=[row]))[0].fingerprint
+            == parse(_intl_payload(pagos=[other]))[0].fingerprint
+        )
+
+    def test_records_the_legacy_clp_amount(self):
+        (movement,) = parse_international_billed_movements(
+            _intl_payload(compras=[_intl_row(monto=1234.56)])
+        )
+        assert movement.legacy_amount == -1235
+        assert movement.legacy_fingerprint == ()
+
+
+class TestInternationalStatementDates:
+    def test_reads_the_international_list_and_its_flag(self):
+        payload = {
+            "listaNacional": [
+                {"fechaFacturacion": "2026-09-05", "existeEstadoCuentaNacional": "1"},
+            ],
+            "listaInternacional": [
+                {"fechaFacturacion": "2026-08-05", "existeEstadoCuentaInternacional": "S"},
+                {"fechaFacturacion": "2026-07-05", "existeEstadoCuentaInternacional": "N"},
+                {"fechaFacturacion": "2026-06-05", "existeEstadoCuentaInternacional": "S"},
+                {"fechaFacturacion": "2026-05-05", "existeEstadoCuentaInternacional": "S"},
+            ],
+        }
+        assert international_statement_dates(payload, 2) == ["2026-08-05", "2026-06-05"]
+
+    def test_empty(self):
+        assert international_statement_dates({}, 2) == []
+        assert international_statement_dates(None, 2) == []
+
+
+class TestUsdDuplicates:
+    """The USD legs share date and signed amount exactly; nothing else."""
+
+    def _card(self, source, amount, currency="USD", **fields):
+        return BanChileMovement(
+            source=source,
+            product_kind="credit_card",
+            description="COMERCIO SINTETICO",
+            amount=Decimal(amount),
+            transaction_date=datetime.date(2026, 8, 20),
+            currency=currency,
+            **fields,
+        )
+
+    def test_a_usd_charge_on_both_legs_keeps_the_billed_row(self):
+        movements = [
+            self._card("card_unbilled", "-1234.56", fingerprint=("fp",)),
+            self._card("card_billed", "-1234.56", operation_id="ref-1"),
+        ]
+        assert [m.source for m in drop_unbilled_duplicates(movements)] == ["card_billed"]
+
+    def test_the_opposite_sign_is_a_different_movement(self):
+        movements = [
+            self._card("card_unbilled", "1234.56", fingerprint=("fp",)),
+            self._card("card_billed", "-1234.56", operation_id="ref-1"),
+        ]
+        assert len(drop_unbilled_duplicates(movements)) == 2
+
+    def test_currencies_never_match_each_other(self):
+        movements = [
+            self._card("card_unbilled", "-12", currency="CLP", fingerprint=("fp",)),
+            self._card("card_billed", "-12.00", operation_id="ref-1"),
+        ]
+        assert len(drop_unbilled_duplicates(movements)) == 2
+
+    def test_the_billed_row_inherits_the_legacy_key(self):
+        """So the misrouted-row cleanup can still match the old row exactly."""
+        movements = [
+            self._card(
+                "card_unbilled",
+                "-1234.56",
+                fingerprint=("fp",),
+                legacy_fingerprint=("legacy",),
+                legacy_amount=-1235,
+            ),
+            self._card("card_billed", "-1234.56", operation_id="ref-1", legacy_amount=-1235),
+        ]
+        (kept,) = drop_unbilled_duplicates(movements)
+        assert kept.legacy_fingerprint == ("legacy",)
+        assert kept.legacy_amount == -1235
+
+    def test_dedupe_keeps_a_usd_and_a_clp_row_with_one_fingerprint(self):
+        pair = [
+            self._card("card_unbilled", "-12", currency="CLP", fingerprint=("fp",)),
+            self._card("card_unbilled", "-12", fingerprint=("fp",)),
+        ]
+        assert len(dedupe_movements(pair)) == 2
+
+
+class TestInternationalSurface:
+    """The USD statement is its own capture; the national one never sees it."""
+
+    _FRAGMENT = "tarjetas/estadocuenta/internacional/resumen-por-fecha"
+
+    def test_captures_the_spas_international_statement(self):
+        page = _FakeCardPage(_intl_payload(compras=[_intl_row()]), self._FRAGMENT)
+
+        found = _read_card_billed_usd(page, attempt=0)
+
+        assert [(m.currency, m.amount) for m in found] == [("USD", Decimal("-1234.56"))]
+
+    def test_the_national_leg_does_not_capture_it(self, monkeypatch):
+        """`estadocuenta/nacional` is not a substring of the international URL."""
+        monkeypatch.setattr(movements_mod, "_RENDER_TIMEOUTS_MS", (0,))
+        page = _FakeCardPage(_intl_payload(compras=[_intl_row()]), self._FRAGMENT)
+
+        assert _read_card_billed(page, attempt=0) is None
+
+
+class TestSurfaceIsolation:
+    def test_a_failed_usd_surface_costs_nothing_else(self, monkeypatch):
+        clp = BanChileMovement(
+            source="card_billed",
+            product_kind="credit_card",
+            description="COMERCIO SINTETICO",
+            amount=Decimal(-999999),
+            transaction_date=datetime.date(2026, 8, 20),
+            operation_id="2008 12345678",
+        )
+        monkeypatch.setattr(
+            movements_mod,
+            "_MOVEMENT_READERS",
+            [
+                ("tarjeta facturados", lambda page, attempt: [clp]),
+                ("tarjeta facturados USD", lambda page, attempt: None),
+                ("tarjeta no facturados", lambda page, attempt: []),
+            ],
+        )
+
+        movements, failed = read_movement_surfaces(MagicMock())
+
+        assert movements == [clp]
+        assert failed == ("tarjeta facturados USD",)
+
+
+# Synthetic place: no real city or country.
+_PLACE = TransactionLocation(city="CIUDAD SINTETICA", country="PAIS SINTETICO")
+
+
+class TestCardLocation:
+    """V025: the card legs carry the merchant's city and country."""
+
+    def test_an_unbilled_row_reads_ciudad_and_the_country_name(self):
+        assert parse_unbilled_movement(_unbilled_row()).location == _PLACE
+
+    def test_a_usd_unbilled_row_carries_it_too(self):
+        movement = parse_unbilled_movement(_unbilled_row(monto=12.34, origen="INT"))
+        assert movement.location == _PLACE
+
+    def test_a_national_billed_row_has_a_city_and_no_country(self):
+        (movement,) = parse_billed_movements(_billed_payload([_billed_row()]))
+        assert movement.location == TransactionLocation(city="CIUDAD SINTETICA")
+
+    def test_a_usd_statement_row_reads_ciudad_comercio_and_pais(self):
+        (movement,) = parse_international_billed_movements(
+            _intl_payload(compras=[_intl_row()])
+        )
+        assert movement.location == _PLACE
+
+    def test_codigo_pais_is_only_a_fallback(self):
+        row = _intl_row(pais="")
+        row["codigoPais"] = "XX"
+        (movement,) = parse_international_billed_movements(_intl_payload(compras=[row]))
+        assert movement.location.country == "XX"
+
+    def test_blank_fields_mean_no_location(self):
+        """Payment rows leave both fields empty."""
+        (movement,) = parse_international_billed_movements(
+            _intl_payload(pagos=[_intl_row(monto=-1234.56, ciudad="", pais=" ")])
+        )
+        assert movement.location is None
+        assert parse_unbilled_movement(_unbilled_row(ciudad=None, pais="")).location is None
+
+    def test_values_are_trimmed_and_not_recased(self):
+        location = card_location("  Ciudad Sintetica ", "PAIS SINTETICO ")
+        assert location == TransactionLocation(
+            city="Ciudad Sintetica", country="PAIS SINTETICO"
+        )
+
+    def test_an_unstorable_value_drops_the_location_not_the_movement(self):
+        movement = parse_unbilled_movement(_unbilled_row(ciudad="X" * 500))
+        assert movement is not None
+        assert movement.location is None
+
+    def test_location_never_reaches_an_identity(self):
+        here = parse_unbilled_movement(_unbilled_row())
+        there = parse_unbilled_movement(_unbilled_row(ciudad="OTRA", pais="OTRO"))
+        assert external_id_for(here) == external_id_for(there)
+
+    def test_a_dropped_unbilled_twin_hands_over_its_location(self):
+        unbilled = parse_unbilled_movement(_unbilled_row(monto=1234.56, origen="INT"))
+        (billed,) = parse_international_billed_movements(
+            _intl_payload(compras=[_intl_row(ciudad="", pais="")])
+        )
+
+        (kept,) = drop_unbilled_duplicates([unbilled, billed])
+
+        assert kept.source == "card_billed"
+        assert kept.location == _PLACE
+
+    def test_a_dropped_twin_fills_the_billed_rows_gaps_field_by_field(self):
+        """The billed leg wins per field; the unbilled one only fills gaps."""
+        unbilled = parse_unbilled_movement(
+            _unbilled_row(
+                monto=1234.56, origen="INT", ciudad="OTRA", pais="PAIS SINTETICO"
+            )
+        )
+        (billed,) = parse_international_billed_movements(
+            _intl_payload(compras=[_intl_row(ciudad="CIUDAD SINTETICA", pais="")])
+        )
+
+        (kept,) = drop_unbilled_duplicates([unbilled, billed])
+
+        assert kept.location == _PLACE
+
+    def test_a_billed_location_wins_over_its_unbilled_twin(self):
+        unbilled = parse_unbilled_movement(
+            _unbilled_row(monto=1234.56, origen="INT", ciudad="OTRA")
+        )
+        (billed,) = parse_international_billed_movements(
+            _intl_payload(compras=[_intl_row()])
+        )
+
+        (kept,) = drop_unbilled_duplicates([unbilled, billed])
+
+        assert kept.location == _PLACE
+
+
+class TestMergeLocations:
+    """Field-by-field merge; coordinates travel as a pair."""
+
+    def test_either_side_missing(self):
+        assert merge_locations(None, None) is None
+        assert merge_locations(_PLACE, None) == _PLACE
+        assert merge_locations(None, _PLACE) == _PLACE
+
+    def test_primary_text_wins_and_gaps_are_filled(self):
+        merged = merge_locations(
+            TransactionLocation(city="CIUDAD SINTETICA"),
+            TransactionLocation(name="TIENDA", city="OTRA", country="PAIS SINTETICO"),
+        )
+        assert merged == TransactionLocation(
+            name="TIENDA", city="CIUDAD SINTETICA", country="PAIS SINTETICO"
+        )
+
+    def test_coordinates_are_never_mixed(self):
+        primary = TransactionLocation(latitude=-33.0, longitude=-70.0)
+        fallback = TransactionLocation(latitude=-34.0, longitude=-71.0)
+        assert merge_locations(primary, fallback) == primary
+        merged = merge_locations(TransactionLocation(city="X"), fallback)
+        assert (merged.latitude, merged.longitude) == (-34.0, -71.0)
+
+
+class TestReadSession:
+    """One page, every read: products, then the USD card rate, then movements."""
+
+    def _patch(self, monkeypatch, calls, rates=(), rate_failed=()):
+        product = ScrapedProduct(
+            institution="banchile", kind="credit_card", currency="USD"
+        )
+        movement = BanChileMovement(
+            source="card_billed",
+            product_kind="credit_card",
+            description="COMERCIO SINTETICO",
+            amount=Decimal("-1234.56"),
+            transaction_date=datetime.date(2026, 8, 20),
+            currency="USD",
+        )
+
+        def products(page):
+            calls.append("products")
+            return BalanceFetchResult(products=[product], failed_surfaces=("línea",))
+
+        def rate(page):
+            calls.append("rate")
+            return list(rates), tuple(rate_failed)
+
+        def movements(page):
+            calls.append("movements")
+            return [movement], ("movimientos",)
+
+        monkeypatch.setattr(movements_mod, "_read_all_surfaces", products)
+        monkeypatch.setattr(movements_mod, "read_exchange_rate_surface", rate)
+        monkeypatch.setattr(movements_mod, "read_movement_surfaces", movements)
+        return product, movement
+
+    def test_the_rate_rides_its_own_channel(self, monkeypatch):
+        calls = []
+        rate = ScrapedExchangeRate(
+            institution="banchile",
+            base_currency="USD",
+            rate="950.00",
+            product=ProductRef(kind="credit_card", currency="USD"),
+            source="Pago internacional de tarjeta",
+        )
+        product, movement = self._patch(monkeypatch, calls, rates=[rate])
+
+        result = read_session(MagicMock())
+
+        assert calls == ["products", "rate", "movements"]
+        assert result.products == [product]
+        assert result.exchange_rates == [rate]
+        assert result.movements == [movement]
+        assert result.failed_surfaces == ("línea", "movimientos")
+
+    def test_a_failed_rate_is_a_failed_surface_and_costs_nothing_else(
+        self, monkeypatch
+    ):
+        calls = []
+        product, movement = self._patch(
+            monkeypatch, calls, rate_failed=("tipo de cambio",)
+        )
+
+        result = read_session(MagicMock())
+
+        assert result.exchange_rates == []
+        assert result.products == [product]
+        assert result.movements == [movement]
+        assert result.failed_surfaces == ("línea", "tipo de cambio", "movimientos")

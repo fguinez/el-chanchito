@@ -1,5 +1,6 @@
 psycopg[binary]>=3.1,<4
-psycopg-pool>=3.1,<4
+# 3.2 added the pool `check` callback db/connection.py relies on.
+psycopg-pool>=3.2,<4
 python-dotenv>=1.0,<2
 apscheduler>=3.10,<4
 httpx>=0.27,<1
