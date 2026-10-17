@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { count, desc, eq, sql } from "drizzle-orm";
+import { and, count, desc, eq, isNull, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { products, transactions } from "@/lib/db/schema";
 import { failureBody, normalizeKeyword } from "@/lib/categories";
@@ -24,7 +24,11 @@ export async function GET(request: NextRequest) {
       return NextResponse.json(failureBody(keyword), { status: keyword.status });
     }
 
-    const matches = sql`strpos(lower(${transactions.description}), lower(${keyword.value})) > 0`;
+    // A soft-deleted row (V033) is not a match a rule could ever categorize.
+    const matches = and(
+      sql`strpos(lower(${transactions.description}), lower(${keyword.value})) > 0`,
+      isNull(transactions.deletedAt)
+    );
     const uncategorized = sql<number>`count(*) FILTER (
       WHERE ${transactions.categoryId} IS NULL
         AND NOT ${transactions.isManuallyCategorized}

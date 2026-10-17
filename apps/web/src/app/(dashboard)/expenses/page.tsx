@@ -30,7 +30,16 @@ import { clpTotals } from "@/lib/transactions";
 import { CsvImport } from "@/components/dashboard/CsvImport";
 import { TransactionDetailSheet } from "@/components/transactions/transaction-detail-sheet";
 import { useSelectedTransaction } from "@/components/transactions/use-selected-transaction";
+import {
+  ProductSelect,
+  useActiveProducts,
+  useCategories,
+} from "@/components/transactions/pickers";
+import { SELECT_CLASS } from "@/components/ui/native-select";
 import { LOCATION_TEXT_MAX_LENGTH } from "@/lib/transaction-location";
+
+/** The currency the CLP-only manual form and totals work in. */
+const CLP = "CLP";
 
 interface Transaction {
   id: string;
@@ -44,9 +53,25 @@ interface Transaction {
   /** Linked to an internal transfer: listed, but left out of the totals. */
   isInternalTransfer: boolean;
   notes: string | null;
+  /** The category, resolved to a name client-side from GET /api/categories. */
+  categoryId: string | null;
 }
 
-type TransactionSortKey = "fecha" | "descripcion" | "fuente" | "monto";
+type TransactionSortKey =
+  | "fecha"
+  | "descripcion"
+  | "categoria"
+  | "fuente"
+  | "monto";
+
+/** The current month as "YYYY-MM", for the <input type="month"> default. */
+function currentMonthInput(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+}
+
+/** How many rows a "Cargar más" click adds (and the first page size). */
+const PAGE_SIZE = 50;
 
 // useSearchParams needs a Suspense boundary for the static prerender.
 export default function ExpensesPage() {
@@ -88,30 +113,63 @@ function ExpensesView() {
     useSelectedTransaction();
 
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [month, setMonth] = useState(currentMonthInput());
+  const [limit, setLimit] = useState(PAGE_SIZE);
+  const [hasMore, setHasMore] = useState(false);
   const [description, setDescription] = useState("");
   const [place, setPlace] = useState("");
   const [amount, setAmount] = useState("");
+  const [isExpense, setIsExpense] = useState(true);
+  const [productId, setProductId] = useState("");
   const [transactionDate, setTransactionDate] = useState(
     new Date().toISOString().split("T")[0]
   );
   const [saving, setSaving] = useState(false);
 
-  const loadTransactions = () => {
-    const now = new Date();
-    const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
-    fetch(`/api/transactions?month=${month}`)
-      .then((res) => res.json())
-      .then(setTransactions)
-      .catch(console.error);
-  };
+  const categories = useCategories();
+  const categoryName = useCallback(
+    (id: string | null) => categories.find((c) => c.id === id)?.name ?? null,
+    [categories]
+  );
+  // CLP-only products for the manual form, like the transfers picker.
+  const { institutions } = useActiveProducts(CLP);
+
+  // Any day of the picked month: the API reads the month off the string. The
+  // optional AbortSignal drops a slower older response (e.g. after a rapid
+  // month switch) so it cannot overwrite a newer one.
+  const loadTransactions = useCallback(
+    (signal?: AbortSignal) => {
+      fetch(`/api/transactions?month=${month}-01&limit=${limit}`, { signal })
+        .then((res) => {
+          // A 4xx/5xx body is { error, ... }, not an array: throw so it never
+          // reaches the list state, which would otherwise break the page.
+          if (!res.ok) throw new Error(`GET /api/transactions ${res.status}`);
+          return res.json();
+        })
+        .then((rows: Transaction[]) => {
+          if (signal?.aborted) return;
+          setTransactions(rows);
+          setHasMore(rows.length >= limit);
+        })
+        .catch((error) => {
+          if (!signal?.aborted) console.error(error);
+        });
+    },
+    [month, limit]
+  );
 
   useEffect(() => {
-    loadTransactions();
-  }, []);
+    const controller = new AbortController();
+    loadTransactions(controller.signal);
+    return () => controller.abort();
+  }, [loadTransactions]);
 
   const handleAdd = async () => {
     const parsedAmount = parseNumberInput(amount);
     if (!description || parsedAmount === null) return;
+
+    const signedAmount =
+      (isExpense ? -1 : 1) * Math.abs(Math.round(parsedAmount));
 
     setSaving(true);
     try {
@@ -120,8 +178,10 @@ function ExpensesView() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           description,
-          amount: -Math.abs(Math.round(parsedAmount)), // expenses are negative
+          amount: signedAmount,
           transactionDate,
+          // Optional; when none is picked the route resolves the manual product.
+          ...(productId && { productId }),
           // Optional; the detail panel edits the rest of the location.
           ...(place.trim() && { location: { name: place } }),
         }),
@@ -131,11 +191,21 @@ function ExpensesView() {
         setDescription("");
         setPlace("");
         setAmount("");
+        setProductId("");
         loadTransactions();
       }
     } finally {
       setSaving(false);
     }
+  };
+
+  const recategorize = async (id: string, categoryId: string) => {
+    const res = await fetch(`/api/transactions/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ categoryId: categoryId || null }),
+    });
+    if (res.ok) loadTransactions();
   };
 
   // Peso totals over CLP rows only: a USD amount is not pesos. Rows an
@@ -154,13 +224,15 @@ function ExpensesView() {
           return txn.transactionDate; // ISO strings sort correctly as strings.
         case "descripcion":
           return txn.description;
+        case "categoria":
+          return categoryName(txn.categoryId) ?? "";
         case "fuente":
           return txn.source;
         case "monto":
           return txn.amount;
       }
     },
-    []
+    [categoryName]
   );
 
   const { sorted, sort, toggleSort } = useSortableData(transactions, getValue);
@@ -216,15 +288,15 @@ function ExpensesView() {
       {/* Add transaction form */}
       <Card>
         <CardHeader>
-          <CardTitle>Agregar gasto</CardTitle>
+          <CardTitle>Agregar movimiento</CardTitle>
           <CardDescription>
-            Registra un gasto manualmente (equivale a agregar una fila en
-            &quot;Inputs&quot;)
+            Registra un gasto o un ingreso manualmente (equivale a agregar una
+            fila en &quot;Inputs&quot;)
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="flex items-end gap-3">
-            <div className="flex-1">
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="min-w-48 flex-1">
               <label className="mb-1 block text-sm text-muted-foreground">
                 Descripcion
               </label>
@@ -232,6 +304,38 @@ function ExpensesView() {
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
                 placeholder="Ej: Supermercado"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm text-muted-foreground">
+                Tipo
+              </label>
+              <div className="flex gap-1">
+                <Button
+                  type="button"
+                  variant={isExpense ? "default" : "outline"}
+                  onClick={() => setIsExpense(true)}
+                >
+                  Gasto
+                </Button>
+                <Button
+                  type="button"
+                  variant={isExpense ? "outline" : "default"}
+                  onClick={() => setIsExpense(false)}
+                >
+                  Ingreso
+                </Button>
+              </div>
+            </div>
+            <div className="w-36">
+              <label className="mb-1 block text-sm text-muted-foreground">
+                Monto (CLP)
+              </label>
+              <Input
+                type="number"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                placeholder="15000"
               />
             </div>
             <div className="w-44">
@@ -245,15 +349,15 @@ function ExpensesView() {
                 maxLength={LOCATION_TEXT_MAX_LENGTH}
               />
             </div>
-            <div className="w-36">
+            <div className="w-56">
               <label className="mb-1 block text-sm text-muted-foreground">
-                Monto (CLP)
+                Producto (opcional)
               </label>
-              <Input
-                type="number"
-                value={amount}
-                onChange={(e) => setAmount(e.target.value)}
-                placeholder="15000"
+              <ProductSelect
+                value={productId}
+                onChange={setProductId}
+                institutions={institutions}
+                emptyLabel="Producto manual"
               />
             </div>
             <div className="w-40">
@@ -279,8 +383,29 @@ function ExpensesView() {
       {/* Transaction list */}
       <Card>
         <CardHeader>
-          <CardTitle>Transacciones del mes</CardTitle>
-          <CardDescription>{transactions.length} transacciones</CardDescription>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <CardTitle>Transacciones del mes</CardTitle>
+              <CardDescription>
+                {transactions.length} transacciones
+              </CardDescription>
+            </div>
+            <div>
+              <label className="mb-1 block text-sm text-muted-foreground">
+                Mes
+              </label>
+              <Input
+                type="month"
+                className="w-44"
+                value={month}
+                onChange={(e) => {
+                  // A new month resets paging back to the first page.
+                  setLimit(PAGE_SIZE);
+                  setMonth(e.target.value || currentMonthInput());
+                }}
+              />
+            </div>
+          </div>
         </CardHeader>
         <CardContent>
           {transactions.length === 0 ? (
@@ -305,6 +430,15 @@ function ExpensesView() {
                     active={sort?.key === "descripcion"}
                     direction={
                       sort?.key === "descripcion" ? sort.direction : undefined
+                    }
+                    onSort={handleSort}
+                  />
+                  <SortableTableHead
+                    label="Categoría"
+                    columnKey="categoria"
+                    active={sort?.key === "categoria"}
+                    direction={
+                      sort?.key === "categoria" ? sort.direction : undefined
                     }
                     onSort={handleSort}
                   />
@@ -341,6 +475,26 @@ function ExpensesView() {
                         </Badge>
                       )}
                     </TableCell>
+                    {/* The inline select recategorizes without opening the
+                        panel, so its clicks and keys must not reach the row. */}
+                    <TableCell
+                      onClick={(e) => e.stopPropagation()}
+                      onKeyDown={(e) => e.stopPropagation()}
+                    >
+                      <select
+                        className={SELECT_CLASS}
+                        value={txn.categoryId ?? ""}
+                        onChange={(e) => recategorize(txn.id, e.target.value)}
+                        aria-label="Categoría"
+                      >
+                        <option value="">Sin categoría</option>
+                        {categories.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.name}
+                          </option>
+                        ))}
+                      </select>
+                    </TableCell>
                     <TableCell>
                       <Badge variant="outline" className="text-xs">
                         {txn.source}
@@ -363,13 +517,23 @@ function ExpensesView() {
               </TableBody>
             </Table>
           )}
+          {hasMore && (
+            <div className="mt-4 flex justify-center">
+              <Button
+                variant="outline"
+                onClick={() => setLimit((n) => n + PAGE_SIZE)}
+              >
+                Cargar más
+              </Button>
+            </div>
+          )}
         </CardContent>
       </Card>
 
       <TransactionDetailSheet
         transactionId={selectedTxnId}
         onClose={() => selectTransaction(null)}
-        onTransferChanged={loadTransactions}
+        onChanged={loadTransactions}
       />
     </div>
   );

@@ -1,4 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { PgDialect } from "drizzle-orm/pg-core";
+import type { SQL } from "drizzle-orm";
+
+// Where conditions recorded off the select chain, newest query first unused:
+// index 0 is the first `.where()` of the request (the detail/lookup query).
+const selectWheres: unknown[] = [];
+const updateWheres: unknown[] = [];
+
+/** The SQL text of a recorded `where`, for asserting a filter is applied. */
+function whereSql(index: number): string {
+  return new PgDialect().sqlToQuery(selectWheres[index] as SQL).sql;
+}
+function updateWhereSql(index: number): string {
+  return new PgDialect().sqlToQuery(updateWheres[index] as SQL).sql;
+}
 
 // Fake db: every query-builder step returns the same chain, and the final
 // `.limit()` resolves to whatever rows the test queued (or rejects with a
@@ -6,29 +21,44 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const queuedRows: (unknown[] | Error)[] = [];
 const selectMock = vi.fn();
 const setMock = vi.fn();
+const deleteMock = vi.fn();
+
+function shiftRows() {
+  const next = queuedRows.shift() ?? [];
+  return next instanceof Error ? Promise.reject(next) : Promise.resolve(next);
+}
 
 vi.mock("@/lib/db", () => {
   const chain: Record<string, unknown> = {};
-  for (const step of ["from", "innerJoin", "leftJoin", "where"]) {
+  for (const step of ["from", "innerJoin", "leftJoin"]) {
     chain[step] = () => chain;
   }
-  chain.limit = () => {
-    const next = queuedRows.shift() ?? [];
-    return next instanceof Error ? Promise.reject(next) : Promise.resolve(next);
+  chain.where = (condition: unknown) => {
+    selectWheres.push(condition);
+    return chain;
   };
-  // PATCH: update(table).set(values).where(...).returning(...) resolves to the
-  // next queued rows, like `.limit()` above.
+  chain.limit = () => shiftRows();
+  // PATCH: update(table).set(values).where(...) either `.returning(...)` (the
+  // location-only reply) or is awaited directly; both resolve to queued rows.
   const updateChain: Record<string, unknown> = {
     set: (values: unknown) => {
       setMock(values);
       return updateChain;
     },
-    where: () => updateChain,
-    returning: () => {
-      const next = queuedRows.shift() ?? [];
-      return next instanceof Error
-        ? Promise.reject(next)
-        : Promise.resolve(next);
+    where: (condition: unknown) => {
+      updateWheres.push(condition);
+      return updateChain;
+    },
+    returning: () => shiftRows(),
+    // Awaiting the chain without `.returning()` resolves like a write.
+    then: (onFulfilled: (value: unknown) => unknown) =>
+      shiftRows().then(onFulfilled),
+  };
+  // DELETE hard path: delete(table).where(...) is awaited directly.
+  const deleteChain: Record<string, unknown> = {
+    where: (...args: unknown[]) => {
+      deleteMock(...args);
+      return shiftRows();
     },
   };
   return {
@@ -38,11 +68,14 @@ vi.mock("@/lib/db", () => {
         return chain;
       },
       update: () => updateChain,
+      delete: () => deleteChain,
     },
   };
 });
 
-const { GET, PATCH } = await import("@/app/api/transactions/[id]/route");
+const { GET, PATCH, DELETE } = await import(
+  "@/app/api/transactions/[id]/route"
+);
 
 // Synthetic fixtures only: fake ids, descriptions and amounts.
 const TXN_ID = "00000000-0000-4000-8000-000000000001";
@@ -93,8 +126,11 @@ function call(id: string) {
 
 beforeEach(() => {
   queuedRows.length = 0;
+  selectWheres.length = 0;
+  updateWheres.length = 0;
   selectMock.mockReset();
   setMock.mockReset();
+  deleteMock.mockReset();
 });
 
 afterEach(() => {
@@ -286,8 +322,10 @@ describe("PATCH /api/transactions/[id]", () => {
   it.each([
     ["invalid JSON", "{", undefined],
     ["a non-object body", [1], undefined],
-    ["a missing location", {}, "location"],
-    ["another field", { location: null, notes: "x" }, "notes"],
+    ["an empty body", {}, undefined],
+    ["a blank description", { description: "   " }, "description"],
+    ["a malformed categoryId", { categoryId: "nope" }, "categoryId"],
+    ["a malformed productId", { productId: "nope" }, "productId"],
     ["a non-object location", { location: "Ciudad Ficticia" }, "location"],
     ["an unknown location key", { location: { street: "x" } }, "location.street"],
     ["a non-string city", { location: { city: 7 } }, "location.city"],
@@ -367,6 +405,172 @@ describe("PATCH /api/transactions/[id]", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     queuedRows.push(new Error("synthetic connection failure"));
     const res = await patch(TXN_ID, { location: null });
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "Internal error" });
+  });
+});
+
+describe("GET /api/transactions/[id] excludes soft-deleted rows", () => {
+  it("filters deleted_at IS NULL in the detail lookup", async () => {
+    queuedRows.push([]); // a deleted (or missing) row returns nothing
+    const res = await call(TXN_ID);
+    expect(res.status).toBe(404);
+    const sql = whereSql(0).toLowerCase();
+    expect(sql).toContain("deleted_at");
+    expect(sql).toContain("is null");
+  });
+});
+
+describe("PATCH /api/transactions/[id] field edits", () => {
+  it("edits description and returns the full refreshed detail", async () => {
+    // update.returning, then the detail + link reads of loadTransactionDetail.
+    queuedRows.push([{ id: TXN_ID }], [joinedRow({ description: "Nueva" })], []);
+    const res = await patch(TXN_ID, { description: "  Nueva  " });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.description).toBe("Nueva");
+    expect(body.id).toBe(TXN_ID);
+    expect(setMock).toHaveBeenCalledWith({
+      description: "Nueva",
+      updatedAt: expect.any(Date),
+    });
+    // The update itself is guarded against editing a soft-deleted row.
+    const sql = updateWhereSql(0).toLowerCase();
+    expect(sql).toContain("deleted_at");
+    expect(sql).toContain("is null");
+  });
+
+  it("edits amount, date and scheduledMonth together", async () => {
+    queuedRows.push([{ id: TXN_ID }], [joinedRow()], []);
+    const res = await patch(TXN_ID, {
+      amount: 2500000,
+      transactionDate: "2026-02-10",
+      scheduledMonth: "2026-02-15",
+    });
+    expect(res.status).toBe(200);
+    expect(setMock).toHaveBeenCalledWith({
+      amount: 2500000,
+      transactionDate: "2026-02-10",
+      scheduledMonth: "2026-02-01", // normalized to the first of the month
+      updatedAt: expect.any(Date),
+    });
+  });
+
+  it("preserves cents on a non-CLP amount (does not force an integer)", async () => {
+    queuedRows.push([{ id: TXN_ID }], [joinedRow()], []);
+    const res = await patch(TXN_ID, { amount: -1234.56 });
+    expect(res.status).toBe(200);
+    expect(setMock).toHaveBeenCalledWith({
+      amount: -1234.56,
+      updatedAt: expect.any(Date),
+    });
+  });
+
+  it("marks a non-null categoryId as manually categorized", async () => {
+    queuedRows.push([{ id: TXN_ID }], [joinedRow()], []);
+    const res = await patch(TXN_ID, { categoryId: CATEGORY_ID });
+    expect(res.status).toBe(200);
+    expect(setMock).toHaveBeenCalledWith({
+      categoryId: CATEGORY_ID,
+      isManuallyCategorized: true,
+      updatedAt: expect.any(Date),
+    });
+  });
+
+  it("clears the category with null without flipping the manual flag", async () => {
+    queuedRows.push([{ id: TXN_ID }], [joinedRow()], []);
+    const res = await patch(TXN_ID, { categoryId: null });
+    expect(res.status).toBe(200);
+    const values = setMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(values.categoryId).toBeNull();
+    expect(values).not.toHaveProperty("isManuallyCategorized");
+  });
+
+  it("moves the row to another product", async () => {
+    queuedRows.push([{ id: TXN_ID }], [joinedRow()], []);
+    const res = await patch(TXN_ID, { productId: PRODUCT_ID });
+    expect(res.status).toBe(200);
+    expect(setMock).toHaveBeenCalledWith({
+      productId: PRODUCT_ID,
+      updatedAt: expect.any(Date),
+    });
+  });
+
+  it("strips unknown keys instead of rejecting them", async () => {
+    queuedRows.push([{ id: TXN_ID }], [joinedRow()], []);
+    const res = await patch(TXN_ID, { description: "X", nope: "ignored" });
+    expect(res.status).toBe(200);
+    const values = setMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(values).not.toHaveProperty("nope");
+  });
+
+  it("returns 404 editing a missing or deleted row", async () => {
+    queuedRows.push([]); // update touches no row
+    const res = await patch(TXN_ID, { description: "X" });
+    expect(res.status).toBe(404);
+  });
+});
+
+function del(id: string) {
+  return DELETE(
+    new Request(`https://dashboard.example/api/transactions/${id}`, {
+      method: "DELETE",
+    }),
+    { params: Promise.resolve({ id }) }
+  );
+}
+
+describe("DELETE /api/transactions/[id]", () => {
+  it("rejects a malformed id before reading", async () => {
+    const res = await del("not-a-uuid");
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: expect.any(String), field: "id" });
+    expect(selectMock).not.toHaveBeenCalled();
+  });
+
+  it("soft-deletes an imported row (external id), keeping it in the table", async () => {
+    queuedRows.push([{ externalId: "SYNTH-0001" }], []);
+    const res = await del(TXN_ID);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, softDeleted: true });
+    expect(setMock).toHaveBeenCalledWith(
+      expect.objectContaining({ deletedAt: expect.any(Date) })
+    );
+    expect(deleteMock).not.toHaveBeenCalled();
+    // The lookup only considers rows that are not already soft-deleted.
+    const sql = whereSql(0).toLowerCase();
+    expect(sql).toContain("deleted_at");
+    expect(sql).toContain("is null");
+  });
+
+  it("hard-deletes a manual row (no external id)", async () => {
+    queuedRows.push([{ externalId: null }], []);
+    const res = await del(TXN_ID);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, softDeleted: false });
+    expect(deleteMock).toHaveBeenCalledOnce();
+    expect(setMock).not.toHaveBeenCalled();
+  });
+
+  it("treats an empty-string external id as manual (hard delete)", async () => {
+    queuedRows.push([{ externalId: "" }], []);
+    const res = await del(TXN_ID);
+    expect((await res.json()).softDeleted).toBe(false);
+    expect(deleteMock).toHaveBeenCalledOnce();
+  });
+
+  it("returns 404 for an unknown or already-deleted row", async () => {
+    queuedRows.push([]);
+    const res = await del(TXN_ID);
+    expect(res.status).toBe(404);
+    expect(setMock).not.toHaveBeenCalled();
+    expect(deleteMock).not.toHaveBeenCalled();
+  });
+
+  it("returns 500 when the lookup fails", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    queuedRows.push(new Error("synthetic connection failure"));
+    const res = await del(TXN_ID);
     expect(res.status).toBe(500);
     expect(await res.json()).toEqual({ error: "Internal error" });
   });

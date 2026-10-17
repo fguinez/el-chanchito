@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { asc, count, desc, isNotNull, sql } from "drizzle-orm";
+import { and, asc, count, desc, isNotNull, isNull, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { categories, categoryRules, transactions } from "@/lib/db/schema";
 import { failureBody, validateCategoryInput } from "@/lib/categories";
@@ -25,7 +25,13 @@ export async function GET() {
       db
         .select({ categoryId: transactions.categoryId, n: count() })
         .from(transactions)
-        .where(isNotNull(transactions.categoryId))
+        // Soft-deleted rows (V033) are not counted against their category.
+        .where(
+          and(
+            isNotNull(transactions.categoryId),
+            isNull(transactions.deletedAt)
+          )
+        )
         .groupBy(transactions.categoryId),
     ]);
 
@@ -93,7 +99,9 @@ export async function PUT() {
       WITH m AS MATERIALIZED (
         SELECT id, category_for_description(description) AS category_id
         FROM transactions
-        WHERE category_id IS NULL AND NOT is_manually_categorized
+        WHERE category_id IS NULL
+          AND NOT is_manually_categorized
+          AND deleted_at IS NULL
       )
       UPDATE transactions t
       SET category_id = m.category_id, updated_at = now()

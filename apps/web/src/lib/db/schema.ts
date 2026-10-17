@@ -302,6 +302,12 @@ export const transactions = pgTable(
       mode: "number",
     }),
     locationIsManual: boolean("location_is_manual").notNull().default(false),
+    // Set when the user deletes an imported (external_id) row; NULL while
+    // visible (V033). The row keeps its (product_id, external_id) key so
+    // scrapers and CSV re-imports skip it instead of importing it again.
+    // Every dashboard read filters `deleted_at IS NULL`; the writer's lookups
+    // deliberately do not. Manual rows (no external_id) are hard-deleted.
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

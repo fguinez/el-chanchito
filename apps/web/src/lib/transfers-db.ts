@@ -11,6 +11,7 @@ import {
   desc,
   eq,
   inArray,
+  isNull,
   ne,
   or,
   sql,
@@ -79,7 +80,8 @@ function linkedTransaction(
 /** Whether the product has at least one stored transaction: the stand-in for
  *  "has a transaction feed" until the registry declares it per kind. */
 export function hasFeed(productId: AnyPgColumn) {
-  return sql<boolean>`exists (select 1 from ${transactions} where ${transactions.productId} = ${productId})`;
+  // Soft-deleted rows (V033) do not count as a feed.
+  return sql<boolean>`exists (select 1 from ${transactions} where ${transactions.productId} = ${productId} and ${transactions.deletedAt} is null)`;
 }
 
 /**
@@ -133,8 +135,22 @@ export async function loadTransfers(where?: SQL) {
     .leftJoin(toProduct, eq(internalTransfers.toProductId, toProduct.id))
     .leftJoin(toAccount, eq(toProduct.accountId, toAccount.id))
     .leftJoin(toInstitution, eq(toAccount.institutionId, toInstitution.id))
-    .leftJoin(fromTxn, eq(internalTransfers.fromTransactionId, fromTxn.id))
-    .leftJoin(toTxn, eq(internalTransfers.toTransactionId, toTxn.id))
+    // A soft-deleted linked row (V033) is treated as missing, so the feed does
+    // not show a transaction the user deleted.
+    .leftJoin(
+      fromTxn,
+      and(
+        eq(internalTransfers.fromTransactionId, fromTxn.id),
+        isNull(fromTxn.deletedAt)
+      )
+    )
+    .leftJoin(
+      toTxn,
+      and(
+        eq(internalTransfers.toTransactionId, toTxn.id),
+        isNull(toTxn.deletedAt)
+      )
+    )
     .where(where)
     .orderBy(
       desc(internalTransfers.transferDate),
@@ -245,7 +261,8 @@ export async function applyTransferLinks(
         amount: transactions.amount,
       })
       .from(transactions)
-      .where(inArray(transactions.id, requestedIds))
+      // A soft-deleted row (V033) is not a valid link target.
+      .where(and(inArray(transactions.id, requestedIds), isNull(transactions.deletedAt)))
       // Held until commit: a row deleted between this check and the UPDATE
       // below would otherwise fail the FK (23503) as a 500. KEY SHARE is
       // what the FK itself takes, so scraper updates are not blocked.
@@ -422,6 +439,8 @@ export async function loadTransferCandidates(transferId: string) {
           .where(
             and(
               eq(transactions.productId, productId),
+              // Soft-deleted rows (V033) are never offered as link candidates.
+              isNull(transactions.deletedAt),
               or(
                 and(
                   eq(
@@ -444,7 +463,12 @@ export async function loadTransferCandidates(transferId: string) {
         db
           .select({ id: transactions.id })
           .from(transactions)
-          .where(eq(transactions.productId, productId))
+          .where(
+            and(
+              eq(transactions.productId, productId),
+              isNull(transactions.deletedAt)
+            )
+          )
           .limit(1),
       ]);
       const candidates: TransferCandidate[] = rows.map((row) => ({

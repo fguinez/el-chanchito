@@ -10,12 +10,23 @@ import { PRODUCT_KINDS, TRANSFER_STATUSES } from "@/lib/db/schema";
 // Shared fields
 // ---------------------------------------------------------------------------
 
-/** A whole CLP amount: any finite number, rounded as the routes always did,
- *  that fits the Postgres `integer` columns amounts live in. */
+/** A whole CLP amount: any finite number, rounded as the routes always did.
+ *  Used where amounts are always pesos (manual CLP entry, transfers); the
+ *  transactions column itself is NUMERIC(18, 2) so foreign-currency rows can
+ *  keep cents (see `moneyAmount`). */
 export const clpAmount = z
   .number()
   .transform((n) => Math.round(n))
   .pipe(z.int32());
+
+/** A signed amount in a product's own currency, kept to the two decimals the
+ *  NUMERIC(18, 2) column stores: CLP rows round to whole pesos, USD rows (V023)
+ *  keep their cents. The bound keeps `n * 100` below Number.MAX_SAFE_INTEGER so
+ *  the cents rounding stays exact, and still sits far above any real balance. */
+export const moneyAmount = z
+  .number()
+  .transform((n) => Math.round(n * 100) / 100)
+  .pipe(z.number().min(-1e13).max(1e13));
 
 /** A calendar day, YYYY-MM-DD; impossible days like 2023-02-29 fail. */
 export const isoDate = z.iso.date({ error: "Expected a YYYY-MM-DD date" });
@@ -131,6 +142,28 @@ export const createTransactionSchema = z.object({
   /** Checked by validateLocationInput, as PATCH /api/transactions/[id] does. */
   location: z.unknown().optional(),
 });
+
+/** PATCH /api/transactions/[id]: a non-empty subset of a transaction's
+ *  editable fields (the id comes from the URL). `categoryId` null clears the
+ *  category; `scheduledMonth` null unassigns the budget month. `location` is
+ *  passed through untouched and checked by validateLocationInput in the route,
+ *  as POST /api/transactions does. */
+export const updateTransactionSchema = z
+  .object({
+    description: requiredText,
+    // Kept to 2 decimals so a USD row keeps its cents; CLP rounds to pesos.
+    amount: moneyAmount,
+    transactionDate: isoDate,
+    categoryId: rowId.nullable(),
+    scheduledMonth: month.nullable(),
+    isInternalTransfer: z.boolean(),
+    productId: rowId,
+    location: z.unknown(),
+  })
+  .partial()
+  .refine((body) => Object.keys(body).length > 0, {
+    error: "No updatable fields provided",
+  });
 
 /** POST /api/transfers: money between two distinct products, both required.
  *  `from*`/`to*AccountId` are legacy aliases; ids come out lowercased, as

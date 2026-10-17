@@ -940,6 +940,27 @@ Transactions are deduplicated via `UNIQUE(product_id, external_id)`:
   `Date|From|Subject|body` instead
 - CSV: `csv_{base64url(date|description|amount)[:24]}`
 
+### Deleting a transaction (soft vs hard, V033)
+
+Transactions can be edited, recategorized and deleted from the dashboard
+(the detail panel edits the row in place; PATCH/DELETE `/api/transactions/[id]`).
+Deletion is split by origin, because a hard delete would let the next scrape
+bring an imported movement straight back:
+
+- A row with an `external_id` (scraper or CSV) is soft-deleted: `deleted_at` is
+  set and the row stays, still holding its `(product_id, external_id)` key, so
+  `upsert_transactions` keeps matching it and skips the movement (no writer
+  change), and BanChile's adoption path can still re-key a deleted legacy row.
+- A row without an `external_id` (manual entry) is hard-deleted, since nothing
+  can re-import it.
+
+Every dashboard-facing read filters `deleted_at IS NULL` (the transactions
+list and detail, the product movement list, category counts and rule previews,
+transfer link candidates and suggestions). The writer's lookups deliberately
+do not, so the re-key path above still sees the tombstoned row. A non-null
+`categoryId` set by hand also sets `is_manually_categorized`, so the choice
+survives the auto-categorization backfill.
+
 ### On-demand refresh (control endpoint)
 
 Scrapers normally run only on their APScheduler intervals. The scheduled service
