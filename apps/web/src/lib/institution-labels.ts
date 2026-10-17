@@ -9,6 +9,7 @@ const INSTITUTION_LABELS: Record<string, string> = {
   mercadopago: "MercadoPago",
   tenpo: "Tenpo",
   bci_lider: "BCI Lider",
+  skipo: "Skipo",
   _legacy_composite: "Email (legacy)",
 };
 

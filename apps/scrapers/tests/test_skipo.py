@@ -5,13 +5,23 @@ over an `httpx.MockTransport` serving canned Skipo payloads written from
 scratch. Every figure, symbol balance and id is synthetic.
 """
 
+import asyncio
 import logging
+import os
 from datetime import date
 from decimal import Decimal
 
+import httpx
 import pytest
 
+os.environ.setdefault("SKIPO_API_KEY", "skp_live_synthetic-key")
+
+from scrapers import retry
+from scrapers.institutions import skipo as skipo_mod
 from scrapers.institutions.skipo import (
+    SkipoApiError,
+    SkipoAuthError,
+    SkipoScraper,
     _asset_classes,
     _exchange_rates,
     _local_date,
@@ -19,6 +29,8 @@ from scrapers.institutions.skipo import (
     _parse_ledger_entry,
     _to_clp,
 )
+
+KEY = "skp_live_synthetic-key"
 
 _CLASSES = {
     "CLP": "FIAT",
@@ -81,6 +93,113 @@ def _entry(n: int, entry_type="DEPOSIT", amount="1000000", **overrides) -> dict:
     }
     row.update(overrides)
     return row
+
+
+_DEFAULT_BALANCES = [
+    _balance("CLP", balance="2500000"),
+    _balance("BTC", balance="0.12345678", pref="999999"),
+    _balance("ETH"),
+]
+
+
+class _Skipo:
+    """Canned Skipo API behind an httpx.MockTransport.
+
+    `ledger` maps a page number to its entries; `fail` lists ledger pages
+    answering 500; `status` forces every answer (as problem+json with
+    `code`). Like Skipo, it answers 401 unless the bearer key matches.
+    """
+
+    def __init__(
+        self,
+        balances=None,
+        assets=None,
+        ledger=None,
+        preferred="CLP",
+        fail=(),
+        status=None,
+        code="unauthorized",
+    ):
+        self.balances = _DEFAULT_BALANCES if balances is None else balances
+        self.assets = assets if assets is not None else [_asset(s, c) for s, c in _CLASSES.items()]
+        self.ledger = ledger or {}
+        self.preferred = preferred
+        self.fail = set(fail)
+        self.status = status
+        self.code = code
+        self.requests: list[httpx.Request] = []
+
+    @staticmethod
+    def _problem(status: int, code: str) -> httpx.Response:
+        return httpx.Response(
+            status,
+            json={"type": "about:blank", "title": "Synthetic problem", "status": status, "code": code},
+            headers={"Content-Type": "application/problem+json"},
+        )
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if self.status is not None:
+            return self._problem(self.status, self.code)
+        if request.headers.get("Authorization") != f"Bearer {KEY}":
+            return self._problem(401, "unauthorized")
+        path = request.url.path
+        if path == "/v2/account":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "acc_synthetic_0001",
+                    "username": "usuario_sintetico",
+                    "email": "user@example.com",
+                    "fullName": "Persona Sintetica",
+                    "nationalId": "00.000.000-0",
+                    "verificationStatus": "VERIFIED",
+                    "preferredCurrency": self.preferred,
+                },
+            )
+        if path == "/v2/balances":
+            return httpx.Response(200, json=self.balances)
+        if path == "/v2/assets":
+            return httpx.Response(
+                200,
+                json={
+                    "data": self.assets,
+                    "pagination": {"page": 1, "limit": 100, "totalItems": len(self.assets), "totalPages": 1},
+                },
+            )
+        if path == "/v2/ledger":
+            if "assetSymbol" not in request.url.params:
+                return self._problem(400, "validation_error")
+            page = int(request.url.params["page"])
+            if page in self.fail:
+                return self._problem(500, "internal_error")
+            entries = self.ledger.get(page, [])
+            return httpx.Response(
+                200,
+                json={
+                    "startDate": "2026-01-01T00:00:00Z",
+                    "endDate": "2026-01-31T23:59:59Z",
+                    "data": entries,
+                    "pagination": {
+                        "page": page,
+                        "limit": 100,
+                        "totalItems": sum(len(v) for v in self.ledger.values()),
+                        "totalPages": max(self.ledger, default=1),
+                    },
+                },
+            )
+        return self._problem(404, "not_found")
+
+
+def _install(monkeypatch, fake: _Skipo) -> None:
+    """Route the scraper's httpx.AsyncClient through the fake, with no retry delays."""
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(retry, "BASE_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(
+        skipo_mod.httpx,
+        "AsyncClient",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(fake.handler), **kwargs),
+    )
 
 
 class TestToClp:
@@ -318,3 +437,204 @@ class TestParseLedgerEntry:
 
         assert txn is None
         assert "Skipo ledger entry" in caplog.text
+
+
+class TestScrapeProducts:
+    def setup_method(self):
+        self.scraper = SkipoScraper()
+
+    def test_emits_wallet_coins_and_rates(self, monkeypatch):
+        """Held balances become products and the held coin gets a CLP rate."""
+        _install(monkeypatch, _Skipo())
+
+        result = asyncio.run(self.scraper.scrape_products())
+
+        assert sorted((p.kind, p.currency) for p in result.products) == [
+            ("crypto", "BTC"),
+            ("wallet", "CLP"),
+        ]
+        assert [r.base_currency for r in result.exchange_rates] == ["BTC"]
+        assert result.warnings == []
+
+    def test_stock_holdings_make_the_run_partial(self, monkeypatch):
+        """A held tokenized stock is skipped with a counted warning."""
+        balances = [*_DEFAULT_BALANCES, _balance("NVDAX", balance="0.12345678", pref="999999")]
+        _install(monkeypatch, _Skipo(balances=balances))
+
+        result = asyncio.run(self.scraper.scrape_products())
+
+        assert "NVDAX" not in {p.currency for p in result.products}
+        assert result.warnings == ["Skipo: 1 tokenized stock holding(s) not imported"]
+
+    def test_no_rates_unless_the_preferred_currency_is_clp(self, monkeypatch):
+        """Values in another preferred currency are not CLP rates."""
+        _install(monkeypatch, _Skipo(preferred="USD"))
+
+        result = asyncio.run(self.scraper.scrape_products())
+
+        assert result.exchange_rates == []
+        assert len(result.products) == 2
+
+    def test_only_get_requests_are_sent(self, monkeypatch):
+        """The scraper never writes to Skipo."""
+        fake = _Skipo()
+        _install(monkeypatch, fake)
+
+        asyncio.run(self.scraper.scrape_products())
+
+        assert {r.method for r in fake.requests} == {"GET"}
+        assert {r.url.path for r in fake.requests} == {"/v2/assets", "/v2/balances", "/v2/account"}
+
+    @pytest.mark.parametrize(
+        ("status", "code"),
+        [
+            pytest.param(401, "key_expired", id="expired"),
+            pytest.param(401, "key_revoked", id="revoked"),
+            pytest.param(403, "insufficient_scope", id="scope"),
+            pytest.param(403, "ip_not_allowed", id="ip"),
+        ],
+    )
+    def test_rejected_key_raises_with_the_code_only(self, monkeypatch, status, code):
+        """An auth failure names its status, code and fix, never the key or a URL."""
+        _install(monkeypatch, _Skipo(status=status, code=code))
+
+        with pytest.raises(SkipoAuthError) as excinfo:
+            asyncio.run(self.scraper.scrape_products())
+
+        message = str(excinfo.value)
+        assert code in message and str(status) in message
+        assert "make secret-set KEY=SKIPO_API_KEY" in message
+        assert KEY not in message and "synthetic-key" not in message
+        assert "api.skipo.com" not in message
+
+    def test_problem_code_that_is_not_a_token_is_dropped(self, monkeypatch):
+        """A free-text `code` never reaches the error message."""
+        _install(monkeypatch, _Skipo(status=401, code="Key skp_live_synthetic-key expired"))
+
+        with pytest.raises(SkipoAuthError) as excinfo:
+            asyncio.run(self.scraper.scrape_products())
+
+        assert "skp_live" not in str(excinfo.value)
+
+    def test_unexpected_balances_payload_fails_the_leg(self, monkeypatch):
+        """A balances answer that is not a list raises instead of yielding nothing."""
+        _install(monkeypatch, _Skipo(balances={"data": []}))
+
+        with pytest.raises(SkipoApiError):
+            asyncio.run(self.scraper.scrape_products())
+
+    def test_rate_limit_is_retried(self, monkeypatch):
+        """A 429 on balances is retried and the leg succeeds."""
+        fake = _Skipo()
+        handler = fake.handler
+        calls = {"balances": 0}
+
+        def limited_once(request):
+            if request.url.path == "/v2/balances" and calls["balances"] == 0:
+                calls["balances"] += 1
+                return _Skipo._problem(429, "rate_limited")
+            return handler(request)
+
+        fake.handler = limited_once
+        _install(monkeypatch, fake)
+
+        result = asyncio.run(self.scraper.scrape_products())
+
+        assert len(result.products) == 2
+
+
+class TestScrapeTransactions:
+    def setup_method(self):
+        self.scraper = SkipoScraper()
+
+    def test_reads_only_the_clp_ledger(self, monkeypatch):
+        """The ledger is requested for CLP, with the page size Skipo allows."""
+        fake = _Skipo(ledger={1: [_entry(1)]})
+        _install(monkeypatch, fake)
+
+        asyncio.run(self.scraper.scrape_transactions())
+
+        params = [dict(r.url.params) for r in fake.requests]
+        assert params == [{"assetSymbol": "CLP", "page": "1", "limit": "100"}]
+
+    def test_follows_pagination(self, monkeypatch):
+        """Every page Skipo reports is fetched, in order."""
+        ledger = {1: [_entry(n) for n in range(1, 101)], 2: [_entry(101)]}
+        fake = _Skipo(ledger=ledger)
+        _install(monkeypatch, fake)
+
+        transactions = asyncio.run(self.scraper.scrape_transactions())
+
+        assert len(transactions) == 101
+        assert len({t.external_id for t in transactions}) == 101
+        assert [r.url.params["page"] for r in fake.requests] == ["1", "2"]
+
+    def test_stops_at_the_page_cap_with_a_warning(self, monkeypatch):
+        """Past MAX_PAGES the rest is left out, and the run is flagged partial."""
+        monkeypatch.setattr(skipo_mod, "MAX_PAGES", 2)
+        ledger = {p: [_entry(p * 1000 + i) for i in range(100)] for p in range(1, 4)}
+        _install(monkeypatch, _Skipo(ledger=ledger))
+
+        transactions = asyncio.run(self.scraper.scrape_transactions())
+        result = asyncio.run(self.scraper.scrape_products())
+
+        assert len(transactions) == 200
+        assert any("capped" in w for w in result.warnings)
+
+    def test_later_page_failure_keeps_earlier_pages(self, monkeypatch):
+        """A 500 on page 2 keeps page 1 and surfaces as a products warning."""
+        ledger = {1: [_entry(1)], 2: [_entry(2)]}
+        _install(monkeypatch, _Skipo(ledger=ledger, fail={2}))
+
+        transactions = asyncio.run(self.scraper.scrape_transactions())
+        result = asyncio.run(self.scraper.scrape_products())
+
+        assert [t.external_id for t in transactions] == ["skipo_ldg_synthetic_0001"]
+        assert any("stopped early" in w for w in result.warnings)
+
+    def test_warnings_reset_between_cycles(self, monkeypatch):
+        """A warning from one cycle doesn't leak into the next."""
+        ledger = {1: [_entry(1)], 2: [_entry(2)]}
+        _install(monkeypatch, _Skipo(ledger=ledger, fail={2}))
+        asyncio.run(self.scraper.scrape_transactions())
+        asyncio.run(self.scraper.scrape_products())
+
+        result = asyncio.run(self.scraper.scrape_products())
+
+        assert result.warnings == []
+
+    def test_first_page_failure_fails_the_leg(self, monkeypatch):
+        """With nothing read the leg raises instead of returning []."""
+        _install(monkeypatch, _Skipo(ledger={1: [_entry(1)]}, fail={1}))
+
+        with pytest.raises(SkipoApiError) as excinfo:
+            asyncio.run(self.scraper.scrape_transactions())
+
+        assert "CLP ledger" in str(excinfo.value)
+
+    def test_rejected_key_fails_the_leg(self, monkeypatch):
+        """An auth failure is never swallowed."""
+        _install(monkeypatch, _Skipo(status=403, code="insufficient_scope"))
+
+        with pytest.raises(SkipoAuthError):
+            asyncio.run(self.scraper.scrape_transactions())
+
+    def test_bad_rows_are_skipped_not_fatal(self, monkeypatch):
+        """One unusable entry is dropped and the rest are kept."""
+        ledger = {1: [_entry(1), _entry(2, type="TRANSFER"), _entry(3, "SELL")]}
+        _install(monkeypatch, _Skipo(ledger=ledger))
+
+        transactions = asyncio.run(self.scraper.scrape_transactions())
+
+        assert [t.amount for t in transactions] == [1000000, -1000000]
+
+    def test_transactions_land_on_the_wallet_product(self, monkeypatch):
+        """Transactions share the (kind, currency) of the singleton CLP wallet."""
+        _install(monkeypatch, _Skipo(ledger={1: [_entry(1)]}))
+
+        transactions = asyncio.run(self.scraper.scrape_transactions())
+        products = asyncio.run(self.scraper.scrape_products()).products
+
+        assert {(t.product_kind, t.currency) for t in transactions} <= {
+            (p.kind, p.currency) for p in products if p.external_ref is None
+        }

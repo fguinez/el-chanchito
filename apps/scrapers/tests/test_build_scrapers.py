@@ -17,6 +17,7 @@ _VALUES = {
     "FINTUAL_TOKEN": "synthetic-token",
     "BUDA_API_KEY": "synthetic-key",
     "BUDA_API_SECRET": "synthetic-secret",
+    "SKIPO_API_KEY": "synthetic-key",
     "BANCHILE_RUT": "00.000.000-0",
     "BANCHILE_PASSWORD": "synthetic-password",
     "LIDER_BCI_RUT": "00.000.000-0",
@@ -29,7 +30,16 @@ _VALUES = {
 _CONSTRUCTOR_VARS = ("FINTUAL_SESSION_FILE", "EMAIL_LOOKBACK_DAYS")
 
 _EMAIL = ("EMAIL_IMAP_HOST", "EMAIL_IMAP_USER", "EMAIL_IMAP_PASSWORD")
-_ALL = {"fintual", "buda", "banchile", "bci_lider", "mach", "mercadopago", "tenpo"}
+_ALL = {
+    "fintual",
+    "buda",
+    "skipo",
+    "banchile",
+    "bci_lider",
+    "mach",
+    "mercadopago",
+    "tenpo",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -49,6 +59,7 @@ def _clean_env(monkeypatch):
         pytest.param(("BUDA_API_KEY", "BUDA_API_SECRET"), {"buda"}, id="buda"),
         pytest.param(("BUDA_API_KEY",), set(), id="buda-key-only"),
         pytest.param(("BUDA_API_SECRET",), set(), id="buda-secret-only"),
+        pytest.param(("SKIPO_API_KEY",), {"skipo"}, id="skipo"),
         pytest.param(("BANCHILE_RUT", "BANCHILE_PASSWORD"), {"banchile"}, id="banchile"),
         pytest.param(("BANCHILE_RUT",), set(), id="banchile-rut-only"),
         pytest.param(("BANCHILE_PASSWORD",), set(), id="banchile-password-only"),

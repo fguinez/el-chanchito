@@ -49,7 +49,9 @@ was written).
 """
 
 import logging
+import os
 import re
+from collections.abc import AsyncIterator
 from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
@@ -60,10 +62,13 @@ import httpx
 from product_model import CryptoMetrics, WalletMetrics
 
 from scrapers.base import (
+    BaseScraper,
+    ProductScrapeResult,
     ScrapedExchangeRate,
     ScrapedProduct,
     ScrapedTransaction,
 )
+from scrapers.retry import send_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -358,3 +363,151 @@ def _parse_ledger_entry(entry: dict) -> ScrapedTransaction | None:
         external_id=f"{ID_PREFIX}{entry_id}",
         scheduled_month=date(tx_date.year, tx_date.month, 1),
     )
+
+
+class SkipoScraper(BaseScraper):
+    method = "http_api"
+    institution = "skipo"
+
+    def __init__(self) -> None:
+        self.api_key = os.environ["SKIPO_API_KEY"]
+        # `scrape_transactions` returns a bare list, so its partial-coverage
+        # warnings ride out with the products leg, which runs next.
+        self._warnings: list[str] = []
+
+    def _client(self) -> httpx.AsyncClient:
+        """The one place the HTTP client is built, so tests can swap its transport."""
+        return httpx.AsyncClient(
+            base_url=SKIPO_BASE,
+            timeout=30.0,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Accept": "application/json",
+            },
+        )
+
+    async def _get_json(
+        self,
+        client: httpx.AsyncClient,
+        path: str,
+        what: str,
+        params: dict | None = None,
+    ) -> Any:
+        """GET with bounded retries; raise on any error status.
+
+        Messages end up in `scraper_runs.error_message`, so they carry only
+        what was being read, the status and the problem code: never the key,
+        the URL or the body.
+        """
+        resp = await send_with_retry(
+            lambda: client.get(path, params=params), label=f"Skipo GET {what}"
+        )
+        if resp.status_code in (401, 403):
+            code = _problem_code(resp) or "no code"
+            raise SkipoAuthError(
+                f"Skipo refused the API key ({resp.status_code}, {code}). Issue a "
+                "read-only key with accounts:read and market_data:read and run "
+                "`make secret-set KEY=SKIPO_API_KEY`."
+            )
+        if resp.is_error:
+            code = _problem_code(resp)
+            suffix = f", {code}" if code else ""
+            raise SkipoApiError(f"Skipo answered {resp.status_code}{suffix} reading {what}")
+        try:
+            return resp.json()
+        except ValueError:
+            raise SkipoApiError(f"Skipo sent a non-JSON answer reading {what}") from None
+
+    async def _paged(
+        self,
+        client: httpx.AsyncClient,
+        path: str,
+        what: str,
+        params: dict,
+        max_pages: int,
+    ) -> AsyncIterator[list[dict]]:
+        """Yield each page's `data`, following `pagination.totalPages`.
+
+        Stops at the last page Skipo reports, else at the first short page.
+        Pages already yielded survive a later page failing. Past `max_pages`
+        a warning joins the run's.
+        """
+        for page in range(1, max_pages + 1):
+            body = await self._get_json(
+                client, path, what, {**params, "page": page, "limit": PAGE_SIZE}
+            )
+            if not isinstance(body, dict) or not isinstance(body.get("data"), list):
+                raise SkipoApiError(f"Skipo sent an unexpected payload reading {what}")
+            items = [item for item in body["data"] if isinstance(item, dict)]
+            yield items
+            total_pages = (body.get("pagination") or {}).get("totalPages")
+            if isinstance(total_pages, int) and not isinstance(total_pages, bool):
+                if page >= total_pages:
+                    return
+            elif len(items) < PAGE_SIZE:
+                return
+        logger.warning("Skipo %s: stopped after %d pages; the rest were not read", what, max_pages)
+        self._warnings.append(f"Skipo: {what} capped at {max_pages} pages")
+
+    async def scrape_transactions(self) -> list[ScrapedTransaction]:
+        """The CLP ledger's entries, up to MAX_PAGES pages.
+
+        A failure on a later page keeps the pages already read and leaves a
+        warning; a failure before any page was read (and any auth failure)
+        fails the leg.
+        """
+        self._warnings = []
+        transactions: list[ScrapedTransaction] = []
+        pages_read = 0
+        async with self._client() as client:
+            try:
+                async for entries in self._paged(
+                    client, "/v2/ledger", "the CLP ledger", {"assetSymbol": CLP}, MAX_PAGES
+                ):
+                    pages_read += 1
+                    for entry in entries:
+                        txn = _parse_ledger_entry(entry)
+                        if txn is not None:
+                            transactions.append(txn)
+            except SkipoAuthError:
+                raise
+            except (httpx.HTTPError, SkipoApiError) as e:
+                if not pages_read:
+                    raise
+                logger.warning("Skipo: ledger stopped early, keeping what was read: %s", e)
+                self._warnings.append(f"Skipo: CLP ledger stopped early ({e})")
+        logger.info("Skipo: %d transactions", len(transactions))
+        return transactions
+
+    async def _preferred_currency(self, client: httpx.AsyncClient) -> str | None:
+        """The account's preferred currency; nothing else of `/v2/account` is kept."""
+        account = await self._get_json(client, "/v2/account", "the account")
+        currency = account.get("preferredCurrency") if isinstance(account, dict) else None
+        return currency.upper() if isinstance(currency, str) else None
+
+    async def scrape_products(self) -> ProductScrapeResult:
+        """Balances as products, coin valuations as rates, and both legs' warnings."""
+        async with self._client() as client:
+            assets: list[dict] = []
+            async for page in self._paged(
+                client, "/v2/assets", "the asset catalog", {}, MAX_ASSET_PAGES
+            ):
+                assets.extend(page)
+            rows = await self._get_json(client, "/v2/balances", "balances")
+            if not isinstance(rows, list):
+                raise SkipoApiError("Skipo sent an unexpected payload reading balances")
+            rows = [row for row in rows if isinstance(row, dict)]
+            preferred = await self._preferred_currency(client)
+
+        # Taken only after the fetches, so a failing fetch can't lose them.
+        warnings, self._warnings = self._warnings, []
+        classes = _asset_classes(assets)
+        products, balance_warnings = _parse_balances(rows, classes)
+        warnings.extend(balance_warnings)
+        if preferred == CLP:
+            rates = _exchange_rates(rows, classes)
+        else:
+            logger.info("Skipo preferred currency is not CLP; no coin rates derived")
+            rates = []
+        logger.info("Skipo: %d products, %d rates", len(products), len(rates))
+        return ProductScrapeResult(products, warnings, rates)
