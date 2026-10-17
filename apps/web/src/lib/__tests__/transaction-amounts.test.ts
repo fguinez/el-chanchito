@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { formatAmount, formatCLP } from "../utils";
-import { clpTotals } from "../transactions";
+import { clpTotals, countsTowardFlow } from "../transactions";
 import { formatBalance } from "@/components/institutions/shared";
 
 // Synthetic figures only (see the repo's personal data policy): CLP amounts
@@ -65,7 +65,12 @@ describe("clpTotals", () => {
         { amount: -1000000, currency: "CLP" },
         { amount: 2500000, currency: "CLP" },
       ])
-    ).toEqual({ expenses: -1999999, income: 2500000, otherCurrencyCount: 0 });
+    ).toEqual({
+      expenses: -1999999,
+      income: 2500000,
+      otherCurrencyCount: 0,
+      internalTransferCount: 0,
+    });
   });
 
   it("never adds a USD amount to a peso total", () => {
@@ -75,7 +80,12 @@ describe("clpTotals", () => {
         { amount: -1234.56, currency: "USD" },
         { amount: 1234.56, currency: "USD" },
       ])
-    ).toEqual({ expenses: -999999, income: 0, otherCurrencyCount: 2 });
+    ).toEqual({
+      expenses: -999999,
+      income: 0,
+      otherCurrencyCount: 2,
+      internalTransferCount: 0,
+    });
   });
 
   it("is all zeros for no rows", () => {
@@ -83,6 +93,31 @@ describe("clpTotals", () => {
       expenses: 0,
       income: 0,
       otherCurrencyCount: 0,
+      internalTransferCount: 0,
     });
+  });
+
+  it("leaves out both legs of an internal transfer", () => {
+    expect(
+      clpTotals([
+        { amount: -999999, currency: "CLP" },
+        { amount: -1000000, currency: "CLP", isInternalTransfer: true },
+        { amount: 1000000, currency: "CLP", isInternalTransfer: true },
+        { amount: 2500000, currency: "CLP", isInternalTransfer: false },
+      ])
+    ).toEqual({
+      expenses: -999999,
+      income: 2500000,
+      otherCurrencyCount: 0,
+      internalTransferCount: 2,
+    });
+  });
+});
+
+describe("countsTowardFlow", () => {
+  it("skips only rows flagged as internal transfers", () => {
+    expect(countsTowardFlow({ isInternalTransfer: true })).toBe(false);
+    expect(countsTowardFlow({ isInternalTransfer: false })).toBe(true);
+    expect(countsTowardFlow({})).toBe(true);
   });
 });

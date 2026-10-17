@@ -34,7 +34,7 @@ make dev               # PostgreSQL (port 5435) + migrations + scrapers + dashbo
 
 ## Usage
 
-The dashboard runs at `http://localhost:3000`: **Inicio** lists the monitors that need attention and the latest scraper runs, **Monitores** every monitor with its history chart and variaciones, **Historial** the net-worth timeline, **Instituciones** every scraped product with an on-demand refresh button and edit dialogs for institutions, accounts and products, and **Gastos**, **Gastos Fijos** and **Transferencias** the transactions, recurring expenses and internal transfers.
+The dashboard runs at `http://localhost:3000`: **Inicio** lists the monitors that need attention and the latest scraper runs, **Monitores** every monitor with its history chart and variaciones, **Historial** the net-worth timeline, **Instituciones** every scraped product with an on-demand refresh button and edit dialogs for institutions, accounts and products, and **Gastos**, **Gastos Fijos** and **Transferencias** the transactions, recurring expenses and internal transfers (linked to the scraped debit and credit they account for, so they stay out of Gastos and Ingresos).
 
 Every published port listens on loopback only (`127.0.0.1`), so nothing is reachable from your network; to open the dashboard from your phone, set `DASHBOARD_HOST` (see [USAGE.md](USAGE.md#reaching-the-dashboard-from-another-device)).
 

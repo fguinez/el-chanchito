@@ -164,6 +164,34 @@ describe("GET /api/transactions/[id]", () => {
         slug: "banco-prueba",
       },
       category: { id: CATEGORY_ID, name: "Categoría de prueba" },
+      transfer: null,
+    });
+  });
+
+  it("returns the internal transfer that links the row", async () => {
+    const TRANSFER_ID = "00000000-0000-4000-8000-000000000005";
+    queuedRows.push(
+      [joinedRow({ isInternalTransfer: true })],
+      [
+        {
+          id: TRANSFER_ID,
+          description: "Traspaso de prueba",
+          amount: 999999,
+          transferDate: "2026-01-14",
+          status: "resolved",
+          fromTransactionId: TXN_ID,
+        },
+      ]
+    );
+    const res = await call(TXN_ID);
+    expect(res.status).toBe(200);
+    expect((await res.json()).transfer).toEqual({
+      id: TRANSFER_ID,
+      description: "Traspaso de prueba",
+      amount: 999999,
+      transferDate: "2026-01-14",
+      status: "resolved",
+      side: "from",
     });
   });
 

@@ -1,12 +1,14 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { eq } from "drizzle-orm";
+import { eq, or } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   accounts,
   categories,
   institutions,
+  internalTransfers,
   products,
   transactions,
+  type TransferStatus,
 } from "@/lib/db/schema";
 import { UUID_RE } from "@/lib/monitors/validate";
 import type { ProductKind } from "@chanchito/product-model";
@@ -54,6 +56,16 @@ export interface TransactionDetail {
   };
   institution: { id: string; name: string; slug: string };
   category: { id: string; name: string } | null;
+  /** The internal transfer that links this row (V028), and on which side:
+   *  "from" = its outgoing leg, "to" = its incoming leg. */
+  transfer: {
+    id: string;
+    description: string;
+    amount: number;
+    transferDate: string;
+    status: TransferStatus;
+    side: "from" | "to";
+  } | null;
 }
 
 const detailColumns = {
@@ -90,7 +102,8 @@ const detailColumns = {
 
 /**
  * GET /api/transactions/[id]: the full transaction row joined with its
- * product, institution and (optional) category. 400 `{ error, field }` on a
+ * product, institution, (optional) category and the internal transfer that
+ * links it, if any. 400 `{ error, field }` on a
  * malformed id, 404 `{ error }` when no transaction has that id.
  */
 export async function GET(_request: Request, { params }: Context) {
@@ -128,6 +141,24 @@ async function loadTransactionDetail(id: string) {
     );
   }
 
+  const [link] = await db
+    .select({
+      id: internalTransfers.id,
+      description: internalTransfers.description,
+      amount: internalTransfers.amount,
+      transferDate: internalTransfers.transferDate,
+      status: internalTransfers.status,
+      fromTransactionId: internalTransfers.fromTransactionId,
+    })
+    .from(internalTransfers)
+    .where(
+      or(
+        eq(internalTransfers.fromTransactionId, id),
+        eq(internalTransfers.toTransactionId, id)
+      )
+    )
+    .limit(1);
+
   const detail: TransactionDetail = {
     id: row.id,
     productId: row.productId,
@@ -163,6 +194,16 @@ async function loadTransactionDetail(id: string) {
       row.categoryId && row.categoryName !== null
         ? { id: row.categoryId, name: row.categoryName }
         : null,
+    transfer: link
+      ? {
+          id: link.id,
+          description: link.description,
+          amount: link.amount,
+          transferDate: link.transferDate,
+          status: link.status,
+          side: link.fromTransactionId === row.id ? "from" : "to",
+        }
+      : null,
   };
   return NextResponse.json(detail);
 }
