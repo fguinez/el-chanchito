@@ -841,9 +841,10 @@ class TestSupersededTransactions:
         assert deleted == 0
         assert self._keys(db_conn) == ["bch_fp_000000000000000a"]
 
-    def test_a_batch_a_database_error_rolled_back_deletes_nothing(self, db_conn):
-        """One failing row aborts the batch: the replacement written before it
-        is rolled back too, so its twin must survive."""
+    def test_a_failing_row_keeps_only_its_own_twin(self, db_conn):
+        """A row that fails is rolled back alone: the replacement written
+        before it stays stored, so its twin goes and the failed key is not
+        reported as persisted."""
         upsert_transactions([self._card("bch_fp_000000000000000a", -1235)])
         db_conn.execute(
             "ALTER TABLE transactions ADD CONSTRAINT synthetic_failure "
@@ -861,10 +862,10 @@ class TestSupersededTransactions:
             {usd.external_id, failing.external_id},
         )
 
-        assert written.persisted_external_ids == frozenset()
-        assert deleted == 0
-        assert self._keys(db_conn) == ["bch_fp_000000000000000a"]
-        assert self._keys(db_conn, "USD") == []
+        assert written.persisted_external_ids == {self.REPLACEMENT}
+        assert deleted == 1
+        assert self._keys(db_conn) == []
+        assert self._keys(db_conn, "USD") == [self.REPLACEMENT]
 
     def test_a_stored_replacement_lets_its_twin_go(self, db_conn):
         upsert_transactions([self._card("bch_fp_000000000000000a", -1235)])

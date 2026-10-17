@@ -8,6 +8,7 @@ import os
 import signal
 import sys
 import threading
+import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,7 +20,7 @@ load_dotenv()
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
-from db.connection import close_pool, database_url
+from db.connection import close_pool, database_url, is_transient_db_error
 from db.writer import (
     UnresolvedRateScope,
     delete_superseded_transactions,
@@ -46,7 +47,29 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
+# The executor logs two INFO lines per job run: run_scraper already logs each
+# scrape's start and end, and the heartbeat would add a pair every 30s.
+# Missed runs and job exceptions are WARNING/ERROR and still show.
+logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
 logger = logging.getLogger("scraper-service")
+
+
+def run_outcome(
+    errors: list[str], warnings: list[str], landed: int
+) -> tuple[str, str | None]:
+    """The final (status, error_message) of a run.
+
+    `landed` counts what the run did store: scraped transactions that were
+    written (new or already stored) plus products written. A failure only makes
+    the run `error` when nothing landed; a run that stored part of its data is
+    `partial`, as is one whose scraper reported warnings.
+    """
+    message = "; ".join(errors + warnings) or None
+    if errors and not landed:
+        return "error", message
+    if errors or warnings:
+        return "partial", message
+    return "success", None
 
 
 async def run_scraper(scraper: BaseScraper) -> None:
@@ -60,11 +83,13 @@ async def run_scraper(scraper: BaseScraper) -> None:
     cached one while it's live (a second full login inside BanChile's login
     cooldown is refused).
 
-    The products leg can also report non-fatal warnings (e.g. a BanChile
-    surface that failed all its retries): a run with warnings but no errors is
-    recorded as `partial`, with the warnings as its message. The exchange
-    rates it read are written after its products, each on its own: a rate
-    that names an unknown product, or fails to write, is a warning too.
+    Writes are isolated per row too: a product or transaction that fails to
+    write is logged and counted, and the rest are still written. The final
+    status comes from `run_outcome`, and the products leg's non-fatal warnings
+    (e.g. a BanChile surface that failed all its retries) join the message.
+    The exchange rates it read are written after its products, each on its
+    own: a rate that names an unknown product, or fails to write, is a
+    warning.
     """
     run_id = start_scraper_run(scraper.method, scraper.institution)
     logger.info("Starting scraper: %s (run=%s)", scraper.name, run_id)
@@ -74,12 +99,16 @@ async def run_scraper(scraper: BaseScraper) -> None:
     n_tx = 0
     inserted = 0
     n_prod = 0
+    landed = 0
 
     try:
         transactions = await scraper.scrape_transactions()
         n_tx = len(transactions)
         written = write_transactions(transactions)
         inserted = written.inserted
+        landed += n_tx - written.failed
+        if written.failed:
+            errors.append(f"transactions: {written.failed} of {n_tx} not written")
     except Exception as e:
         logger.exception("Scraper %s: transactions failed", scraper.name)
         errors.append(f"transactions: {e}")
@@ -101,14 +130,40 @@ async def run_scraper(scraper: BaseScraper) -> None:
     rates: list[ScrapedExchangeRate] = []
     try:
         result = await scraper.scrape_products()
-        n_prod = len(result.products)
-        warnings.extend(result.warnings)
-        rates = list(result.exchange_rates)
-        for sp in result.products:
-            upsert_product(sp)
     except Exception as e:
         logger.exception("Scraper %s: products failed", scraper.name)
         errors.append(f"products: {e}")
+    else:
+        n_prod = len(result.products)
+        warnings.extend(result.warnings)
+        rates = list(result.exchange_rates)
+        products_written = 0
+        failed: list[str] = []
+        for sp in result.products:
+            try:
+                upsert_product(sp)
+                products_written += 1
+            except Exception as e:
+                logger.exception(
+                    "Scraper %s: writing %s/%s %s failed",
+                    scraper.name,
+                    sp.institution,
+                    sp.kind,
+                    sp.currency,
+                )
+                failed.append(f"{sp.institution}/{sp.kind} {sp.currency}: {e}")
+                if is_transient_db_error(e):
+                    # upsert_product already retried, so the database is down:
+                    # each remaining write would block the loop through its own
+                    # retries. They count as not written.
+                    break
+        landed += products_written
+        if products_written < n_prod:
+            errors.append(
+                f"products: {n_prod - products_written} of {n_prod} not written "
+                f"({'; '.join(failed)})"
+            )
+
     warnings.extend(_write_exchange_rates(scraper, rates))
 
     logger.info(
@@ -118,18 +173,10 @@ async def run_scraper(scraper: BaseScraper) -> None:
         inserted,
         n_prod,
     )
-    if errors:
-        finish_scraper_run(
-            run_id, "error", transactions_imported=inserted,
-            error_message="; ".join(errors + warnings),
-        )
-    elif warnings:
-        finish_scraper_run(
-            run_id, "partial", transactions_imported=inserted,
-            error_message="; ".join(warnings),
-        )
-    else:
-        finish_scraper_run(run_id, "success", transactions_imported=inserted)
+    status, message = run_outcome(errors, warnings, landed)
+    finish_scraper_run(
+        run_id, status, transactions_imported=inserted, error_message=message
+    )
 
 
 def _write_exchange_rates(
@@ -225,9 +272,36 @@ _REFRESH_COOLDOWNS: dict[str, Callable[[], float | None]] = {
 }
 
 
+# The scheduler runs a heartbeat job this often, and GET /health answers 503
+# once it has gone this long without one. The threshold is generous because
+# sync work (IMAP scans, DB writes) still runs on the event loop and delays the
+# beat while it does; only a loop stuck far longer than that reads as wedged.
+_HEARTBEAT_INTERVAL_SECONDS = 30
+_HEARTBEAT_STALE_SECONDS = 10 * 60
+
+
+class Heartbeat:
+    """When the scheduler last ran its heartbeat job.
+
+    Written on the event loop and read from the control server's thread; a
+    single float assignment needs no lock.
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._last = clock()
+
+    def beat(self) -> None:
+        self._last = self._clock()
+
+    def age(self) -> float:
+        return self._clock() - self._last
+
+
 def _make_control_handler(
     scheduler: AsyncIOScheduler,
     scraper_keys: set[str],
+    heartbeat: Heartbeat,
     cooldowns: dict[str, Callable[[], float | None]] | None = None,
 ):
     """Build the HTTP handler for the internal scraper control server.
@@ -244,6 +318,10 @@ def _make_control_handler(
     triggers the rest and lists it under `skipped`. The startup run isn't a
     job, so a trigger during it isn't absorbed (BanChile's login gate still
     stops a second login).
+
+    GET /health reports the scheduler, not just this thread: it answers 503
+    when `heartbeat` has gone stale, which is what the compose healthcheck
+    reads.
     """
     cooldowns = cooldowns or {}
 
@@ -275,7 +353,11 @@ def _make_control_handler(
 
         def do_GET(self) -> None:  # noqa: N802
             if self.path == "/health":
-                self._send(200, {"status": "ok"})
+                age = round(heartbeat.age())
+                if age < _HEARTBEAT_STALE_SECONDS:
+                    self._send(200, {"status": "ok", "heartbeat_age_seconds": age})
+                else:
+                    self._send(503, {"status": "stale", "heartbeat_age_seconds": age})
             elif self.path == "/scrapers":
                 # Which scrapers exist is decided at startup by env vars
                 # (build_scrapers()), so expose the list for the dashboard
@@ -332,7 +414,7 @@ def _make_control_handler(
 
 
 def _start_control_server(
-    scheduler: AsyncIOScheduler, scraper_keys: set[str]
+    scheduler: AsyncIOScheduler, scraper_keys: set[str], heartbeat: Heartbeat
 ) -> ThreadingHTTPServer | None:
     """Start the internal HTTP control server when SCRAPER_CONTROL_PORT is set.
 
@@ -346,14 +428,17 @@ def _start_control_server(
         return None
 
     host = os.environ.get("SCRAPER_CONTROL_HOST") or "127.0.0.1"
-    handler = _make_control_handler(scheduler, scraper_keys, _REFRESH_COOLDOWNS)
+    handler = _make_control_handler(
+        scheduler, scraper_keys, heartbeat, _REFRESH_COOLDOWNS
+    )
     server = ThreadingHTTPServer((host, int(port)), handler)
     thread = threading.Thread(
         target=server.serve_forever, name="scraper-control", daemon=True
     )
     thread.start()
     logger.info(
-        "Control server listening on %s:%s (POST /refresh[/{slug}], GET /scrapers)",
+        "Control server listening on %s:%s "
+        "(POST /refresh[/{slug}], GET /scrapers, GET /health)",
         host,
         port,
     )
@@ -402,7 +487,30 @@ def main_scheduled() -> None:
             # scheduled or in-flight run of the same institution.
             max_instances=1,
             coalesce=True,
+            # APScheduler's default grace is 1s: a run (or a manual trigger)
+            # that comes due while sync work holds the event loop would be
+            # dropped as missed. Run it late instead; `coalesce` keeps it to one.
+            misfire_grace_time=None,
         )
+
+    heartbeat = Heartbeat()
+
+    async def beat() -> None:
+        heartbeat.beat()
+
+    # A coroutine, so it runs on the event loop itself: the beat goes stale
+    # exactly when the loop, and every scraper job with it, is stuck.
+    scheduler.add_job(
+        beat,
+        IntervalTrigger(seconds=_HEARTBEAT_INTERVAL_SECONDS),
+        id="heartbeat",
+        name="Heartbeat",
+        max_instances=1,
+        coalesce=True,
+        # A late beat is still true (it only runs once the loop is free), and
+        # skipping it would log a missed-run warning after every busy second.
+        misfire_grace_time=None,
+    )
 
     def shutdown(signum, frame):
         logger.info("Shutting down (signal %s)...", signum)
@@ -423,7 +531,7 @@ def main_scheduled() -> None:
     scheduler.start()
     logger.info("Scheduler started. Running initial scrape...")
 
-    control_server = _start_control_server(scheduler, set(scrapers))
+    control_server = _start_control_server(scheduler, set(scrapers), heartbeat)
 
     loop.run_until_complete(run_all_once(scrapers))
 
@@ -433,7 +541,10 @@ def main_scheduled() -> None:
     except (KeyboardInterrupt, SystemExit):
         pass
     finally:
-        scheduler.shutdown(wait=False)
+        # The signal handler has usually shut it down already, and a second
+        # shutdown() raises, which would skip the cleanup below.
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
         if control_server is not None:
             control_server.shutdown()
         try:

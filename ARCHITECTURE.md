@@ -544,7 +544,7 @@ and USD amounts keep their cents. Before #79 the unbilled USD charges were
 stored on the CLP card as whole "pesos"; each run deletes those leftovers once
 their USD rows are stored (`superseded_transactions` ->
 `db/writer.py::delete_superseded_transactions`, gated on the keys
-`write_transactions` reports as persisted, so a rolled-back batch deletes
+`write_transactions` reports as persisted, so a replacement that failed to write deletes
 nothing): by their exact old key when it is reproducible, else by date and old
 amount (only for a USD statement row whose statement the national leg also read
 in that scrape, with both CLP card legs loaded, since the two legs pick their
@@ -637,10 +637,41 @@ class BaseScraper(ABC):
 ```
 
 Both `method` and `institution` are stored per `scraper_runs` row, and
-`run_scraper` finishes the row as `success`, `partial` (both legs ran but a
-scraper reported warnings, e.g. a BanChile surface that failed all its retries
-or Fintual goals skipped for lacking an id; the warnings land in
-`error_message`), or `error` (a leg raised).
+`run_scraper` finishes the row as `success`, `partial`, or `error`, with every
+failure and warning joined into `error_message`:
+
+- `partial`: something went wrong but part of the data landed (one leg raised
+  while the other wrote, or some products or transactions failed to write
+  while the rest were written), or a scraper reported warnings, e.g. a
+  BanChile surface that failed all its retries or Fintual goals skipped for
+  lacking an id.
+- `error`: something failed and nothing landed.
+
+Writes are isolated per row: `run_scraper` writes each product separately, and
+`write_transactions` runs each transaction (and each product resolution) in
+its own `conn.transaction()` block, so a row that fails is rolled back alone
+instead of aborting the transaction for every row after it. The dashboard's
+`ScraperStatus` widget shows `partial` runs with an amber badge and banner,
+and failed and partial rows expand to their `error_message`.
+
+**Retries.** `scrapers/retry.py` retries idempotent work only, three attempts
+with 1 s / 2 s backoff: Buda's and Fintual's GETs on transport errors and
+429/5xx (re-signing each Buda attempt, since a nonce can't be reused; the
+last response is returned as-is, so Fintual's 401 re-login is unchanged), and
+the DB writers (`with_db_retry`) on `psycopg.OperationalError`, which covers a
+dropped connection, a pool timeout and serialization/deadlock rollbacks
+(inside `write_transactions` a per-row error, those included, counts as
+failed instead; only a dropped connection replays its batch). Every writer is
+idempotent, so a replay can't double-write; `start_scraper_run` mints its id
+before the retry so a replay can't leave a second run stuck in `running`.
+Once a product write exhausts its retries on such an error, `run_scraper`
+stops writing that run's remaining products, since each would block the event
+loop through its own retries. Logins are never retried (a repeated Fintual
+`initiate_login` e-mails another 2FA code), and neither are whole legs. The
+pool pings each connection before handing it out
+(`check=ConnectionPool.check_connection`), so the ones a Postgres restart
+killed are replaced rather than failing a write, recycles connections after
+30 min, and gives up waiting for one after 10 s so a retry can move on.
 
 `ScrapedTransaction`/`ScrapedProduct` are pydantic envelopes defined in
 `packages/product-model`; both carry `institution` (slug), a kind, and
@@ -837,6 +868,9 @@ Browser → web POST /api/institutions/refresh {institution?}
   for BanChile the login cooldown still stops a second login). The HTTP call
   returns `202` immediately; the scrape runs asynchronously on the scheduler's
   event loop.
+  Jobs also set `misfire_grace_time=None`: APScheduler's default of 1 s would
+  drop a run, or a manual trigger, that comes due while sync work (IMAP scans,
+  DB writes) holds the event loop.
 - Those guards stop overlap, not frequency, so a scraper can also refuse manual
   triggers (`_REFRESH_COOLDOWNS` in `main.py`; only BanChile, issue #28).
   `banchile_web.login_cooldown_retry_after` refuses only a run that would
@@ -848,6 +882,12 @@ Browser → web POST /api/institutions/refresh {institution?}
   `skipped: [{slug, retry_after_seconds}]`; `POST /refresh` triggers the rest
   and lists it under `skipped` in its `202`. The dashboard shows either as a
   "consulted recently, try again in N minutes" notice.
+- `GET /health` reports the scheduler, not just the server thread: a heartbeat
+  job runs on the event loop every 30 s, and the endpoint answers `503
+  {"status": "stale"}` once it has gone 10 minutes without one (a wedged loop).
+  The Compose `scrapers` service polls it as its `healthcheck`, so a wedged
+  scheduler shows as `unhealthy` in `docker compose ps`. Compose only marks
+  the container; restarting it on that is up to whatever runs the stack.
 - The server runs on a daemon thread and binds `SCRAPER_CONTROL_HOST`, which
   defaults to `127.0.0.1` (host-dev); Compose sets `0.0.0.0` inside the
   container so `web` can reach it. It's an **unauthenticated** trigger: keep it

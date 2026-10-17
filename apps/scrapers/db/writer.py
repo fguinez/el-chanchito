@@ -8,10 +8,9 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 
-from psycopg.pq import TransactionStatus
 from psycopg.types.json import Jsonb
 
-from db.connection import get_pool
+from db.connection import get_pool, with_db_retry
 from db.slug import slugify, unique_slug
 from scrapers.base import (
     ScrapedExchangeRate,
@@ -31,18 +30,30 @@ def start_scraper_run(method: str, institution: str) -> str:
     'open_banking'); `institution` is the platform being scraped.
     """
     run_id = str(uuid4())
+    _insert_scraper_run(run_id, method, institution, datetime.now(timezone.utc))
+    return run_id
+
+
+@with_db_retry
+def _insert_scraper_run(
+    run_id: str, method: str, institution: str, started_at: datetime
+) -> None:
+    """The id is minted by the caller, so a retry after a commit whose
+    acknowledgement was lost finds its own row instead of adding a second one
+    that would stay `running` forever."""
     pool = get_pool()
     with pool.connection() as conn:
         conn.execute(
             """
             INSERT INTO scraper_runs (id, method, institution, started_at, status)
             VALUES (%s, %s, %s, %s, 'running')
+            ON CONFLICT (id) DO NOTHING
             """,
-            (run_id, method, institution, datetime.now(timezone.utc)),
+            (run_id, method, institution, started_at),
         )
-    return run_id
 
 
+@with_db_retry
 def finish_scraper_run(
     run_id: str,
     status: str,
@@ -487,33 +498,129 @@ def _fill_location(conn, row_id, location: TransactionLocation | None) -> None:
     )
 
 
+def _write_transaction(
+    conn,
+    txn: ScrapedTransaction,
+    product_id: str,
+    claimed: set,
+    incoming_ids: set[str],
+) -> tuple[str, str | None]:
+    """Store one scraped transaction and say what became of it.
+
+    Returns the outcome and the stored row it claims, if any. The outcome is
+    "inserted" for a new row, "stored" when its key already holds a row
+    (found, adopted, or taken by a concurrent insert) and "kept" when a stored
+    row with a bank id keeps the movement out (see `_claim_decision`). A
+    movement already stored under its key is only claimed; one that adopts a
+    stored row (see `write_transactions`) re-keys it in place. `claimed` is
+    only read: the caller records the claim once this row's block commits.
+    """
+    source = f"scraper_{txn.institution}"
+    row = conn.execute(
+        "SELECT id FROM transactions "
+        "WHERE product_id = %s AND external_id = %s",
+        (product_id, txn.external_id),
+    ).fetchone()
+    if row:
+        _fill_location(conn, row[0], txn.location)
+        return "stored", row[0]
+
+    if _adopts_stored_rows(txn.external_id):
+        action, row_id = _claim_decision(
+            txn.external_id,
+            _sibling_rows(conn, product_id, txn, source),
+            claimed,
+            incoming_ids,
+        )
+        if action == "rekey":
+            # The dates move with the key: a legacy row is sitting under its
+            # posting date, and leaving it there would show the movement on the
+            # wrong day and force the same decision again on every later run.
+            conn.execute(
+                "UPDATE transactions SET external_id = %s, "
+                "transaction_date = %s, accounting_date = %s, "
+                "scheduled_month = %s, updated_at = now() "
+                "WHERE id = %s",
+                (
+                    txn.external_id,
+                    txn.transaction_date,
+                    txn.accounting_date,
+                    txn.scheduled_month,
+                    row_id,
+                ),
+            )
+            _fill_location(conn, row_id, txn.location)
+            logger.info(
+                "Adopted stored transaction %s onto %s",
+                row_id,
+                txn.external_id,
+            )
+            return "stored", row_id
+        if action == "keep":
+            logger.warning(
+                "Transaction %s (%s, %s) has no bank id this run and "
+                "matches stored row %s, which has one; left as it is "
+                "and not imported",
+                txn.external_id,
+                txn.transaction_date,
+                txn.amount,
+                row_id,
+            )
+            return "kept", row_id
+
+    cur = conn.execute(
+        """
+        INSERT INTO transactions
+            (id, product_id, description, amount, transaction_date,
+             accounting_date, scheduled_month, source, external_id,
+             location_name, location_city, location_country,
+             location_latitude, location_longitude)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s)
+        ON CONFLICT (product_id, external_id) DO NOTHING
+        """,
+        (
+            str(uuid4()),
+            product_id,
+            txn.description,
+            txn.amount,
+            txn.transaction_date,
+            txn.accounting_date,
+            txn.scheduled_month,
+            source,
+            txn.external_id,
+            *_location_values(txn.location),
+        ),
+    )
+    # A conflict means the row is already stored under this key.
+    return ("inserted" if cur.rowcount and cur.rowcount > 0 else "stored"), None
+
+
 @dataclass(frozen=True)
 class TransactionWriteResult:
-    """What `write_transactions` did.
+    """What one `write_transactions` call did.
 
-    `persisted_external_ids` holds the keys a stored row carries once the batch
-    is committed: inserted, already stored, or adopted onto. It is empty when
-    the batch's database transaction failed, since nothing of it was kept.
+    `inserted` counts rows newly inserted and `failed` the transactions that
+    raised and were skipped. `persisted_external_ids` holds the keys a stored
+    row carries once the call returns: inserted, already stored, or adopted
+    onto.
     """
 
-    inserted: int
-    persisted_external_ids: frozenset[str]
-
-
-def _transaction_failed(conn) -> bool:
-    """True when a statement error aborted `conn`'s open transaction."""
-    info = getattr(conn, "info", None)
-    return getattr(info, "transaction_status", None) == TransactionStatus.INERROR
+    inserted: int = 0
+    failed: int = 0
+    persisted_external_ids: frozenset[str] = frozenset()
 
 
 def upsert_transactions(transactions: list[ScrapedTransaction]) -> int:
     """Insert transactions, skipping duplicates. Returns count of new rows.
 
-    See `write_transactions`, which also reports which keys were persisted.
+    See `write_transactions`, which also reports failures and which keys were
+    persisted.
     """
     return write_transactions(transactions).inserted
 
 
+@with_db_retry
 def write_transactions(transactions: list[ScrapedTransaction]) -> TransactionWriteResult:
     """Insert transactions, skipping duplicates, and report what was persisted.
 
@@ -533,139 +640,80 @@ def write_transactions(transactions: list[ScrapedTransaction]) -> TransactionWri
     (BanChile's legacy rows hold the *posting* date) and a NULL
     `accounting_date`. Neither is derivable from anything stored, so nothing
     backfills them.
+
+    Each product resolution and each transaction runs in its own
+    `conn.transaction()` block, so one that fails (a serialization failure
+    included) is rolled back alone and counted in `failed` instead of leaving
+    the connection in an aborted transaction that fails every row after it. A
+    dropped connection is the exception: it re-raises, and `with_db_retry`
+    replays the batch, which is safe because every step is idempotent (rows the
+    lost attempt committed are found, not re-inserted, so they are missing from
+    `inserted`).
     """
     if not transactions:
-        return TransactionWriteResult(0, frozenset())
+        return TransactionWriteResult()
 
     pool = get_pool()
     inserted = 0
+    failed = 0
     persisted: set[str] = set()
 
     with pool.connection() as conn:
         products: dict[tuple, str] = {}
 
-        def product_of(txn: ScrapedTransaction) -> str:
-            key = (txn.institution, txn.product_kind, txn.currency)
-            if key not in products:
-                products[key] = _resolve_product(
-                    conn, txn.institution, txn.product_kind, txn.currency
-                )
-            return products[key]
-
         # Every key this scrape carries, per product: a stored row already
         # holding one of them belongs to that movement and is never adopted.
-        # Resolution failures are logged and skipped here exactly as they are
-        # below, so one unresolvable transaction can't abort the batch.
+        # Only a product whose block committed is cached.
         incoming: dict[str, set[str]] = {}
         for txn in transactions:
+            key = (txn.institution, txn.product_kind, txn.currency)
             try:
-                incoming.setdefault(product_of(txn), set()).add(txn.external_id)
+                if key not in products:
+                    with conn.transaction():
+                        product_id = _resolve_product(
+                            conn, txn.institution, txn.product_kind, txn.currency
+                        )
+                    products[key] = product_id
             except Exception:
+                if conn.broken:
+                    raise
                 logger.exception(
                     "Failed to resolve the product for: %s", txn.external_id
                 )
+                continue
+            incoming.setdefault(products[key], set()).add(txn.external_id)
 
         claimed: set = set()
         for txn in transactions:
+            key = (txn.institution, txn.product_kind, txn.currency)
+            product_id = products.get(key)
+            if product_id is None:
+                # Its product failed to resolve, and was logged, above.
+                failed += 1
+                continue
             try:
-                product_id = product_of(txn)
-                source = f"scraper_{txn.institution}"
-                row = conn.execute(
-                    "SELECT id FROM transactions "
-                    "WHERE product_id = %s AND external_id = %s",
-                    (product_id, txn.external_id),
-                ).fetchone()
-                if row:
-                    claimed.add(row[0])
-                    _fill_location(conn, row[0], txn.location)
-                    persisted.add(txn.external_id)
-                    continue
-
-                if _adopts_stored_rows(txn.external_id):
-                    action, row_id = _claim_decision(
-                        txn.external_id,
-                        _sibling_rows(conn, product_id, txn, source),
-                        claimed,
-                        incoming.get(product_id, set()),
+                with conn.transaction():
+                    outcome, claim = _write_transaction(
+                        conn, txn, product_id, claimed, incoming.get(product_id, set())
                     )
-                    if action != "insert":
-                        claimed.add(row_id)
-                    if action == "rekey":
-                        # The dates move with the key: a legacy row is sitting
-                        # under its posting date, and leaving it there would
-                        # show the movement on the wrong day and force the same
-                        # decision again on every later run.
-                        conn.execute(
-                            "UPDATE transactions SET external_id = %s, "
-                            "transaction_date = %s, accounting_date = %s, "
-                            "scheduled_month = %s, updated_at = now() "
-                            "WHERE id = %s",
-                            (
-                                txn.external_id,
-                                txn.transaction_date,
-                                txn.accounting_date,
-                                txn.scheduled_month,
-                                row_id,
-                            ),
-                        )
-                        _fill_location(conn, row_id, txn.location)
-                        logger.info(
-                            "Adopted stored transaction %s onto %s",
-                            row_id,
-                            txn.external_id,
-                        )
-                        persisted.add(txn.external_id)
-                        continue
-                    if action == "keep":
-                        logger.warning(
-                            "Transaction %s (%s, %s) has no bank id this run and "
-                            "matches stored row %s, which has one; left as it is "
-                            "and not imported",
-                            txn.external_id,
-                            txn.transaction_date,
-                            txn.amount,
-                            row_id,
-                        )
-                        continue
-
-                cur = conn.execute(
-                    """
-                    INSERT INTO transactions
-                        (id, product_id, description, amount, transaction_date,
-                         accounting_date, scheduled_month, source, external_id,
-                         location_name, location_city, location_country,
-                         location_latitude, location_longitude)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s, %s)
-                    ON CONFLICT (product_id, external_id) DO NOTHING
-                    """,
-                    (
-                        str(uuid4()),
-                        product_id,
-                        txn.description,
-                        txn.amount,
-                        txn.transaction_date,
-                        txn.accounting_date,
-                        txn.scheduled_month,
-                        source,
-                        txn.external_id,
-                        *_location_values(txn.location),
-                    ),
-                )
-                if cur.rowcount and cur.rowcount > 0:
-                    inserted += 1
-                # A conflict means the row is already stored under this key.
-                persisted.add(txn.external_id)
             except Exception:
+                if conn.broken:
+                    raise
+                failed += 1
                 logger.exception("Failed to insert transaction: %s", txn.external_id)
+                continue
+            if claim is not None:
+                claimed.add(claim)
+            if outcome != "kept":
+                persisted.add(txn.external_id)
+            if outcome == "inserted":
+                inserted += 1
 
-        if _transaction_failed(conn):
-            # The pool rolls the whole batch back on exit, so nothing above
-            # was kept, whatever the per-row bookkeeping says.
-            logger.error("Transaction batch aborted by a database error; nothing kept")
-            persisted.clear()
-
-    return TransactionWriteResult(inserted, frozenset(persisted))
+    return TransactionWriteResult(
+        inserted=inserted,
+        failed=failed,
+        persisted_external_ids=frozenset(persisted),
+    )
 
 
 def _like_prefix(prefix: str) -> str:
@@ -839,6 +887,7 @@ def delete_superseded_transactions(
     return deleted
 
 
+@with_db_retry
 def upsert_product(sp: ScrapedProduct) -> None:
     """Record one scraped product observation.
 

@@ -304,7 +304,8 @@ instead of spinning forever.
     `429` with `Retry-After` when it can't run yet, see below)
   - `GET /scrapers`: the enabled scraper slugs (drives which refresh buttons
     are enabled)
-  - `GET /health` — liveness check
+  - `GET /health`: liveness check; `503` once the scheduler's heartbeat has
+    stalled for 10 minutes (the Compose healthcheck reads it)
 - **Dashboard** — set `SCRAPER_CONTROL_URL` to reach that server; the web route
   `POST /api/institutions/refresh` (optional body `{"institution":"<slug>"}`) proxies
   to it and returns `503` when it's unavailable.
@@ -661,6 +662,9 @@ make logs      # View logs
 
 The dashboard is at `http://localhost:3000` on the machine running Compose; see
 above to reach it from elsewhere.
+
+`docker compose ps` shows the `scrapers` service as `unhealthy` when its
+scheduler has stopped running jobs (its `/health` endpoint answers `503`).
 
 ### Production
 
