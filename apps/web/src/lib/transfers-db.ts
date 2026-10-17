@@ -135,8 +135,22 @@ export async function loadTransfers(where?: SQL) {
     .leftJoin(toProduct, eq(internalTransfers.toProductId, toProduct.id))
     .leftJoin(toAccount, eq(toProduct.accountId, toAccount.id))
     .leftJoin(toInstitution, eq(toAccount.institutionId, toInstitution.id))
-    .leftJoin(fromTxn, eq(internalTransfers.fromTransactionId, fromTxn.id))
-    .leftJoin(toTxn, eq(internalTransfers.toTransactionId, toTxn.id))
+    // A soft-deleted linked row (V033) is treated as missing, so the feed does
+    // not show a transaction the user deleted.
+    .leftJoin(
+      fromTxn,
+      and(
+        eq(internalTransfers.fromTransactionId, fromTxn.id),
+        isNull(fromTxn.deletedAt)
+      )
+    )
+    .leftJoin(
+      toTxn,
+      and(
+        eq(internalTransfers.toTransactionId, toTxn.id),
+        isNull(toTxn.deletedAt)
+      )
+    )
     .where(where)
     .orderBy(
       desc(internalTransfers.transferDate),
