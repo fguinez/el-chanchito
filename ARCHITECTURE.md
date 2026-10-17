@@ -194,7 +194,7 @@ most specific first:
    Buda's tickers for crypto, cached in memory for 5 minutes.
 
 Skipo's scraper fills the institution level for the coins it holds: it
-derives each coin's CLP rate from the balance Skipo values in pesos, so a
+reads each coin's indicative SELL price in CLP from Skipo on every run, so a
 coin Buda's tickers don't cover still converts.
 
 `exchange_rates` (V024) holds the rates institutions publish themselves (a
@@ -605,13 +605,18 @@ scraper had truncated and stored on it as pesos.
 Skipo reads its official REST API (`api.skipo.com/v2`) with a personal
 read-only key sent as a bearer token; every call is a GET. The products leg
 classifies symbols through the asset catalog and reads the balances: CLP
-becomes the singleton `wallet` product (reported even at zero), each held
-crypto or stablecoin one `crypto` product per symbol, like Buda. Fiat other
-than CLP, tokenized stocks and unclassified symbols are left out and counted
-in a run warning. When the account's preferred currency is CLP, each held
-coin's peso value over its units becomes an institution-wide
-`ScrapedExchangeRate`. The transactions leg reads only the CLP ledger, paged
-(capped at 50 pages of 100): DEPOSIT and BUY (a coin sold for pesos) are
+becomes the singleton `wallet` product (reported even at zero), each
+crypto or stablecoin row one `crypto` product per symbol, like Buda, also at
+zero units so a sold-out coin stops counting (a coin the response leaves out
+can't be zeroed; an "absent means zero" writer rule is a follow-up shared
+with Buda). Fiat other than CLP, tokenized stocks and unclassified symbols
+are left out and counted in a run warning. Each held coin is priced with
+`/v2/markets/{SYMBOL}-CLP/price?side=SELL` (the price a holding would
+liquidate at), which becomes an institution-wide `ScrapedExchangeRate` dated
+by its `pricedAt`; a coin without a CLP market or a readable price only gets
+a counted warning. The transactions leg reads only the CLP ledger, which
+without a date range returns the whole history newest first, paged (capped
+at 50 pages of 100): DEPOSIT and BUY (a coin sold for pesos) are
 money in, WITHDRAWAL and SELL (pesos spent on a coin) money out. Coin ledgers
 are skipped for Buda's reason. A 401 or 403 fails the leg with the HTTP status
 and the API's problem code, never the key.

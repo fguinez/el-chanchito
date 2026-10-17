@@ -255,9 +255,10 @@ via autofill) and report `Could not reach the Chrome debug port…` when it isn'
 
 Skipo is read through its official API with a personal key. Create one in
 your Skipo account with read-only scopes only: `accounts:read`
-(balances and ledger) and `market_data:read` (asset catalog). The scraper
-never writes. Leave the IP allowlist empty if your scrapers run from a
-dynamic residential IP, since the key would stop working when it changes.
+(balances and ledger) and `market_data:read` (asset catalog and coin
+prices). The scraper never writes. Leave the IP allowlist empty if your
+scrapers run from a dynamic residential IP, since the key would stop working
+when it changes.
 Store it with:
 
 ```bash
