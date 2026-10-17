@@ -11,11 +11,11 @@ transactions leg opens the session, reads products *and* movements, and the
 products leg serves its half from that cache.
 
 Since issue #79 every movement carries its currency, so the USD card
-movements land on their own product (USD checking movements are not read yet;
-see #82). Before that, the USD charges in the card's unbilled list were stored
-on the CLP card with their USD figure read as pesos; `superseded_transactions`
-names those rows so the run removes them once their USD replacements are
-written.
+movements land on their own product, and since issue #82 so do the USD
+checking ones (their row shape is pending live verification). Before that, the
+USD charges in the card's unbilled list were stored on the CLP card with their
+USD figure read as pesos; `superseded_transactions` names those rows so the run
+removes them once their USD replacements are written.
 
 The same session also reads the rate the bank bills that USD debt at
 (`backends/banchile_fx.py`), which the products leg hands on as
@@ -122,6 +122,13 @@ def external_id_for(movement: BanChileMovement) -> str:
     amount as a quantized Decimal, so a USD and a CLP movement can never share
     a key even if routing ever changed. CLP keys are byte-identical to what
     they were before the currency existed.
+
+    USD checking movements (issue #82) follow the checking rules: ``bch_op_``
+    when the bank gives an operation id, else a ``USD|``-prefixed fingerprint
+    of the composite `id` plus `saldo` (as a quantized Decimal). An operation
+    id is not namespaced by currency: should the bank ever reuse one across
+    the CLP and USD accounts, the two rows still land on different products,
+    and `external_id` is only unique per product (and adopted per product).
     """
     operation_id = _normalized_id(movement.operation_id)
     if operation_id is not None:

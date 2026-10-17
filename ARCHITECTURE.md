@@ -566,7 +566,14 @@ failed surface.
 The USD products get their movements the same way (issue #79): the unbilled
 list mixes both currencies and `origenTransaccion == "INT"` marks the USD rows;
 the USD statement (`estadocuenta/internacional/resumen-por-fecha`) is a surface
-of its own. USD checking movements are not read yet (see #82).
+of its own, and so is the USD checking cartola (issue #82: the same dialog with
+USD picked and the account radio found by its "(USD)" label). A customer with
+no USD account (no "(USD)" option, or no "(USD)" radio once it is picked) reads
+as an empty list rather than a failed surface, a USD dialog that fails after
+showing an account fails only that surface, and every dialog step logs which
+one failed and why. The USD cartola's row shape is pending live verification
+(the account observed had no movements), so its amounts are parsed defensively
+(numbers or strings, cents kept).
 Every movement carries its currency, so the writer resolves the USD product,
 and USD amounts keep their cents. Before #79 the unbilled USD charges were
 stored on the CLP card as whole "pesos"; each run deletes those leftovers once
