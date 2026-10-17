@@ -141,7 +141,9 @@ export default function MonitorDetailPage() {
         case "producto":
           return ref.name;
         case "valor":
-          return ref.latestValue;
+          // The monitor-currency value, so mixed currencies sort together; an
+          // unconvertible foreign amount sorts as no data.
+          return ref.converted ? ref.monitorValue : ref.latestValue;
         case "al":
           return ref.balanceAsOf; // ISO strings sort correctly as strings.
       }
@@ -523,6 +525,11 @@ export default function MonitorDetailPage() {
                         formatAmount(ref.currency, ref.latestValue)
                       ) : (
                         <span className="text-muted-foreground">sin dato</span>
+                      )}
+                      {ref.converted && ref.monitorValue != null && (
+                        <div className="text-xs text-muted-foreground">
+                          ≈ {formatAmount(monitor.currency, ref.monitorValue)}
+                        </div>
                       )}
                     </TableCell>
                     <TableCell className="text-right text-sm text-muted-foreground">

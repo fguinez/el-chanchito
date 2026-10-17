@@ -27,7 +27,12 @@ from scrapers.backends.banchile_movements import (
     parse_unbilled_movement,
 )
 from scrapers.backends.banchile_web import BalanceFetchResult
-from scrapers.base import ScrapedProduct, TransactionLocation
+from scrapers.base import (
+    ProductRef,
+    ScrapedExchangeRate,
+    ScrapedProduct,
+    TransactionLocation,
+)
 from scrapers.institutions import banchile as banchile_mod
 from scrapers.institutions.banchile import (
     BanChileScraper,
@@ -328,6 +333,36 @@ class TestScrapeTransactions:
         assert result.products == products
         assert result.warnings == ["BanChile: card surface failed after 3 attempts"]
 
+    def test_the_sessions_rate_reaches_the_products_leg(self, monkeypatch):
+        rate = ScrapedExchangeRate(
+            institution="banchile",
+            base_currency="USD",
+            rate="950.00",
+            product=ProductRef(kind="credit_card", currency="USD"),
+            source="Pago internacional de tarjeta",
+        )
+        self._session(monkeypatch, BanChileSessionResult(exchange_rates=[rate]))
+
+        asyncio.run(self.scraper.scrape_transactions())
+        result = asyncio.run(self.scraper.scrape_products())
+
+        assert result.exchange_rates == [rate]
+        assert result.products == []
+        assert result.warnings == []
+
+    def test_a_failed_rate_surface_becomes_a_warning(self, monkeypatch):
+        self._session(
+            monkeypatch, BanChileSessionResult(failed_surfaces=("tipo de cambio",))
+        )
+
+        asyncio.run(self.scraper.scrape_transactions())
+        result = asyncio.run(self.scraper.scrape_products())
+
+        assert result.exchange_rates == []
+        assert result.warnings == [
+            "BanChile: tipo de cambio surface failed after 3 attempts"
+        ]
+
     def test_movement_surface_failures_become_warnings(self, monkeypatch):
         """A movements surface that stayed empty is reported, not swallowed."""
         self._session(
@@ -382,6 +417,8 @@ class TestScrapeProducts:
 
         assert result.products == expected
         assert result.warnings == []
+        # The balance-only fallback does not read the rate.
+        assert result.exchange_rates == []
 
     def test_failed_surfaces_become_warnings(self, monkeypatch):
         async def fake_fetch(rut, password):

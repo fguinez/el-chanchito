@@ -46,6 +46,7 @@ import {
   type ProductTransaction,
 } from "@/components/institutions/product-graphs";
 import { BalanceHistorySheet } from "@/components/institutions/balance-history-sheet";
+import { ExchangeRateCard } from "@/components/institutions/exchange-rate-card";
 import { ProductTransactionsCard } from "@/components/institutions/product-transactions";
 
 interface ProductDetailResponse {
@@ -149,6 +150,7 @@ export default function ProductDetailPage() {
   const isCreditKind =
     product.kind === "credit_card" || product.kind === "line_of_credit";
   const anchorBalance = product.currentBalance ?? latestBalance;
+  const showRate = product.currency !== "CLP";
 
   return (
     <div className="space-y-6">
@@ -196,7 +198,12 @@ export default function ProductDetailPage() {
       </div>
 
       {/* Current state */}
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+      <div
+        className={cn(
+          "grid gap-4 md:grid-cols-2",
+          showRate ? "lg:grid-cols-4" : "lg:grid-cols-3"
+        )}
+      >
         <Card>
           <CardHeader className="pb-2">
             <CardDescription>Saldo actual</CardDescription>
@@ -246,6 +253,13 @@ export default function ProductDetailPage() {
             )}
           </CardHeader>
         </Card>
+        {showRate && (
+          <ExchangeRateCard
+            currency={product.currency}
+            rate={product.exchangeRate}
+            institution={institution}
+          />
+        )}
       </div>
 
       {/* Per-kind insight graphs */}

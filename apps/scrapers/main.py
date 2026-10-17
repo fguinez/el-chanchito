@@ -21,15 +21,17 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from db.connection import close_pool, database_url
 from db.writer import (
+    UnresolvedRateScope,
     delete_superseded_transactions,
     finish_scraper_run,
     start_scraper_run,
+    upsert_exchange_rate,
     upsert_product,
     write_transactions,
 )
 from scrapers.backends import banchile_web
 from scrapers.backends.email import get_session as get_email_session
-from scrapers.base import BaseScraper
+from scrapers.base import BaseScraper, ScrapedExchangeRate
 from scrapers.institutions import (
     BanChileScraper,
     BciLiderScraper,
@@ -60,7 +62,9 @@ async def run_scraper(scraper: BaseScraper) -> None:
 
     The products leg can also report non-fatal warnings (e.g. a BanChile
     surface that failed all its retries): a run with warnings but no errors is
-    recorded as `partial`, with the warnings as its message.
+    recorded as `partial`, with the warnings as its message. The exchange
+    rates it read are written after its products, each on its own: a rate
+    that names an unknown product, or fails to write, is a warning too.
     """
     run_id = start_scraper_run(scraper.method, scraper.institution)
     logger.info("Starting scraper: %s (run=%s)", scraper.name, run_id)
@@ -94,15 +98,18 @@ async def run_scraper(scraper: BaseScraper) -> None:
             logger.exception("Scraper %s: superseded-row cleanup failed", scraper.name)
             warnings.append(f"cleanup: {e}")
 
+    rates: list[ScrapedExchangeRate] = []
     try:
         result = await scraper.scrape_products()
         n_prod = len(result.products)
         warnings.extend(result.warnings)
+        rates = list(result.exchange_rates)
         for sp in result.products:
             upsert_product(sp)
     except Exception as e:
         logger.exception("Scraper %s: products failed", scraper.name)
         errors.append(f"products: {e}")
+    warnings.extend(_write_exchange_rates(scraper, rates))
 
     logger.info(
         "Scraper %s: %d transactions (%d new), %d products",
@@ -123,6 +130,30 @@ async def run_scraper(scraper: BaseScraper) -> None:
         )
     else:
         finish_scraper_run(run_id, "success", transactions_imported=inserted)
+
+
+def _write_exchange_rates(
+    scraper: BaseScraper, rates: list[ScrapedExchangeRate]
+) -> list[str]:
+    """Write each rate on its own; return a warning per rate that wasn't written.
+
+    A rate is auxiliary to the products it prices, so neither an unresolvable
+    scope nor a write error may cost the run its other results.
+    """
+    warnings: list[str] = []
+    for rate in rates:
+        label = f"{rate.base_currency}/{rate.quote_currency}"
+        try:
+            upsert_exchange_rate(rate)
+        except UnresolvedRateScope as e:
+            logger.warning(
+                "Scraper %s: exchange rate %s skipped: %s", scraper.name, label, e
+            )
+            warnings.append(f"exchange rate {label}: {e}")
+        except Exception as e:
+            logger.exception("Scraper %s: exchange rate %s failed", scraper.name, label)
+            warnings.append(f"exchange rate {label}: {e}")
+    return warnings
 
 
 def build_scrapers() -> dict[str, BaseScraper]:

@@ -14,6 +14,25 @@ export function formatCLP(amount: number): string {
   }).format(amount);
 }
 
+/** An exchange rate in pesos with two decimals (999.99 -> "$999,99"): the
+ *  CLP price of one unit of another currency. */
+export function formatClpRate(rate: number): string {
+  return new Intl.NumberFormat("es-CL", {
+    style: "currency",
+    currency: "CLP",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(rate);
+}
+
+/** The number typed into a form input, or null when it is blank or not a
+ *  finite number (parseInt would give NaN, which JSON sends as null). */
+export function parseNumberInput(value: string): number | null {
+  if (value.trim() === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 let isoCurrencies: Set<string> | null = null;
 
 /** Minor-unit digits of an ISO 4217 currency (USD 2, JPY 0), or null for a

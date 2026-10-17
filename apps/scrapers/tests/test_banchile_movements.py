@@ -41,10 +41,16 @@ from scrapers.backends.banchile_movements import (
     parse_unbilled_movement,
     parse_unbilled_movements,
     read_movement_surfaces,
+    read_session,
     statement_dates,
 )
 from scrapers.backends.banchile_web import BalanceFetchResult, LoginCooldownError
-from scrapers.base import TransactionLocation
+from scrapers.base import (
+    ProductRef,
+    ScrapedExchangeRate,
+    ScrapedProduct,
+    TransactionLocation,
+)
 from scrapers.institutions.banchile import external_id_for
 
 # --- Synthetic payload builders ------------------------------------------------
@@ -727,6 +733,10 @@ class TestSharedSession:
             events.append("products")
             return BalanceFetchResult(products=[], failed_surfaces=("card",))
 
+        def read_rate(p):
+            events.append("rate")
+            return [], ()
+
         def read_movements(p):
             events.append("movements")
             return [], ("tarjeta facturados",)
@@ -735,12 +745,19 @@ class TestSharedSession:
         monkeypatch.setattr(movements_mod, "_authenticated_session", authenticated_session)
         monkeypatch.setattr(movements_mod, "_dismiss_popup", lambda p: None)
         monkeypatch.setattr(movements_mod, "_read_all_surfaces", read_products)
+        monkeypatch.setattr(movements_mod, "read_exchange_rate_surface", read_rate)
         monkeypatch.setattr(movements_mod, "read_movement_surfaces", read_movements)
 
         result = movements_mod._session_sync("11.111.111-1", "synthetic-password", True)
 
-        # The post-read save sees the cookies both reads may have rotated.
-        assert events == ["authenticated", "products", "movements", "session saved"]
+        # The post-read save sees the cookies every read may have rotated.
+        assert events == [
+            "authenticated",
+            "products",
+            "rate",
+            "movements",
+            "session saved",
+        ]
         assert result.failed_surfaces == ("card", "tarjeta facturados")
 
     def test_a_certain_login_is_refused_before_launching_chromium(
@@ -1283,3 +1300,71 @@ class TestMergeLocations:
         assert merge_locations(primary, fallback) == primary
         merged = merge_locations(TransactionLocation(city="X"), fallback)
         assert (merged.latitude, merged.longitude) == (-34.0, -71.0)
+
+
+class TestReadSession:
+    """One page, every read: products, then the USD card rate, then movements."""
+
+    def _patch(self, monkeypatch, calls, rates=(), rate_failed=()):
+        product = ScrapedProduct(
+            institution="banchile", kind="credit_card", currency="USD"
+        )
+        movement = BanChileMovement(
+            source="card_billed",
+            product_kind="credit_card",
+            description="COMERCIO SINTETICO",
+            amount=Decimal("-1234.56"),
+            transaction_date=datetime.date(2026, 8, 20),
+            currency="USD",
+        )
+
+        def products(page):
+            calls.append("products")
+            return BalanceFetchResult(products=[product], failed_surfaces=("línea",))
+
+        def rate(page):
+            calls.append("rate")
+            return list(rates), tuple(rate_failed)
+
+        def movements(page):
+            calls.append("movements")
+            return [movement], ("movimientos",)
+
+        monkeypatch.setattr(movements_mod, "_read_all_surfaces", products)
+        monkeypatch.setattr(movements_mod, "read_exchange_rate_surface", rate)
+        monkeypatch.setattr(movements_mod, "read_movement_surfaces", movements)
+        return product, movement
+
+    def test_the_rate_rides_its_own_channel(self, monkeypatch):
+        calls = []
+        rate = ScrapedExchangeRate(
+            institution="banchile",
+            base_currency="USD",
+            rate="950.00",
+            product=ProductRef(kind="credit_card", currency="USD"),
+            source="Pago internacional de tarjeta",
+        )
+        product, movement = self._patch(monkeypatch, calls, rates=[rate])
+
+        result = read_session(MagicMock())
+
+        assert calls == ["products", "rate", "movements"]
+        assert result.products == [product]
+        assert result.exchange_rates == [rate]
+        assert result.movements == [movement]
+        assert result.failed_surfaces == ("línea", "movimientos")
+
+    def test_a_failed_rate_is_a_failed_surface_and_costs_nothing_else(
+        self, monkeypatch
+    ):
+        calls = []
+        product, movement = self._patch(
+            monkeypatch, calls, rate_failed=("tipo de cambio",)
+        )
+
+        result = read_session(MagicMock())
+
+        assert result.exchange_rates == []
+        assert result.products == [product]
+        assert result.movements == [movement]
+        assert result.failed_surfaces == ("línea", "tipo de cambio", "movimientos")

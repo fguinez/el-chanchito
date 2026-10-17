@@ -1,7 +1,9 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { categories, categoryRules, transactions } from "@/lib/db/schema";
 import { eq, desc, isNull, ilike, and } from "drizzle-orm";
+import { withJsonBody } from "@/lib/api/validation";
+import { createCategoryRuleSchema } from "@/lib/api/schemas";
 
 /** GET /api/categories — list categories with their rules */
 export async function GET() {
@@ -20,29 +22,18 @@ export async function GET() {
   return NextResponse.json(result);
 }
 
-/** POST /api/categories/rules — add a category rule */
-export async function POST(request: NextRequest) {
-  const body = await request.json();
-  const { keyword, categoryId, priority } = body;
+/** POST /api/categories: add a category rule */
+export const POST = withJsonBody(
+  createCategoryRuleSchema,
+  async ({ keyword, categoryId, priority }) => {
+    const [created] = await db
+      .insert(categoryRules)
+      .values({ keyword, categoryId, priority: priority ?? 0 })
+      .returning();
 
-  if (!keyword || !categoryId) {
-    return NextResponse.json(
-      { error: "Missing keyword or categoryId" },
-      { status: 400 }
-    );
+    return NextResponse.json(created, { status: 201 });
   }
-
-  const [created] = await db
-    .insert(categoryRules)
-    .values({
-      keyword: keyword.toLowerCase(),
-      categoryId,
-      priority: priority ?? 0,
-    })
-    .returning();
-
-  return NextResponse.json(created, { status: 201 });
-}
+);
 
 /** PUT /api/categories — auto-assign categories to uncategorized transactions */
 export async function PUT() {
