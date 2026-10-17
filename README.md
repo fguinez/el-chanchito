@@ -4,12 +4,12 @@ Personal finance tracker for Chilean banks and fintechs: automated scrapers, a d
 
 ## Overview
 
-El Chanchito (“the piggy bank”) is a self-hosted personal finance tracker. Python scrapers pull balances and transactions from Chilean financial institutions (Banco de Chile, Fintual, Buda, MACH, MercadoPago and Tenpo) into PostgreSQL, and a Next.js dashboard turns them into a daily budget plan, a spending history, and a net-worth timeline. Everything runs locally via the Makefile or Docker Compose, and credentials stay on your machine in the macOS Keychain.
+El Chanchito (“the piggy bank”) is a self-hosted personal finance tracker. Python scrapers pull balances and transactions from Chilean financial institutions (Banco de Chile, Tarjeta Lider Bci, Fintual, Racional, Buda, MACH, MercadoPago and Tenpo) into PostgreSQL, and a Next.js dashboard turns them into a daily budget plan, a spending history, and a net-worth timeline. Everything runs locally via the Makefile or Docker Compose, and credentials stay on your machine in the macOS Keychain.
 
 ## Highlights
 
 - **Monitors**: formula alerts over your products, with thresholds that can ramp through the month and one-off variaciones (a reimbursement, an extra budget) that shift them until month end.
-- **Six institution scrapers** on independent schedules, mixing REST APIs (Fintual, Buda), Playwright browser automation (Banco de Chile), and Gmail inbox parsing (MACH, MercadoPago, Tenpo).
+- **Eight institution scrapers** on independent schedules, mixing HTTP APIs (Fintual, Racional, Buda), Playwright browser automation (Banco de Chile), a real Chrome over CDP (Tarjeta Lider Bci), and Gmail inbox parsing (MACH, MercadoPago, Tenpo).
 - **Typed product registry**: every product kind (checking, credit card, crypto, ...) is declared once in pydantic, grouped into display families with the column specs of their dashboard tables, and code-generated into TypeScript types, a JSON Schema, and per-kind docs.
 - **Net worth from snapshots**: derived from per-product snapshot history, with per-kind asset/liability conventions and multi-currency conversion to CLP.
 - **On-demand refresh**: an internal control endpoint lets the dashboard trigger a scrape immediately instead of waiting for the next scheduled run.
@@ -36,6 +36,7 @@ Scrapers run separately from the dashboard and share its database:
 make scrapers-once    # run every configured scraper once
 make scrapers-start   # long-running, each scraper on its own schedule
 make fintual-login    # one-time Fintual sign-in (e-mail 2FA, session cached)
+make racional-login   # one-time Racional sign-in (e-mailed code, session cached)
 ```
 
 A scraper is enabled only when all of its credentials are present. See [USAGE.md](USAGE.md) for the full guide: dashboard pages, daily and monthly workflows, CSV import, category auto-assignment, and the API reference.
@@ -47,6 +48,7 @@ A scraper is enabled only when all of its credentials are present. See [USAGE.md
 | `DATABASE_URL` | yes | PostgreSQL connection string; the `.env.example` default works with `make db-up` |
 | `BANCHILE_RUT` | no | Banco de Chile RUT; enables the BanChile scraper (Playwright) |
 | `FINTUAL_EMAIL` | no | Fintual account e-mail; enables the Fintual scraper (run `make fintual-login` once) |
+| `RACIONAL_EMAIL` | no | Racional account e-mail; with `chanchito.RACIONAL_PASSWORD`, enables the Racional scraper (run `make racional-login` once) |
 | `EMAIL_IMAP_HOST` / `EMAIL_IMAP_USER` | no | Gmail IMAP identifiers; enable the e-mail parsers (MACH, MercadoPago, Tenpo) |
 | `chanchito.*` | scrapers only | Secrets (bank passwords, Buda API keys, Gmail App Password) live in the macOS Keychain: `make secrets-init` / `make secrets-status`. On non-macOS hosts, export them as env vars instead |
 

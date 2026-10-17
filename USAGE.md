@@ -54,6 +54,7 @@ BANCHILE_RUT=12345678-9          # Banco de Chile (via Playwright)
 LIDER_BCI_RUT=12345678-9         # Tarjeta Lider Bci (real Chrome over CDP)
 LIDER_BCI_CDP_URL=http://localhost:9222  # Tarjeta Lider Bci: the make bci-lider-login Chrome
 FINTUAL_EMAIL=your@email.com     # Fintual (web session; run `make fintual-login` once)
+RACIONAL_EMAIL=your@email.com    # Racional (Firebase session; run `make racional-login` once)
 EMAIL_IMAP_HOST=imap.gmail.com   # Email parser (MercadoPago, MACH, Tenpo)
 EMAIL_IMAP_USER=your@gmail.com
 ```
@@ -64,7 +65,7 @@ Optional email parser tuning (defaults in parentheses):
 |---|---|
 | `EMAIL_LOOKBACK_DAYS` (7) | Days of mail searched on each run |
 | `EMAIL_MAX_MESSAGES` (100) | Emails parsed per institution and run, newest first; a truncated window logs a warning |
-| `EMAIL_IMAP_MAILBOX` (`INBOX`) | Mailbox searched for notifications. Set it to Gmail's All Mail (`[Gmail]/All Mail`, or `[Gmail]/Todos` with a Spanish Gmail UI) when filters archive them. Fintual 2FA codes are always read from `INBOX` |
+| `EMAIL_IMAP_MAILBOX` (`INBOX`) | Mailbox searched for notifications. Set it to Gmail's All Mail (`[Gmail]/All Mail`, or `[Gmail]/Todos` with a Spanish Gmail UI) when filters archive them. Fintual and Racional sign-in codes are always read from `INBOX` |
 
 Then store the secrets in the Keychain (prompts interactively, values never
 touch disk or shell history):
@@ -82,6 +83,7 @@ Secrets and their meaning:
 | `chanchito.BANCHILE_PASSWORD` | Banco de Chile web password |
 | `chanchito.LIDER_BCI_PASSWORD` | Tarjeta Lider Bci clave (optional; only prefills the `make bci-lider-login` browser) |
 | `chanchito.FINTUAL_PASSWORD` | Fintual account password (used by `make fintual-login` to open a web session) |
+| `chanchito.RACIONAL_PASSWORD` | Racional account password (used by `make racional-login`, and by the automatic sign-in when `RACIONAL_EMAIL` is `EMAIL_IMAP_USER`) |
 | `chanchito.BUDA_API_KEY` | Buda.com API key |
 | `chanchito.BUDA_API_SECRET` | Buda.com API secret |
 | `chanchito.EMAIL_IMAP_PASSWORD` | Gmail App Password (see below) |
@@ -178,6 +180,48 @@ container so it writes to that volume:
 docker compose run --rm scrapers python -m scrapers.institutions.fintual
 ```
 
+### Racional sign-in
+
+Racional has no API for individuals, so the scraper signs in the way its web
+app (app.racional.cl) does: e-mail and password plus the 6-digit code Racional
+e-mails you, all over plain HTTP. Sign in once and the session is cached
+(`apps/scrapers/.racional_session.json`, gitignored, readable only by you):
+
+```bash
+make racional-login   # signs in, prompts for the code Racional e-mails you
+```
+
+Scheduled scrapes only renew that session: no sign-in and no e-mail. When it
+stops working, the run fails with "Racional session expired" and asks you to
+run `make racional-login` again. If `RACIONAL_EMAIL` is also `EMAIL_IMAP_USER`,
+the scraper signs in by itself instead, reading the code from that mailbox. If an
+automatic sign-in ever fails for anything but a network error (a changed
+password, a code that never arrived), it stops trying until `make racional-login` succeeds, and each run's error
+says what failed, so it can't lock the account by retrying every cycle.
+
+Each portfolio becomes its own investment product: CLP for Racional
+Portafolios, USD for Racional Stocks. What you have contributed shows as the
+product's Aportado figure (its `deposited` metric); individual deposits and
+withdrawals are not imported as transactions yet.
+
+Two account settings are not supported, and each fails with its own message:
+Racional's "seguridad de dispositivo" (the web app sends those accounts to
+Racional's new app, and the scraper doesn't work around that) and an SMS
+second factor.
+
+Racional's public Firebase web key is read from its web app at sign-in. If a
+change to the web app breaks that (`Couldn't read Racional's public Firebase
+key…`), copy the `apiKey` of the Firebase config in the web app's main script
+into `RACIONAL_FIREBASE_API_KEY` in `.env`.
+
+In Docker the session lives in the `scraper_state` volume
+(`RACIONAL_SESSION_FILE=/data/racional_session.json`); sign in inside the
+container:
+
+```bash
+docker compose run --rm scrapers python -m scrapers.institutions.racional
+```
+
 ### Tarjeta Lider Bci
 
 The Tarjeta Lider Bci portal guards its login with a Cloudflare "Verifique que es
@@ -222,6 +266,7 @@ make scrapers-start
 
 Schedule per scraper:
 - **Fintual**: every 6 hours
+- **Racional**: every 6 hours
 - **Buda**: every 1 hour
 - **BanChile**: every 24 hours
 - **BCI Lider**: every 24 hours
