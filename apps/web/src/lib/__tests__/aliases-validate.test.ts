@@ -3,7 +3,10 @@ import {
   ALIAS_MAX_LENGTH,
   MATCH_DESCRIPTION_MAX_LENGTH,
   MATCH_TYPES,
+  amountConditionError,
   normalizeAlias,
+  normalizeAmountBound,
+  normalizeCurrency,
   normalizeMatchDescription,
   normalizeMatchType,
   validateAliasInput,
@@ -106,6 +109,9 @@ describe("validateAliasInput (create)", () => {
       matchType: "exact",
       alias: "Tienda",
       priority: 0,
+      amountMin: null,
+      amountMax: null,
+      currency: null,
     });
   });
 
@@ -180,12 +186,187 @@ describe("validateAliasInput (create)", () => {
   });
 });
 
+describe("normalizeAmountBound", () => {
+  it("passes null, undefined, and blank as no bound", () => {
+    for (const raw of [null, undefined, "", "   "]) {
+      expect(expectValue(normalizeAmountBound(raw))).toBeNull();
+    }
+  });
+
+  it("accepts a number and a numeric string (the preview query)", () => {
+    expect(expectValue(normalizeAmountBound(1000000))).toBe(1000000);
+    expect(expectValue(normalizeAmountBound("2500000"))).toBe(2500000);
+    expect(expectValue(normalizeAmountBound(-999999))).toBe(-999999);
+  });
+
+  it("rounds to two decimals", () => {
+    expect(expectValue(normalizeAmountBound(1234.567))).toBe(1234.57);
+    expect(expectValue(normalizeAmountBound("1234.561"))).toBe(1234.56);
+  });
+
+  it("rejects a non-finite or non-numeric value, naming the field", () => {
+    for (const raw of [Number.NaN, Infinity, "abc", {}, true]) {
+      const failure = expectFailure(normalizeAmountBound(raw, "amountMin"));
+      expect(failure.field).toBe("amountMin");
+    }
+  });
+
+  it("rejects a bound beyond the magnitude limit", () => {
+    expect(normalizeAmountBound(1e14).ok).toBe(false);
+    expect(normalizeAmountBound(-1e14).ok).toBe(false);
+  });
+});
+
+describe("normalizeCurrency", () => {
+  it("passes null, undefined, and blank", () => {
+    for (const raw of [null, undefined, "", "   "]) {
+      expect(expectValue(normalizeCurrency(raw))).toBeNull();
+    }
+  });
+
+  it("trims and uppercases", () => {
+    expect(expectValue(normalizeCurrency("  usd "))).toBe("USD");
+    expect(expectValue(normalizeCurrency("clp"))).toBe("CLP");
+  });
+
+  it("rejects a too-long or non-string value", () => {
+    expect(normalizeCurrency("a".repeat(13)).ok).toBe(false);
+    expect(normalizeCurrency(7).ok).toBe(false);
+  });
+});
+
+describe("amountConditionError", () => {
+  it("passes when no bound is set", () => {
+    expect(
+      amountConditionError({ amountMin: null, amountMax: null, currency: null })
+    ).toBeNull();
+  });
+
+  it("passes a complete condition", () => {
+    expect(
+      amountConditionError({
+        amountMin: 1000000,
+        amountMax: 2500000,
+        currency: "CLP",
+      })
+    ).toBeNull();
+  });
+
+  it("fails on amountMax when min > max", () => {
+    const failure = amountConditionError({
+      amountMin: 2500000,
+      amountMax: 1000000,
+      currency: "CLP",
+    });
+    expect(failure?.field).toBe("amountMax");
+  });
+
+  it("fails on currency when a bound is set without one", () => {
+    for (const bounds of [
+      { amountMin: 1000000, amountMax: null },
+      { amountMin: null, amountMax: 2500000 },
+    ]) {
+      const failure = amountConditionError({ ...bounds, currency: null });
+      expect(failure?.field).toBe("currency");
+    }
+  });
+});
+
+describe("validateAliasInput (amount condition)", () => {
+  it("defaults the amount condition to null and keeps a valid one", () => {
+    const bare = expectValue(
+      validateAliasInput({ matchDescription: "COMPRA WEB", alias: "Tienda" })
+    );
+    expect(bare).toMatchObject({
+      amountMin: null,
+      amountMax: null,
+      currency: null,
+    });
+
+    const withCondition = expectValue(
+      validateAliasInput({
+        matchDescription: "COMPRA WEB",
+        alias: "Tienda",
+        amountMin: 1000000,
+        amountMax: 2500000,
+        currency: "clp",
+      })
+    );
+    expect(withCondition).toMatchObject({
+      amountMin: 1000000,
+      amountMax: 2500000,
+      currency: "CLP",
+    });
+  });
+
+  it("rejects an amount bound without a currency (create)", () => {
+    const failure = expectFailure(
+      validateAliasInput({
+        matchDescription: "COMPRA WEB",
+        alias: "Tienda",
+        amountMin: 1000000,
+      })
+    );
+    expect(failure.field).toBe("currency");
+  });
+
+  it("rejects amountMin greater than amountMax (create)", () => {
+    const failure = expectFailure(
+      validateAliasInput({
+        matchDescription: "COMPRA WEB",
+        alias: "Tienda",
+        amountMin: 2500000,
+        amountMax: 1000000,
+        currency: "CLP",
+      })
+    );
+    expect(failure.field).toBe("amountMax");
+  });
+});
+
 describe("validateAliasInput (partial)", () => {
   it("returns only the fields present", () => {
     const value = expectValue(
       validateAliasInput({ priority: 10 }, { partial: true })
     );
     expect(value).toEqual({ priority: 10 });
+  });
+
+  it("normalizes a present amount bound and currency", () => {
+    const value = expectValue(
+      validateAliasInput(
+        { amountMin: 1000000, currency: " usd " },
+        { partial: true }
+      )
+    );
+    expect(value).toEqual({ amountMin: 1000000, currency: "USD" });
+  });
+
+  it("checks the order of two bounds both present in the patch", () => {
+    const failure = expectFailure(
+      validateAliasInput(
+        { amountMin: 2500000, amountMax: 1000000 },
+        { partial: true }
+      )
+    );
+    expect(failure.field).toBe("amountMax");
+  });
+
+  it("does not require a currency for a lone bound (the route merges)", () => {
+    const value = expectValue(
+      validateAliasInput({ amountMin: 1000000 }, { partial: true })
+    );
+    expect(value).toEqual({ amountMin: 1000000 });
+  });
+
+  it("allows clearing a bound with null", () => {
+    const value = expectValue(
+      validateAliasInput(
+        { amountMin: null, amountMax: null, currency: null },
+        { partial: true }
+      )
+    );
+    expect(value).toEqual({ amountMin: null, amountMax: null, currency: null });
   });
 
   it("normalizes a matchDescription that is present", () => {

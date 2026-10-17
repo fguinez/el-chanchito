@@ -15,7 +15,7 @@ import {
 const fake = createFakeDb();
 vi.mock("@/lib/db", () => ({ db: fake.db }));
 
-const { POST } = await import("@/app/api/aliases/route");
+const { GET: LIST, POST } = await import("@/app/api/aliases/route");
 const { PATCH, DELETE } = await import("@/app/api/aliases/[id]/route");
 const { GET: PREVIEW } = await import("@/app/api/aliases/preview/route");
 
@@ -57,11 +57,15 @@ describe("POST /api/aliases", () => {
     );
 
     expect(res.status).toBe(201);
+    // Create mode always carries the amount condition, defaulting it to null.
     expect(argOf(queryOf("insert"), "values")).toEqual({
       matchDescription: "COMPRA WEB 1234",
       matchType: "substring",
       alias: "Tienda del barrio",
       priority: 5,
+      amountMin: null,
+      amountMax: null,
+      currency: null,
     });
   });
 
@@ -93,6 +97,61 @@ describe("POST /api/aliases", () => {
     });
     expect(fake.queries.some((q) => q.op === "insert")).toBe(false);
   });
+
+  it("inserts the normalized amount condition", async () => {
+    const res = await POST(
+      jsonRequest("https://dashboard.example/api/aliases", "POST", {
+        matchDescription: "COMPRA WEB",
+        alias: "Rango",
+        amountMin: 1000000,
+        amountMax: 2500000,
+        currency: "clp",
+      })
+    );
+
+    expect(res.status).toBe(201);
+    expect(argOf(queryOf("insert"), "values")).toMatchObject({
+      amountMin: 1000000,
+      amountMax: 2500000,
+      currency: "CLP",
+    });
+  });
+
+  it("answers 400 for an amount bound without a currency and never inserts", async () => {
+    const res = await POST(
+      jsonRequest("https://dashboard.example/api/aliases", "POST", {
+        matchDescription: "COMPRA WEB",
+        alias: "Rango",
+        amountMin: 1000000,
+      })
+    );
+
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toMatchObject({ field: "currency" });
+    expect(fake.queries.some((q) => q.op === "insert")).toBe(false);
+  });
+});
+
+describe("GET /api/aliases", () => {
+  it("returns the amount/currency fields of each row", async () => {
+    const row = {
+      id: ALIAS_ID,
+      matchDescription: "COMPRA WEB",
+      matchType: "exact",
+      alias: "Rango",
+      priority: 0,
+      amountMin: 1000000,
+      amountMax: 2500000,
+      currency: "CLP",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    fake.respondWith((query) => (query.op === "select" ? [row] : []));
+
+    const res = await LIST();
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual([row]);
+  });
 });
 
 describe("PATCH /api/aliases/[id]", () => {
@@ -120,6 +179,55 @@ describe("PATCH /api/aliases/[id]", () => {
     expect(set.updatedAt).toBeInstanceOf(Date);
     // The update is scoped to the row's id.
     expect(whereParams(queryOf("update"))).toContain(ALIAS_ID);
+  });
+
+  it("rejects a merged condition that leaves a bound without a currency (400)", async () => {
+    // Stored row has no currency; the patch sets a bound and omits currency, so
+    // the MERGED row is invalid. The route answers 400 instead of a DB CHECK 500.
+    fake.respondWith((query) => {
+      if (query.op === "select") {
+        return [
+          { id: ALIAS_ID, amountMin: null, amountMax: null, currency: null },
+        ];
+      }
+      return [];
+    });
+
+    const res = await PATCH(
+      jsonRequest(`https://dashboard.example/api/aliases/${ALIAS_ID}`, "PATCH", {
+        amountMin: 1000000,
+      }),
+      { params: Promise.resolve({ id: ALIAS_ID }) }
+    );
+
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toMatchObject({ field: "currency" });
+    expect(fake.queries.some((q) => q.op === "update")).toBe(false);
+  });
+
+  it("writes a valid amount condition merged over the stored row", async () => {
+    // Stored row already carries the currency; the patch narrows a bound.
+    fake.respondWith((query) => {
+      if (query.op === "select") {
+        return [
+          { id: ALIAS_ID, amountMin: null, amountMax: null, currency: "CLP" },
+        ];
+      }
+      if (query.op === "update") {
+        return [{ id: ALIAS_ID, ...(argOf(query, "set") as object) }];
+      }
+      return [];
+    });
+
+    const res = await PATCH(
+      jsonRequest(`https://dashboard.example/api/aliases/${ALIAS_ID}`, "PATCH", {
+        amountMin: 1000000,
+      }),
+      { params: Promise.resolve({ id: ALIAS_ID }) }
+    );
+
+    expect(res.status).toBe(200);
+    expect(argOf(queryOf("update"), "set")).toMatchObject({ amountMin: 1000000 });
   });
 
   it("answers 404 for an unknown id and never updates", async () => {
@@ -202,6 +310,39 @@ describe("GET /api/aliases/preview", () => {
     expect(sql).toContain("deleted_at");
     expect(sql).toContain("is null");
     expect(whereParams(queryOf("select"))).toContain("COMPRA WEB");
+  });
+
+  it("applies the amount and currency predicate with their params", async () => {
+    previewResponder();
+    const res = await PREVIEW(
+      new NextRequest(
+        "https://dashboard.example/api/aliases/preview?matchDescription=COMPRA%20WEB" +
+          "&matchType=exact&amountMin=1000000&amountMax=2500000&currency=clp"
+      )
+    );
+
+    expect(res.status).toBe(200);
+    const sql = whereSql(queryOf("select"));
+    // amount bounds on transactions.amount, currency equality on products.
+    expect(sql).toContain(">=");
+    expect(sql).toContain("<=");
+    expect(sql).toContain("currency");
+    const params = whereParams(queryOf("select"));
+    expect(params).toContain(1000000);
+    expect(params).toContain(2500000);
+    expect(params).toContain("CLP");
+  });
+
+  it("answers 400 to an amount bound without a currency and never queries", async () => {
+    const res = await PREVIEW(
+      new NextRequest(
+        "https://dashboard.example/api/aliases/preview?matchDescription=COMPRA%20WEB&amountMin=1000000"
+      )
+    );
+
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toMatchObject({ field: "currency" });
+    expect(fake.queries).toHaveLength(0);
   });
 
   it("builds the substring predicate with strpos", async () => {
