@@ -410,11 +410,22 @@ All API routes are under `/api/`:
 
 When `DASHBOARD_PASSWORD` is set, every route above except the three marked
 public (`/api/auth/login`, `/api/auth/logout`, `/api/auth/session`) answers `401`
-without a valid session. Mutating requests are additionally rejected with `403`
-when they look cross-origin, logout included.
+without a valid session. Mutating requests are rejected with `403` when they look
+cross-origin, logout included, and that check runs with or without a password
+(so under `make dev` too). Clients that send neither `Origin` nor
+`Sec-Fetch-Site`, such as curl, are not affected. Without a password the
+dashboard also answers `403` to every request whose `Host` is not
+`localhost`, `127.0.0.1` or `[::1]` (any port), which blocks DNS rebinding.
+Reaching `make dev` from another device (a phone on the LAN, a tunnel)
+therefore needs `DASHBOARD_PASSWORD` set, and `DASHBOARD_HOST` once the dev
+server binds to loopback by default.
 
 Request bodies and query strings are validated before anything touches the
-database. An empty or malformed JSON body answers `400 {"error": "Invalid JSON body"}`;
+database. A JSON body must be sent as `Content-Type: application/json`
+(parameters such as `; charset=utf-8` are fine), or the route answers
+`415 {"error": "Content-Type must be application/json"}`; the refresh route's
+body is optional, but one that is present follows the same rule.
+An empty or malformed JSON body answers `400 {"error": "Invalid JSON body"}`;
 a body or query string that fails its schema answers `400` with `error` (the
 first problem, prefixed by its field), `field`, and `issues` (every problem as
 `{ path, message }`). Dates are `YYYY-MM-DD`, ids are uuids, amounts are numbers

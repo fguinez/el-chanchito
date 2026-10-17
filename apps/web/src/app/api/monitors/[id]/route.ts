@@ -17,6 +17,7 @@ import {
   referencedProductIds,
   resolveHistoryRange,
 } from "@/lib/monitors/serialize";
+import { readJsonBody } from "@/lib/api/validation";
 
 // Next 16: dynamic segment params arrive as a Promise on the context arg.
 type Context = { params: Promise<{ id: string }> };
@@ -102,12 +103,9 @@ export async function PUT(request: NextRequest, { params }: Context) {
       return NextResponse.json({ error: "Invalid id" }, { status: 400 });
     }
 
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-    }
+    const read = await readJsonBody(request);
+    if (!read.ok) return read.response;
+    const body = read.body;
 
     const catalog = await loadProductCatalog();
     const result = validateMonitorInput(body, catalog, { partial: true });

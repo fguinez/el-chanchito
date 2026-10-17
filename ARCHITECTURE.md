@@ -890,7 +890,7 @@ table, no session table and no third-party dependency.
   |---|---|---|
   | set | any | Enforced: pages redirect to `/login`, `/api/*` answers `401` |
   | unset | production | Misconfigured: pages show a "not configured" notice, `/api/*` answers `503` |
-  | unset | development | Disabled: identical to the pre-auth app, so `make dev` needs no setup |
+  | unset | development | Disabled: no login, so `make dev` needs no setup; only a loopback `Host` is served and cross-site writes are still refused |
 
 - **Public surfaces**: `/login`, `POST /api/auth/login`, `GET /api/auth/session`,
   `POST /api/auth/logout`, `/favicon.ico`, `_next/static` and `_next/image`.
@@ -900,7 +900,9 @@ table, no session table and no third-party dependency.
   *cross-site* requests, so a sibling subdomain or any host under a shared public
   suffix (`*.duckdns.org`, `*.nip.io`, `*.ngrok-free.app`) would otherwise be
   free to POST to every API. Mutating `/api/*` requests are therefore checked
-  against two allow-lists before any handler runs, `403` on failure:
+  against two allow-lists before any handler runs, `403` on failure, in every
+  auth mode: with no password (`make dev`) this is the only thing keeping any
+  page the browser visits from writing transactions or starting bank logins.
   `Sec-Fetch-Site` must be `same-origin`, `none` or absent (case-insensitive; an
   unknown value is refused), and `Origin`, when present, must match the request's
   own host. The Origin comparison uses `Host` (or
@@ -908,10 +910,21 @@ table, no session table and no third-party dependency.
   `request.nextUrl.origin`, and ignores the scheme: behind a TLS-terminating
   proxy `nextUrl.origin` is the internal `http://host:port` while the browser
   sends the external HTTPS origin, so comparing those two would reject every
-  legitimate write. Comparing hosts keeps the protection (an attacker page still
-  sends our host in `Host` and its own in `Origin`). `OPTIONS` counting as
+  legitimate write. Comparing hosts stops a page that addresses us by our own
+  name (it sends our host in `Host` and its own in `Origin`), but not DNS
+  rebinding: a page on `attacker.example` re-pointed at our address sends
+  `attacker.example` in both and is genuinely same-origin, free to read as well
+  as write. With auth enforced the session cookie, bound to our name, keeps it
+  out. With auth disabled the proxy first refuses every request, pages and
+  reads included, whose raw `Host` is not `localhost`, `127.0.0.1` or `[::1]`
+  (any port; `X-Forwarded-Host` is ignored), with a `403`. `OPTIONS` counting as
   mutating is load-bearing rather than an oversight: it is what refuses the
   preflight that forging a header forces, so no browser-reachable path survives.
+  An absent `Origin` is allowed because browsers always send one on a
+  cross-origin write; only non-browser clients (curl, scripts) omit it.
+  JSON routes also require `Content-Type: application/json` (`415` otherwise,
+  `readJsonBody` in `lib/api/validation.ts`), which is the label that forces a
+  browser preflight: a form post or `text/plain` fetch never gets that far.
 - **Caching**: authenticated pages are served `Cache-Control: private, no-store`
   and the login redirect `no-store`. Protected pages build as static and would
   otherwise carry a year-long `s-maxage`, which a CDN could hand to an anonymous

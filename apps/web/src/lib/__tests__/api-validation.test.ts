@@ -9,11 +9,16 @@ import { clpAmount, isoDate, monthStart, rowId } from "@/lib/api/schemas";
 
 // All figures below are synthetic (see the repo's personal data policy).
 
-function post(body: string | undefined) {
+function post(
+  body: string | undefined,
+  contentType: string | null = "application/json"
+) {
   return new Request("http://localhost:3000/api/test", {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body,
+    headers: contentType === null ? {} : { "content-type": contentType },
+    // Bytes, so a missing content type stays missing (a string body would
+    // default to text/plain).
+    body: body === undefined ? undefined : new TextEncoder().encode(body),
   });
 }
 
@@ -40,6 +45,40 @@ describe("parseJsonBody", () => {
     expect(result).toEqual({
       ok: true,
       data: { name: "Arriendo", amount: 999_999 },
+    });
+  });
+
+  it.each([
+    "application/json; charset=utf-8",
+    "Application/JSON",
+    " application/json ;charset=UTF-8",
+  ])("accepts a %j body", async (contentType) => {
+    const result = await parseJsonBody(
+      post(JSON.stringify({ name: "Arriendo", amount: 1_000_000 }), contentType),
+      schema
+    );
+
+    expect(result).toEqual({
+      ok: true,
+      data: { name: "Arriendo", amount: 1_000_000 },
+    });
+  });
+
+  it.each([
+    ["text/plain", "text/plain;charset=UTF-8"],
+    ["a form", "application/x-www-form-urlencoded"],
+    ["a JSON look-alike", "application/jsonx"],
+    ["no content type", null],
+  ])("turns %s into a 415 before reading the body", async (_case, contentType) => {
+    const result = await parseJsonBody(
+      post(JSON.stringify({ name: "Arriendo", amount: 1_000_000 }), contentType),
+      schema
+    );
+
+    if (result.ok) throw new Error("expected a failure");
+    expect(result.response.status).toBe(415);
+    await expect(result.response.json()).resolves.toEqual({
+      error: "Content-Type must be application/json",
     });
   });
 

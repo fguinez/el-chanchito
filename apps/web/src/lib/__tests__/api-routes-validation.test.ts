@@ -98,6 +98,30 @@ describe.each(MUTATING_ROUTES)("%s", (_route, method, handler) => {
     expect(resolveProductId).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["text/plain;charset=UTF-8"],
+    ["application/x-www-form-urlencoded"],
+    ["multipart/form-data; boundary=x"],
+    [undefined],
+  ])("answers 415 to a %s body without querying", async (contentType) => {
+    // These are the bodies a browser sends cross-origin without a preflight.
+    const response = await handler(
+      new NextRequest(new URL("http://localhost:3000/api/test"), {
+        method,
+        headers: contentType ? { "content-type": contentType } : {},
+        // Bytes, so the unlabelled case really carries no content type.
+        body: new TextEncoder().encode('{"id":"00000000-0000-0000-0000-000000000001"}'),
+      })
+    );
+
+    expect(response.status).toBe(415);
+    await expect(response.json()).resolves.toEqual({
+      error: "Content-Type must be application/json",
+    });
+    expect(fake.queries).toHaveLength(0);
+    expect(resolveProductId).not.toHaveBeenCalled();
+  });
+
   it.each([["null"], ['"a string"'], ["[]"]])(
     "answers 400 with issues to a %s body",
     async (body) => {
