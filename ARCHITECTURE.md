@@ -890,7 +890,7 @@ table, no session table and no third-party dependency.
   |---|---|---|
   | set | any | Enforced: pages redirect to `/login`, `/api/*` answers `401` |
   | unset | production | Misconfigured: pages show a "not configured" notice, `/api/*` answers `503` |
-  | unset | development | Disabled: no login, so `make dev` needs no setup; cross-site writes are still refused |
+  | unset | development | Disabled: no login, so `make dev` needs no setup; only a loopback `Host` is served and cross-site writes are still refused |
 
 - **Public surfaces**: `/login`, `POST /api/auth/login`, `GET /api/auth/session`,
   `POST /api/auth/logout`, `/favicon.ico`, `_next/static` and `_next/image`.
@@ -910,8 +910,14 @@ table, no session table and no third-party dependency.
   `request.nextUrl.origin`, and ignores the scheme: behind a TLS-terminating
   proxy `nextUrl.origin` is the internal `http://host:port` while the browser
   sends the external HTTPS origin, so comparing those two would reject every
-  legitimate write. Comparing hosts keeps the protection (an attacker page still
-  sends our host in `Host` and its own in `Origin`). `OPTIONS` counting as
+  legitimate write. Comparing hosts stops a page that addresses us by our own
+  name (it sends our host in `Host` and its own in `Origin`), but not DNS
+  rebinding: a page on `attacker.example` re-pointed at our address sends
+  `attacker.example` in both and is genuinely same-origin, free to read as well
+  as write. With auth enforced the session cookie, bound to our name, keeps it
+  out. With auth disabled the proxy first refuses every request, pages and
+  reads included, whose raw `Host` is not `localhost`, `127.0.0.1` or `[::1]`
+  (any port; `X-Forwarded-Host` is ignored), with a `403`. `OPTIONS` counting as
   mutating is load-bearing rather than an oversight: it is what refuses the
   preflight that forging a header forces, so no browser-reachable path survives.
   An absent `Origin` is allowed because browsers always send one on a

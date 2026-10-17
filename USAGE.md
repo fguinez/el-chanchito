@@ -413,7 +413,9 @@ public (`/api/auth/login`, `/api/auth/logout`, `/api/auth/session`) answers `401
 without a valid session. Mutating requests are rejected with `403` when they look
 cross-origin, logout included, and that check runs with or without a password
 (so under `make dev` too). Clients that send neither `Origin` nor
-`Sec-Fetch-Site`, such as curl, are not affected.
+`Sec-Fetch-Site`, such as curl, are not affected. Without a password the
+dashboard also answers `403` to every request whose `Host` is not
+`localhost`, `127.0.0.1` or `[::1]` (any port), which blocks DNS rebinding.
 
 Request bodies and query strings are validated before anything touches the
 database. A JSON body must be sent as `Content-Type: application/json`

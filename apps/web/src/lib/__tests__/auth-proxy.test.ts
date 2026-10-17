@@ -86,11 +86,71 @@ afterEach(() => {
 });
 
 describe("proxy: disabled mode", () => {
+  // Without a password the dashboard is only served on loopback.
+  const LOCAL = "http://localhost:3000";
+
   it("passes everything through when no password is configured outside production", async () => {
-    const response = await proxy(makeRequest({ path: "/history" }));
+    const response = await proxy(makeRequest({ path: "/history", origin: LOCAL }));
     expect(response.status).toBe(200);
     expect(isRewrite(response)).toBe(false);
     expect(response.headers.get("cache-control")).toBeNull();
+  });
+
+  it("serves every loopback name, with or without a port", async () => {
+    for (const host of [
+      "localhost",
+      "localhost:3000",
+      "LOCALHOST:3000",
+      "127.0.0.1",
+      "127.0.0.1:3000",
+      "[::1]",
+      "[::1]:3000",
+    ]) {
+      for (const [path, method] of [
+        ["/history", "GET"],
+        ["/api/balances", "GET"],
+        ["/api/transactions", "POST"],
+      ]) {
+        const response = await proxy(
+          makeRequest({ path, method, origin: LOCAL, headers: { host } })
+        );
+        expect(response.status, `${method} ${path} on ${host}`).toBe(200);
+      }
+    }
+  });
+
+  it("refuses a DNS rebinding host for pages, reads and writes alike", async () => {
+    // attacker.example re-pointed at 127.0.0.1: Host and Origin both carry the
+    // attacker's name, so the page is same-origin with what it reaches.
+    const REBOUND = "http://attacker.example:3000";
+    for (const [path, method] of [
+      ["/history", "GET"],
+      ["/api/balances", "GET"],
+      ["/api/transactions", "POST"],
+      ["/api/institutions/refresh", "POST"],
+    ]) {
+      const response = await proxy(
+        makeRequest({
+          path,
+          method,
+          origin: REBOUND,
+          headers: { origin: REBOUND, "sec-fetch-site": "same-origin" },
+        })
+      );
+      expect(response.status, `${method} ${path}`).toBe(403);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+    }
+  });
+
+  it("ignores a forwarded host when deciding what is local", async () => {
+    const response = await proxy(
+      makeRequest({
+        path: "/history",
+        origin: "http://attacker.example",
+        headers: { "x-forwarded-host": "localhost:3000" },
+      })
+    );
+    expect(response.status).toBe(403);
   });
 
   it("still rejects a cross-site write, since nothing else guards the API here", async () => {
@@ -98,11 +158,18 @@ describe("proxy: disabled mode", () => {
     // otherwise forge transactions or start a live bank login.
     for (const headers of <Record<string, string>[]>[
       { "sec-fetch-site": "cross-site" },
+      { "sec-fetch-site": "same-site" },
       { origin: "https://evil.example" },
+      { origin: "null" },
       { origin: "https://evil.example", "sec-fetch-site": "cross-site" },
     ]) {
       const response = await proxy(
-        makeRequest({ path: "/api/institutions/refresh", method: "POST", headers })
+        makeRequest({
+          path: "/api/institutions/refresh",
+          method: "POST",
+          origin: LOCAL,
+          headers,
+        })
       );
       expect(response.status, JSON.stringify(headers)).toBe(403);
       expect(response.headers.get("cache-control")).toBe("no-store");
@@ -111,34 +178,23 @@ describe("proxy: disabled mode", () => {
 
   it("lets our own pages and non-browser clients write", async () => {
     for (const headers of <Record<string, string>[]>[
-      { origin: ORIGIN, "sec-fetch-site": "same-origin" },
-      { origin: ORIGIN },
+      { origin: LOCAL, "sec-fetch-site": "same-origin" },
+      { origin: LOCAL },
       // curl and other scripts send neither header.
       {},
     ]) {
       const response = await proxy(
-        makeRequest({ path: "/api/transactions", method: "POST", headers })
+        makeRequest({ path: "/api/transactions", method: "POST", origin: LOCAL, headers })
       );
       expect(response.status, JSON.stringify(headers)).toBe(200);
     }
-  });
-
-  it("works for a plain-HTTP localhost dev server", async () => {
-    const response = await proxy(
-      makeRequest({
-        path: "/api/transactions",
-        method: "POST",
-        origin: "http://localhost:3000",
-        headers: { origin: "http://localhost:3000", "sec-fetch-site": "same-origin" },
-      })
-    );
-    expect(response.status).toBe(200);
   });
 
   it("leaves cross-site reads alone", async () => {
     const response = await proxy(
       makeRequest({
         path: "/api/balances",
+        origin: LOCAL,
         headers: { "sec-fetch-site": "cross-site" },
       })
     );
@@ -157,6 +213,17 @@ describe("proxy: misconfigured mode", () => {
     expect(getRewrittenUrl(response)).toBe(`${ORIGIN}/setup-required`);
   });
 
+  it("refuses a cross-site write before the 503", async () => {
+    const response = await proxy(
+      makeRequest({
+        path: "/api/transactions",
+        method: "POST",
+        headers: { origin: "https://evil.example" },
+      })
+    );
+    expect(response.status).toBe(403);
+  });
+
   it("answers 503 on every API route", async () => {
     const response = await proxy(makeRequest({ path: "/api/balances" }));
     expect(response.status).toBe(503);
@@ -166,6 +233,11 @@ describe("proxy: misconfigured mode", () => {
 
 describe("proxy: enforced mode without a session", () => {
   beforeEach(enforce);
+
+  it("serves any host: the loopback guard is for disabled mode only", async () => {
+    const response = await proxy(makeRequest({ path: "/login" }));
+    expect(response.status).toBe(200);
+  });
 
   it("redirects a page to the login, remembering where to come back to", async () => {
     const response = await proxy(makeRequest({ path: "/history?range=30d" }));
