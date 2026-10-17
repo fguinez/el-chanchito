@@ -152,6 +152,49 @@ preview all include them. Days are local calendar days, the same unit as
 `DAY_OF_MONTH()`. The monitor detail page manages them ("Variaciones" card)
 through `/api/monitors/[id]/adjustments`.
 
+## Exchange rates
+
+Every CLP figure of a non-CLP product (its "≈ CLP" balance, the institution
+subtotals and net-worth totals, the `/api/wealth` series, monitor references)
+converts with a rate resolved **per product** in `apps/web/src/lib/rates.ts`,
+most specific first:
+
+1. **product**: an `exchange_rates` row for that product and currency;
+2. **institution**: a row of the product's institution with `product_id` NULL;
+3. **provider**: `getClpRates()`, open.er-api fiat FX pivoted to CLP plus
+   Buda's tickers for crypto, cached in memory for 5 minutes.
+
+`exchange_rates` (V024) holds the rates institutions publish themselves (a
+bank's "Tipo de cambio" for its card), read by their scrapers: one current
+value per (institution, product or NULL, base currency, quote currency), with
+`rate` in quote units per base unit, a Spanish `source` label, the
+`reported_as_of` validity date when the institution prints one, and
+`observed_at`, which every scrape that reads the value moves forward. There is
+no history: past balances are valued at today's resolved rate, as they were
+with provider rates alone. The web reads only CLP-quoted rows.
+
+Each request loads one `RateBook` (`lib/rate-book.ts` `getRateBook()`: the
+provider rates and every override, in parallel) and converts a product with
+`ratesFor(book, { productId, institutionSlug })`, which returns plain
+`ClpRates`, so `toClp` and the `lib/networth` helpers are unchanged. A monitor
+reference converts both legs of its cross rate with the referenced product's
+rates. A failed `exchange_rates` read is logged and degrades to provider rates.
+
+**Staleness**: an override is stale when its `observed_at` falls on an earlier
+calendar day than now, both read in `America/Santiago` explicitly
+(`isRateStale`, via `Intl` with a `timeZone`, so the process timezone does not
+matter). A stale override is still used, never silently swapped for the
+provider rate; the UI warns instead. Provider rates are never flagged.
+
+The institutions and product endpoints return the rate behind each non-CLP
+product as `product.exchangeRate` (`RateInfo`: `currency`, `rate`, `scope`
+product/institution/provider, `source`, `observedAt`, `reportedAsOf`, `stale`;
+null for CLP products and unconvertible currencies). The product page shows it
+in a "Tipo de cambio" card with a "Desactualizado: no es de hoy" warning, and
+the family tables mark a stale "≈ CLP" with an amber icon. The card has no
+refresh of its own: the control server has no per-surface scoping, so an
+institution rate is reread by the institution page's "Actualizar".
+
 ## Database Schema (ER Diagram)
 
 Core hierarchy (since V009): `users -> accounts -> products`. "Account" always
@@ -273,10 +316,8 @@ exchange_rates (V024)
           base_currency, quote_currency)
 ```
 
-`exchange_rates` holds the latest rate an institution applies, one row per
-scope and currency pair (no history): scrapers write it through
-`upsert_exchange_rate`, and the dashboard prefers a product's row over its
-institution's over the market reference when it converts that product.
+`exchange_rates` semantics, resolution order and staleness: see
+[Exchange rates](#exchange-rates).
 
 ## Migrations
 
@@ -523,8 +564,7 @@ institution-wide (`product` = None), with a Spanish `source` label and the
 product up by the same identity rule but never creates anything: a rate naming
 an unknown institution or product raises `UnresolvedRateScope` and becomes a
 run warning (`partial`), as does a failed write. A re-scrape updates the row in
-place and moves `observed_at`, the "last read" the dashboard's staleness
-warning compares with today.
+place (see [Exchange rates](#exchange-rates)).
 
 | Institution | Method | Source | Auth | Schedule |
 |---|---|---|---|---|
