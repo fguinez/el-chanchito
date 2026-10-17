@@ -34,12 +34,14 @@ from db.writer import (
     start_scraper_run,
     upsert_product,
     upsert_transactions,
+    write_transactions,
 )
 from product_model import (
     InvestmentMetrics,
     ScrapedProduct,
     ScrapedTransaction,
     TermDepositMetrics,
+    TransactionLocation,
 )
 
 
@@ -580,7 +582,7 @@ class _FakeBlock:
 
 
 class _FakeTxConn:
-    """A transactions table stand-in for `upsert_transactions`.
+    """A transactions table stand-in for `write_transactions`.
 
     Rows are dicts; `created_at` is the insertion order, which is what the real
     query orders by. `_resolve_product` is monkeypatched, so only the
@@ -594,6 +596,7 @@ class _FakeTxConn:
     def __init__(self, rows=None, fail_on=(), drop_on=()):
         self.rows = list(rows or [])
         self.executed = []
+        self.location_fills = []
         self._clock = 100
         self.fail_on = set(fail_on)
         self.drop_on = set(drop_on)
@@ -666,6 +669,7 @@ class _FakeTxConn:
                 month,
                 source,
                 ext,
+                *location,
             ) = p
             if ext in self.fail_on:
                 self.aborted = True
@@ -687,8 +691,12 @@ class _FakeTxConn:
                     "scheduled_month": month,
                     "source": source,
                     "created_at": self._clock,
+                    "location": tuple(location),
                 }
             )
+            return _FakeCursor(rowcount=1)
+        if "UPDATE transactions SET location_" in q:
+            self.location_fills.append(p)
             return _FakeCursor(rowcount=1)
         return _FakeCursor()
 
@@ -728,6 +736,7 @@ def _txn(
     kind="checking",
     tx_date=date(2026, 8, 20),
     accounting_date=None,
+    location=None,
 ):
     return ScrapedTransaction(
         institution="banchile",
@@ -738,6 +747,7 @@ def _txn(
         accounting_date=accounting_date,
         external_id=external_id,
         scheduled_month=date(tx_date.year, tx_date.month, 1),
+        location=location,
     )
 
 
@@ -789,7 +799,7 @@ class TestUpsertTransactionsIsolation:
         conn = _FakeTxConn(fail_on={"bch_op_12345678902"})
         _use_tx_conn(monkeypatch, conn)
 
-        result = upsert_transactions(
+        result = write_transactions(
             [
                 _txn("bch_op_12345678901", amount=-999999),
                 _txn("bch_op_12345678902", amount=-1000000),
@@ -797,7 +807,7 @@ class TestUpsertTransactionsIsolation:
             ]
         )
 
-        assert result == TransactionWriteResult(inserted=2, failed=1)
+        assert (result.inserted, result.failed) == (2, 1)
         assert [row["external_id"] for row in conn.rows] == [
             "bch_op_12345678901",
             "bch_op_12345678903",
@@ -814,14 +824,14 @@ class TestUpsertTransactionsIsolation:
 
         monkeypatch.setattr(writer, "_resolve_product", resolve)
 
-        result = upsert_transactions(
+        result = write_transactions(
             [
                 _txn("bch_ref_200812345678", kind="credit_card"),
                 _txn("bch_op_12345678901"),
             ]
         )
 
-        assert result == TransactionWriteResult(inserted=1, failed=1)
+        assert (result.inserted, result.failed) == (1, 1)
 
     def test_a_dropped_connection_replays_the_batch_without_duplicates(
         self, monkeypatch
@@ -833,7 +843,7 @@ class TestUpsertTransactionsIsolation:
         _use_tx_conn(monkeypatch, conn)
         monkeypatch.setattr("scrapers.retry.BASE_DELAY_SECONDS", 0.0)
 
-        result = upsert_transactions(
+        result = write_transactions(
             [
                 _txn("bch_op_12345678901", amount=-999999),
                 _txn("bch_op_12345678902", amount=-1000000),
@@ -841,7 +851,7 @@ class TestUpsertTransactionsIsolation:
             ]
         )
 
-        assert result == TransactionWriteResult(inserted=2, failed=0)
+        assert (result.inserted, result.failed) == (2, 0)
         assert [row["external_id"] for row in conn.rows] == [
             "bch_op_12345678901",
             "bch_op_12345678902",
@@ -856,7 +866,7 @@ class TestUpsertTransactionsAdoption:
         conn = _FakeTxConn([_legacy_row("row-1", "bch_a1b2c3d4e5f60718", 1)])
         _use_tx_conn(monkeypatch, conn)
 
-        inserted = upsert_transactions([_txn("bch_op_12345678901")]).inserted
+        inserted = write_transactions([_txn("bch_op_12345678901")]).inserted
 
         assert inserted == 0
         assert len(conn.rows) == 1
@@ -873,7 +883,7 @@ class TestUpsertTransactionsAdoption:
         )
         _use_tx_conn(monkeypatch, conn)
 
-        inserted = upsert_transactions(
+        inserted = write_transactions(
             [_txn(f"bch_op_1234567890{n}") for n in range(3)]
         ).inserted
 
@@ -888,7 +898,7 @@ class TestUpsertTransactionsAdoption:
         conn = _FakeTxConn([_legacy_row("row-1", "bch_aaaaaaaaaaaaaaaa", 1)])
         _use_tx_conn(monkeypatch, conn)
 
-        inserted = upsert_transactions(
+        inserted = write_transactions(
             [_txn("bch_op_12345678901"), _txn("bch_op_12345678902")]
         ).inserted
 
@@ -900,8 +910,8 @@ class TestUpsertTransactionsAdoption:
         _use_tx_conn(monkeypatch, conn)
         batch = [_txn("bch_op_12345678901"), _txn("bch_op_12345678902")]
 
-        first = upsert_transactions(batch).inserted
-        second = upsert_transactions(batch).inserted
+        first = write_transactions(batch).inserted
+        second = write_transactions(batch).inserted
 
         assert (first, second) == (1, 0)
         assert len(conn.rows) == 2
@@ -911,7 +921,7 @@ class TestUpsertTransactionsAdoption:
         conn = _FakeTxConn([_legacy_row("row-1", "bch_fp_a1b2c3d4e5f60718", 1)])
         _use_tx_conn(monkeypatch, conn)
 
-        inserted = upsert_transactions(
+        inserted = write_transactions(
             [_txn("bch_ref_200812345678", kind="credit_card")]
         ).inserted
 
@@ -928,7 +938,7 @@ class TestUpsertTransactionsAdoption:
         )
         _use_tx_conn(monkeypatch, conn)
 
-        inserted = upsert_transactions([_txn("bch_op_12345678901")]).inserted
+        inserted = write_transactions([_txn("bch_op_12345678901")]).inserted
 
         assert inserted == 1
         assert conn.rows[0]["external_id"] == "bch_aaaaaaaaaaaaaaaa"
@@ -939,7 +949,7 @@ class TestUpsertTransactionsAdoption:
         conn = _FakeTxConn([_legacy_row("row-1", "bch_op_12345678901", 1)])
         _use_tx_conn(monkeypatch, conn)
 
-        inserted = upsert_transactions(
+        inserted = write_transactions(
             [_txn("bch_op_12345678901", description="COMERCIO SINTETICO S.A.")]
         ).inserted
 
@@ -951,7 +961,7 @@ class TestUpsertTransactionsAdoption:
         conn = _FakeTxConn([_legacy_row("row-1", "bch_op_12345678901", 1)])
         _use_tx_conn(monkeypatch, conn)
 
-        inserted = upsert_transactions([_txn("bch_fp_a1b2c3d4e5f60718")]).inserted
+        inserted = write_transactions([_txn("bch_fp_a1b2c3d4e5f60718")]).inserted
 
         assert (inserted, len(conn.rows)) == (0, 1)
         assert conn.rows[0]["external_id"] == "bch_op_12345678901"
@@ -971,7 +981,7 @@ class TestUpsertTransactionsAdoption:
             external_id="bcl_ffffffffffffffff",
         )
 
-        inserted = upsert_transactions([txn]).inserted
+        inserted = write_transactions([txn]).inserted
 
         assert inserted == 1
         assert len(conn.rows) == 2
@@ -1000,7 +1010,7 @@ class TestAdoptionAcrossTheDateShift:
         )
         _use_tx_conn(monkeypatch, conn)
 
-        inserted = upsert_transactions([self._incoming()]).inserted
+        inserted = write_transactions([self._incoming()]).inserted
 
         assert (inserted, len(conn.rows)) == (0, 1)
         assert conn.rows[0]["external_id"] == "bch_op_12345678901"
@@ -1011,7 +1021,7 @@ class TestAdoptionAcrossTheDateShift:
         )
         _use_tx_conn(monkeypatch, conn)
 
-        upsert_transactions([self._incoming()])
+        write_transactions([self._incoming()])
 
         row = conn.rows[0]
         assert row["transaction_date"] == date(2026, 8, 21)
@@ -1032,7 +1042,7 @@ class TestAdoptionAcrossTheDateShift:
         )
         _use_tx_conn(monkeypatch, conn)
 
-        upsert_transactions([self._incoming()])
+        write_transactions([self._incoming()])
 
         by_id = {row["id"]: row for row in conn.rows}
         assert by_id["row-exact"]["external_id"] == "bch_op_12345678901"
@@ -1045,7 +1055,7 @@ class TestAdoptionAcrossTheDateShift:
         )
         _use_tx_conn(monkeypatch, conn)
 
-        inserted = upsert_transactions([self._incoming()]).inserted
+        inserted = write_transactions([self._incoming()]).inserted
 
         assert (inserted, len(conn.rows)) == (1, 2)
         assert conn.rows[0]["external_id"] == "bch_aaaaaaaaaaaaaaaa"
@@ -1062,7 +1072,7 @@ class TestAdoptionAcrossTheDateShift:
         )
         _use_tx_conn(monkeypatch, conn)
 
-        inserted = upsert_transactions([self._incoming()]).inserted
+        inserted = write_transactions([self._incoming()]).inserted
 
         assert (inserted, len(conn.rows)) == (1, 2)
         assert conn.rows[0]["external_id"] == "csv_import_1"
@@ -1071,7 +1081,7 @@ class TestAdoptionAcrossTheDateShift:
         conn = _FakeTxConn([])
         _use_tx_conn(monkeypatch, conn)
 
-        upsert_transactions([self._incoming()])
+        write_transactions([self._incoming()])
 
         assert conn.rows[0]["transaction_date"] == date(2026, 8, 21)
         assert conn.rows[0]["accounting_date"] == date(2026, 8, 24)
@@ -1083,10 +1093,151 @@ class TestAdoptionAcrossTheDateShift:
         )
         _use_tx_conn(monkeypatch, conn)
 
-        inserted = upsert_transactions(
+        inserted = write_transactions(
             [_txn("bch_ref_200812345678", kind="credit_card")]
         ).inserted
 
         assert (inserted, len(conn.rows)) == (0, 1)
         assert conn.rows[0]["external_id"] == "bch_ref_200812345678"
         assert conn.rows[0]["accounting_date"] is None
+
+
+class TestWriteTransactionsPersistedKeys:
+    """Which keys a stored row carries once `write_transactions` is done."""
+
+    def test_inserted_matched_and_adopted_keys_are_reported(self, monkeypatch):
+        conn = _FakeTxConn(
+            [
+                _legacy_row("row-1", "bch_op_10000000001", 1, amount=-1),
+                _legacy_row("row-2", "bch_a1b2c3d4e5f60718", 2, amount=-2),
+            ]
+        )
+        _use_tx_conn(monkeypatch, conn)
+
+        result = write_transactions(
+            [
+                _txn("bch_op_10000000001", amount=-1),  # already stored
+                _txn("bch_op_10000000002", amount=-2),  # adopts row-2
+                _txn("bch_op_10000000003", amount=-3),  # inserted
+            ]
+        )
+
+        assert result.inserted == 1
+        assert result.persisted_external_ids == {
+            "bch_op_10000000001",
+            "bch_op_10000000002",
+            "bch_op_10000000003",
+        }
+
+    def test_a_key_left_out_in_favour_of_a_final_row_is_not_reported(self, monkeypatch):
+        conn = _FakeTxConn([_legacy_row("row-1", "bch_op_10000000001", 1)])
+        _use_tx_conn(monkeypatch, conn)
+
+        result = write_transactions([_txn("bch_fp_a1b2c3d4e5f60718")])
+
+        assert result.persisted_external_ids == frozenset()
+
+    def test_a_failed_row_is_not_reported(self, monkeypatch):
+        conn = _FakeTxConn([])
+        _use_tx_conn(monkeypatch, conn)
+        execute = conn.execute
+
+        def failing(sql, params=None):
+            if "INSERT" in sql and "bch_op_10000000002" in params:
+                raise RuntimeError("synthetic failure")
+            return execute(sql, params)
+
+        conn.execute = failing
+
+        result = write_transactions(
+            [_txn("bch_op_10000000001"), _txn("bch_op_10000000002")]
+        )
+
+        assert result.persisted_external_ids == {"bch_op_10000000001"}
+
+    def test_upsert_transactions_still_returns_the_count(self, monkeypatch):
+        _use_tx_conn(monkeypatch, _FakeTxConn([]))
+
+        assert upsert_transactions([_txn("bch_op_10000000001")]) == 1
+
+
+# Synthetic place: no real city or country.
+_LOCATION = TransactionLocation(city="CIUDAD FICTICIA", country="PAIS FICTICIO")
+
+
+class TestTransactionLocation:
+    """V025: a scraped location is inserted, and only ever fills NULL columns."""
+
+    def test_a_new_row_is_inserted_with_its_location(self, monkeypatch):
+        conn = _FakeTxConn()
+        _use_tx_conn(monkeypatch, conn)
+
+        write_transactions([_txn("bch_op_12345678901", location=_LOCATION)])
+
+        assert conn.rows[0]["location"] == (
+            None,
+            "CIUDAD FICTICIA",
+            "PAIS FICTICIO",
+            None,
+            None,
+        )
+        assert conn.location_fills == []
+
+    def test_a_row_without_location_inserts_nulls(self, monkeypatch):
+        conn = _FakeTxConn()
+        _use_tx_conn(monkeypatch, conn)
+
+        write_transactions([_txn("bch_op_12345678901")])
+
+        assert conn.rows[0]["location"] == (None,) * 5
+
+    def test_an_already_stored_row_gets_a_fill_only_update(self, monkeypatch):
+        conn = _FakeTxConn([_legacy_row("row-1", "bch_op_12345678901", 1)])
+        _use_tx_conn(monkeypatch, conn)
+
+        inserted = upsert_transactions(
+            [_txn("bch_op_12345678901", location=_LOCATION)]
+        )
+
+        assert inserted == 0
+        (fill,) = [q for q, _ in conn.executed if "SET location_" in q]
+        assert "location_city = COALESCE(location_city, %s)" in fill
+        assert "location_country = COALESCE(location_country, %s)" in fill
+        # Name and coordinates were not scraped, so they are not touched.
+        assert "location_name" not in fill
+        assert "location_latitude" not in fill
+        assert "NOT location_is_manual" in fill
+        assert conn.location_fills == [("CIUDAD FICTICIA", "PAIS FICTICIO", "row-1")]
+
+    def test_an_adopted_row_gets_its_location_filled(self, monkeypatch):
+        conn = _FakeTxConn([_legacy_row("row-1", "bch_a1b2c3d4e5f60718", 1)])
+        _use_tx_conn(monkeypatch, conn)
+
+        write_transactions([_txn("bch_op_12345678901", location=_LOCATION)])
+
+        assert conn.location_fills == [("CIUDAD FICTICIA", "PAIS FICTICIO", "row-1")]
+
+    def test_a_stored_row_without_scraped_location_is_not_written(self, monkeypatch):
+        conn = _FakeTxConn([_legacy_row("row-1", "bch_op_12345678901", 1)])
+        _use_tx_conn(monkeypatch, conn)
+
+        write_transactions([_txn("bch_op_12345678901")])
+
+        assert conn.location_fills == []
+
+    def test_coordinates_fill_as_a_pair(self, monkeypatch):
+        conn = _FakeTxConn([_legacy_row("row-1", "bch_op_12345678901", 1)])
+        _use_tx_conn(monkeypatch, conn)
+
+        write_transactions(
+            [
+                _txn(
+                    "bch_op_12345678901",
+                    location=TransactionLocation(latitude=-33.0, longitude=-70.0),
+                )
+            ]
+        )
+
+        (fill,) = [q for q, _ in conn.executed if "SET location_" in q]
+        assert fill.count("WHEN location_latitude IS NULL") == 2
+        assert conn.location_fills == [(-33.0, -70.0, "row-1")]

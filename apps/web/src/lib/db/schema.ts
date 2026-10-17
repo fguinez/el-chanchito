@@ -12,7 +12,7 @@ import {
   index,
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 import type {
   ProductAttributes,
   ProductKind,
@@ -172,6 +172,49 @@ export const productSnapshots = pgTable(
   ]
 );
 
+// Exchange rates an institution publishes itself, read by its scraper (V024).
+// product_id NULL = institution-wide; a product-scoped row also carries the
+// product's institution_id. Current value only: a rescrape overwrites it and
+// moves observed_at. Resolution and staleness live in lib/rates.
+export const exchangeRates = pgTable(
+  "exchange_rates",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    institutionId: uuid("institution_id")
+      .notNull()
+      .references(() => institutions.id, { onDelete: "cascade" }),
+    productId: uuid("product_id").references(() => products.id, {
+      onDelete: "cascade",
+    }),
+    baseCurrency: text("base_currency").notNull(),
+    quoteCurrency: text("quote_currency").notNull().default("CLP"),
+    // Quote units per 1 base unit.
+    rate: numeric("rate", { precision: 20, scale: 8 }).notNull(),
+    // Spanish UI label of where the rate was read.
+    source: text("source").notNull(),
+    // Validity date printed by the institution, when it shows one.
+    reportedAsOf: date("reported_as_of"),
+    // Last scrape that read this value.
+    observedAt: timestamp("observed_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("exchange_rates_scope_pair_idx").on(
+      table.institutionId,
+      sql`COALESCE(${table.productId}, '00000000-0000-0000-0000-000000000000'::uuid)`,
+      table.baseCurrency,
+      table.quoteCurrency
+    ),
+  ]
+);
+
 // ---------------------------------------------------------------------------
 // Transactions & categorization
 // ---------------------------------------------------------------------------
@@ -214,7 +257,14 @@ export const transactions = pgTable(
       .notNull()
       .references(() => products.id),
     description: text("description").notNull(),
-    amount: integer("amount").notNull(),
+    // Signed, in the product's currency (products.currency). NUMERIC(18, 2)
+    // since V023 so foreign-currency movements keep their cents. postgres.js
+    // hands NUMERIC over as a string; mode "number" converts it on every
+    // select of this column, so callers keep getting (and inserting) numbers.
+    // Raw sql`` over the column (e.g. SUM(amount)) bypasses that mapping and
+    // must convert its result itself.
+    amount: numeric("amount", { precision: 18, scale: 2, mode: "number" })
+      .notNull(),
     transactionDate: date("transaction_date").notNull(),
     // When the institution posted the movement, where it reports that apart
     // from when the movement occurred (V019). Nullable: most sources report a
@@ -231,6 +281,23 @@ export const transactions = pgTable(
       .notNull()
       .default(false),
     notes: text("notes"),
+    // Optional location (V025), every column independent; the coordinates are
+    // set together or not at all. Scrapers only fill NULL columns, and never
+    // touch a row whose location the user set or cleared (locationIsManual).
+    locationName: text("location_name"),
+    locationCity: text("location_city"),
+    locationCountry: text("location_country"),
+    locationLatitude: numeric("location_latitude", {
+      precision: 9,
+      scale: 6,
+      mode: "number",
+    }),
+    locationLongitude: numeric("location_longitude", {
+      precision: 9,
+      scale: 6,
+      mode: "number",
+    }),
+    locationIsManual: boolean("location_is_manual").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -291,6 +358,11 @@ export const fixedExpenses = pgTable("fixed_expenses", {
     .defaultNow(),
 });
 
+// Internal transfer lifecycle. The column has no CHECK constraint (V004), so
+// the API validates against this list.
+export const TRANSFER_STATUSES = ["pending", "resolved"] as const;
+export type TransferStatus = (typeof TRANSFER_STATUSES)[number];
+
 // Internal transfers (between products)
 export const internalTransfers = pgTable("internal_transfers", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -299,7 +371,7 @@ export const internalTransfers = pgTable("internal_transfers", {
   fromProductId: uuid("from_product_id").references(() => products.id),
   toProductId: uuid("to_product_id").references(() => products.id),
   transferDate: date("transfer_date").notNull(),
-  status: text("status").notNull().default("pending"),
+  status: text("status").$type<TransferStatus>().notNull().default("pending"),
   notes: text("notes"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()

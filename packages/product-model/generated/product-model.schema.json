@@ -980,6 +980,58 @@
       "title": "PrepaidCardMetrics",
       "type": "object"
     },
+    "ProductRef": {
+      "additionalProperties": false,
+      "description": "The identity of one product of the envelope's institution.\n\nThe same (kind, currency, external_ref) triple the writer resolves a\n`ScrapedProduct` by, so a scraper names a product exactly as it emits it.",
+      "properties": {
+        "currency": {
+          "description": "Upper-case currency code of the product, e.g. 'USD'.",
+          "pattern": "^[A-Z]{3,10}$",
+          "title": "Currency",
+          "type": "string"
+        },
+        "external_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The product's external_ref; None for singleton products.",
+          "title": "External Ref"
+        },
+        "kind": {
+          "description": "Kind of the product, e.g. 'credit_card'.",
+          "enum": [
+            "checking",
+            "savings",
+            "vista",
+            "wallet",
+            "term_deposit",
+            "credit_card",
+            "debit_card",
+            "prepaid_card",
+            "line_of_credit",
+            "loan",
+            "mortgage",
+            "investment",
+            "crypto",
+            "other"
+          ],
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "currency"
+      ],
+      "title": "ProductRef",
+      "type": "object"
+    },
     "SavingsAttributes": {
       "additionalProperties": false,
       "description": "Identity fields for a savings account (cuenta de ahorro).",
@@ -1058,6 +1110,84 @@
         "balance"
       ],
       "title": "SavingsMetrics",
+      "type": "object"
+    },
+    "ScrapedExchangeRate": {
+      "additionalProperties": false,
+      "description": "One exchange rate an institution applies, as a scraper read it.\n\nScoped to one product (`product`) or to the whole institution (None). The\nwriter only ever attaches it to an institution and product that already\nexist: it never creates one to hang a rate on.",
+      "properties": {
+        "base_currency": {
+          "description": "Upper-case code of the currency being priced, e.g. 'USD'.",
+          "pattern": "^[A-Z]{3,10}$",
+          "title": "Base Currency",
+          "type": "string"
+        },
+        "institution": {
+          "description": "Institution slug, e.g. 'banchile', 'fintual'.",
+          "title": "Institution",
+          "type": "string"
+        },
+        "product": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProductRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The product of this institution the rate applies to; None for an institution-wide rate."
+        },
+        "quote_currency": {
+          "default": "CLP",
+          "description": "Upper-case code of the currency the rate is quoted in.",
+          "pattern": "^[A-Z]{3,10}$",
+          "title": "Quote Currency",
+          "type": "string"
+        },
+        "rate": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "pattern": "^\\d{1,12}(\\.\\d{1,8})?$",
+              "type": "string"
+            }
+          ],
+          "description": "Quote units per 1 base unit (e.g. CLP per USD); positive, at most 8 decimals (stored as NUMERIC(20, 8)).",
+          "title": "Rate"
+        },
+        "reported_as_of": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Validity date the institution prints next to the rate, if any.",
+          "title": "Reported As Of"
+        },
+        "source": {
+          "description": "Spanish label of where the rate was read, shown in the UI.",
+          "minLength": 1,
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "institution",
+        "base_currency",
+        "rate",
+        "source"
+      ],
+      "title": "ScrapedExchangeRate",
       "type": "object"
     },
     "ScrapedProduct": {
@@ -1299,9 +1429,17 @@
           "title": "Accounting Date"
         },
         "amount": {
-          "description": "Amount in CLP; negative=expense, positive=income.",
-          "title": "Amount",
-          "type": "integer"
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "pattern": "^-?\\d{1,16}(\\.\\d{1,2})?$",
+              "type": "string"
+            }
+          ],
+          "description": "Signed amount in the transaction's currency: negative=expense, positive=income. At most 2 decimals (stored as NUMERIC(18, 2)); CLP amounts are whole numbers and may be sent as integers.",
+          "title": "Amount"
         },
         "category_hint": {
           "anyOf": [
@@ -1336,6 +1474,18 @@
           "description": "Institution slug, e.g. 'banchile', 'fintual'.",
           "title": "Institution",
           "type": "string"
+        },
+        "location": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TransactionLocation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Where the transaction happened, when the source reports it. Written only into location columns that are still NULL, and never onto a row whose location the user edited."
         },
         "product_kind": {
           "description": "Kind of the product the transaction belongs to, e.g. 'checking'.",
@@ -1506,6 +1656,86 @@
       "title": "TermDepositMetrics",
       "type": "object"
     },
+    "TransactionLocation": {
+      "additionalProperties": false,
+      "description": "Where a transaction happened, as far as its source says.\n\nEvery field is optional and independent of the others: a source that\nreports only a city sends only `city`. Text is trimmed, blank means\nabsent, and nothing is re-cased (descriptions are stored as given too).\nCoordinates come in pairs. Frozen, so it can ride on hashable records\nsuch as a scraper's frozen dataclasses.",
+      "properties": {
+        "city": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "City, as the source spells it.",
+          "title": "City"
+        },
+        "country": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Country name as the source spells it (e.g. 'Chile'); a source that only reports an ISO 3166 code sends the code.",
+          "title": "Country"
+        },
+        "latitude": {
+          "anyOf": [
+            {
+              "maximum": 90,
+              "minimum": -90,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "WGS84 latitude in degrees.",
+          "title": "Latitude"
+        },
+        "longitude": {
+          "anyOf": [
+            {
+              "maximum": 180,
+              "minimum": -180,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "WGS84 longitude in degrees.",
+          "title": "Longitude"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Merchant or place name, when it differs from the description.",
+          "title": "Name"
+        }
+      },
+      "title": "TransactionLocation",
+      "type": "object"
+    },
     "VistaAttributes": {
       "additionalProperties": false,
       "description": "Identity fields for a vista account (cuenta vista).",
@@ -1627,6 +1857,6 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Ingest contract for scraped products and transactions; ScrapedProduct and ScrapedTransaction are the envelope models.",
+  "description": "Ingest contract for scraped products, transactions and exchange rates; ScrapedProduct, ScrapedTransaction and ScrapedExchangeRate are the envelope models.",
   "title": "chanchito product model"
 }

@@ -5,9 +5,10 @@ Auth: HMAC-SHA384 signing.
   Headers: X-SBTC-APIKEY, X-SBTC-NONCE, X-SBTC-SIGNATURE
 
 Balances cover every wallet, one `crypto` product per currency. Transactions
-cover CLP deposits and withdrawals only: `transactions.amount` is integer CLP,
-and a crypto movement has no CLP amount without a price at its date, so crypto
-value history comes from the balance snapshots instead (issue #3).
+cover CLP deposits and withdrawals only: `transactions.amount` keeps two
+decimals (too few for crypto units) and a crypto movement has no CLP amount
+without a price at its date, so crypto value history comes from the balance
+snapshots instead (issue #3).
 """
 
 import base64

@@ -70,8 +70,8 @@ def with_db_retry(fn: Callable[P, T]) -> Callable[P, T]:
     """Retry `fn` on transient DB errors, at most DB_ATTEMPTS times.
 
     Only for functions that are safe to repeat, and that roll a failed attempt
-    back whole or, like `upsert_transactions`, commit in idempotent steps. An
-    error `fn` catches itself (a per-row failure in `upsert_transactions`)
+    back whole or, like `write_transactions`, commit in idempotent steps. An
+    error `fn` catches itself (a per-row failure in `write_transactions`)
     never reaches the retry.
     """
 

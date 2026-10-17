@@ -8,6 +8,7 @@
 // per-institution buttons for everything else.
 
 import { useCallback, useEffect, useState } from "react";
+import { refreshCooldownNotice } from "@/lib/refresh-cooldown";
 import {
   fetchRunMap,
   POLL_INTERVAL_MS,
@@ -25,6 +26,9 @@ export interface UseInstitutionRefresh {
   scrapers: Set<string>;
   /** Set when the scraper service is unreachable / not configured (proxy 503). */
   serviceError: string | null;
+  /** Set when a scraper is inside its manual-refresh cooldown: a 429, or a
+   *  refresh-all that skipped it. */
+  notice: string | null;
   /** Trigger a scrape for one institution (by slug) or all when omitted. */
   refresh: (slug?: string) => Promise<void>;
 }
@@ -75,6 +79,8 @@ export function useInstitutionRefresh(
   const [scrapers, setScrapers] = useState<Set<string>>(new Set());
   // Set when the scraper service is unreachable / not configured (proxy 503).
   const [serviceError, setServiceError] = useState<string | null>(null);
+  // Set when the service skipped a scraper still in its refresh cooldown.
+  const [notice, setNotice] = useState<string | null>(null);
 
   // Which scrapers exist is decided by the backend's env at startup
   // (build_scrapers()), so ask it once instead of hardcoding the list. The
@@ -108,6 +114,7 @@ export function useInstitutionRefresh(
   const refresh = useCallback(
     async (slug?: string) => {
       setServiceError(null);
+      setNotice(null);
       // Snapshot current runs first so polling can tell the new run apart.
       const baseline = await fetchRunMap();
 
@@ -119,6 +126,8 @@ export function useInstitutionRefresh(
           body: JSON.stringify(slug ? { institution: slug } : {}),
         });
         const data = await res.json().catch(() => ({}));
+        setNotice(refreshCooldownNotice(res.status, data));
+        if (res.status === 429) return;
         if (!res.ok) {
           setServiceError(
             data.error ??
@@ -151,5 +160,5 @@ export function useInstitutionRefresh(
     [markDone, reload]
   );
 
-  return { syncing, scrapers, serviceError, refresh };
+  return { syncing, scrapers, serviceError, notice, refresh };
 }
