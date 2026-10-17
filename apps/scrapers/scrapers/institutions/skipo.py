@@ -6,9 +6,9 @@ Acquisition decision: rung 1 of the ladder. Skipo publishes a documented REST
 API (`https://api.skipo.com/v2`) with user-issued keys, so no lower rung was
 considered. Auth is a personal read-only key (`SKIPO_API_KEY`, `skp_live_...`,
 held in the Keychain) sent as a bearer token. It needs the `accounts:read`
-scope (balances and ledger) and `market_data:read` (asset catalog). The key
-carries no IP allowlist because the scrapers run from a dynamic residential
-IP. Every call is a GET; nothing here writes.
+scope (balances and ledger) and `market_data:read` (asset catalog and
+prices). The key carries no IP allowlist because the scrapers run from a
+dynamic residential IP. Every call is a GET; nothing here writes.
 
 Errors are `application/problem+json` with a stable `code`. A 401 or 403
 raises `SkipoAuthError` carrying only the status and that code; 429 and 5xx
@@ -25,11 +25,11 @@ are retried by `scrapers.retry`.
   holds whole CLP only), as are tokenized stocks (no product kind fits yet)
   and unclassified symbols. Skipped holdings are counted in the run's
   warnings, so the run is recorded partial;
-- `/v2/account`, for `preferredCurrency` only. The rest of that payload is
-  personal and is neither stored nor logged. When it is CLP, each held coin's
-  `balancePrefCurrency / balance` is emitted as an institution-scoped
-  `ScrapedExchangeRate`, so the dashboard can value coins Buda's tickers do
-  not cover.
+- `/v2/markets/{SYMBOL}-CLP/price?side=SELL` for each held coin: Skipo's
+  indicative price becomes an institution-scoped `ScrapedExchangeRate`, so
+  the dashboard values coins Buda's tickers do not cover, at a rate read on
+  every run. A coin without a CLP market, or whose price can't be read, gets
+  no rate and is counted in a warning; it never fails the leg.
 
 `scrape_transactions()` reads only the CLP ledger
 (`/v2/ledger?assetSymbol=CLP`, paged), the single source for the CLP wallet's
@@ -91,7 +91,12 @@ MAX_PAGES = 50
 MAX_ASSET_PAGES = 10
 
 COIN_CLASSES = frozenset({"CRYPTO", "STABLECOIN"})
-RATE_SOURCE = "Skipo (valorización del saldo)"
+# SELL is the side a holding would be liquidated at, so it is what the
+# holding is worth in pesos (BUY would price what it costs to acquire more).
+PRICE_SIDE = "SELL"
+RATE_SOURCE = "Skipo (precio indicativo de venta)"
+# What may go into a market path segment; Skipo's symbols are alphanumeric.
+_MARKET_SYMBOL_RE = re.compile(r"^[A-Z0-9]{1,20}$")
 
 # Signed direction of each ledger type on the CLP ledger. SELL sells CLP for a
 # coin (money out), BUY sells a coin for CLP (money in).
@@ -297,48 +302,32 @@ def _rate(raw: Any) -> Decimal | None:
     return rate if rate > 0 else None
 
 
-def _exchange_rates(rows: list[dict], classes: dict[str, str]) -> list[ScrapedExchangeRate]:
-    """CLP per unit of each held coin, from its CLP-valued balance.
+def _price_rate(symbol: str, body: Any) -> ScrapedExchangeRate | None:
+    """A `{SYMBOL}-CLP` price answer as Skipo's CLP rate for `symbol`, or None.
 
-    Only for rows whose whole holding is `balance` (no frozen or pending
-    units): whether `balancePrefCurrency` values the balance alone or the
-    total is not verified, and recording no rate beats recording a wrong one.
-    The caller has checked that the preferred currency is CLP.
+    `rate` is CLP per 1 unit of the base (verified live: it equals
+    quoteAmount / baseAmount on both sides). An answer for another market, an
+    unusable rate or a symbol the envelope can't hold yields None.
     """
-    rates: list[ScrapedExchangeRate] = []
-    for row in rows:
-        symbol = row.get("assetSymbol")
-        if not isinstance(symbol, str):
-            continue
-        symbol = symbol.strip().upper()
-        if symbol == CLP or classes.get(symbol) not in COIN_CLASSES:
-            continue
-        units = _units(row)
-        value = _decimal(row.get("balancePrefCurrency"))
-        if units is None or value is None:
-            continue
-        balance, frozen, pending = units
-        if balance <= 0 or value <= 0:
-            continue
-        if frozen or pending:
-            logger.info("Skipo %s has frozen or pending units; no rate derived", symbol)
-            continue
-        rate = _rate(value / balance)
-        if rate is None:
-            continue
-        try:
-            rates.append(
-                ScrapedExchangeRate(
-                    institution="skipo",
-                    base_currency=symbol,
-                    quote_currency=CLP,
-                    rate=rate,
-                    source=RATE_SOURCE,
-                )
-            )
-        except ValueError:
-            logger.info("Skipo %s can't be stored as a rate currency, skipping", symbol)
-    return rates
+    if not isinstance(body, dict):
+        return None
+    market = body.get("market")
+    if market is not None and str(market).upper() != f"{symbol}-{CLP}":
+        return None
+    rate = _rate(body.get("rate"))
+    if rate is None:
+        return None
+    try:
+        return ScrapedExchangeRate(
+            institution="skipo",
+            base_currency=symbol,
+            quote_currency=CLP,
+            rate=rate,
+            source=RATE_SOURCE,
+            reported_as_of=_local_date(body.get("pricedAt")),
+        )
+    except ValueError:
+        return None
 
 
 def _parse_ledger_entry(entry: dict) -> ScrapedTransaction | None:
@@ -509,11 +498,39 @@ class SkipoScraper(BaseScraper):
         logger.info("Skipo: %d transactions", len(transactions))
         return transactions
 
-    async def _preferred_currency(self, client: httpx.AsyncClient) -> str | None:
-        """The account's preferred currency; nothing else of `/v2/account` is kept."""
-        account = await self._get_json(client, "/v2/account", "the account")
-        currency = account.get("preferredCurrency") if isinstance(account, dict) else None
-        return currency.upper() if isinstance(currency, str) else None
+    async def _coin_rates(
+        self, client: httpx.AsyncClient, symbols: list[str]
+    ) -> tuple[list[ScrapedExchangeRate], int]:
+        """Skipo's SELL price in CLP for each coin, and how many got none.
+
+        Any failure but a rejected key (no CLP market, a 5xx after retries, a
+        timeout, an unreadable answer) costs only that coin's rate.
+        """
+        rates: list[ScrapedExchangeRate] = []
+        missing = 0
+        for symbol in symbols:
+            rate = None
+            if _MARKET_SYMBOL_RE.fullmatch(symbol):
+                try:
+                    body = await self._get_json(
+                        client,
+                        f"/v2/markets/{symbol}-{CLP}/price",
+                        "a coin price",
+                        {"side": PRICE_SIDE},
+                    )
+                except SkipoAuthError:
+                    raise
+                except (httpx.HTTPError, SkipoApiError) as e:
+                    logger.warning(
+                        "Skipo %s price unavailable: %s", symbol, str(e) or type(e).__name__
+                    )
+                else:
+                    rate = _price_rate(symbol, body)
+            if rate is None:
+                missing += 1
+            else:
+                rates.append(rate)
+        return rates, missing
 
     async def scrape_products(self) -> ProductScrapeResult:
         """Balances as products, coin valuations as rates, and both legs' warnings."""
@@ -527,17 +544,20 @@ class SkipoScraper(BaseScraper):
             if not isinstance(rows, list):
                 raise SkipoApiError("Skipo sent an unexpected payload reading balances")
             rows = [row for row in rows if isinstance(row, dict)]
-            preferred = await self._preferred_currency(client)
+            classes = _asset_classes(assets)
+            products, balance_warnings = _parse_balances(rows, classes)
+            held = [
+                p.currency
+                for p in products
+                if p.kind == CRYPTO_KIND
+                and (p.metrics.units or p.metrics.frozen or p.metrics.pending)
+            ]
+            rates, missing = await self._coin_rates(client, held)
 
         # Taken only after the fetches, so a failing fetch can't lose them.
         warnings, self._warnings = self._warnings, []
-        classes = _asset_classes(assets)
-        products, balance_warnings = _parse_balances(rows, classes)
         warnings.extend(balance_warnings)
-        if preferred == CLP:
-            rates = _exchange_rates(rows, classes)
-        else:
-            logger.info("Skipo preferred currency is not CLP; no coin rates derived")
-            rates = []
+        if missing:
+            warnings.append(f"Skipo: no CLP price for {missing} coin(s)")
         logger.info("Skipo: %d products, %d rates", len(products), len(rates))
         return ProductScrapeResult(products, warnings, rates)

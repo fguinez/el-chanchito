@@ -23,10 +23,10 @@ from scrapers.institutions.skipo import (
     SkipoAuthError,
     SkipoScraper,
     _asset_classes,
-    _exchange_rates,
     _local_date,
     _parse_balances,
     _parse_ledger_entry,
+    _price_rate,
     _rate,
     _to_clp,
 )
@@ -96,6 +96,23 @@ def _entry(n: int, entry_type="DEPOSIT", amount="1000000", **overrides) -> dict:
     return row
 
 
+def _price(market: str, rate: str, side: str = "SELL") -> dict:
+    """A synthetic `/v2/markets/{market}/price` answer for one base unit."""
+    base = market.split("-")[0]
+    return {
+        "market": market,
+        "side": side,
+        "rate": rate,
+        "baseAmount": "1",
+        "quoteAmount": rate,
+        "indicative": True,
+        "pricedAt": "2026-01-16T02:30:00Z",
+        "assetFormat": "rebased",
+        "multiplier": "1",
+        "base": {"asset": base, "amount": "1"},
+    }
+
+
 _DEFAULT_BALANCES = [
     _balance("CLP", balance="2500000"),
     _balance("BTC", balance="0.12345678", pref="999999"),
@@ -107,8 +124,11 @@ class _Skipo:
     """Canned Skipo API behind an httpx.MockTransport.
 
     `ledger` maps a page number to its entries; `fail` lists ledger pages
-    answering 500; `status` forces every answer (as problem+json with
-    `code`). Like Skipo, it answers 401 unless the bearer key matches.
+    answering 500; `prices` maps a market ("BTC-CLP") to its SELL rate, or
+    to an int status to answer with; a market not in it answers 404.
+    `status` forces every answer (as problem+json with `code`). Like Skipo,
+    it answers 401 unless the bearer key matches, and 400 for a price
+    without `side`.
     """
 
     def __init__(
@@ -116,7 +136,7 @@ class _Skipo:
         balances=None,
         assets=None,
         ledger=None,
-        preferred="CLP",
+        prices=None,
         fail=(),
         status=None,
         code="unauthorized",
@@ -124,7 +144,7 @@ class _Skipo:
         self.balances = _DEFAULT_BALANCES if balances is None else balances
         self.assets = assets if assets is not None else [_asset(s, c) for s, c in _CLASSES.items()]
         self.ledger = ledger or {}
-        self.preferred = preferred
+        self.prices = {"BTC-CLP": "65000000.5"} if prices is None else prices
         self.fail = set(fail)
         self.status = status
         self.code = code
@@ -145,19 +165,14 @@ class _Skipo:
         if request.headers.get("Authorization") != f"Bearer {KEY}":
             return self._problem(401, "unauthorized")
         path = request.url.path
-        if path == "/v2/account":
-            return httpx.Response(
-                200,
-                json={
-                    "id": "acc_synthetic_0001",
-                    "username": "usuario_sintetico",
-                    "email": "user@example.com",
-                    "fullName": "Persona Sintetica",
-                    "nationalId": "00.000.000-0",
-                    "verificationStatus": "VERIFIED",
-                    "preferredCurrency": self.preferred,
-                },
-            )
+        if path.startswith("/v2/markets/") and path.endswith("/price"):
+            if "side" not in request.url.params:
+                return self._problem(400, "validation_error")
+            market = path.split("/")[3]
+            price = self.prices.get(market, 404)
+            if isinstance(price, int):
+                return self._problem(price, "not_found" if price == 404 else "internal_error")
+            return httpx.Response(200, json=_price(market, price, request.url.params["side"]))
         if path == "/v2/balances":
             return httpx.Response(200, json=self.balances)
         if path == "/v2/assets":
@@ -325,47 +340,38 @@ class TestParseBalances:
         assert warnings == ["Skipo: 2 tokenized stock holding(s) not imported"]
 
 
-class TestExchangeRates:
-    def test_rate_is_clp_value_over_units(self):
-        """A held coin's rate is its CLP value divided by its units, institution-wide."""
-        rates = _exchange_rates([_balance("BTC", balance="0.5", pref="1000000")], _CLASSES)
+class TestPriceRate:
+    def test_sell_price_becomes_an_institution_rate(self):
+        """The price's rate is CLP per unit, institution-wide, dated in Santiago."""
+        rate = _price_rate("BTC", _price("BTC-CLP", "65000000.123456789"))
 
-        assert len(rates) == 1
-        rate = rates[0]
+        assert rate is not None
         assert (rate.institution, rate.base_currency, rate.quote_currency) == ("skipo", "BTC", "CLP")
-        assert rate.rate == Decimal("2000000")
+        assert rate.rate == Decimal("65000000.12345679")
         assert rate.product is None
-        assert rate.source
+        assert rate.reported_as_of == date(2026, 1, 15)
+        assert "venta" in rate.source
 
-    def test_rate_rounds_half_up_to_eight_decimals(self):
-        """The quotient is rounded half up to what `exchange_rates.rate` holds."""
-        rates = _exchange_rates([_balance("USDC", balance="3", pref="2")], _CLASSES)
+    def test_unreadable_priced_at_leaves_no_date(self):
+        """A missing pricedAt keeps the rate, undated."""
+        rate = _price_rate("BTC", {**_price("BTC-CLP", "999999"), "pricedAt": None})
 
-        assert rates[0].rate == Decimal("0.66666667")
+        assert rate is not None and rate.reported_as_of is None
 
     @pytest.mark.parametrize(
-        "row",
+        ("symbol", "body"),
         [
-            pytest.param(_balance("CLP", balance="2500000", pref="2500000"), id="clp"),
-            pytest.param(_balance("NVDAX", balance="1", pref="999999"), id="stock"),
-            pytest.param(_balance("USD", balance="1", pref="999999"), id="other-fiat"),
-            pytest.param(_balance("BTC", balance="0", pref="999999"), id="zero-units"),
-            pytest.param(_balance("BTC", balance="0.5", pref="0"), id="zero-value"),
-            pytest.param(_balance("BTC", balance="0.5", pref="n/a"), id="unreadable-value"),
-            pytest.param(_balance("BTC", balance="0.5", frozen="0.1", pref="999999"), id="frozen-units"),
-            pytest.param(_balance("BTC", balance="0.5", pending="0.1", pref="999999"), id="pending-units"),
-            pytest.param(_balance("BTC", balance="0.00000001", pref="999999999999"), id="too-large"),
+            pytest.param("BTC", _price("ETH-CLP", "999999"), id="other-market"),
+            pytest.param("BTC", _price("BTC-CLP", "0"), id="zero-rate"),
+            pytest.param("BTC", _price("BTC-CLP", "abc"), id="unreadable-rate"),
+            pytest.param("BTC", _price("BTC-CLP", "1" + "0" * 40), id="huge-rate"),
+            pytest.param("BTC", ["not", "an", "object"], id="not-an-object"),
+            pytest.param("1INCH", _price("1INCH-CLP", "999999"), id="symbol-outside-pattern"),
         ],
     )
-    def test_no_rate_when_it_would_be_wrong_or_meaningless(self, row):
-        """No rate for CLP, non-coins, empty or ambiguous holdings, or values that don't fit."""
-        assert _exchange_rates([row], _CLASSES) == []
-
-    def test_symbol_outside_the_currency_pattern_is_skipped(self):
-        """A coin whose symbol can't be a rate currency is skipped, not raised."""
-        classes = {**_CLASSES, "1INCH": "CRYPTO"}
-
-        assert _exchange_rates([_balance("1INCH", balance="1", pref="999999")], classes) == []
+    def test_unusable_answers_yield_no_rate(self, symbol, body):
+        """No rate rather than a wrong one, and nothing raises."""
+        assert _price_rate(symbol, body) is None
 
 
 class TestRate:
@@ -482,7 +488,9 @@ class TestScrapeProducts:
             ("crypto", "BTC"),
             ("wallet", "CLP"),
         ]
-        assert [r.base_currency for r in result.exchange_rates] == ["BTC"]
+        assert [(r.base_currency, r.rate) for r in result.exchange_rates] == [
+            ("BTC", Decimal("65000000.5"))
+        ]
         assert result.warnings == []
 
     def test_stock_holdings_make_the_run_partial(self, monkeypatch):
@@ -495,14 +503,65 @@ class TestScrapeProducts:
         assert "NVDAX" not in {p.currency for p in result.products}
         assert result.warnings == ["Skipo: 1 tokenized stock holding(s) not imported"]
 
-    def test_no_rates_unless_the_preferred_currency_is_clp(self, monkeypatch):
-        """Values in another preferred currency are not CLP rates."""
-        _install(monkeypatch, _Skipo(preferred="USD"))
+    def test_prices_are_asked_for_the_sell_side_of_held_coins(self, monkeypatch):
+        """Only held coins are priced, against CLP, on the SELL side."""
+        fake = _Skipo()
+        _install(monkeypatch, fake)
+
+        asyncio.run(self.scraper.scrape_products())
+
+        priced = [
+            (r.url.path, dict(r.url.params))
+            for r in fake.requests
+            if r.url.path.startswith("/v2/markets/")
+        ]
+        assert priced == [("/v2/markets/BTC-CLP/price", {"side": "SELL"})]
+
+    @pytest.mark.parametrize(
+        "price",
+        [
+            pytest.param(404, id="no-clp-market"),
+            pytest.param(422, id="unprocessable"),
+            pytest.param(500, id="server-error"),
+            pytest.param("abc", id="unreadable-rate"),
+        ],
+    )
+    def test_a_missing_price_is_a_warning_not_a_failure(self, monkeypatch, price):
+        """A coin without a usable price keeps its product, gets no rate and is counted."""
+        _install(monkeypatch, _Skipo(prices={"BTC-CLP": price}))
 
         result = asyncio.run(self.scraper.scrape_products())
 
+        assert "BTC" in {p.currency for p in result.products}
         assert result.exchange_rates == []
+        assert result.warnings == ["Skipo: no CLP price for 1 coin(s)"]
+
+    def test_a_price_timeout_is_a_warning(self, monkeypatch):
+        """A timeout on one price costs only that rate."""
+        fake = _Skipo()
+        handler = fake.handler
+
+        def timeout_on_price(request):
+            if request.url.path.startswith("/v2/markets/"):
+                raise httpx.ReadTimeout("")
+            return handler(request)
+
+        fake.handler = timeout_on_price
+        _install(monkeypatch, fake)
+
+        result = asyncio.run(self.scraper.scrape_products())
+
         assert len(result.products) == 2
+        assert result.warnings == ["Skipo: no CLP price for 1 coin(s)"]
+
+    def test_a_rejected_key_on_a_price_still_raises(self, monkeypatch):
+        """A 401 or 403 on a price is an auth failure, not a missing rate."""
+        _install(monkeypatch, _Skipo(prices={"BTC-CLP": 403}))
+
+        with pytest.raises(SkipoAuthError) as excinfo:
+            asyncio.run(self.scraper.scrape_products())
+
+        assert "403" in str(excinfo.value)
 
     def test_only_get_requests_are_sent(self, monkeypatch):
         """The scraper never writes to Skipo."""
@@ -512,7 +571,11 @@ class TestScrapeProducts:
         asyncio.run(self.scraper.scrape_products())
 
         assert {r.method for r in fake.requests} == {"GET"}
-        assert {r.url.path for r in fake.requests} == {"/v2/assets", "/v2/balances", "/v2/account"}
+        assert {r.url.path for r in fake.requests} == {
+            "/v2/assets",
+            "/v2/balances",
+            "/v2/markets/BTC-CLP/price",
+        }
 
     @pytest.mark.parametrize(
         ("status", "code"),
