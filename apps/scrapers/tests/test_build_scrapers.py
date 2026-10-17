@@ -15,6 +15,8 @@ _VALUES = {
     "FINTUAL_EMAIL": "user@example.com",
     "FINTUAL_PASSWORD": "synthetic-password",
     "FINTUAL_TOKEN": "synthetic-token",
+    "RACIONAL_EMAIL": "user@example.com",
+    "RACIONAL_PASSWORD": "synthetic-password",
     "BUDA_API_KEY": "synthetic-key",
     "BUDA_API_SECRET": "synthetic-secret",
     "BANCHILE_RUT": "00.000.000-0",
@@ -26,10 +28,15 @@ _VALUES = {
     "EMAIL_IMAP_PASSWORD": "synthetic-password",
 }
 # Read by the constructors, not the gating; cleared so a stray value can't leak in.
-_CONSTRUCTOR_VARS = ("FINTUAL_SESSION_FILE", "EMAIL_LOOKBACK_DAYS")
+_CONSTRUCTOR_VARS = (
+    "FINTUAL_SESSION_FILE",
+    "EMAIL_LOOKBACK_DAYS",
+    "RACIONAL_SESSION_FILE",
+    "RACIONAL_FIREBASE_API_KEY",
+)
 
 _EMAIL = ("EMAIL_IMAP_HOST", "EMAIL_IMAP_USER", "EMAIL_IMAP_PASSWORD")
-_ALL = {"fintual", "buda", "banchile", "bci_lider", "mach", "mercadopago", "tenpo"}
+_ALL = {"fintual", "racional", "buda", "banchile", "bci_lider", "mach", "mercadopago", "tenpo"}
 
 
 @pytest.fixture(autouse=True)
@@ -46,6 +53,9 @@ def _clean_env(monkeypatch):
         pytest.param(("FINTUAL_EMAIL", "FINTUAL_TOKEN"), {"fintual"}, id="fintual-token"),
         pytest.param(("FINTUAL_EMAIL",), set(), id="fintual-email-only"),
         pytest.param(("FINTUAL_PASSWORD", "FINTUAL_TOKEN"), set(), id="fintual-no-email"),
+        pytest.param(("RACIONAL_EMAIL", "RACIONAL_PASSWORD"), {"racional"}, id="racional"),
+        pytest.param(("RACIONAL_EMAIL",), set(), id="racional-email-only"),
+        pytest.param(("RACIONAL_PASSWORD",), set(), id="racional-password-only"),
         pytest.param(("BUDA_API_KEY", "BUDA_API_SECRET"), {"buda"}, id="buda"),
         pytest.param(("BUDA_API_KEY",), set(), id="buda-key-only"),
         pytest.param(("BUDA_API_SECRET",), set(), id="buda-secret-only"),

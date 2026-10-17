@@ -34,6 +34,7 @@ from scrapers.institutions import (
     FintualScraper,
     MachScraper,
     MercadoPagoScraper,
+    RacionalScraper,
     TenpoScraper,
 )
 
@@ -130,6 +131,10 @@ def build_scrapers() -> dict[str, BaseScraper]:
         scrapers["fintual"] = FintualScraper()
         logger.info("Fintual scraper enabled")
 
+    if os.environ.get("RACIONAL_EMAIL") and os.environ.get("RACIONAL_PASSWORD"):
+        scrapers["racional"] = RacionalScraper()
+        logger.info("Racional scraper enabled")
+
     if os.environ.get("BUDA_API_KEY") and os.environ.get("BUDA_API_SECRET"):
         scrapers["buda"] = BudaScraper()
         logger.info("Buda scraper enabled")
@@ -172,6 +177,7 @@ _EMAIL_INTERVAL_MINUTES = 30
 _SCHEDULES: dict[str, dict] = {
     "fintual":      {"hours": 6,  "label": "Fintual API (every 6h)"},
     "buda":         {"hours": 1,  "label": "Buda API (every 1h)"},
+    "racional":     {"hours": 6,  "label": "Racional API (every 6h)"},
     "banchile":     {"hours": 24, "label": "BanChile (daily)"},
     "bci_lider":    {"hours": 24, "label": "BCI Lider (daily)"},
     "mach":         {"minutes": _EMAIL_INTERVAL_MINUTES, "label": "MACH email (every 30m)"},
