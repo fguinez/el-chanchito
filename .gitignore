@@ -37,7 +37,8 @@ coverage/
 local/
 .fintual_session.json
 .banchile_session.json*
-.bci_lider_chrome_profile/
+# Per-institution browser profiles (live sessions), e.g. .bci_lider_chrome_profile/
+.*_chrome_profile*/
 .agents/*local*
 **/.claude/*
 !/.claude/skills/
