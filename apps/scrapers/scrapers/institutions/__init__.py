@@ -6,13 +6,16 @@ drives its own Playwright login for both legs
 (`scrapers.backends.banchile_web` for balances,
 `scrapers.backends.banchile_movements` for movements and the shared session);
 the BCI Lider scraper consumes `scrapers.backends.bci_lider_web` (a real Chrome driven
-over CDP) for both legs, and the Santander scraper consumes
+over CDP) for both legs, the Santander scraper consumes
 `scrapers.backends.santander_web` (a headless login whose data comes from the
-SPA's own JSON) for both legs. Buda, Fintual and Skipo are self-contained
-(HTTP APIs).
+SPA's own JSON) for both legs, and the Banco Falabella scraper consumes
+`scrapers.backends.banco_falabella_web` (a headless login whose data is read
+from the rendered DOM) for both legs. Buda, Fintual and Skipo are
+self-contained (HTTP APIs).
 """
 
 from scrapers.institutions.banchile import BanChileScraper
+from scrapers.institutions.banco_falabella import BancoFalabellaScraper
 from scrapers.institutions.bci_lider import BciLiderScraper
 from scrapers.institutions.buda import BudaScraper
 from scrapers.institutions.fintual import FintualScraper
@@ -24,6 +27,7 @@ from scrapers.institutions.tenpo import TenpoScraper
 
 __all__ = [
     "BanChileScraper",
+    "BancoFalabellaScraper",
     "BciLiderScraper",
     "BudaScraper",
     "FintualScraper",
