@@ -1,5 +1,6 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { failureBody } from "@/lib/api/validation";
 import {
   institutions,
   accounts,
@@ -11,7 +12,12 @@ import { and, eq, desc } from "drizzle-orm";
 import { rateInfoFor, ratesFor, toClp } from "@/lib/rates";
 import { getRateBook } from "@/lib/rate-book";
 import { isRetiredGhost } from "@/lib/retired-products";
-import type { ProductMetrics } from "@/lib/db/schema";
+import {
+  isUniqueViolation,
+  planProductUpdate,
+  validateProductPatch,
+} from "@/lib/management";
+import type { ProductKind, ProductMetrics } from "@/lib/db/schema";
 import { formatLocationText } from "@/lib/transaction-location";
 
 // Next 16: dynamic segment params arrive as a Promise on the context arg.
@@ -48,6 +54,16 @@ export interface ProductTransaction {
   location: string | null;
 }
 
+/** The product this one hangs from (debit card -> checking, línea -> cta. cte.). */
+export interface ProductParent {
+  id: string;
+  institutionSlug: string;
+  slug: string;
+  name: string;
+  kind: ProductKind;
+  currency: string;
+}
+
 /**
  * GET /api/institutions/[slug]/products/[product] — one product by its
  * institution-unique slug, with its balance-over-time history from
@@ -74,6 +90,7 @@ export async function GET(_request: Request, { params }: Context) {
       parentProductId: products.parentProductId,
       kind: products.kind,
       productName: products.name,
+      productDefaultName: products.defaultName,
       productSlug: products.slug,
       currency: products.currency,
       currentBalance: products.currentBalance,
@@ -82,6 +99,7 @@ export async function GET(_request: Request, { params }: Context) {
       attributes: products.attributes,
       metrics: products.metrics,
       isActive: products.isActive,
+      displayOrder: products.displayOrder,
     })
     .from(products)
     .innerJoin(accounts, eq(products.accountId, accounts.id))
@@ -96,7 +114,7 @@ export async function GET(_request: Request, { params }: Context) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  const [snapshots, txns, book] = await Promise.all([
+  const [snapshots, txns, book, parent] = await Promise.all([
     db
       .select({
         balance: productSnapshots.balance,
@@ -129,6 +147,7 @@ export async function GET(_request: Request, { params }: Context) {
       // One extra row tells whether the cap dropped anything.
       .limit(MAX_TRANSACTIONS + 1),
     getRateBook(),
+    row.parentProductId ? loadParent(row.parentProductId) : null,
   ]);
   const target = {
     productId: row.productId,
@@ -189,6 +208,7 @@ export async function GET(_request: Request, { params }: Context) {
       parentProductId: row.parentProductId,
       kind: row.kind,
       name: row.productName,
+      defaultName: row.productDefaultName,
       slug: row.productSlug,
       currency: row.currency,
       currentBalance,
@@ -206,9 +226,164 @@ export async function GET(_request: Request, { params }: Context) {
       attributes: row.attributes,
       metrics: row.metrics,
       isActive: row.isActive,
+      displayOrder: row.displayOrder,
     },
+    parent,
     history,
     transactions: productTransactions,
     transactionsTruncated,
   });
+}
+
+/** The parent product's identity for the detail page, or null when it no
+ *  longer resolves (or is a retired ghost, which the UI treats as gone). */
+async function loadParent(parentId: string): Promise<ProductParent | null> {
+  const [parent] = await db
+    .select({
+      id: products.id,
+      institutionSlug: institutions.slug,
+      slug: products.slug,
+      name: products.name,
+      kind: products.kind,
+      currency: products.currency,
+      isActive: products.isActive,
+      currentBalance: products.currentBalance,
+    })
+    .from(products)
+    .innerJoin(accounts, eq(products.accountId, accounts.id))
+    .innerJoin(institutions, eq(accounts.institutionId, institutions.id))
+    .where(eq(products.id, parentId))
+    .limit(1);
+  if (!parent || isRetiredGhost(parent)) return null;
+  return {
+    id: parent.id,
+    institutionSlug: parent.institutionSlug,
+    slug: parent.slug,
+    name: parent.name,
+    kind: parent.kind,
+    currency: parent.currency,
+  };
+}
+
+/**
+ * PATCH /api/institutions/[slug]/products/[product]: edit a product's display
+ * metadata: `name`, `slug`, `parentProductId`, `isActive`, `displayOrder`
+ * (see lib/management for the rules). `name: null` resets the name to the
+ * product's `defaultName` (the scrapers' name, which it then follows again on
+ * later scrapes); a blank string is a 400. A rename never touches the slug; a new
+ * slug moves the product's page URL, while monitors keep working since they
+ * reference products by uuid. Returns the product's new identity; 400 for a
+ * bad body, 404 for an unknown or retired product, 409 for a taken slug or a
+ * deactivation that would hide the product.
+ */
+export async function PATCH(request: NextRequest, { params }: Context) {
+  try {
+    const { slug, product } = await params;
+
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    }
+    const patch = validateProductPatch(body);
+    if (!patch.ok) {
+      return NextResponse.json(failureBody(patch), { status: patch.status });
+    }
+
+    const result = await db.transaction(async (tx) => {
+      // Locking the institution serializes edits across its products, so two
+      // concurrent PATCHes can't claim one slug or link two products into a
+      // loop; locking the product keeps its balance (the deactivation rule)
+      // steady against a scrape landing mid-edit. NO KEY UPDATE does both
+      // without blocking the scraper's inserts that reference these rows.
+      const [institution] = await tx
+        .select({ id: institutions.id })
+        .from(institutions)
+        .where(eq(institutions.slug, slug))
+        .for("no key update");
+      if (!institution) return null;
+
+      const [row] = await tx
+        .select({
+          id: products.id,
+          slug: products.slug,
+          defaultName: products.defaultName,
+          parentProductId: products.parentProductId,
+          isActive: products.isActive,
+          currentBalance: products.currentBalance,
+        })
+        .from(products)
+        .innerJoin(accounts, eq(products.accountId, accounts.id))
+        .where(
+          and(
+            eq(accounts.institutionId, institution.id),
+            eq(products.slug, product)
+          )
+        )
+        .limit(1)
+        .for("no key update", { of: products });
+      if (!row || isRetiredGhost(row)) return null;
+
+      // Every product of the institution: slugs are unique across all of its
+      // accounts, and parents may live under any of them.
+      const institutionProducts = await tx
+        .select({
+          id: products.id,
+          slug: products.slug,
+          parentProductId: products.parentProductId,
+          isActive: products.isActive,
+          currentBalance: products.currentBalance,
+        })
+        .from(products)
+        .innerJoin(accounts, eq(products.accountId, accounts.id))
+        .where(eq(accounts.institutionId, institution.id));
+
+      const plan = planProductUpdate(row, patch.value, institutionProducts);
+      if (!plan.ok) return plan;
+
+      const [updated] = await tx
+        .update(products)
+        .set({ ...plan.value, updatedAt: new Date() })
+        .where(eq(products.id, row.id))
+        .returning({
+          id: products.id,
+          slug: products.slug,
+          name: products.name,
+          defaultName: products.defaultName,
+          parentProductId: products.parentProductId,
+          isActive: products.isActive,
+          displayOrder: products.displayOrder,
+        });
+      return { ok: true as const, value: updated };
+    });
+
+    if (!result) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+    if (!result.ok) {
+      return NextResponse.json(failureBody(result), { status: result.status });
+    }
+    return NextResponse.json({
+      institutionSlug: slug,
+      product: result.value,
+    });
+  } catch (error) {
+    // The (account_id, slug) index backstops the institution-wide check
+    // against the scraper writer minting the same slug mid-edit.
+    if (isUniqueViolation(error, "uq_products_account_slug")) {
+      return NextResponse.json(
+        {
+          error: "That slug is already used by another product of this institution",
+          field: "slug",
+        },
+        { status: 409 }
+      );
+    }
+    console.error(
+      "PATCH /api/institutions/[slug]/products/[product] failed:",
+      error
+    );
+    return NextResponse.json({ error: "Internal error" }, { status: 500 });
+  }
 }

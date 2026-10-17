@@ -143,6 +143,8 @@ For the email parser, you need a Gmail App Password (not your regular password):
 | **Categorías** | `/categories` | Categories and keyword rules for automatic categorization |
 | **Gastos Fijos** | `/fixed` | Monthly fixed expenses with shared ratio (69%) |
 | **Transferencias** | `/transfers` | Internal money movements (pending/resolved) |
+| **Instituciones** | `/institutions` | Every institution and its products with balances; edit institutions, accounts and products from their detail pages |
+| **Configuracion** | `/settings` | Budget parameters, income split calculator, monthly reset |
 
 ## Daily Workflow
 
@@ -334,6 +336,29 @@ make scrapers-start
 SCRAPER_CONTROL_URL=http://127.0.0.1:8080 make dev-web
 ```
 
+## Managing institutions and products
+
+Scrapers create institutions, accounts and products with generated names
+("Banco de Chile - checking"). The **Editar** buttons on the Instituciones detail
+pages rename them and fill in what no scraper writes:
+
+- **Institution** (`/institutions/{slug}`): name, kind, country and site, plus a
+  rename field per account. The slug is read-only: scrapers resolve the
+  institution by it. This is also how the `csv_import` institution that CSV
+  imports create gets a proper name.
+- **Product** (`/institutions/{slug}/{product}`): name, the product it hangs from
+  (a debit card under its checking account), display order and the active flag.
+  Renaming never changes the slug. The slug has its own **Cambiar slug** action,
+  since it moves the product page's URL; monitors are unaffected because they
+  store product ids.
+
+Kind and currency are read-only: together with the external reference they are
+how scrapers recognize a product, so changing them would split it in two on the
+next scrape. Scrapers stop updating a deactivated product's balance, though its
+movements keep importing; its last balance keeps showing and counting toward net
+worth, and monitors that reference it report no data. A product with no balance
+cannot be deactivated, because it would disappear from the dashboard.
+
 ## CSV Import
 
 1. Go to **Gastos**
@@ -394,13 +419,13 @@ All API routes are under `/api/`:
 | POST | `/api/monitors/preview` | Validate and evaluate an unsaved monitor (`monitorId` applies that monitor's variaciones) |
 | GET/POST | `/api/monitors/[id]/adjustments` | Variaciones (`?month=YYYY-MM`); create from `{ adjustmentDate, amount, description? }` |
 | PATCH/DELETE | `/api/monitors/[id]/adjustments/[adjustmentId]` | Edit or delete one variación |
-| GET | `/api/institutions` | Institutions + nested products + CLP subtotals |
-| GET | `/api/institutions/[slug]` | One institution, same shape as a list item |
-| GET | `/api/institutions/[slug]/products/[product]` | One product with its balance history and recent transactions |
+| GET | `/api/institutions` | Institutions + nested products (balances included) + CLP subtotals |
+| GET/PATCH | `/api/institutions/[slug]` | One institution, same shape as a list item; edit `name`, `kind`, `country`, `url` |
+| GET/PATCH | `/api/institutions/[slug]/products/[product]` | One product (with its `defaultName`) plus its balance history and recent transactions; edit `name` (`null` resets it to `defaultName`), `slug`, `parentProductId`, `isActive`, `displayOrder` |
+| PATCH | `/api/accounts/[id]` | Rename an account (`name`) |
 | POST | `/api/institutions/refresh` | Trigger a scrape (all, or `{institution}`) |
 | GET | `/api/scrapers` | Latest run per scraper |
 | GET | `/api/scrapers/available` | Enabled scraper slugs, from the scraper service |
-| GET | `/api/balances` | Latest balance per product |
 | GET/POST | `/api/transactions` | Transactions (list, create; create takes an optional `location`) |
 | GET/PATCH | `/api/transactions/[id]` | One transaction with product, institution, category and location; PATCH sets or clears only `{ location }` |
 | POST | `/api/import` | CSV import |

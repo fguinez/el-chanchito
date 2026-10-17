@@ -26,6 +26,7 @@ import {
   visibleColumns,
   type ColumnCell,
 } from "@/lib/product-columns";
+import { displayProductName } from "@/lib/product-names";
 import { FAMILY_INFO, KIND_INFO } from "@chanchito/product-model";
 import type {
   ColumnSpec,
@@ -43,6 +44,8 @@ export interface InstitutionProduct {
   parentProductId: string | null;
   kind: ProductKind;
   name: string;
+  /** The scrapers' name for the product; `name` equals it until renamed. */
+  defaultName: string;
   slug: string;
   currency: string;
   currentBalance: number | null;
@@ -54,6 +57,17 @@ export interface InstitutionProduct {
   attributes: ProductAttributes | Record<string, never>;
   metrics: ProductMetrics | null;
   isActive: boolean;
+  displayOrder: number;
+}
+
+/** The product another one hangs from, as the product detail route returns it. */
+export interface ProductParent {
+  id: string;
+  institutionSlug: string;
+  slug: string;
+  name: string;
+  kind: ProductKind;
+  currency: string;
 }
 
 export interface InstitutionSubtotals {
@@ -86,15 +100,11 @@ export interface InstitutionsResponse {
   totals: InstitutionTotals;
 }
 
-// Institution kinds (bank/fintech/...) are a page-local vocabulary; product
-// kinds come from the shared registry (KIND_INFO: labels + asset/liability roles).
-export const INSTITUTION_KIND_LABELS: Record<string, string> = {
-  bank: "Banco",
-  fintech: "Fintech",
-  exchange: "Exchange",
-  asset_manager: "Gestora",
-  other: "Otro",
-};
+// Institution kinds (bank/fintech/...) are a dashboard-local vocabulary kept
+// with the management API's validation; product kinds come from the shared
+// registry (KIND_INFO: labels + asset/liability roles).
+export { INSTITUTION_KIND_LABELS } from "@/lib/management";
+export { displayProductName };
 
 // Latest scraper run per institution, from GET /api/scrapers (used for polling).
 export interface ScraperRun {
@@ -141,33 +151,6 @@ export function timeAgo(dateStr: string): string {
 export function formatBalance(currency: string, value: number | null): string | null {
   if (value == null) return null;
   return formatAmount(currency, value);
-}
-
-/**
- * A meaningful label for the Producto column. Scraped products are auto-named
- * "Institution - kind" (e.g. "Buda - crypto (ETH)"), so a raw name carries no
- * more information than the Tipo badge. When that's the case we fall back to
- * the currency for crypto (CLP / ETH / BTC …) and to the friendly kind label
- * otherwise; anything a human named stays untouched.
- */
-export function displayProductName(
-  product: Pick<InstitutionProduct, "name" | "kind" | "currency">,
-  institutionName: string
-): string {
-  const prefix = `${institutionName} - `;
-  const cleaned = (
-    product.name.startsWith(prefix)
-      ? product.name.slice(prefix.length)
-      : product.name
-  ).trim();
-
-  const isGeneric =
-    cleaned === product.kind || cleaned.startsWith(`${product.kind} (`);
-  if (isGeneric || !cleaned) {
-    if (product.kind === "crypto") return product.currency;
-    return KIND_INFO[product.kind].labelEs;
-  }
-  return cleaned;
 }
 
 /** The product's credit limit (cupo) as observed in its latest metrics. */

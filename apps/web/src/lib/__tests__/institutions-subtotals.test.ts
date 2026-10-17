@@ -20,6 +20,7 @@ function product(overrides: Partial<ApiProduct>): ApiProduct {
     parentProductId: null,
     kind: "savings",
     name: "Cuenta de prueba",
+    defaultName: "Cuenta de prueba",
     slug: "cuenta-prueba",
     currency: "USD",
     currentBalance: 1234.56,
@@ -30,6 +31,7 @@ function product(overrides: Partial<ApiProduct>): ApiProduct {
     attributes: {},
     metrics: null,
     isActive: true,
+    displayOrder: 0,
     ...overrides,
   };
 }

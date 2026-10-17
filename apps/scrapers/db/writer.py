@@ -134,8 +134,11 @@ def _resolve_product(
     Walks the chain institution -> account -> product, creating missing links.
     Single-user deployment: everything attaches to the oldest user. The product
     step upserts on the identity index so concurrent writers can't race a
-    SELECT-then-INSERT; `name` and `slug` are only used for the INSERT values
-    (create-only), so a user rename is never overwritten and slugs stay stable.
+    SELECT-then-INSERT. The slug is create-only, so it stays stable. A
+    scraper-supplied `name` refreshes `default_name` and moves `name` with it
+    only while the user has not renamed the product. Without one (the
+    transaction path resolves by identity alone) both columns are left as they
+    are, so the generic default never flips a scraper's name back and forth.
     """
     row = conn.execute(
         "SELECT id, name FROM institutions WHERE slug = %s", (institution_slug,)
@@ -197,21 +200,30 @@ def _resolve_product(
     slug = unique_slug(slugify(product_name, kind), taken)
     product_row = conn.execute(
         """
-        INSERT INTO products (id, account_id, name, slug, kind, currency,
-                              external_ref)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO products (id, account_id, name, default_name, slug, kind,
+                              currency, external_ref)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (account_id, kind, currency, COALESCE(external_ref, ''))
-        DO UPDATE SET updated_at = now()
+        DO UPDATE SET
+            name = CASE WHEN %s AND products.name = products.default_name
+                        THEN EXCLUDED.default_name
+                        ELSE products.name END,
+            default_name = CASE WHEN %s THEN EXCLUDED.default_name
+                                ELSE products.default_name END,
+            updated_at = now()
         RETURNING id
         """,
         (
             str(uuid4()),
             account_id,
             product_name,
+            product_name,
             slug,
             kind,
             currency,
             external_ref,
+            name is not None,
+            name is not None,
         ),
     ).fetchone()
     return product_row[0]
