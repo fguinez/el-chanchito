@@ -7,6 +7,7 @@
 // `today` is the caller's local day (formatLocalDate), never the UTC date.
 
 import { calcPersonalAmount } from "./budget-engine";
+import { isValidDay } from "./monitors/dates";
 import type { ValidationFailure, ValidationResult } from "./monitors/validate";
 import { formatPlainDateEs } from "./utils";
 
@@ -31,7 +32,6 @@ export const DEFAULT_SHARED_RATIO = "0.6900";
 
 const INT32_MIN = -2_147_483_648;
 const INT32_MAX = 2_147_483_647;
-const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 
 /** Both bounds are inclusive: an expense ending today is still active. */
 export function fixedExpenseStatus(
@@ -113,16 +113,7 @@ export function formatActiveWindow({
 
 /** A real calendar date in YYYY-MM-DD form (rejects 2026-02-30, 2026-9-1). */
 export function isCalendarDate(value: unknown): value is string {
-  if (typeof value !== "string") return false;
-  const match = DATE_RE.exec(value);
-  if (!match) return false;
-  const [year, month, day] = match.slice(1).map(Number);
-  const date = new Date(Date.UTC(year, month - 1, day));
-  return (
-    date.getUTCFullYear() === year &&
-    date.getUTCMonth() === month - 1 &&
-    date.getUTCDate() === day
-  );
+  return typeof value === "string" && isValidDay(value);
 }
 
 // ---------------------------------------------------------------------------

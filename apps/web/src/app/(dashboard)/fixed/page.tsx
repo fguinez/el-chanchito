@@ -34,7 +34,7 @@ import {
   sortByStatus,
   type FixedExpense,
 } from "@/lib/fixed-expenses";
-import { formatLocalDate } from "@/lib/monitors/history";
+import { formatLocalDate } from "@/lib/monitors/dates";
 import { Trash2 } from "lucide-react";
 
 const STATUS_BADGES = {
