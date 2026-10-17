@@ -253,6 +253,12 @@ def _usd_from_text(value) -> Optional[Decimal]:
     last is the decimal separator when both appear; a lone "." is a thousands
     separator only when exactly three digits follow it, as on every figure this
     portal prints. Never rounded to a whole unit: cents are kept, quantized.
+
+    A lone "," is always the decimal separator, the portal's Chilean format
+    ("." groups thousands, "," starts the decimals), even with exactly three
+    digits after it ("1,234" reads 1.23 after quantizing, never 1234). That
+    case is ambiguous in isolation, so it is logged at WARNING while the USD
+    row shape is unverified.
     """
     if _number(value) is not None:
         return _usd(value)
@@ -265,6 +271,12 @@ def _usd_from_text(value) -> Optional[Decimal]:
         else:
             cleaned = cleaned.replace(",", "")
     elif "," in cleaned:
+        if cleaned.count(",") == 1 and len(cleaned.rsplit(",", 1)[-1]) == 3:
+            # WARNING until a real USD row confirms the format (issue #82).
+            logger.warning(
+                "BanChile: a USD amount has three digits after a lone comma; "
+                "reading the comma as the decimal separator"
+            )
         cleaned = cleaned.replace(",", "." if cleaned.count(",") == 1 else "")
     elif cleaned.count(".") > 1 or (
         "." in cleaned and len(cleaned.rsplit(".", 1)[-1]) == 3
@@ -1267,9 +1279,10 @@ def _select_currency(page, currency: str, timeout_ms: int) -> _StepResult:
     """Open the dialog's currency select and pick `currency` (it defaults to USD).
 
     USD is picked explicitly too rather than trusted as the default, so both
-    drives go through the same steps. `_STEP_ABSENT` means the list opened and
-    none of its options is `currency`'s; an empty or unreadable list is a
-    failure, since that is what a slow render looks like.
+    drives go through the same steps. `_STEP_ABSENT` means the list opened with
+    another currency recognised and none of its options is `currency`'s; an
+    empty or unrecognised list is a failure, since that is what a slow render
+    looks like.
     """
     try:
         select = page.locator(_CURRENCY_SELECT_SELECTOR).first
@@ -1282,9 +1295,17 @@ def _select_currency(page, currency: str, timeout_ms: int) -> _StepResult:
         page.wait_for_timeout(_DIALOG_SETTLE_MS)
         options = page.locator(_CURRENCY_OPTION_SELECTOR)
         texts = [options.nth(i).inner_text() or "" for i in range(options.count())]
-        logger.debug("BanChile: currency options offered: %s", texts)
+        # The count and the currencies recognised, never the raw option text.
+        recognised = [
+            c for c in _CURRENCY_OPTION_RES if matching_option_index(texts, c) is not None
+        ]
+        logger.debug(
+            "BanChile: %d currency option(s); recognised: %s", len(texts), recognised
+        )
         if not texts:
             return _StepResult(_STEP_FAILED, "currency list did not open")
+        if not recognised:
+            return _StepResult(_STEP_FAILED, "no currency option recognised")
         index = matching_option_index(texts, currency)
         if index is None:
             return _StepResult(_STEP_ABSENT, f"no {currency} option")
@@ -1500,6 +1521,16 @@ def _movements_from_cartola(
         movement = parse_cartola_movement(raw, operation_id, currency)
         if movement is not None:
             movements.append(movement)
+    if currency != "CLP":
+        # One line per cartola, no figures: these keys rest on the id alone.
+        no_saldo = sum(1 for m in movements if not m.fingerprint[1])
+        if no_saldo:
+            logger.warning(
+                "BanChile: %d %s cartola row(s) have no parseable saldo; their "
+                "fallback key rests on the composite id alone",
+                no_saldo,
+                currency,
+            )
     with_id = sum(1 for m in movements if m.operation_id)
     logger.info(
         "BanChile: %d %s checking movements (%d with an operation id)",

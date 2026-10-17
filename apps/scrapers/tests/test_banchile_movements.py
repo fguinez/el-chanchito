@@ -1642,6 +1642,15 @@ class TestDialogSteps:
         assert _read_usd_dialog(page) == []
         assert (page.chosen, page.picked) == ("USD", 1)
 
+    def test_option_text_is_never_logged(self, caplog):
+        page = _FakeDialogPage(options=("(USD) sintetico", "(CLP) sintetico"))
+
+        with caplog.at_level("DEBUG", logger=movements_mod.__name__):
+            _read_usd_dialog(page)
+
+        assert "2 currency option(s); recognised: ['CLP', 'USD']" in caplog.text
+        assert "sintetico" not in caplog.text
+
     def test_no_usd_option_means_no_account(self, caplog):
         page = _FakeDialogPage(options=("(CLP)",))
 
@@ -1650,6 +1659,15 @@ class TestDialogSteps:
 
         assert found == []
         assert "no USD checking account (no USD option)" in caplog.text
+
+    def test_a_list_with_no_recognised_currency_is_a_failure(self, caplog):
+        """Blank or relabelled options are a slow render, not a missing account."""
+        page = _FakeDialogPage(options=("",))
+
+        with caplog.at_level("INFO", logger=movements_mod.__name__):
+            assert _read_usd_dialog(page) is None
+
+        assert "no currency option recognised" in caplog.text
 
     def test_a_usd_option_whose_radios_never_render_is_a_failure(self, caplog):
         """The option promised an account; a radio wait that times out is a
@@ -1734,6 +1752,12 @@ class TestUsdAmountParsing:
         assert parse(1234.56) == Decimal("1234.56")
         assert parse(1234) == Decimal("1234.00")
 
+    def test_a_lone_comma_is_always_the_decimal_separator(self, caplog):
+        """Chilean format, even when three digits follow it (ambiguous, so logged)."""
+        with caplog.at_level("WARNING", logger=movements_mod.__name__):
+            assert movements_mod._usd_from_text("1,234") == Decimal("1.23")
+        assert "three digits after a lone comma" in caplog.text
+
     def test_unparseable(self):
         parse = movements_mod._usd_from_text
         assert parse("") is None
@@ -1767,6 +1791,20 @@ class TestUsdCartolaRows:
         second = parse_cartola_movement(as_string, currency="USD")
         assert first.fingerprint == second.fingerprint == (as_number["id"], "2345.67")
         assert external_id_for(first) == external_id_for(second)
+
+    def test_rows_without_a_saldo_are_kept_and_warned_about_once(self, caplog):
+        rows = [_usd_cartola_row(monto=1234.56), _usd_cartola_row(monto=0.99)]
+        for row in rows:
+            row["saldo"] = None
+
+        with caplog.at_level("WARNING", logger=movements_mod.__name__):
+            found, _ = movements_mod._movements_from_cartola(
+                MagicMock(), _usd_cartola(rows), 0, "USD"
+            )
+
+        assert [m.fingerprint for m in found] == [(row["id"], "") for row in rows]
+        assert caplog.text.count("no parseable saldo") == 1
+        assert "2 USD cartola row(s) have no parseable saldo" in caplog.text
 
     def test_the_operation_id_scheme_is_the_clp_one(self):
         movement = parse_cartola_movement(
