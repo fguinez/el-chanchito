@@ -1577,6 +1577,8 @@ class _FakeDialogPage:
         button_needs_fetch=True,
         accept_response_polls=1,
         reopen_click_raises=0,
+        auto_fetch_fails=False,
+        auto_request_body=...,
     ):
         self.url = "https://portalpersonas.bancochile.cl/mibancochile-web/#/home"
         self.options = options
@@ -1618,6 +1620,8 @@ class _FakeDialogPage:
         self.auto_request = None
         self.accept_response_polls = accept_response_polls
         self.reopen_click_raises = reopen_click_raises
+        self.auto_fetch_fails = auto_fetch_fails
+        self.auto_request_body = auto_request_body
         self.handlers = {}
         self.keyboard = _FakeKeyboard(self)
 
@@ -1643,9 +1647,10 @@ class _FakeDialogPage:
 
     _CARTOLA_URL = "https://portalpersonas.bancochile.cl/x/movimientos/getCartola"
 
-    def send_request(self, currency, picked):
+    def send_request(self, currency, picked, body=...):
         """Fire a getCartola request; its response comes with `fire_cartola`."""
-        body = {"cuentaSeleccionada": {"moneda": currency, "codigoProducto": "SINTETICO"}}
+        if body is ...:
+            body = {"cuentaSeleccionada": {"moneda": currency, "codigoProducto": "SINTETICO"}}
         request = _FakeRequest(self._CARTOLA_URL, body)
         for handler in list(self.handlers.get("request", [])):
             handler(request)
@@ -1674,7 +1679,9 @@ class _FakeDialogPage:
             self.polls_since_route = 0
             if self.remembered and self.remembered_as is not None:
                 # The SPA fetches the remembered account's cartola by itself.
-                self.auto_request = self.send_request(*self.remembered_as)
+                self.auto_request = self.send_request(
+                    *self.remembered_as, body=self.auto_request_body
+                )
                 self.auto_fetch_in = self.auto_fetch_polls
                 self._tick_auto_fetch(advance=False)
         return None
@@ -1690,6 +1697,10 @@ class _FakeDialogPage:
             self.auto_fetch_in -= 1
         if self.auto_fetch_in <= 0:
             self.auto_fetch_in = None
+            if self.auto_fetch_fails:
+                for handler in list(self.handlers.get("requestfailed", [])):
+                    handler(self.auto_request[2])
+                return
             self.fire_cartola(*self.auto_request)
 
     def click_reopen(self, timeout_ms=0):
@@ -1957,6 +1968,33 @@ class TestDialogSteps:
             button_needs_fetch=False,
             payload_moneda=False,
             accept_response_polls=40,
+        )
+        page.cartolas = {
+            "CLP": {"movimientos": []},
+            "USD": {"movimientos": [_usd_cartola_row()]},
+        }
+
+        found = _read_usd_dialog(page)
+
+        assert [(m.currency, m.amount) for m in found] == [("USD", Decimal("-1234.56"))]
+
+    def test_a_failed_remembered_fetch_is_not_waited_for(self):
+        """An aborted automatic fetch ends; it must not cost the in-flight wait."""
+        page = _remembered_page(auto_fetch_polls=1, auto_fetch_fails=True)
+        page.cartolas["USD"] = {"movimientos": [_usd_cartola_row()]}
+        started = _CLOCK.now
+
+        assert [m.currency for m in _read_usd_dialog(page)] == ["USD"]
+        assert _CLOCK.now - started < movements_mod._IN_FLIGHT_WAIT_MS / 1000
+
+    def test_a_request_without_a_json_body_still_counts_as_in_flight(self):
+        """Its slow, unjudgeable answer must land before the capture is cleared."""
+        page = _remembered_page(
+            auto_fetch_polls=30,
+            button_needs_fetch=False,
+            payload_moneda=False,
+            accept_response_polls=40,
+            auto_request_body=None,
         )
         page.cartolas = {
             "CLP": {"movimientos": []},

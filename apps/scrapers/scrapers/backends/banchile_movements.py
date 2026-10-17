@@ -1164,29 +1164,40 @@ class _JsonCapture:
         self.fragment = fragment
         self.payloads: list[dict] = []
         self.requests: list[dict] = []
-        # The request body behind each payload (None when unknown), and how
-        # many matching responses arrived at all, 200 or not: together with
-        # `requests` they say whether a call is still in flight.
+        # The request body behind each payload (None when unknown). `started`
+        # counts every matching request, whatever its body, and `finished`
+        # every one that ended: answered (200 or not) or failed (aborted,
+        # cancelled), so a dropped call is never in flight forever.
         self.payload_requests: list[Optional[dict]] = []
-        self.responses = 0
+        self.started = 0
+        self.finished = 0
 
     def in_flight(self) -> bool:
-        """True while a captured request has had no response yet."""
-        return len(self.requests) > self.responses
+        """True while a matching request has neither been answered nor failed."""
+        return self.started > self.finished
 
     def clear(self) -> None:
         self.payloads.clear()
         self.requests.clear()
         self.payload_requests.clear()
-        self.responses = 0
+        self.started = 0
+        self.finished = 0
 
     def _on_request(self, request) -> None:
         try:
             if self.fragment not in (request.url or ""):
                 return
+            self.started += 1
             data = request.post_data_json
             if isinstance(data, dict):
                 self.requests.append({"url": request.url, "body": data})
+        except Exception:
+            pass
+
+    def _on_request_failed(self, request) -> None:
+        try:
+            if self.fragment in (request.url or ""):
+                self.finished += 1
         except Exception:
             pass
 
@@ -1194,7 +1205,7 @@ class _JsonCapture:
         try:
             if self.fragment not in (response.url or ""):
                 return
-            self.responses += 1
+            self.finished += 1
             if response.status != 200:
                 return
             payload = response.json()
@@ -1208,6 +1219,7 @@ class _JsonCapture:
         try:
             self.page.on("request", self._on_request)
             self.page.on("response", self._on_response)
+            self.page.on("requestfailed", self._on_request_failed)
         except Exception:
             logger.debug("BanChile: could not attach a %s listener", self.fragment)
         return self
@@ -1216,6 +1228,7 @@ class _JsonCapture:
         for event, handler in (
             ("request", self._on_request),
             ("response", self._on_response),
+            ("requestfailed", self._on_request_failed),
         ):
             try:
                 self.page.remove_listener(event, handler)
