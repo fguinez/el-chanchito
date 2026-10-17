@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { SCORE_SHARED_INSTITUTION_MATCH } from "@/lib/transfer-suggestions";
 
 // The suggestions SQL against a real PostgreSQL. Runs only with
 // TEST_DATABASE_URL naming a disposable server (`make test-db-up` starts one;
@@ -243,6 +244,36 @@ describe.skipIf(!ADMIN_URL)("transfer suggestions (real PostgreSQL)", () => {
       matchedBy: "institution",
       institutionSiblings: 0,
     });
+  });
+
+  it("scores an institution name shared by several feedless products lower", async () => {
+    const [fundsAccount] = await sql`
+      SELECT account_id FROM products WHERE id = ${ids.fund}`;
+    const addFund = async (key: string, name: string) => {
+      const [row] = await sql`
+        INSERT INTO products (account_id, kind, name, slug, currency, external_ref)
+        VALUES (${fundsAccount.account_id}, 'investment', ${name}, ${key}, 'CLP', ${key})
+        RETURNING id`;
+      ids[key] = row.id;
+    };
+    await addFund("fund2", "Fondo Casa Propia");
+    // Has a transaction feed: neither a target nor a sibling.
+    await addFund("fedFund", "Fondo Con Movimientos");
+    await txn("fedRow", "fedFund", "2025-01-01", 1, "Saldo inicial");
+    await txn("elsewhere", "checking", "2026-09-22", -999_999, "Pago a Fondos de Prueba");
+
+    const suggestions = await lib.loadTransferSuggestions(TODAY);
+
+    expect(suggestions.map(keyOf).sort()).toEqual(
+      ["elsewhere>fund", "elsewhere>fund2"].sort()
+    );
+    for (const suggestion of suggestions) {
+      expect(suggestion).toMatchObject({
+        matchedBy: "institution",
+        institutionSiblings: 1,
+        score: SCORE_SHARED_INSTITUTION_MATCH,
+      });
+    }
   });
 
   it("confirms a pair: a resolved transfer, flagged rows and a pattern", async () => {
