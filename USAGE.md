@@ -472,9 +472,8 @@ The **Sugeridas** section, above Pendientes, proposes scraped rows that look
 like internal transfers, so most linking is a click on **Confirmar**. It is
 hidden when there is nothing to suggest. Suggestions are computed on each load
 from the last 90 days of CLP rows that no transfer links and that are not
-already flagged. Nothing is ever linked automatically: paying a person the
-same amount on the same day is a real false positive, so every suggestion
-waits for you.
+already flagged. The clearest pairs are linked on their own (see
+"Automatic links" below); everything else waits for you.
 
 Two kinds:
 
@@ -506,6 +505,18 @@ It also saves a pattern: the two products and the start of the source
 description, lowercased without accents or digits, so account numbers and
 dates do not matter. Later rows matching it rank first. Patterns live in
 `confirmed_transfer_patterns`; deleting a row there removes its boost.
+
+**Automatic links**: loading the suggestions (the Transferencias page, or the
+detail panel's hint) confirms every pair scoring at least 85 whose rows no
+other suggestion uses, for example a same-day card payment with a transfer
+keyword. A row with two possible partners, or a debit that also has a
+one-sided suggestion, stays a manual choice, and one-sided suggestions are
+never linked on their own. The transfer is flagged `auto_linked` and shows an
+**Automática** badge in the transfer lists and the transaction detail panel.
+An automatic link saves no pattern, so it never pushes the next one past the
+bar. **Deshacer vínculo** (the undo arrow in the lists) deletes the transfer
+and dismisses that pair, so it is not linked again; editing its links by hand
+also dismisses the original pair and makes the transfer an ordinary one.
 
 **Descartar** remembers the dismissal in `dismissed_transfer_suggestions`, so
 the suggestion does not come back. A dismissed pair is that exact pair of
