@@ -5,9 +5,10 @@ run the SQL that carries them out: the institution -> account -> product
 resolution chain, transaction dedup and issue #57's in-place re-key,
 transactions that name an existing product by its ref, snapshot
 history only on change, the roll-up guards, the exchange-rate upsert (V024),
-the price-history upsert (V038) and the scraper run log. Each test
-gets its own freshly migrated database (see conftest.py) and is skipped unless
-TEST_DATABASE_URL is set. Every figure and identifier is synthetic.
+the price-history upsert (V038), the stock re-kind (V039) and the scraper run
+log. Each test gets its own freshly migrated database (see conftest.py) and is
+skipped unless TEST_DATABASE_URL is set. Every figure and identifier is
+synthetic.
 """
 
 import os
@@ -19,9 +20,10 @@ import psycopg
 import pytest
 from psycopg import sql
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 from db import writer
-from tests.conftest import apply_migrations
+from tests.conftest import MIGRATIONS_DIR, apply_migrations
 from db.writer import (
     UnresolvedPriceScope,
     UnresolvedRateScope,
@@ -46,6 +48,7 @@ from product_model import (
     ScrapedPriceHistory,
     ScrapedProduct,
     ScrapedTransaction,
+    StockMetrics,
     TermDepositMetrics,
     TransactionLocation,
 )
@@ -770,11 +773,11 @@ class TestProductRefTransactions:
         upsert_product(
             ScrapedProduct(
                 institution="fintual",
-                kind="investment",
+                kind="stock",
                 currency="USD",
                 external_ref=ref,
                 name=name,
-                metrics=InvestmentMetrics(nav=1234.56, deposited=999.99, profit=234.57),
+                metrics=StockMetrics(nav=1234.56, deposited=999.99, profit=234.57),
             )
         )
 
@@ -784,7 +787,7 @@ class TestProductRefTransactions:
         ref="stock:1001",
         institution="fintual",
         internal=True,
-        kind="investment",
+        kind="stock",
         amount="1234.56",
     ):
         return ScrapedTransaction(
@@ -854,15 +857,15 @@ class TestProductRefTransactions:
         ]
 
     def test_a_ref_never_falls_back_to_the_ref_less_product(self, db_conn):
-        """An existing investment/USD product without a ref is not a fallback:
+        """An existing stock/USD product without a ref is not a fallback:
         a row lands on the product its ref names, or waits for it."""
         upsert_product(
             ScrapedProduct(
                 institution="fintual",
-                kind="investment",
+                kind="stock",
                 currency="USD",
                 name="Acciones sinteticas",
-                metrics=InvestmentMetrics(nav=999.99),
+                metrics=StockMetrics(nav=999.99),
             )
         )
         products_before = _count(db_conn, "products")
@@ -901,15 +904,15 @@ class TestProductRefTransactions:
             """
         ).fetchall()
         assert [tuple(row.values()) for row in rows] == [
-            ("fintual_stock_buy_5001", "investment", "stock:1001", Decimal("999.99"), True),
-            ("fintual_stock_div_6001", "investment", "stock:1001", Decimal("12.34"), False),
+            ("fintual_stock_buy_5001", "stock", "stock:1001", Decimal("999.99"), True),
+            ("fintual_stock_div_6001", "stock", "stock:1001", Decimal("12.34"), False),
             ("fintual_wallet_buy_5001", "wallet", None, Decimal("-999.99"), True),
             ("fintual_wallet_dep_2001", "wallet", None, Decimal("1234.56"), True),
             ("fintual_wallet_div_6001", "wallet", None, Decimal("12.34"), True),
         ]
         products = _products(db_conn, "fintual")
         assert sorted((p["kind"], p["external_ref"] or "") for p in products) == [
-            ("investment", "stock:1001"),
+            ("stock", "stock:1001"),
             ("wallet", ""),
         ]
         assert all(p["is_active"] for p in products)
@@ -1345,6 +1348,209 @@ class TestAmountMigration:
         assert upsert_transactions([operation_id]) == 0
 
 
+class TestStockKindMigration:
+    """V039 re-kinds Fintual's stock positions from `investment` to `stock`,
+    payloads and snapshot history included; the goals stay `investment`, and
+    a stock ref can never be an `investment` again."""
+
+    _AS_OF = datetime(2026, 1, 2, 12, tzinfo=timezone.utc)
+
+    def _stage(
+        self,
+        conn,
+        ref,
+        *,
+        kind="investment",
+        currency="USD",
+        attributes=None,
+        metrics=None,
+        snapshots=(),
+        is_active=True,
+    ):
+        """One product at Fintual plus its snapshot payloads, one day apart."""
+        (product_id,) = conn.execute(
+            "INSERT INTO products (account_id, name, slug, kind, currency, "
+            "external_ref, attributes, metrics, current_balance, is_active) "
+            "SELECT a.id, %s, %s, %s, %s, %s, %s, %s, %s, %s FROM accounts a "
+            "JOIN institutions i ON a.institution_id = i.id "
+            "WHERE i.slug = 'fintual' RETURNING id",
+            (
+                f"Producto {ref}",
+                f"producto-{ref.replace(':', '-')}",
+                kind,
+                currency,
+                ref,
+                Jsonb(attributes if attributes is not None else {}),
+                Jsonb(metrics) if metrics is not None else None,
+                metrics["nav"] if metrics else None,
+                is_active,
+            ),
+        ).fetchone()
+        for n, payload in enumerate(snapshots):
+            conn.execute(
+                "INSERT INTO product_snapshots (product_id, balance, metrics, as_of) "
+                "VALUES (%s, %s, %s, %s)",
+                (
+                    product_id,
+                    payload.get("nav", 0),
+                    Jsonb(payload),
+                    self._AS_OF + timedelta(days=n),
+                ),
+            )
+        return product_id
+
+    def _state(self, dsn):
+        with psycopg.connect(dsn, row_factory=dict_row) as conn:
+            products = {
+                row["id"]: row
+                for row in conn.execute(
+                    "SELECT id, kind, attributes, metrics, is_active FROM products"
+                )
+            }
+            snapshots: dict = {}
+            for row in conn.execute(
+                "SELECT product_id, metrics FROM product_snapshots ORDER BY as_of"
+            ):
+                snapshots.setdefault(row["product_id"], []).append(row["metrics"])
+        return products, snapshots
+
+    def test_stock_positions_move_to_the_stock_kind(self, unmigrated_db):
+        apply_migrations(unmigrated_db, before="V039")
+        held = {"kind": "investment", "nav": 1234.56, "units": 2.5}
+        goal_metrics = {"kind": "investment", "nav": 2500000}
+        with psycopg.connect(unmigrated_db) as conn:
+            conn.execute(
+                "INSERT INTO accounts (user_id, institution_id) "
+                "SELECT %s, id FROM institutions WHERE slug = 'fintual'",
+                (SEEDED_USER_ID,),
+            )
+            stock_id = self._stage(
+                conn,
+                "stock:0001",
+                attributes={"kind": "investment", "ticker": "ACME"},
+                metrics=held,
+                # A legacy observation without a payload, then a typed one.
+                snapshots=({}, held),
+            )
+            # Confirmed but never observed: no metrics at all.
+            unobserved_id = self._stage(conn, "stock:0002")
+            # V011's check admits attributes without a "kind" key.
+            untagged_id = self._stage(
+                conn,
+                "stock:0003",
+                attributes={"ticker": "GLBX"},
+                metrics={"kind": "investment", "nav": 0.0, "units": 0.0},
+            )
+            retired_id = self._stage(
+                conn,
+                "stock:0004",
+                attributes={"kind": "investment", "ticker": "INITK"},
+                metrics={"kind": "investment", "nav": 0.0},
+                snapshots=({"kind": "investment", "nav": 0.0},),
+                is_active=False,
+            )
+            goal_id = self._stage(
+                conn,
+                "1001",
+                currency="CLP",
+                metrics=goal_metrics,
+                snapshots=(goal_metrics,),
+            )
+
+        apply_migrations(unmigrated_db)
+        # Re-running the statements finds nothing left to move.
+        migration = (MIGRATIONS_DIR / "V039__stock_product_kind.sql").read_text(
+            encoding="utf-8"
+        )
+        with psycopg.connect(unmigrated_db) as conn:
+            conn.execute(migration)
+
+        products, snapshots = self._state(unmigrated_db)
+        for product_id in (stock_id, unobserved_id, untagged_id, retired_id):
+            assert products[product_id]["kind"] == "stock"
+        assert products[stock_id]["attributes"] == {"kind": "stock", "ticker": "ACME"}
+        assert products[stock_id]["metrics"] == {**held, "kind": "stock"}
+        assert snapshots[stock_id] == [{}, {**held, "kind": "stock"}]
+        assert products[unobserved_id]["metrics"] is None
+        assert products[unobserved_id]["attributes"] == {}
+        assert unobserved_id not in snapshots
+        assert products[untagged_id]["attributes"] == {"ticker": "GLBX"}
+        assert products[untagged_id]["metrics"]["kind"] == "stock"
+        assert products[retired_id]["is_active"] is False
+        assert products[retired_id]["attributes"]["kind"] == "stock"
+        assert snapshots[retired_id] == [{"kind": "stock", "nav": 0.0}]
+        assert products[goal_id]["kind"] == "investment"
+        assert products[goal_id]["metrics"] == goal_metrics
+        assert snapshots[goal_id] == [goal_metrics]
+
+        # The next scrape of the position updates the re-kinded product.
+        upsert_product(
+            ScrapedProduct(
+                institution="fintual",
+                kind="stock",
+                currency="USD",
+                external_ref="stock:0001",
+                name="Acme Corp",
+                metrics=StockMetrics(nav=1234.56, units=2.5),
+            )
+        )
+        with psycopg.connect(unmigrated_db, row_factory=dict_row) as conn:
+            refs = sorted(
+                (row["kind"], row["external_ref"])
+                for row in _products(conn, "fintual")
+            )
+        assert refs == [
+            ("investment", "1001"),
+            ("stock", "stock:0001"),
+            ("stock", "stock:0002"),
+            ("stock", "stock:0003"),
+            ("stock", "stock:0004"),
+        ]
+
+    def test_an_old_scraper_cannot_add_an_investment_stock(self, db_conn):
+        """A scraper still on the old code writes a position as an
+        `investment`: the guard fails that write instead of adding a twin."""
+        upsert_product(
+            ScrapedProduct(
+                institution="fintual",
+                kind="stock",
+                currency="USD",
+                external_ref="stock:0001",
+                name="Acme Corp",
+                metrics=StockMetrics(nav=1234.56, units=2.5),
+            )
+        )
+
+        with pytest.raises(
+            psycopg.errors.CheckViolation, match="products_stock_ref_kind_check"
+        ):
+            upsert_product(
+                ScrapedProduct(
+                    institution="fintual",
+                    kind="investment",
+                    currency="USD",
+                    external_ref="stock:0001",
+                    name="Acme Corp",
+                    metrics=InvestmentMetrics(nav=1234.56),
+                )
+            )
+
+        assert [
+            (p["kind"], p["external_ref"]) for p in _products(db_conn, "fintual")
+        ] == [("stock", "stock:0001")]
+        # A goal (a bare numeric ref) is still an `investment`.
+        upsert_product(
+            ScrapedProduct(
+                institution="fintual",
+                kind="investment",
+                external_ref="1001",
+                name="Meta sintetica",
+                metrics=InvestmentMetrics(nav=2500000),
+            )
+        )
+        assert len(_products(db_conn, "fintual")) == 2
+
+
 class TestSnapshots:
     """A snapshot row only when the observation changed."""
 
@@ -1652,11 +1858,11 @@ class TestExchangeRates:
 def _stock_position(external_ref, name):
     return ScrapedProduct(
         institution="fintual",
-        kind="investment",
+        kind="stock",
         currency="USD",
         external_ref=external_ref,
         name=name,
-        metrics=InvestmentMetrics(nav=250.5, deposited=100.0, profit=150.5),
+        metrics=StockMetrics(nav=250.5, deposited=100.0, profit=150.5),
     )
 
 
@@ -1665,7 +1871,7 @@ def _closes(*points, external_ref="stock:0001", institution="fintual"):
     return ScrapedPriceHistory(
         institution=institution,
         product=ProductRef(
-            kind="investment", currency="USD", external_ref=external_ref
+            kind="stock", currency="USD", external_ref=external_ref
         ),
         points=[DailyPrice(date=day, price=price) for day, price in points],
     )
@@ -1748,7 +1954,7 @@ class TestPriceHistory:
 
         with pytest.raises(
             UnresolvedPriceScope,
-            match="no investment product in USD with that external_ref at 'fintual'",
+            match="no stock product in USD with that external_ref at 'fintual'",
         ):
             upsert_price_history(
                 _closes(("2026-01-02", "100.0"), external_ref="stock:0003")

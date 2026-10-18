@@ -37,7 +37,7 @@ Both legs of a run share one session drive: the transactions leg (which
 products leg, so a run refreshes the session or signs in at most once.
 
 Each run emits one CLP `investment` product per goal, then the stocks: one USD
-`investment` product per position (`external_ref` "stock:<asset id>") and one
+`stock` product per position (`external_ref` "stock:<asset id>") and one
 USD `wallet` for the cash not yet invested in stocks. Position figures follow
 the web app's own formulas (see `stock_metrics`). The stocks are a separate
 part of the same run: if they fail, the goals still land and the run is
@@ -78,7 +78,12 @@ from typing import Any, Callable
 
 import httpx
 
-from product_model import InvestmentAttributes, InvestmentMetrics, WalletMetrics
+from product_model import (
+    InvestmentMetrics,
+    StockAttributes,
+    StockMetrics,
+    WalletMetrics,
+)
 
 from scrapers.backends.email import fetch_latest_code
 from scrapers.backends.fintual_stocks import (
@@ -217,6 +222,12 @@ class StockPrice:
 
 def _usd(value: Decimal) -> float:
     return float(cents(value))
+
+
+def _nonzero_usd(value: Decimal | None) -> float | None:
+    """`_usd`, or None for a missing or zero total: the Acciones table hides
+    Realizada and Dividendos until a position has them."""
+    return (_usd(value) or None) if value is not None else None
 
 
 def _parse_datetime(value: Any) -> datetime | None:
@@ -372,7 +383,7 @@ def details_query(count: int) -> str:
 
 def stock_metrics(
     shares: Decimal, price: StockPrice | None, performance: dict
-) -> InvestmentMetrics:
+) -> StockMetrics:
     """A position's figures, by the web app's own formulas (verified to the cent):
 
         value          = shares * price
@@ -386,8 +397,8 @@ def stock_metrics(
     profit = nav - deposited to the cent, and average_cost is the held
     shares' cost (nav - unrealized_profit) per share. nav/deposited/profit
     keep the goals' meaning. A position without shares needs no price: it is
-    worth 0. Raises ValueError when a performance total is missing, or a held
-    position has no price.
+    worth 0. A zero realized or dividend total is left out. Raises ValueError
+    when a performance total is missing, or a held position has no price.
     """
     subscriptions = number(performance.get("totalCompletedSubscriptions"))
     redemptions = number(performance.get("totalCompletedRedemptions"))
@@ -411,7 +422,7 @@ def stock_metrics(
     average_cost = average_cost.quantize(_AVERAGE_COST_STEP, rounding=ROUND_HALF_UP)
     unrealized_pct = cents(unrealized_pct)
 
-    return InvestmentMetrics(
+    return StockMetrics(
         nav=float(value),
         deposited=float(net_invested),
         profit=float(total_pl),
@@ -420,17 +431,17 @@ def stock_metrics(
         average_cost=float(average_cost),
         unrealized_profit=float(unrealized),
         unrealized_profit_pct=float(unrealized_pct),
-        realized_profit=_usd(realized),
-        dividends=_usd(dividends) if dividends is not None else None,
+        realized_profit=_nonzero_usd(realized),
+        dividends=_nonzero_usd(dividends),
         unit_price_as_of=price.as_of if price else None,
     )
 
 
-def stock_attributes(symbol: str, asset: Any) -> InvestmentAttributes:
+def stock_attributes(symbol: str, asset: Any) -> StockAttributes:
     """Identity of a position: its ticker, plus the profile when StocksDetails
     returned one (otherwise those fields stay None and keep their stored value)."""
     if not isinstance(asset, dict):
-        return InvestmentAttributes(ticker=symbol)
+        return StockAttributes(ticker=symbol)
     raw_tags = asset.get("assetTags")
     tags: list[str] | None = None  # a null list keeps the stored tags
     if isinstance(raw_tags, list):
@@ -441,7 +452,7 @@ def stock_attributes(symbol: str, asset: Any) -> InvestmentAttributes:
                 continue
             emoji = text(tag.get("emoji"))
             tags.append(f"{emoji} {label}" if emoji else label)
-    return InvestmentAttributes(
+    return StockAttributes(
         ticker=symbol, description=text(asset.get("overview")), tags=tags
     )
 
@@ -892,7 +903,7 @@ class FintualScraper(BaseScraper):
             products.append(
                 ScrapedProduct(
                     institution="fintual",
-                    kind="investment",
+                    kind="stock",
                     currency=STOCKS_CURRENCY,
                     external_ref=stock_ref(position.asset_id),
                     name=position.name,
@@ -982,7 +993,7 @@ class FintualScraper(BaseScraper):
             )
         logger.info(
             "Fintual: %d stock positions%s",
-            sum(p.kind == "investment" for p in products),
+            sum(p.kind == "stock" for p in products),
             ", plus the USD wallet" if any(p.kind == "wallet" for p in products) else "",
         )
         return _Stocks(
@@ -1059,7 +1070,7 @@ class FintualScraper(BaseScraper):
                 history = ScrapedPriceHistory(
                     institution="fintual",
                     product=ProductRef(
-                        kind="investment",
+                        kind="stock",
                         currency=STOCKS_CURRENCY,
                         external_ref=stock_ref(position.asset_id),
                     ),

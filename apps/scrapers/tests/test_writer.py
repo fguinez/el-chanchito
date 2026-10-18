@@ -1189,7 +1189,7 @@ def _stock_txn(external_id, ref="stock:1001", amount="1234.56", internal=True):
     """A synthetic stock purchase naming its per-holding product."""
     return ScrapedTransaction(
         institution="fintual",
-        product_kind="investment",
+        product_kind="stock",
         product_external_ref=ref,
         description="Compra ACME",
         amount=amount,
@@ -1244,8 +1244,8 @@ class TestProductRefTransactions:
         ]
         assert calls["resolve"] == []
         assert calls["lookup"] == [
-            ("fintual", "investment", "USD", "stock:1001"),
-            ("fintual", "investment", "USD", "stock:1002"),
+            ("fintual", "stock", "USD", "stock:1001"),
+            ("fintual", "stock", "USD", "stock:1002"),
         ]
 
     def test_a_missing_product_counts_unresolved_and_creates_nothing(

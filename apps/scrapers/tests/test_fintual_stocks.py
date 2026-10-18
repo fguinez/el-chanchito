@@ -204,7 +204,7 @@ class TestCoreMovements:
         wallet = txns["fintual_wallet_buy_5001"]
         stock = txns["fintual_stock_buy_5001"]
         assert (wallet.product_kind, wallet.amount) == ("wallet", Decimal("-999.99"))
-        assert (stock.product_kind, stock.amount) == ("investment", Decimal("999.99"))
+        assert (stock.product_kind, stock.amount) == ("stock", Decimal("999.99"))
         assert stock.product_external_ref == "stock:1001"
         assert wallet.description == stock.description == "Compra ACME"
         assert wallet.internal_transfer and stock.internal_transfer
@@ -653,7 +653,7 @@ class TestSoldOutProducts:
         (product,) = sold_out_products(entries, frozenset())
 
         assert (product.kind, product.currency, product.external_ref) == (
-            "investment",
+            "stock",
             "USD",
             "stock:1003",
         )
@@ -661,6 +661,7 @@ class TestSoldOutProducts:
         assert product.attributes.ticker == "INITK"
         assert (product.metrics.nav, product.metrics.units) == (0.0, 0.0)
         assert (product.metrics.deposited, product.metrics.profit) == (-234.57, 234.57)
+        assert product.metrics.realized_profit == 234.57
         assert product.metrics.dividends == 12.34
 
     def test_a_sale_values_the_stock_at_zero(self):
@@ -673,6 +674,7 @@ class TestSoldOutProducts:
 
         assert (product.external_ref, product.metrics.nav) == ("stock:1001", 0.0)
         assert (product.metrics.deposited, product.metrics.profit) == (-234.57, 234.57)
+        assert product.metrics.dividends is None  # none paid: left out
 
     def test_a_listed_stock_is_left_alone(self):
         entries = self._entries(

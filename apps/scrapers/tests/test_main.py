@@ -492,7 +492,7 @@ class TestExchangeRates:
 def _stock():
     return ScrapedProduct(
         institution="fintual",
-        kind="investment",
+        kind="stock",
         currency="USD",
         external_ref="stock:0001",
     )
@@ -503,7 +503,7 @@ def _history(external_ref="stock:0001"):
     return ScrapedPriceHistory(
         institution="fintual",
         product=ProductRef(
-            kind="investment", currency="USD", external_ref=external_ref
+            kind="stock", currency="USD", external_ref=external_ref
         ),
         points=[
             DailyPrice(date=date(2026, 1, 2), price="100.0"),
@@ -512,7 +512,7 @@ def _history(external_ref="stock:0001"):
     )
 
 
-_UNRESOLVED_STOCK = "no investment product in USD with that external_ref at 'fintual'"
+_UNRESOLVED_STOCK = "no stock product in USD with that external_ref at 'fintual'"
 
 
 class TestPriceHistories:
