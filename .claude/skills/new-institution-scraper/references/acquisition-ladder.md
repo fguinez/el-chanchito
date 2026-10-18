@@ -176,12 +176,18 @@ desktop User-Agent.
   `apps/scrapers/` (gitignored), path overridable by `<SLUG>_SESSION_FILE` so
   Docker can point it at the `scraper_state` volume. Reuse the cache; re-login
   only on 401.
+- **Refresh before re-login.** When the site keeps its own session alive with
+  a refresh-token cookie, take that path on a 401 instead of a new login (for
+  Fintual, loading `/app/goals` re-issues the short-lived token). Refresh
+  tokens often rotate on every use, so persist the new cookies immediately.
 - **E-mailed 2FA codes.** When the code goes to the IMAP mailbox the service
   already reads, fetch it with `backends.email.fetch_latest_code` (Fintual
   does this when `FINTUAL_EMAIL == EMAIL_IMAP_USER`). Its subject filter
   ignores case and accents; its sender filter is a case-insensitive
   substring. Confirm the real sender and subject live before relying on
-  them. Make an unattended re-login give up after one failure (until a
+  them. Pass `received_after` (taken before the login starts, minus a small
+  clock skew) so a previous login's code still in the inbox is never reused.
+  Make an unattended re-login give up after one failure (until a
   manual login succeeds): an OTP loop mails the user on every run and looks
   like an attack.
 - **Manual fallback.** A `_login_cli()` under `if __name__ == "__main__"` plus a
