@@ -670,11 +670,15 @@ gotchas handled: a post-login marketing modal whose backdrop intercepts clicks
 waits for its content), an idle-timeout modal ("Tu sesion expirara") that logs
 the session out if its "Continuar" button is not clicked, and a flaky movements
 BFF that often 500s, read with bounded retries (a "Reintentar" click between
-tries) and reported as partial coverage when a surface never loads. A tab only
-counts as empty once its header-only table or "no movements" message holds for
-a few polls, and every read stays inside the movements component and its
-visible tab. One login feeds both legs per cycle, the way Santander and BCI
-Lider cache their drive, and every wait is bounded (never `networkidle`).
+tries) and reported as partial coverage when a surface never loads. The
+component draws the same header-only table while a load runs, after it failed
+and when the tab is truly empty, so the scraper watches the `/movement-cc/*`
+calls on the wire: a tab only counts as empty after its `/movements` call
+answered 2xx, with no "Reintentar" showing, and the header-only table or "no
+movements" message held for a few polls. Every read stays inside the movements
+component and its visible tab. One login feeds both legs per cycle, the way
+Santander and BCI Lider cache their drive, and every wait is bounded (never
+`networkidle`).
 
 Buda reads two signed REST surfaces (issue #3). Balances cover every wallet:
 one `crypto` product per currency, `units` kept fractional. Transactions cover
