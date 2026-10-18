@@ -4,7 +4,7 @@
 
 # Secrets: scraper session caches, browser profiles and env files.
 **/.banchile_session.json*
-**/.fintual_session.json
+**/.fintual_session.json*
 **/.*_chrome_profile*
 **/.env
 **/.env.*

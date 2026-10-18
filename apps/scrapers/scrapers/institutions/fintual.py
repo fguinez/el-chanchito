@@ -8,13 +8,18 @@ alone gets a 401. The working flow mirrors a browser sign-in:
     POST /auth/sessions/initiate_login   -> {email, password}; 201 => e-mail 2FA
     POST /auth/sessions/finalize_login_web -> {email, password, code}; sets cookies
     GET  /api/goals                      -> old JSON:API shape, `nav` per goal
+    GET  /app/goals                      -> with auth_refresh_token, re-issues a
+                                            short-lived monolith_token and
+                                            rotates the refresh token
 
-The 2FA code is e-mailed to the account address. When FINTUAL_EMAIL equals
-EMAIL_IMAP_USER, the scraper reads the code straight from the mailbox and
-re-signs in by itself on a missing/expired session; otherwise sign-in is a
-manual step: run `make fintual-login`, type the code, and the session cookies
-are cached to disk. Scheduled scrapes reuse the cached session and fail with a
-clear message when it expires so the login can be repeated.
+The session cookies are cached to disk. The monolith_token that /api/goals
+checks lives only a few minutes, so scheduled scrapes refresh the session the
+way the website does (no 2FA) and save the rotated refresh token right away. A
+full 2FA login is only needed once the refresh token itself has expired: when
+FINTUAL_EMAIL equals EMAIL_IMAP_USER the scraper reads the e-mailed code from
+the mailbox and signs in by itself; otherwise run `make fintual-login` and type
+the code. An automatic login that fails once is not retried until
+`make fintual-login` succeeds.
 """
 
 import asyncio
@@ -22,7 +27,9 @@ import inspect
 import json
 import logging
 import os
+import tempfile
 from collections.abc import Awaitable
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -37,7 +44,7 @@ from scrapers.base import (
     ScrapedProduct,
     ScrapedTransaction,
 )
-from scrapers.retry import send_with_retry
+from scrapers.retry import TRANSIENT_HTTP_STATUSES, send_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +53,8 @@ SIGN_IN_URL = f"{FINTUAL_ORIGIN}/f/sign-in/"
 INITIATE_LOGIN_URL = f"{FINTUAL_ORIGIN}/auth/sessions/initiate_login"
 FINALIZE_LOGIN_URL = f"{FINTUAL_ORIGIN}/auth/sessions/finalize_login_web"
 GOALS_URL = f"{FINTUAL_ORIGIN}/api/goals"
+# The web app page whose server render refreshes the session.
+APP_URL = f"{FINTUAL_ORIGIN}/app/goals"
 
 # A desktop Chrome UA; Fintual's session endpoints behave differently without one.
 BROWSER_USER_AGENT = (
@@ -53,8 +62,17 @@ BROWSER_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 
-# Cookie that proves an authenticated session; its presence gates a cache hit.
-_SESSION_COOKIE = "monolith_token"
+# Cookie that keeps the session alive (it re-issues the short-lived
+# monolith_token); its presence gates a cache hit.
+_SESSION_COOKIE = "auth_refresh_token"
+
+# A fresh 2FA e-mail can take tens of seconds to reach the inbox.
+_CODE_POLL_ATTEMPTS = 30
+_CODE_POLL_INTERVAL_SECONDS = 2
+# Slack between our clock and the mail server's when picking a fresh code.
+_CODE_CLOCK_SKEW = timedelta(seconds=30)
+
+_RELOGIN_HINT = "Run `make fintual-login` to sign in again."
 
 # apps/scrapers/, resolved from this file so cwd doesn't matter.
 _APP_DIR = Path(__file__).resolve().parents[2]
@@ -76,17 +94,38 @@ class FintualScraper(BaseScraper):
         self.session_file = Path(
             os.environ.get("FINTUAL_SESSION_FILE", str(_DEFAULT_SESSION_FILE))
         )
+        # The refresh token is single-use, so two runs at once (the startup
+        # scrape isn't a scheduler job, so a manual refresh can overlap it)
+        # would both spend it. A run waits, then reads the rotated cache.
+        self._session_lock = asyncio.Lock()
 
     # -- session persistence ------------------------------------------------
 
     def _base_headers(self) -> dict[str, str]:
         return {"User-Agent": BROWSER_USER_AGENT, "Origin": FINTUAL_ORIGIN}
 
+    @property
+    def _login_failed_file(self) -> Path:
+        """Marker left by a failed automatic login, next to the session cache."""
+        return self.session_file.with_name(self.session_file.name + ".login-failed")
+
     def _save_session(self, client: httpx.AsyncClient) -> None:
         cookies = {c.name: c.value for c in client.cookies.jar if c.value}
-        self.session_file.write_text(json.dumps(cookies))
-        # Session tokens are secrets — keep the cache private.
-        os.chmod(self.session_file, 0o600)
+        # Session tokens are secrets: the temp file is created private (0600),
+        # and swapping it in whole means a kill mid-write can't lose a rotated
+        # refresh token.
+        fd, tmp = tempfile.mkstemp(
+            dir=self.session_file.parent, prefix=self.session_file.name + "."
+        )
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(cookies, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.session_file)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
         logger.info("Saved Fintual session to %s", self.session_file)
 
     def _load_session(self, client: httpx.AsyncClient) -> bool:
@@ -109,19 +148,20 @@ class FintualScraper(BaseScraper):
         e-mailed to it can be read automatically."""
         return os.environ.get("EMAIL_IMAP_USER") == self.email
 
-    async def _email_code_provider(self) -> str:
-        """Poll the inbox for the newest Fintual 2FA code."""
-        for _ in range(15):
+    async def _email_code_provider(self, received_after: datetime) -> str:
+        """Poll the inbox for a Fintual 2FA code e-mailed after `received_after`."""
+        for _ in range(_CODE_POLL_ATTEMPTS):
             code = await fetch_latest_code(
                 sender_contains=["hola@fintual.com"],
                 subject_contains=["código para entrar"],
+                received_after=received_after,
             )
             if code:
                 logger.info("Fintual: read 2FA code from e-mail.")
                 return code
-            await asyncio.sleep(2)
+            await asyncio.sleep(_CODE_POLL_INTERVAL_SECONDS)
         raise FintualSessionError(
-            "Fintual: 2FA code e-mail not found in the IMAP inbox."
+            "Fintual's 2FA code e-mail did not reach the IMAP inbox."
         )
 
     async def login(self, code_provider: Callable[[], str | Awaitable[str]]) -> None:
@@ -156,24 +196,65 @@ class FintualScraper(BaseScraper):
                     headers={"Accept": "application/json", "Referer": SIGN_IN_URL},
                     json={"email": self.email, "password": self.password, "code": code},
                 )
-                resp.raise_for_status()
+                if not resp.is_success:
+                    raise FintualSessionError(
+                        f"Fintual rejected the sign-in (HTTP {resp.status_code})."
+                    )
                 logger.info("Fintual 2FA accepted; session established.")
             elif resp.status_code == 200:
                 logger.info("Fintual login succeeded without 2FA.")
             else:
-                resp.raise_for_status()
+                raise FintualSessionError(
+                    f"Fintual refused to start the sign-in (HTTP {resp.status_code})."
+                )
 
             self._save_session(client)
+            self._login_failed_file.unlink(missing_ok=True)
 
-    async def _ensure_session(self, client: httpx.AsyncClient) -> None:
-        """Load a cached session, or auto-login via IMAP when possible."""
+    async def _auto_login(self) -> None:
+        """Sign in unattended, reading the 2FA code from the IMAP inbox.
+
+        Gives up after one failure until a manual login succeeds: retrying on
+        every run would e-mail a new code each time, which looks like an attack.
+        """
+        if self._login_failed_file.exists():
+            raise FintualSessionError(
+                f"Fintual automatic sign-in failed earlier. {_RELOGIN_HINT}"
+            )
+        # Taken before initiate_login: only a code e-mailed after this point is
+        # valid, and the inbox may still hold the previous login's spent one.
+        received_after = datetime.now(timezone.utc) - _CODE_CLOCK_SKEW
+        try:
+            await self.login(lambda: self._email_code_provider(received_after))
+        except Exception as exc:
+            self._mark_login_failed()
+            # Only our own messages are safe to show: httpx errors carry URLs.
+            reason = (
+                str(exc)
+                if isinstance(exc, FintualSessionError)
+                else f"Fintual automatic sign-in failed ({type(exc).__name__})."
+            )
+            raise FintualSessionError(f"{reason} {_RELOGIN_HINT}") from exc
+
+    def _mark_login_failed(self) -> None:
+        try:
+            self._login_failed_file.write_text(datetime.now(timezone.utc).isoformat())
+            os.chmod(self._login_failed_file, 0o600)
+        except OSError:
+            logger.warning("Fintual: could not write %s", self._login_failed_file)
+
+    async def _ensure_session(self, client: httpx.AsyncClient) -> bool:
+        """Load a cached session, or auto-login via IMAP when possible.
+
+        Returns True when it had to sign in, so the run doesn't sign in twice.
+        """
         if self._load_session(client):
-            return
+            return False
         if self._can_auto_login:
             logger.info("Fintual: no cached session; signing in via e-mailed 2FA code.")
-            await self.login(self._email_code_provider)
+            await self._auto_login()
             self._load_session(client)
-            return
+            return True
         raise FintualSessionError(
             "No cached Fintual session. Run `make fintual-login` to sign in."
         )
@@ -192,25 +273,57 @@ class FintualScraper(BaseScraper):
             label="Fintual GET /api/goals",
         )
 
+    async def _refresh_session(self, client: httpx.AsyncClient) -> bool:
+        """Refresh an expired session the way the website does; True on success.
+
+        The refresh token rotates on every use, so the jar is saved at once,
+        before anything else can fail and strand the spent one on disk.
+        """
+        resp = await send_with_retry(
+            lambda: client.get(
+                APP_URL,
+                headers={"Accept": "text/html,application/xhtml+xml,*/*;q=0.8"},
+            ),
+            label="Fintual GET /app/goals",
+        )
+        # An outage that outlived the retries says nothing about the refresh
+        # token: fail the run instead of signing in (and mailing a code).
+        if resp.status_code in TRANSIENT_HTTP_STATUSES:
+            resp.raise_for_status()
+        # A redirect to the sign-in page also ends in a 200: not a refresh.
+        if resp.status_code != 200 or not resp.url.path.startswith("/app"):
+            logger.info(
+                "Fintual: session refresh answered HTTP %d at %s.",
+                resp.status_code,
+                resp.url.path,
+            )
+            return False
+        self._save_session(client)
+        logger.info("Fintual: session refreshed.")
+        return True
+
     async def scrape_products(self) -> ProductScrapeResult:
-        async with httpx.AsyncClient(
+        async with self._session_lock, httpx.AsyncClient(
             timeout=30.0, follow_redirects=True, headers=self._base_headers()
         ) as client:
-            await self._ensure_session(client)
+            signed_in = await self._ensure_session(client)
 
             resp = await self._get_goals(client)
+            if resp.status_code == 401 and await self._refresh_session(client):
+                resp = await self._get_goals(client)
             if resp.status_code == 401:
-                # Session expired: refresh it once (auto when the account is our
-                # mailbox, otherwise surface the manual-login error).
-                logger.info("Fintual: session expired; refreshing sign-in.")
-                if self._can_auto_login:
-                    await self.login(self._email_code_provider)
-                    self._load_session(client)
-                    resp = await self._get_goals(client)
-                else:
+                # The refresh token itself expired or was revoked: only a full
+                # sign-in helps.
+                if signed_in:
                     raise FintualSessionError(
-                        "Fintual session expired. Run `make fintual-login` to sign in again."
+                        f"Fintual rejected the session it just issued. {_RELOGIN_HINT}"
                     )
+                if not self._can_auto_login:
+                    raise FintualSessionError(f"Fintual session expired. {_RELOGIN_HINT}")
+                logger.info("Fintual: session expired; signing in again.")
+                await self._auto_login()
+                self._load_session(client)
+                resp = await self._get_goals(client)
             resp.raise_for_status()
 
             # One product per goal: the JSON:API resource id is the stable

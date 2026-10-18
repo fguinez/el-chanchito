@@ -539,6 +539,65 @@ class TestFetchLatestCode:
         assert code == "000000"
         assert mail.selected == [('"INBOX"', True)]
 
+    def test_a_code_received_before_the_cutoff_is_ignored(self, imap):
+        """A code e-mailed for a previous login is spent: skip it, even though
+        its Date header (12:00 -0300) claims it is fresh, and stop scanning
+        there, since every older message is staler still."""
+        mail = imap(
+            ["fintual_code.eml", "fintual_code.eml"],
+            internal_date="20-Sep-2026 11:50:00 -0300",
+        )
+        cutoff = datetime(2026, 9, 20, 14, 55, tzinfo=UTC)  # 11:55 -0300
+
+        code = asyncio.run(
+            fetch_latest_code(
+                sender_contains=["hola@fintual.com"],
+                subject_contains=["código para entrar"],
+                received_after=cutoff,
+            )
+        )
+
+        assert code is None
+        assert mail.fetched == ["2"]
+
+    def test_a_code_received_after_the_cutoff_is_returned(self, imap):
+        """The server's receipt time (INTERNALDATE) decides, not the Date
+        header (12:00 -0300), which here falls before the cutoff."""
+        imap(["fintual_code.eml"], internal_date="20-Sep-2026 12:10:00 -0300")
+        cutoff = datetime(2026, 9, 20, 15, 5, tzinfo=UTC)  # 12:05 -0300
+
+        code = asyncio.run(
+            fetch_latest_code(
+                sender_contains=["hola@fintual.com"],
+                subject_contains=["código para entrar"],
+                received_after=cutoff,
+            )
+        )
+
+        assert code == "000000"
+
+    def test_the_date_header_stands_in_for_a_missing_internaldate(self, imap):
+        """Without a usable INTERNALDATE, the Date header (12:00 -0300) decides."""
+        imap(["fintual_code.eml"], internal_date="not a date")
+        cutoff = datetime(2026, 9, 20, 14, 55)  # naive, so UTC: 11:55 -0300
+
+        code = asyncio.run(
+            fetch_latest_code(
+                sender_contains=["hola@fintual.com"],
+                subject_contains=["código para entrar"],
+                received_after=cutoff,
+            )
+        )
+
+        assert code == "000000"
+
+    def test_an_email_without_any_receipt_time_is_not_fresh(self):
+        """No INTERNALDATE and no Date header: it can't be proven fresh."""
+        msg = build("Fintual <hola@fintual.com>", "Tu código para entrar a Fintual", "000000")
+        del msg["Date"]
+
+        assert email_mod._received_at(msg, None) is None
+
 
 class TestQuoteMailbox:
     @pytest.mark.parametrize(
