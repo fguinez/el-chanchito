@@ -9,6 +9,7 @@ import signal
 import sys
 import threading
 import time
+from collections import Counter
 from collections.abc import Callable
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -22,17 +23,19 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from db.connection import close_pool, database_url, is_transient_db_error
 from db.writer import (
+    UnresolvedPriceScope,
     UnresolvedRateScope,
     delete_superseded_transactions,
     finish_scraper_run,
     start_scraper_run,
     upsert_exchange_rate,
+    upsert_price_history,
     upsert_product,
     write_transactions,
 )
 from scrapers.backends import banchile_web
 from scrapers.backends.email import get_session as get_email_session
-from scrapers.base import BaseScraper, ScrapedExchangeRate
+from scrapers.base import BaseScraper, ScrapedExchangeRate, ScrapedPriceHistory
 from scrapers.institutions import (
     BanChileScraper,
     BancoFalabellaScraper,
@@ -95,9 +98,9 @@ async def run_scraper(scraper: BaseScraper) -> None:
     The final status comes from `run_outcome`, and the products leg's
     non-fatal warnings (e.g. a BanChile surface that failed all its retries)
     join the message.
-    The exchange rates it read are written after its products, each on its
-    own: a rate that names an unknown product, or fails to write, is a
-    warning.
+    The exchange rates and price histories it read are written after its
+    products, each on its own: one that names an unknown product, or fails to
+    write, is a warning. Neither counts as landed.
     """
     run_id = start_scraper_run(scraper.method, scraper.institution)
     logger.info("Starting scraper: %s (run=%s)", scraper.name, run_id)
@@ -143,6 +146,7 @@ async def run_scraper(scraper: BaseScraper) -> None:
             warnings.append(f"cleanup: {e}")
 
     rates: list[ScrapedExchangeRate] = []
+    histories: list[ScrapedPriceHistory] = []
     try:
         result = await scraper.scrape_products()
     except Exception as e:
@@ -152,6 +156,7 @@ async def run_scraper(scraper: BaseScraper) -> None:
         n_prod = len(result.products)
         warnings.extend(result.warnings)
         rates = list(result.exchange_rates)
+        histories = list(result.price_histories)
         products_written = 0
         failed: list[str] = []
         for sp in result.products:
@@ -180,13 +185,15 @@ async def run_scraper(scraper: BaseScraper) -> None:
             )
 
     warnings.extend(_write_exchange_rates(scraper, rates))
+    warnings.extend(_write_price_histories(scraper, histories))
 
     logger.info(
-        "Scraper %s: %d transactions (%d new), %d products",
+        "Scraper %s: %d transactions (%d new), %d products, %d price points read",
         scraper.name,
         n_tx,
         inserted,
         n_prod,
+        sum(len(h.points) for h in histories),
     )
     status, message = run_outcome(errors, warnings, landed)
     finish_scraper_run(
@@ -216,6 +223,44 @@ def _write_exchange_rates(
             logger.exception("Scraper %s: exchange rate %s failed", scraper.name, label)
             warnings.append(f"exchange rate {label}: {e}")
     return warnings
+
+
+def _write_price_histories(
+    scraper: BaseScraper, histories: list[ScrapedPriceHistory]
+) -> list[str]:
+    """Write each price history on its own; return one warning counting the
+    series that weren't written, by exception type.
+
+    Like a rate, a series is auxiliary to the product it prices, so neither an
+    unresolvable product nor a write error may cost the run its other
+    results. An error `is_transient_db_error` accepts (any psycopg
+    OperationalError: a lost connection, a pool timeout, a deadlock) has
+    already outlived `upsert_price_history`'s retries, so it stops the rest,
+    which count as not written: each would sit through its own retries.
+    """
+    failures: Counter[str] = Counter()
+    for i, history in enumerate(histories):
+        label = f"{history.product.kind} {history.product.currency}"
+        try:
+            upsert_price_history(history)
+        except UnresolvedPriceScope as e:
+            logger.warning(
+                "Scraper %s: price history %s skipped: %s", scraper.name, label, e
+            )
+            failures[type(e).__name__] += 1
+        except Exception as e:
+            logger.exception("Scraper %s: price history %s failed", scraper.name, label)
+            if is_transient_db_error(e):
+                # This series and every one not tried yet.
+                failures[type(e).__name__] += len(histories) - i
+                break
+            failures[type(e).__name__] += 1
+    if not failures:
+        return []
+    return [
+        f"price histories: {sum(failures.values())} of {len(histories)} not "
+        f"written ({', '.join(sorted(failures))})"
+    ]
 
 
 def build_scrapers() -> dict[str, BaseScraper]:

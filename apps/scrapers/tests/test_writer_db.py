@@ -4,8 +4,8 @@ test_writer.py pins the writer's decisions with fake connections; these tests
 run the SQL that carries them out: the institution -> account -> product
 resolution chain, transaction dedup and issue #57's in-place re-key,
 transactions that name an existing product by its ref, snapshot
-history only on change, the roll-up guards, the exchange-rate upsert (V024)
-and the scraper run log. Each test
+history only on change, the roll-up guards, the exchange-rate upsert (V024),
+the price-history upsert (V038) and the scraper run log. Each test
 gets its own freshly migrated database (see conftest.py) and is skipped unless
 TEST_DATABASE_URL is set. Every figure and identifier is synthetic.
 """
@@ -23,11 +23,13 @@ from psycopg.rows import dict_row
 from db import writer
 from tests.conftest import apply_migrations
 from db.writer import (
+    UnresolvedPriceScope,
     UnresolvedRateScope,
     delete_superseded_transactions,
     finish_scraper_run,
     start_scraper_run,
     upsert_exchange_rate,
+    upsert_price_history,
     upsert_product,
     upsert_transactions,
     write_transactions,
@@ -36,10 +38,12 @@ from product_model import (
     CheckingMetrics,
     CreditCardAttributes,
     CreditCardMetrics,
+    DailyPrice,
     DebitCardMetrics,
     InvestmentMetrics,
     ProductRef,
     ScrapedExchangeRate,
+    ScrapedPriceHistory,
     ScrapedProduct,
     ScrapedTransaction,
     TermDepositMetrics,
@@ -1642,4 +1646,154 @@ class TestExchangeRates:
                 "(institution_id, base_currency, quote_currency, rate, source) "
                 "VALUES (%s, 'USD', %s, %s, 'Sintetico')",
                 (institution_id, values["quote_currency"], values["rate"]),
+            )
+
+
+def _stock_position(external_ref, name):
+    return ScrapedProduct(
+        institution="fintual",
+        kind="investment",
+        currency="USD",
+        external_ref=external_ref,
+        name=name,
+        metrics=InvestmentMetrics(nav=250.5, deposited=100.0, profit=150.5),
+    )
+
+
+def _closes(*points, external_ref="stock:0001", institution="fintual"):
+    """A synthetic daily series; each point is (YYYY-MM-DD, price)."""
+    return ScrapedPriceHistory(
+        institution=institution,
+        product=ProductRef(
+            kind="investment", currency="USD", external_ref=external_ref
+        ),
+        points=[DailyPrice(date=day, price=price) for day, price in points],
+    )
+
+
+class TestPriceHistory:
+    """`upsert_price_history` keeps one close per product and day (V038).
+
+    Two synthetic USD stock positions at Fintual: stock:0001 (ACME) and
+    stock:0002 (GLBX).
+    """
+
+    def _prices(self, conn):
+        return conn.execute(
+            """
+            SELECT pp.*, p.external_ref FROM product_prices pp
+            JOIN products p ON pp.product_id = p.id
+            ORDER BY p.external_ref, pp.price_date
+            """
+        ).fetchall()
+
+    def _positions(self):
+        upsert_product(_stock_position("stock:0001", "Acme Corp"))
+        upsert_product(_stock_position("stock:0002", "Globex Corporation"))
+
+    def test_a_series_lands_on_its_product_in_its_currency(self, db_conn):
+        self._positions()
+
+        written = upsert_price_history(
+            _closes(
+                ("2026-01-02", "100.0"),
+                ("2026-01-05", "250.5"),
+                external_ref="stock:0002",
+            )
+        )
+
+        rows = self._prices(db_conn)
+        assert written == 2
+        assert [
+            (r["external_ref"], r["price_date"], r["price"], r["currency"])
+            for r in rows
+        ] == [
+            ("stock:0002", date(2026, 1, 2), Decimal("100.0"), "USD"),
+            ("stock:0002", date(2026, 1, 5), Decimal("250.5"), "USD"),
+        ]
+        assert all(r["created_at"] == r["updated_at"] for r in rows)
+
+    def test_sending_the_series_again_changes_nothing(self, db_conn):
+        self._positions()
+        series = _closes(("2026-01-02", "100.0"), ("2026-01-05", "250.5"))
+        upsert_price_history(series)
+        first = self._prices(db_conn)
+
+        written = upsert_price_history(series)
+
+        assert written == 0
+        assert self._prices(db_conn) == first
+
+    def test_a_changed_close_is_updated_in_place(self, db_conn):
+        self._positions()
+        upsert_price_history(_closes(("2026-01-02", "100.0"), ("2026-01-05", "250.5")))
+        before = {r["price_date"]: r for r in self._prices(db_conn)}
+
+        written = upsert_price_history(
+            _closes(("2026-01-05", "250.75"), ("2026-01-06", "250.5"))
+        )
+
+        after = {r["price_date"]: r for r in self._prices(db_conn)}
+        assert written == 2
+        assert sorted(after) == [date(2026, 1, 2), date(2026, 1, 5), date(2026, 1, 6)]
+        changed, kept = after[date(2026, 1, 5)], after[date(2026, 1, 2)]
+        assert changed["id"] == before[date(2026, 1, 5)]["id"]
+        assert changed["price"] == Decimal("250.75")
+        assert changed["created_at"] == before[date(2026, 1, 5)]["created_at"]
+        assert changed["updated_at"] > before[date(2026, 1, 5)]["updated_at"]
+        assert kept == before[date(2026, 1, 2)]
+
+    def test_an_unknown_product_is_reported_and_nothing_is_created(self, db_conn):
+        upsert_product(_stock_position("stock:0001", "Acme Corp"))
+
+        with pytest.raises(
+            UnresolvedPriceScope,
+            match="no investment product in USD with that external_ref at 'fintual'",
+        ):
+            upsert_price_history(
+                _closes(("2026-01-02", "100.0"), external_ref="stock:0003")
+            )
+
+        refs = [p["external_ref"] for p in _products(db_conn, "fintual")]
+        assert refs == ["stock:0001"]
+        assert _count(db_conn, "product_prices") == 0
+
+    def test_an_unknown_institution_is_reported_and_not_created(self, db_conn):
+        with pytest.raises(UnresolvedPriceScope, match="institution 'sintetico'"):
+            upsert_price_history(
+                _closes(("2026-01-02", "100.0"), institution="sintetico")
+            )
+
+        assert (
+            db_conn.execute(
+                "SELECT 1 FROM institutions WHERE slug = 'sintetico'"
+            ).fetchone()
+            is None
+        )
+        assert _count(db_conn, "product_prices") == 0
+
+    def test_deleting_the_product_drops_its_prices(self, db_conn):
+        self._positions()
+        upsert_price_history(_closes(("2026-01-02", "100.0")))
+        upsert_price_history(
+            _closes(("2026-01-02", "250.5"), external_ref="stock:0002")
+        )
+
+        db_conn.execute(
+            "DELETE FROM product_snapshots WHERE product_id = "
+            "(SELECT id FROM products WHERE external_ref = 'stock:0001')"
+        )
+        db_conn.execute("DELETE FROM products WHERE external_ref = 'stock:0001'")
+
+        assert [r["external_ref"] for r in self._prices(db_conn)] == ["stock:0002"]
+
+    def test_the_table_rejects_a_non_positive_price(self, db_conn):
+        upsert_product(_stock_position("stock:0001", "Acme Corp"))
+        product_id = _only_product(db_conn, "fintual")["id"]
+
+        with pytest.raises(psycopg.errors.CheckViolation):
+            db_conn.execute(
+                "INSERT INTO product_prices (product_id, price_date, price, currency) "
+                "VALUES (%s, '2026-01-02', 0, 'USD')",
+                (product_id,),
             )
