@@ -1204,6 +1204,7 @@
             "loan",
             "mortgage",
             "investment",
+            "stock",
             "crypto",
             "other"
           ],
@@ -1428,6 +1429,7 @@
                   "other": "#/$defs/OtherAttributes",
                   "prepaid_card": "#/$defs/PrepaidCardAttributes",
                   "savings": "#/$defs/SavingsAttributes",
+                  "stock": "#/$defs/StockAttributes",
                   "term_deposit": "#/$defs/TermDepositAttributes",
                   "vista": "#/$defs/VistaAttributes",
                   "wallet": "#/$defs/WalletAttributes"
@@ -1470,6 +1472,9 @@
                 },
                 {
                   "$ref": "#/$defs/InvestmentAttributes"
+                },
+                {
+                  "$ref": "#/$defs/StockAttributes"
                 },
                 {
                   "$ref": "#/$defs/CryptoAttributes"
@@ -1526,6 +1531,7 @@
             "loan",
             "mortgage",
             "investment",
+            "stock",
             "crypto",
             "other"
           ],
@@ -1548,6 +1554,7 @@
                   "other": "#/$defs/OtherMetrics",
                   "prepaid_card": "#/$defs/PrepaidCardMetrics",
                   "savings": "#/$defs/SavingsMetrics",
+                  "stock": "#/$defs/StockMetrics",
                   "term_deposit": "#/$defs/TermDepositMetrics",
                   "vista": "#/$defs/VistaMetrics",
                   "wallet": "#/$defs/WalletMetrics"
@@ -1590,6 +1597,9 @@
                 },
                 {
                   "$ref": "#/$defs/InvestmentMetrics"
+                },
+                {
+                  "$ref": "#/$defs/StockMetrics"
                 },
                 {
                   "$ref": "#/$defs/CryptoMetrics"
@@ -1760,6 +1770,227 @@
         "external_id"
       ],
       "title": "ScrapedTransaction",
+      "type": "object"
+    },
+    "StockAttributes": {
+      "additionalProperties": false,
+      "description": "Identity fields for a position in a listed security (acción).",
+      "properties": {
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Short description of the security, as the institution shows it.",
+          "title": "Description"
+        },
+        "kind": {
+          "const": "stock",
+          "default": "stock",
+          "description": "Payload discriminator; always \"stock\".",
+          "title": "Kind",
+          "type": "string"
+        },
+        "tags": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Labels the institution gives the security (e.g. 'Tecnología'), each prefixed by its emoji when it has one; a new list replaces the old one.",
+          "title": "Tags"
+        },
+        "ticker": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Ticker symbol of a listed security (e.g. 'ACME').",
+          "title": "Ticker"
+        }
+      },
+      "title": "StockAttributes",
+      "type": "object"
+    },
+    "StockMetrics": {
+      "additionalProperties": false,
+      "description": "Observation for a stock position; headline is `nav`.",
+      "properties": {
+        "average_cost": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "denomination": "currency",
+          "description": "Average cost per unit of the units held.",
+          "title": "Average Cost"
+        },
+        "deposited": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "denomination": "currency",
+          "description": "Net amount invested to date: deposits minus withdrawals and sales (negative once more came out than went in).",
+          "title": "Deposited"
+        },
+        "dividends": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "denomination": "currency",
+          "description": "Total dividends received (net).",
+          "title": "Dividends"
+        },
+        "kind": {
+          "const": "stock",
+          "default": "stock",
+          "description": "Payload discriminator; always \"stock\".",
+          "title": "Kind",
+          "type": "string"
+        },
+        "nav": {
+          "denomination": "currency",
+          "description": "Current market value of the position (net asset value).",
+          "title": "Nav",
+          "type": "number"
+        },
+        "profit": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "denomination": "currency",
+          "description": "Cumulative profit as reported (nav minus deposited).",
+          "title": "Profit"
+        },
+        "realized_profit": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "denomination": "currency",
+          "description": "Gain or loss already realized by selling units.",
+          "title": "Realized Profit"
+        },
+        "unit_price": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "denomination": "currency",
+          "description": "Latest market price per unit, in the product currency.",
+          "title": "Unit Price"
+        },
+        "unit_price_as_of": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "When `unit_price` was quoted.",
+          "title": "Unit Price As Of"
+        },
+        "units": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "denomination": "count",
+          "description": "Units held, e.g. shares of a stock position (fractional).",
+          "title": "Units"
+        },
+        "unrealized_profit": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "denomination": "currency",
+          "description": "Gain or loss on the units still held (nav minus their cost).",
+          "title": "Unrealized Profit"
+        },
+        "unrealized_profit_pct": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "denomination": "percent",
+          "description": "Unrealized profit as a percent number of the cost of the units held.",
+          "title": "Unrealized Profit Pct"
+        }
+      },
+      "required": [
+        "nav"
+      ],
+      "title": "StockMetrics",
       "type": "object"
     },
     "TermDepositAttributes": {

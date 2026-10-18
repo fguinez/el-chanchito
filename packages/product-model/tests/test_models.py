@@ -15,14 +15,14 @@ from product_model import (
     REGISTRY,
     CreditCardAttributes,
     DailyPrice,
-    InvestmentAttributes,
-    InvestmentMetrics,
     ProductMetrics,
     ProductRef,
     ScrapedExchangeRate,
     ScrapedPriceHistory,
     ScrapedProduct,
     ScrapedTransaction,
+    StockAttributes,
+    StockMetrics,
     TermDepositAttributes,
     TransactionLocation,
 )
@@ -61,6 +61,7 @@ VALID_ATTRIBUTES: dict[str, dict] = {
     },
     "mortgage": {"original_principal": 80_000_000, "installments_total": 300},
     "investment": {"portfolio": "Risky Norris", "risk_profile": "Arriesgado"},
+    "stock": {"ticker": "ACME", "tags": ["Tecnología"]},
     "crypto": {},
     "other": {"note": "Caja fuerte"},
 }
@@ -78,6 +79,7 @@ VALID_METRICS: dict[str, dict] = {
     "loan": {"owed": 1_400_000, "installments_paid": 6},
     "mortgage": {"owed": 78_000_000, "next_payment_amount": 450_000},
     "investment": {"nav": 15_705_644.0, "deposited": 14_000_000.0, "profit": 1_705_644.0},
+    "stock": {"nav": 1234.56, "units": 2.5, "unit_price": 493.824},
     "crypto": {"units": 0.0421, "frozen": 0.001},
     "other": {"balance": 10_000},
 }
@@ -95,6 +97,7 @@ EXPECTED_HEADLINE: dict[str, float | None] = {
     "loan": 1_400_000,
     "mortgage": 78_000_000,
     "investment": 15_705_644.0,
+    "stock": 1234.56,
     "crypto": 0.0421,
     "other": 10_000,
 }
@@ -190,9 +193,9 @@ def test_wallet_balance_keeps_cents():
     assert clp.headline() == 999_999
 
 
-def test_investment_metrics_carry_a_stock_position():
+def test_stock_metrics_carry_a_position():
     """The per-unit fields ride along with nav; the quote time round-trips."""
-    metrics = InvestmentMetrics(
+    metrics = StockMetrics(
         nav=250.0,
         deposited=250.0,
         profit=0.0,
@@ -207,16 +210,16 @@ def test_investment_metrics_carry_a_stock_position():
     )
 
     dumped = metrics.model_dump(mode="json", exclude_none=True)
-    restored = InvestmentMetrics.model_validate(dumped)
+    restored = StockMetrics.model_validate(dumped)
 
     assert metrics.headline() == 250.0
     assert dumped["unit_price_as_of"] == "2026-01-02T15:04:05Z"
     assert restored == metrics
 
 
-def test_investment_attributes_carry_a_ticker_and_tags():
+def test_stock_attributes_carry_a_ticker_and_tags():
     """Stock identity: ticker, description and a list of labels."""
-    attributes = InvestmentAttributes(
+    attributes = StockAttributes(
         ticker="ACME",
         description="Empresa sintetica de prueba.",
         tags=["Tecnología", "Estados Unidos"],
@@ -225,7 +228,7 @@ def test_investment_attributes_carry_a_ticker_and_tags():
     dumped = attributes.model_dump(mode="json", exclude_none=True)
 
     assert dumped == {
-        "kind": "investment",
+        "kind": "stock",
         "ticker": "ACME",
         "description": "Empresa sintetica de prueba.",
         "tags": ["Tecnología", "Estados Unidos"],
@@ -319,7 +322,7 @@ def _stock_txn(**fields) -> ScrapedTransaction:
     """A synthetic stock purchase on a per-holding product; `fields` override."""
     values = {
         "institution": "fintual",
-        "product_kind": "investment",
+        "product_kind": "stock",
         "description": "Compra ACME",
         "amount": "1234.56",
         "transaction_date": date(2026, 1, 2),
@@ -610,7 +613,7 @@ def _price_history(**fields) -> ScrapedPriceHistory:
     """A synthetic two-day ACME series; `fields` override the defaults."""
     values = {
         "institution": "fintual",
-        "product": {"kind": "investment", "currency": "USD", "external_ref": "stock:0001"},
+        "product": {"kind": "stock", "currency": "USD", "external_ref": "stock:0001"},
         "points": [
             {"date": "2026-01-02", "price": 100.0},
             {"date": "2026-01-05", "price": "250.5"},
@@ -627,7 +630,7 @@ class TestScrapedPriceHistory:
         history = _price_history()
 
         assert history.product == ProductRef(
-            kind="investment", currency="USD", external_ref="stock:0001"
+            kind="stock", currency="USD", external_ref="stock:0001"
         )
         assert history.points == [
             DailyPrice(date=date(2026, 1, 2), price=Decimal("100.0")),
@@ -684,7 +687,7 @@ class TestScrapedPriceHistory:
             _price_history(points=[{"date": "2026-01-02", "price": 100.0, "volume": 1}])
         with pytest.raises(ValidationError):
             _price_history(
-                product={"kind": "investment", "currency": "USD", "id": "0001"}
+                product={"kind": "stock", "currency": "USD", "id": "0001"}
             )
 
     def test_a_point_is_immutable(self):

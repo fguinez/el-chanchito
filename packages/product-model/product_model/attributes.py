@@ -206,6 +206,27 @@ class InvestmentAttributes(BaseAttributes):
     )
 
 
+class StockAttributes(BaseAttributes):
+    """Identity fields for a position in a listed security (acción)."""
+
+    kind: Literal["stock"] = Field(
+        "stock", description='Payload discriminator; always "stock".'
+    )
+    ticker: str | None = Field(
+        None, description="Ticker symbol of a listed security (e.g. 'ACME')."
+    )
+    description: str | None = Field(
+        None, description="Short description of the security, as the institution shows it."
+    )
+    tags: list[str] | None = Field(
+        None,
+        description=(
+            "Labels the institution gives the security (e.g. 'Tecnología'), each "
+            "prefixed by its emoji when it has one; a new list replaces the old one."
+        ),
+    )
+
+
 class CryptoAttributes(BaseAttributes):
     """Identity fields for a crypto holding."""
 

@@ -13,6 +13,7 @@ export const PRODUCT_KINDS = [
   "loan",
   "mortgage",
   "investment",
+  "stock",
   "crypto",
   "other",
 ] as const;
@@ -25,6 +26,7 @@ export const PRODUCT_FAMILIES = [
   "revolving_credit",
   "installment_loan",
   "investment",
+  "stock",
   "crypto",
   "other",
 ] as const;
@@ -327,6 +329,46 @@ export interface InvestmentMetrics {
   unit_price_as_of?: string | null;
 }
 
+/** Identity fields for a position in a listed security (acción). */
+export interface StockAttributes {
+  /** Payload discriminator; always "stock". */
+  kind: "stock";
+  /** Ticker symbol of a listed security (e.g. 'ACME'). */
+  ticker?: string | null;
+  /** Short description of the security, as the institution shows it. */
+  description?: string | null;
+  /** Labels the institution gives the security (e.g. 'Tecnología'), each prefixed by its emoji when it has one; a new list replaces the old one. */
+  tags?: string[] | null;
+}
+
+/** Observation for a stock position; headline is `nav`. */
+export interface StockMetrics {
+  /** Payload discriminator; always "stock". */
+  kind: "stock";
+  /** Current market value of the position (net asset value). */
+  nav: number;
+  /** Net amount invested to date: deposits minus withdrawals and sales (negative once more came out than went in). */
+  deposited?: number | null;
+  /** Cumulative profit as reported (nav minus deposited). */
+  profit?: number | null;
+  /** Units held, e.g. shares of a stock position (fractional). */
+  units?: number | null;
+  /** Latest market price per unit, in the product currency. */
+  unit_price?: number | null;
+  /** Average cost per unit of the units held. */
+  average_cost?: number | null;
+  /** Gain or loss on the units still held (nav minus their cost). */
+  unrealized_profit?: number | null;
+  /** Unrealized profit as a percent number of the cost of the units held. */
+  unrealized_profit_pct?: number | null;
+  /** Gain or loss already realized by selling units. */
+  realized_profit?: number | null;
+  /** Total dividends received (net). */
+  dividends?: number | null;
+  /** When `unit_price` was quoted. */
+  unit_price_as_of?: string | null;
+}
+
 /** Identity fields for a crypto holding. */
 export interface CryptoAttributes {
   /** Payload discriminator; always "crypto". */
@@ -374,6 +416,7 @@ export type ProductAttributes =
   | LoanAttributes
   | MortgageAttributes
   | InvestmentAttributes
+  | StockAttributes
   | CryptoAttributes
   | OtherAttributes;
 
@@ -390,6 +433,7 @@ export type ProductMetrics =
   | LoanMetrics
   | MortgageMetrics
   | InvestmentMetrics
+  | StockMetrics
   | CryptoMetrics
   | OtherMetrics;
 
@@ -414,6 +458,7 @@ export const KIND_INFO: Record<
   loan: { role: "liability", balanceConvention: "owed", labelEs: "Préstamo", family: "installment_loan" },
   mortgage: { role: "liability", balanceConvention: "owed", labelEs: "Hipotecario", family: "installment_loan" },
   investment: { role: "asset", balanceConvention: "value", labelEs: "Inversión", family: "investment" },
+  stock: { role: "asset", balanceConvention: "value", labelEs: "Acción", family: "stock" },
   crypto: { role: "asset", balanceConvention: "units", labelEs: "Cripto", family: "crypto" },
   other: { role: "none", balanceConvention: "none", labelEs: "Otro", family: "other" },
 };
@@ -473,6 +518,18 @@ export const METRIC_FIELDS: Record<
     var_daily_pct: { denomination: "percent" },
     var_30d_pct: { denomination: "percent" },
     var_ytd_pct: { denomination: "percent" },
+    units: { denomination: "count" },
+    unit_price: { denomination: "currency" },
+    average_cost: { denomination: "currency" },
+    unrealized_profit: { denomination: "currency" },
+    unrealized_profit_pct: { denomination: "percent" },
+    realized_profit: { denomination: "currency" },
+    dividends: { denomination: "currency" },
+  },
+  stock: {
+    nav: { denomination: "currency" },
+    deposited: { denomination: "currency" },
+    profit: { denomination: "currency" },
     units: { denomination: "count" },
     unit_price: { denomination: "currency" },
     average_cost: { denomination: "currency" },
@@ -564,6 +621,20 @@ export const FAMILY_INFO: Record<
       { key: "ganancia", labelEs: "Ganancia", source: "metric", field: "profit", format: "currency", align: "right", optional: false, signed: true },
       { key: "var_30d", labelEs: "Var 30d", source: "metric", field: "var_30d_pct", format: "percent", align: "right", optional: false, signed: true },
       { key: "var_anual", labelEs: "Var año", source: "metric", field: "var_ytd_pct", format: "percent", align: "right", optional: true, signed: true },
+    ],
+  },
+  stock: {
+    labelEs: "Acciones",
+    kinds: ["stock"],
+    columns: [
+      { key: "valor", labelEs: "Valor", source: "headline", field: null, format: "currency", align: "right", optional: false, signed: false },
+      { key: "unidades", labelEs: "Unidades", source: "metric", field: "units", format: "count", align: "right", optional: false, signed: false },
+      { key: "precio", labelEs: "Precio", source: "metric", field: "unit_price", format: "currency", align: "right", optional: false, signed: false },
+      { key: "costo_prom", labelEs: "Costo prom.", source: "metric", field: "average_cost", format: "currency", align: "right", optional: false, signed: false },
+      { key: "ganancia", labelEs: "Ganancia", source: "metric", field: "unrealized_profit", format: "currency", align: "right", optional: false, signed: true },
+      { key: "rentabilidad", labelEs: "Rentab.", source: "metric", field: "unrealized_profit_pct", format: "percent", align: "right", optional: false, signed: true },
+      { key: "realizada", labelEs: "Realizada", source: "metric", field: "realized_profit", format: "currency", align: "right", optional: true, signed: true },
+      { key: "dividendos", labelEs: "Dividendos", source: "metric", field: "dividends", format: "currency", align: "right", optional: true, signed: false },
     ],
   },
   crypto: {

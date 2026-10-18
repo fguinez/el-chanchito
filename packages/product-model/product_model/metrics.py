@@ -291,6 +291,72 @@ class InvestmentMetrics(BaseMetrics):
         return self.nav
 
 
+class StockMetrics(BaseMetrics):
+    """Observation for a stock position; headline is `nav`."""
+
+    kind: Literal["stock"] = Field(
+        "stock", description='Payload discriminator; always "stock".'
+    )
+    nav: float = Field(
+        description="Current market value of the position (net asset value).",
+        json_schema_extra={"denomination": "currency"},
+    )
+    deposited: float | None = Field(
+        None,
+        description=(
+            "Net amount invested to date: deposits minus withdrawals and sales "
+            "(negative once more came out than went in)."
+        ),
+        json_schema_extra={"denomination": "currency"},
+    )
+    profit: float | None = Field(
+        None,
+        description="Cumulative profit as reported (nav minus deposited).",
+        json_schema_extra={"denomination": "currency"},
+    )
+    units: float | None = Field(
+        None,
+        description="Units held, e.g. shares of a stock position (fractional).",
+        json_schema_extra={"denomination": "count"},
+    )
+    unit_price: float | None = Field(
+        None,
+        description="Latest market price per unit, in the product currency.",
+        json_schema_extra={"denomination": "currency"},
+    )
+    average_cost: float | None = Field(
+        None,
+        description="Average cost per unit of the units held.",
+        json_schema_extra={"denomination": "currency"},
+    )
+    unrealized_profit: float | None = Field(
+        None,
+        description="Gain or loss on the units still held (nav minus their cost).",
+        json_schema_extra={"denomination": "currency"},
+    )
+    unrealized_profit_pct: float | None = Field(
+        None,
+        description="Unrealized profit as a percent number of the cost of the units held.",
+        json_schema_extra={"denomination": "percent"},
+    )
+    realized_profit: float | None = Field(
+        None,
+        description="Gain or loss already realized by selling units.",
+        json_schema_extra={"denomination": "currency"},
+    )
+    dividends: float | None = Field(
+        None,
+        description="Total dividends received (net).",
+        json_schema_extra={"denomination": "currency"},
+    )
+    unit_price_as_of: datetime.datetime | None = Field(
+        None, description="When `unit_price` was quoted."
+    )
+
+    def headline(self) -> float | None:
+        return self.nav
+
+
 class CryptoMetrics(BaseMetrics):
     """Observation for a crypto holding; headline is `units`."""
 
