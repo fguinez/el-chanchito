@@ -96,7 +96,9 @@ gitignored `local/` directory.
    - a fatal auth failure raising the typed, actionable error.
 4. **Envelope agreement.** Products carry the right institution, kind,
    currency and `external_ref`, and the transactions' `(product_kind,
-   currency)` match a product the balance leg emits.
+   currency)` match a product the balance leg emits; a transaction with a
+   `product_external_ref` matches the `(kind, currency, external_ref)` of
+   one. Movements between the user's own products set `internal_transfer`.
 5. **Session reuse**, when both legs share one login: one drive per cycle,
    the products leg re-raises the cached error without driving again, and the
    cache resets between cycles.

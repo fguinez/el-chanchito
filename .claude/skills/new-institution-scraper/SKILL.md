@@ -104,8 +104,10 @@ Read `references/architecture.md`, then decide and write down:
   `packages/product-model/PRODUCTS.md`; a new kind is a separate change.
   The **singleton rule**: transactions land on the product with no
   `external_ref` for their (kind, currency), so a (kind, currency) that gets
-  transactions must be one singleton product. Every transaction also sets
-  `scheduled_month`, or the Expenses page never shows it.
+  transactions must be one singleton product, unless each transaction names
+  its per-ref product in `product_external_ref` (looked up, never created).
+  Every transaction also sets `scheduled_month`, or the Expenses page never
+  shows it.
 - **Identity.** The `external_id` scheme (prefix, source id proven stable
   across logins, or a hash of immutable fields only) and the `external_ref`
   for multi-instance products.
@@ -172,7 +174,9 @@ launch one.
 prints only shapes (counts, kinds, id prefixes, field presence) and checks the
 writer's invariants:
 - unique and prefixed ids;
-- transactions landing on a singleton product;
+- transactions landing on a singleton product, or on a product the run emits
+  under the `product_external_ref` they name (a miss is a note: the writer
+  lands the row only if that product is already stored);
 - no duplicate or mixed product identities.
 
 Prove the ids are stable with two runs on separate logins: the first with

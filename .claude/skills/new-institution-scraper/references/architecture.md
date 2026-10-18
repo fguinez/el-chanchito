@@ -163,25 +163,35 @@ creates a new product and splits the history.
 - One real-world product, one product row. Don't sum several products into
   one (V012 and V013 retired summed products); emit one observation each,
   told apart by `external_ref`.
-- **The singleton rule.** `ScrapedTransaction` carries no product reference.
-  `db.writer.write_transactions` files every transaction on the product with
-  the same `(institution, kind, currency)` **and no `external_ref`**, and
-  creates that product if it is missing. So:
-  - a (kind, currency) that receives transactions must be one singleton
-    product (`external_ref=None`), and its `product_kind` / `currency` must
-    match what the balance leg emits (Buda's comment on `PRODUCT_KIND`);
-  - multi-instance products (per goal, per deposit, per fund: each with an
-    `external_ref`) receive no transactions;
+- **The singleton rule.** By default a `ScrapedTransaction` lands on the
+  product with the same `(institution, kind, currency)` **and no
+  `external_ref`**: `db.writer.write_transactions` creates that product if it
+  is missing. So:
+  - a (kind, currency) whose transactions carry no product ref must be one
+    singleton product (`external_ref=None`), and its `product_kind` /
+    `currency` must match what the balance leg emits (Buda's comment on
+    `PRODUCT_KIND`);
   - never mix a singleton and per-ref products of the same (kind, currency).
     The writer treats the singleton as a summed roll-up: the first per-ref
     write retires it (`_retire_rollup_sibling` deactivates it, nulls its
     balance and **deletes its snapshots**), and later writes to it are
     skipped. Transactions still land on the retired row, because product
     resolution ignores `is_active`.
-  An institution with two accounts of the same kind and currency that both
-  have movements needs the ingest contract to grow a product reference first.
-  That is a separate change touching `envelopes.py` and the writer.
-  `scripts/dry_run.py` flags violations.
+- **Transactions on a per-ref product.** A multi-instance product (per goal,
+  per deposit, per stock position: each with an `external_ref`) receives
+  transactions only when they name it: set `product_external_ref` to the
+  exact `external_ref` the balance leg emits for it (build both from one
+  helper). The writer looks that product up and **never creates it**.
+  `run_scraper` writes transactions before products, so a holding's first
+  movements find no product, are counted `unresolved` (a run warning,
+  `partial`) and land on the next run. Never send such a row without its
+  ref: it would create a ref-less roll-up of that kind and currency, which
+  the next per-ref product write retires.
+- **Movements between the user's own products** (a stock purchase paid from a
+  cash wallet, a deposit from the user's bank) set `internal_transfer=True`.
+  The writer stores it as `is_internal_transfer` on insert only, so a user's
+  change survives re-scrapes, and the row stays out of spending and income.
+  `scripts/dry_run.py` flags violations of these rules.
 - `name` is used only when the product is created; user renames win
   afterwards. Use a generic label, never an account number.
 - `metrics` is the per-scrape observation (snapshotted on change);

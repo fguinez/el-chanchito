@@ -4,7 +4,8 @@
 The output is counts, kinds, id prefixes and field presence, never amounts,
 descriptions or ids, so it is safe to paste into a PR. It also checks the
 invariants the writer relies on (unique ids, transactions landing on a
-singleton product, no duplicate product identities).
+singleton product or on a product the run emits under the ref they name, no
+duplicate product identities).
 
 Run it with the user present (it logs in to the real institution) from the
 repo root, with secrets loaded:
@@ -77,7 +78,10 @@ def _summarize_transactions(txns: list[ScrapedTransaction]) -> None:
     print(f"transactions: {len(txns)} (distinct external_id: {len(set(ids))})")
     if not txns:
         return
-    by_target = Counter(f"{t.product_kind}/{t.currency}" for t in txns)
+    by_target = Counter(
+        f"{t.product_kind}/{t.currency}" + (" ref=<set>" if t.product_external_ref else "")
+        for t in txns
+    )
     prefixes = Counter((_PREFIX.match(i) or [None, "<no prefix>"])[1] for i in ids)
     signs = Counter("out" if t.amount < 0 else "in" if t.amount > 0 else "zero" for t in txns)
     dates = sorted({t.transaction_date for t in txns})
@@ -87,11 +91,12 @@ def _summarize_transactions(txns: list[ScrapedTransaction]) -> None:
     print(f"  dates: {len(dates)} distinct, span {(dates[-1] - dates[0]).days} days")
     print(
         "  accounting_date set: %d, scheduled_month set: %d, category_hint set: %d, "
-        "empty descriptions: %d"
+        "internal_transfer: %d, empty descriptions: %d"
         % (
             sum(t.accounting_date is not None for t in txns),
             sum(t.scheduled_month is not None for t in txns),
             sum(t.category_hint is not None for t in txns),
+            sum(t.internal_transfer for t in txns),
             sum(not t.description.strip() for t in txns),
         )
     )
@@ -116,9 +121,11 @@ def _checks(
     institution: str,
     txns: list[ScrapedTransaction] | None,
     products: list[ScrapedProduct] | None,
-) -> list[str]:
-    """Writer invariants this run breaks, as human-readable failures."""
+) -> tuple[list[str], list[str]]:
+    """Writer invariants this run breaks, as human-readable failures, plus
+    notes on rows the writer may not land (not failures)."""
     failures: list[str] = []
+    notes: list[str] = []
     envelopes: list[Any] = [*(txns or []), *(products or [])]
     strays = {e.institution for e in envelopes} - {institution}
     if strays:
@@ -141,7 +148,7 @@ def _checks(
         if mixed:
             failures.append(f"singleton and per-ref products share (kind, currency): {sorted(mixed)}")
         if txns:
-            targets = {(t.product_kind, t.currency) for t in txns}
+            targets = {(t.product_kind, t.currency) for t in txns if t.product_external_ref is None}
             orphan = targets - singletons
             if orphan:
                 failures.append(
@@ -149,7 +156,20 @@ def _checks(
                     f"run: {sorted(orphan)}; the writer files them on a product with no "
                     "external_ref, creating one if needed"
                 )
-    return failures
+            # A ref is looked up, never created: a row naming a product this run
+            # doesn't emit lands only if an earlier run already stored it.
+            emitted = set(identities)
+            waiting = sum(
+                (t.product_kind, t.currency, t.product_external_ref) not in emitted
+                for t in txns
+                if t.product_external_ref is not None
+            )
+            if waiting:
+                notes.append(
+                    f"{waiting} transaction(s) name a product (kind, currency, external_ref) "
+                    "this run does not emit: written only if it is already stored"
+                )
+    return failures, notes
 
 
 def _local_path(path_arg: str, flag: str) -> Path:
@@ -262,7 +282,9 @@ def main() -> int:
     if superseded:
         print(f"superseded rows the runner would delete: {len(superseded)}")
 
-    failures = _checks(scraper.institution, txns, products)
+    failures, notes = _checks(scraper.institution, txns, products)
+    for note in notes:
+        print(f"note: {note}")
     for failure in failures:
         print(f"CHECK FAILED: {failure}")
     if not failures and ok:
