@@ -9,6 +9,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { InstitutionLogo } from "@/components/institutions/institution-logo";
 import { scraperRunLabel } from "@/lib/scraper-run-label";
 import { cn } from "@/lib/utils";
 import {
@@ -157,7 +158,10 @@ export function ScraperStatus() {
                       }
                     }}
                   >
-                    <span>{runLabel(run)}</span>
+                    <span className="flex items-center gap-2">
+                      <InstitutionLogo slug={run.institution} size="sm" />
+                      {runLabel(run)}
+                    </span>
                     <div className="flex items-center gap-2">
                       {run.transactions_imported > 0 && (
                         <span className="text-xs text-muted-foreground">

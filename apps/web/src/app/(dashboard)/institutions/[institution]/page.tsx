@@ -13,7 +13,6 @@ import { formatCLP, cn } from "@/lib/utils";
 import {
   AlertTriangle,
   ArrowLeft,
-  Building2,
   Clock,
   ExternalLink,
   RefreshCw,
@@ -26,6 +25,7 @@ import {
 } from "@/components/institutions/shared";
 import { useInstitutionRefresh } from "@/components/institutions/use-institution-refresh";
 import { InstitutionEditDialog } from "@/components/institutions/institution-edit-dialog";
+import { InstitutionLogo } from "@/components/institutions/institution-logo";
 
 export default function InstitutionDetailPage() {
   const { institution: slug } = useParams<{ institution: string }>();
@@ -103,9 +103,7 @@ export default function InstitutionDetailPage() {
 
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-center gap-3">
-          <div className="flex h-9 w-9 items-center justify-center rounded-md bg-muted">
-            <Building2 className="h-5 w-5 text-muted-foreground" />
-          </div>
+          <InstitutionLogo slug={institution.slug} />
           <div>
             <h2 className="flex flex-wrap items-center gap-2 text-2xl font-bold">
               {institution.name}

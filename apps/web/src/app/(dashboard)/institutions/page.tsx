@@ -14,7 +14,6 @@ import { Button } from "@/components/ui/button";
 import { formatCLP, cn } from "@/lib/utils";
 import {
   AlertTriangle,
-  Building2,
   Clock,
   ExternalLink,
   RefreshCw,
@@ -29,6 +28,7 @@ import {
   type InstitutionTotals,
 } from "@/components/institutions/shared";
 import { useInstitutionRefresh } from "@/components/institutions/use-institution-refresh";
+import { InstitutionLogo } from "@/components/institutions/institution-logo";
 
 export default function InstitutionsPage() {
   const [institutions, setInstitutions] = useState<ApiInstitution[] | null>(
@@ -184,9 +184,10 @@ export default function InstitutionsPage() {
                   href={`/institutions/${inst.slug}`}
                   className="group flex items-center gap-3"
                 >
-                  <div className="flex h-9 w-9 items-center justify-center rounded-md bg-muted transition-colors group-hover:bg-primary/10">
-                    <Building2 className="h-5 w-5 text-muted-foreground" />
-                  </div>
+                  <InstitutionLogo
+                    slug={inst.slug}
+                    fallbackClassName="transition-colors group-hover:bg-primary/10"
+                  />
                   <div>
                     <CardTitle className="flex items-center gap-2 text-lg transition-colors group-hover:text-primary">
                       {inst.name}

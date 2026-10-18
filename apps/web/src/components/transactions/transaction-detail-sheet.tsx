@@ -11,6 +11,7 @@ import {
 import { Check, Copy } from "lucide-react";
 import { KIND_INFO } from "@chanchito/product-model";
 import { displayProductName } from "@/components/institutions/shared";
+import { InstitutionLogo } from "@/components/institutions/institution-logo";
 import {
   Sheet,
   SheetContent,
@@ -358,8 +359,9 @@ function TransactionDetailBody({
           <Field label="Institución">
             <Link
               href={`/institutions/${txn.institution.slug}`}
-              className="underline-offset-4 hover:underline"
+              className="inline-flex items-center gap-1.5 underline-offset-4 hover:underline"
             >
+              <InstitutionLogo slug={txn.institution.slug} size="sm" />
               {txn.institution.name}
             </Link>
           </Field>

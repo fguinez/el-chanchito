@@ -22,6 +22,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatCLP, formatPlainDateEs } from "@/lib/utils";
 import { hrefWithSearchParam, TXN_PARAM } from "@/lib/transaction-selection";
+import { InstitutionLogo } from "@/components/institutions/institution-logo";
 import {
   SUGGESTIONS_ANCHOR,
   withoutSettled,
@@ -45,8 +46,9 @@ function LegCell({ leg }: { leg: Leg }) {
         className="block max-w-48 min-w-0 hover:underline sm:max-w-64"
         title={`${leg.institutionName} · ${leg.productName}`}
       >
-        <span className="block truncate text-xs text-muted-foreground">
-          {leg.institutionName}
+        <span className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
+          <InstitutionLogo slug={leg.institutionSlug} size="sm" />
+          <span className="truncate">{leg.institutionName}</span>
         </span>
         <span className="block truncate">{leg.productName}</span>
       </Link>

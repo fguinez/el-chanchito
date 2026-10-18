@@ -38,6 +38,7 @@ import {
   type ProductParent,
 } from "@/components/institutions/shared";
 import { ProductEditDialog } from "@/components/institutions/product-edit-dialog";
+import { InstitutionLogo } from "@/components/institutions/institution-logo";
 import {
   CupoUtilizationCard,
   InvestmentCompositionCard,
@@ -187,8 +188,9 @@ export default function ProductDetailPage() {
         <span>/</span>
         <Link
           href={`/institutions/${institution.slug}`}
-          className="hover:text-foreground"
+          className="flex items-center gap-1.5 hover:text-foreground"
         >
+          <InstitutionLogo slug={institution.slug} size="sm" />
           {institution.name}
         </Link>
         <span>/</span>
