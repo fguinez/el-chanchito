@@ -11,6 +11,7 @@ const INSTITUTION_LABELS: Record<string, string> = {
   bci_lider: "BCI Lider",
   skipo: "Skipo",
   santander: "Banco Santander",
+  banco_falabella: "Banco Falabella",
   _legacy_composite: "Email (legacy)",
 };
 
