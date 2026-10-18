@@ -1,5 +1,5 @@
-"""Tests for the Fintual scraper: per-goal products, stock positions and
-session handling.
+"""Tests for the Fintual scraper: per-goal products, stock positions, stock
+and USD wallet movements, and session handling.
 
 These never hit the network: `httpx.AsyncClient` is swapped for a fake that
 answers each Fintual URL from a canned queue (or a real client over
@@ -12,7 +12,7 @@ import json
 import os
 import re
 import stat
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -36,6 +36,7 @@ from scrapers.institutions.fintual import (
     FintualSessionError,
     StockPrice,
     details_query,
+    listed_asset_ids,
     parse_prices,
     stock_attributes,
     stock_metrics,
@@ -827,28 +828,95 @@ _DETAILS = {
 _PRICES = {"ACME": 100.0, "GLBX": 250.5}
 
 
+def _ledger_deposit(dep_id, amount, executed_at="2026-01-02T15:04:05Z"):
+    """A stocksDomesticBankDeposits row (CLP from a bank, converted to USD)."""
+    return {
+        "id": dep_id,
+        "capital": {"amount": 1000000, "currency": "CLP"},
+        "declaredAt": "2026-01-01T12:00:00Z",
+        "forexOrder": {
+            "id": f"3{dep_id}",
+            "executedAt": executed_at,
+            "foreignCapital": {"amount": amount, "currency": "USD"},
+        },
+    }
+
+
+def _ledger_order(order_id, asset_id, symbol, name, capital):
+    """A subscription or redemption instruction around a fulfilled order."""
+    return {
+        "id": f"4{order_id}",
+        "declaredAt": "2026-01-05T14:00:00Z",
+        "requestedCapital": {"amount": capital, "currency": "USD"},
+        "assetOrder": {
+            "id": order_id,
+            "capital": {"amount": capital, "currency": "USD"},
+            "asset": {"id": asset_id, "symbol": symbol, "name": name},
+            "fulfilledAt": "2026-01-05T15:00:00Z",
+        },
+    }
+
+
+def _ledger_dividend(div_id, asset_id, symbol, amount):
+    return {
+        "id": div_id,
+        "date": "2026-01-10",
+        "createdAt": "2026-01-10T12:00:00Z",
+        "netCapital": {"amount": amount, "currency": "USD"},
+        "asset": {"id": asset_id, "symbol": symbol},
+    }
+
+
+def _ledger_matching(portfolio):
+    """A ledger that adds up to the portfolio's wallet: one deposit of its
+    balance (none without a readable USD wallet)."""
+    wallet = ((portfolio or {}).get("data") or {}).get("stocksWallet") or {}
+    balance = wallet.get("balance") or {}
+    if balance.get("currency") != "USD":
+        return {}
+    return {"stocksDomesticBankDeposits": [_ledger_deposit("2001", balance["amount"])]}
+
+
 class _FintualStocks:
     """fintual.cl stand-in for a whole run, behind a real httpx client over
     MockTransport so the cookie jar and query strings behave for real.
 
     StocksDetails answers each `$s{i}` from `details[symbol]` (performance,
-    profile) under the aliases p{i}/a{i}. The pricing service answers 401
-    until a request carries the cookie /auth/jwt mints; with
-    `jwt_accepted=False` it never takes it. `answers` maps a GraphQL operation
-    or a path to (status, payload) answers given in order, the last repeating.
+    profile) under the aliases p{i}/a{i}. WalletMovements pages through
+    `ledger` (list field -> rows; a nested container -> its lists), each list
+    sliced by offset and limit, or by `page_cap` rows when Fintual is made to
+    cap a list below the limit; a list named in `unlimited` ignores the limit
+    (every row from the offset on). By default the ledger is one deposit that
+    adds up to the wallet. The pricing service answers 401 until a request carries
+    the cookie /auth/jwt mints; with `jwt_accepted=False` it never takes it.
+    `answers` maps a GraphQL operation or a path to (status, payload) answers
+    given in order, the last repeating.
     """
 
     def __init__(
-        self, portfolio, details=_DETAILS, prices=_PRICES, *, jwt_accepted=True, answers=None
+        self,
+        portfolio,
+        details=_DETAILS,
+        prices=_PRICES,
+        *,
+        jwt_accepted=True,
+        answers=None,
+        ledger=None,
+        page_cap=None,
+        unlimited=(),
     ):
         self.portfolio = portfolio
         self.details = details
         self.prices = prices
         self.jwt_accepted = jwt_accepted
         self.answers = {key: list(queue) for key, queue in (answers or {}).items()}
+        self.ledger = _ledger_matching(portfolio) if ledger is None else ledger
+        self.page_cap = page_cap
+        self.unlimited = frozenset(unlimited)
         self.requests: list[httpx.Request] = []
         self.operations: list[str] = []
         self.details_variables = None
+        self.movement_pages: list[dict] = []
 
     def _canned(self, key):
         queue = self.answers.get(key)
@@ -907,6 +975,8 @@ class _FintualStocks:
     def _graphql(self, operation, variables):
         if operation == "StocksPortfolio":
             return httpx.Response(200, json=self.portfolio)
+        if operation == "WalletMovements":
+            return httpx.Response(200, json={"data": self._movements(variables)})
         self.details_variables = variables
         data = {}
         for name, symbol in variables.items():
@@ -914,6 +984,21 @@ class _FintualStocks:
             data[f"p{name[1:]}"] = performance
             data[f"a{name[1:]}"] = profile
         return httpx.Response(200, json={"data": data})
+
+    def _movements(self, variables):
+        self.movement_pages.append(variables)
+        offset = variables["offset"]
+        end = offset + min(variables["limit"], self.page_cap or variables["limit"])
+        data = {}
+        for name, rows in self.ledger.items():
+            if isinstance(rows, dict):
+                data[name] = {
+                    key: value[offset:end] if isinstance(value, list) else value
+                    for key, value in rows.items()
+                }
+            else:
+                data[name] = rows[offset:] if name in self.unlimited else rows[offset:end]
+        return data
 
     def paths(self):
         return [request.url.path for request in self.requests]
@@ -1030,6 +1115,29 @@ class TestStockParsers:
 
         assert prices == {"ACME": StockPrice(Decimal("100.0"), _QUOTED_AT)}
 
+    @pytest.mark.parametrize(
+        ("portfolio", "expected"),
+        [
+            pytest.param(
+                _portfolio(_ACME, {**_GLBX, "shares": None}),
+                frozenset({"000101", "000102"}),
+                id="readable-or-not",
+            ),
+            pytest.param(_portfolio(), frozenset(), id="empty-list"),
+            pytest.param(
+                _portfolio(_ACME, {"id": "9", "shares": 1.0, "asset": {"symbol": "GLBX"}}),
+                None,
+                id="a-row-without-an-id",
+            ),
+            pytest.param(
+                {"data": {"stocksPositionsV2": None}}, None, id="list-not-read"
+            ),
+        ],
+    )
+    def test_the_listed_asset_ids(self, portfolio, expected):
+        """Only a fully read list says which stocks Fintual still lists."""
+        assert listed_asset_ids(portfolio["data"]) == expected
+
     def test_the_details_query_aliases_each_position(self):
         query = details_query(2)
 
@@ -1103,9 +1211,16 @@ class TestStocksLeg:
             "/stocks-pricing-cl/current-prices",
             "/auth/jwt",
             "/stocks-pricing-cl/current-prices",
+            "/gql/",
+            "/gql/",
         ]
-        assert server.operations == ["StocksPortfolio", "StocksDetails"]
-        assert server.requests[-1].url.params["symbols"] == "ACME,GLBX"
+        assert server.operations == [
+            "StocksPortfolio",
+            "StocksDetails",
+            "WalletMovements",
+            "WalletMovements",
+        ]
+        assert server.requests[5].url.params["symbols"] == "ACME,GLBX"
         assert json.loads(session_file.read_text()) == {
             "auth_refresh_token": "synthetic-refresh-1",
             _JWT_COOKIE: "synthetic-jwt",
@@ -1183,14 +1298,15 @@ class TestStocksLeg:
     ):
         """Nothing resolving next to a GraphQL error is a failed leg, not an
         account without stocks: the goals land and a warning records the run
-        as partial, so earlier stock products never freeze unnoticed."""
+        as partial, so earlier stock products never freeze unnoticed. The
+        movements are still read, as after any portfolio failure."""
         server = _FintualStocks(portfolio)
 
         result = _run_stocks(monkeypatch, session_file, server)
 
         assert [p.external_ref for p in result.products] == ["34567"]
         assert result.warnings == ["Fintual: skipped the stocks leg (GraphQL error)"]
-        assert server.paths() == ["/api/goals", "/gql/"]
+        assert server.operations == ["StocksPortfolio", "WalletMovements"]
 
     @pytest.mark.parametrize(
         ("answers", "reason"),
@@ -1373,7 +1489,8 @@ class TestStocksLeg:
         assert wallet.metrics.balance == 12.34
         assert wallet.metrics.headline() == 12.34
         assert result.warnings == []
-        assert server.paths() == ["/api/goals", "/gql/"]
+        assert server.operations == ["StocksPortfolio", "WalletMovements", "WalletMovements"]
+        assert "/stocks-pricing-cl/current-prices" not in server.paths()
 
     def test_a_wallet_in_another_currency_is_skipped_with_a_warning(
         self, monkeypatch, session_file
@@ -1467,7 +1584,7 @@ class TestSessionCycle:
 
         transactions, result = _both_legs(FintualScraper())
 
-        assert transactions == []
+        assert [t.external_id for t in transactions] == ["fintual_wallet_dep_2001"]
         assert server.paths().count("/api/goals") == 1
         assert server.operations.count("StocksPortfolio") == 1
         assert ("investment", "USD", "stock:000101") in _by_ref(result.products)
@@ -1510,7 +1627,7 @@ class TestSessionCycle:
         second = _both_legs(scraper)
 
         assert all(isinstance(outcome, httpx.HTTPStatusError) for outcome in first)
-        assert second[0] == []
+        assert [t.external_id for t in second[0]] == ["fintual_wallet_dep_2001"]
         assert ("investment", "USD", "stock:000101") in _by_ref(second[1].products)
         assert server.paths().count("/api/goals") == 2
 
@@ -1526,3 +1643,522 @@ class TestSessionCycle:
         assert ("investment", "USD", "stock:000101") in _by_ref(first.products)
         assert _by_ref(second.products) == _by_ref(first.products)
         assert server.paths().count("/api/goals") == 2
+
+
+# -- stock and wallet movements -------------------------------------------------
+
+_ACME_HELD = _position("1001", "ACME", "Acme Corp", 2.5)
+_GLBX_HELD = _position("1002", "GLBX", "Globex Corporation", 4.0)
+_INITK_LISTED_SOLD = _position("1003", "INITK", "Initech Inc", 0.0)
+
+# A deposit, an ACME buy and an ACME dividend: 1234.56 - 999.99 + 12.34.
+_LEDGER = {
+    "stocksDomesticBankDeposits": [_ledger_deposit("2001", 1234.56)],
+    "stocksWalletAssetSubscriptionInstructions": [
+        _ledger_order("5001", "1001", "ACME", "Acme Corp", 999.99)
+    ],
+    "stocksWalletDividends": [_ledger_dividend("6001", "1001", "ACME", 12.34)],
+}
+_LEDGER_BALANCE = 246.91
+
+_MISMATCH = (
+    "Fintual: the USD wallet movements don't add up to its balance; "
+    "a movement type may be missing"
+)
+
+
+def _run_cycle(monkeypatch, session_file, server):
+    """Both legs against `server`: (transactions, products result)."""
+    _serve(monkeypatch, session_file, server)
+    transactions, result = _both_legs(FintualScraper())
+    assert not isinstance(result, Exception), result
+    return transactions, result
+
+
+def _ids(transactions):
+    return [t.external_id for t in transactions]
+
+
+class TestMovementsLeg:
+    def test_the_ledger_lands_on_the_wallet_and_the_stock(self, monkeypatch, session_file):
+        """Each stock row names a product the same run emits; the ledger adds
+        up to the wallet, so no warning."""
+        server = _FintualStocks(
+            _portfolio(_ACME_HELD, wallet=_LEDGER_BALANCE), ledger=_LEDGER
+        )
+
+        transactions, result = _run_cycle(monkeypatch, session_file, server)
+
+        assert result.warnings == []
+        assert _ids(transactions) == [
+            "fintual_wallet_dep_2001",
+            "fintual_wallet_buy_5001",
+            "fintual_stock_buy_5001",
+            "fintual_wallet_div_6001",
+            "fintual_stock_div_6001",
+        ]
+        products = _by_ref(result.products)
+        for txn in transactions:
+            assert (txn.product_kind, txn.currency, txn.product_external_ref) in products
+        stock_rows = [t for t in transactions if t.product_external_ref]
+        assert {t.product_external_ref for t in stock_rows} == {"stock:1001"}
+        assert [t.amount for t in stock_rows] == [Decimal("999.99"), Decimal("12.34")]
+
+    def test_full_and_short_pages_are_followed_to_an_empty_one(
+        self, monkeypatch, session_file
+    ):
+        """The offset moves by the longest list, nested ones included."""
+        monkeypatch.setattr(fintual_mod, "PAGE_SIZE", 2)
+        ledger = {
+            "stocksDomesticBankDeposits": [
+                _ledger_deposit(f"200{n}", 100.0) for n in range(1, 4)
+            ],
+            "stocksWalletAcatCashActivities": {
+                "fees": [],
+                "cashInbounds": [
+                    {"id": "6401", "date": "2026-01-15", "createdAt": None, "amount": 12.34}
+                ],
+                "cashOutbounds": [],
+            },
+        }
+        server = _FintualStocks(_portfolio(wallet=312.34), ledger=ledger)
+
+        transactions, result = _run_cycle(monkeypatch, session_file, server)
+
+        assert [page["offset"] for page in server.movement_pages] == [0, 2, 3]
+        assert {page["limit"] for page in server.movement_pages} == {2}
+        assert _ids(transactions) == [
+            "fintual_wallet_dep_2001",
+            "fintual_wallet_dep_2002",
+            "fintual_wallet_acatin_6401",
+            "fintual_wallet_dep_2003",
+        ]
+        assert result.warnings == []
+
+    def test_a_list_capped_below_the_limit_loses_nothing(self, monkeypatch, session_file):
+        """Fintual answering fewer rows than asked moves the offset by those."""
+        ledger = {
+            "stocksDomesticBankDeposits": [
+                _ledger_deposit(f"200{n}", 100.0) for n in range(1, 4)
+            ]
+        }
+        server = _FintualStocks(_portfolio(wallet=300.0), ledger=ledger, page_cap=1)
+
+        transactions, result = _run_cycle(monkeypatch, session_file, server)
+
+        assert [page["offset"] for page in server.movement_pages] == [0, 1, 2, 3]
+        assert len(transactions) == 3
+        assert result.warnings == []
+
+    def test_a_list_ignoring_the_limit_skips_no_rows_of_the_others(
+        self, monkeypatch, session_file
+    ):
+        """The offset moves by the limit at most; the rows the list that
+        ignores it repeats are deduplicated."""
+        monkeypatch.setattr(fintual_mod, "PAGE_SIZE", 2)
+        ledger = {
+            "stocksDomesticBankDeposits": [
+                _ledger_deposit(f"200{n}", 100.0) for n in range(1, 6)
+            ],
+            "stocksWalletCashInterests": [
+                {"id": f"610{n}", "date": "2026-01-15", "createdAt": None, "amount": 12.34}
+                for n in range(1, 6)
+            ],
+        }
+        server = _FintualStocks(
+            _portfolio(wallet=561.70),
+            ledger=ledger,
+            unlimited={"stocksWalletCashInterests"},
+        )
+
+        transactions, result = _run_cycle(monkeypatch, session_file, server)
+
+        assert [page["offset"] for page in server.movement_pages] == [0, 2, 4, 5]
+        assert sorted(_ids(transactions)) == [
+            *(f"fintual_wallet_dep_200{n}" for n in range(1, 6)),
+            *(f"fintual_wallet_int_610{n}" for n in range(1, 6)),
+        ]
+        assert result.warnings == []
+
+    def test_the_page_cap_is_a_warning_and_skips_the_balance_check(
+        self, monkeypatch, session_file
+    ):
+        """The pages read still land; the unread rest can't be reconciled."""
+        monkeypatch.setattr(fintual_mod, "PAGE_SIZE", 1)
+        monkeypatch.setattr(fintual_mod, "MAX_PAGES", 2)
+        ledger = {
+            "stocksDomesticBankDeposits": [
+                _ledger_deposit(f"200{n}", 100.0) for n in range(1, 4)
+            ]
+        }
+        server = _FintualStocks(_portfolio(wallet=300.0), ledger=ledger)
+
+        transactions, result = _run_cycle(monkeypatch, session_file, server)
+
+        assert _ids(transactions) == ["fintual_wallet_dep_2001", "fintual_wallet_dep_2002"]
+        assert result.warnings == [
+            "Fintual: stopped after 2 pages of stock movements; the rest were not read"
+        ]
+
+    @pytest.mark.parametrize(
+        ("answer", "reason"),
+        [
+            pytest.param(
+                (200, {"errors": [{"message": "synthetic"}]}),
+                "WalletMovements was refused by the GraphQL server",
+                id="refused",
+            ),
+            pytest.param(
+                (200, {"data": {"stocksWalletDividends": None}, "errors": [{"message": "x"}]}),
+                "WalletMovements answered 1 GraphQL error(s)",
+                id="resolver-error",
+            ),
+            pytest.param((500, {}), "WalletMovements answered HTTP 500", id="outage"),
+            pytest.param(
+                (200, {"data": {"stocksWalletDividends": {"id": "1"}}}),
+                "ValueError",
+                id="unexpected-shape",
+            ),
+        ],
+    )
+    def test_a_failed_movements_query_keeps_the_products(
+        self, monkeypatch, session_file, answer, reason
+    ):
+        """The goals and the stock products land; a short warning (no URL, no
+        body) records the run as partial."""
+        monkeypatch.setattr("scrapers.retry.BASE_DELAY_SECONDS", 0.0)
+        server = _FintualStocks(
+            _portfolio(_ACME_HELD), answers={"WalletMovements": [answer]}
+        )
+
+        transactions, result = _run_cycle(monkeypatch, session_file, server)
+
+        assert transactions == []
+        assert set(_by_ref(result.products)) == {
+            ("investment", "CLP", "34567"),
+            ("investment", "USD", "stock:1001"),
+            ("wallet", "USD", None),
+        }
+        assert result.warnings == [f"Fintual: stock movements failed ({reason})"]
+        assert "://" not in result.warnings[0] and "synthetic" not in result.warnings[0]
+
+    def test_a_later_page_failing_keeps_the_earlier_ones(self, monkeypatch, session_file):
+        monkeypatch.setattr("scrapers.retry.BASE_DELAY_SECONDS", 0.0)
+        first_page = {"data": {"stocksDomesticBankDeposits": [_ledger_deposit("2001", 12.34)]}}
+        server = _FintualStocks(
+            _portfolio(wallet=999.99),
+            answers={"WalletMovements": [(200, first_page), (500, {})]},
+        )
+
+        transactions, result = _run_cycle(monkeypatch, session_file, server)
+
+        assert _ids(transactions) == ["fintual_wallet_dep_2001"]
+        assert result.warnings == [
+            "Fintual: stock movements failed (WalletMovements answered HTTP 500)"
+        ]
+
+    def test_movements_are_read_when_the_portfolio_failed(self, monkeypatch, session_file):
+        """Without the portfolio there is nothing to check them against: no
+        balance check and no sold-out products."""
+        server = _FintualStocks(
+            _portfolio(_ACME_HELD),
+            ledger=_LEDGER,
+            answers={"StocksPortfolio": [(200, {"errors": [{"message": "synthetic"}]})]},
+        )
+
+        transactions, result = _run_cycle(monkeypatch, session_file, server)
+
+        assert len(transactions) == 5
+        assert [p.external_ref for p in result.products] == ["34567"]
+        assert result.warnings == [
+            "Fintual stocks skipped: StocksPortfolio was refused by the GraphQL server"
+        ]
+
+    def test_an_account_without_stocks_reads_no_movements(self, monkeypatch, session_file):
+        server = _FintualStocks(_NO_STOCKS, ledger=_LEDGER)
+
+        transactions, result = _run_cycle(monkeypatch, session_file, server)
+
+        assert transactions == []
+        assert "WalletMovements" not in server.operations
+        assert result.warnings == []
+
+
+class TestMovementWarnings:
+    @pytest.mark.parametrize(
+        ("rows", "warning"),
+        [
+            pytest.param(
+                {
+                    "stocksDomesticBankDeposits": [
+                        {
+                            **_ledger_deposit("2002", 100.0),
+                            "forexOrder": {
+                                "id": "1",
+                                "executedAt": "2026-01-02T15:04:05Z",
+                                "foreignCapital": {"amount": 100.0, "currency": "CLP"},
+                            },
+                        }
+                    ]
+                },
+                "Fintual: skipped 1 stock movement(s) not in USD",
+                id="not-usd",
+            ),
+            pytest.param(
+                {"stocksWalletCashInterests": [{"id": None, "date": "2026-01-15", "amount": 1.0}]},
+                "Fintual: skipped 1 unreadable stock movement(s)",
+                id="unreadable",
+            ),
+            pytest.param(
+                {"stocksDivestments": [{"divestmentOperationUuid": "x", "requestedAmount": 1.0}]},
+                "Fintual: skipped 1 stock divestment(s) (not imported)",
+                id="divestment",
+            ),
+        ],
+    )
+    def test_a_skipped_row_is_counted_and_skips_the_balance_check(
+        self, monkeypatch, session_file, rows, warning
+    ):
+        """One counted warning per kind; with a row missing, a mismatch
+        would be expected, so it isn't reported."""
+        ledger = {**_LEDGER, **rows}
+        server = _FintualStocks(_portfolio(_ACME_HELD, wallet=999.99), ledger=ledger)
+
+        _, result = _run_cycle(monkeypatch, session_file, server)
+
+        assert result.warnings == [warning]
+
+    def test_a_stock_without_an_id_keeps_only_its_wallet_row(self, monkeypatch, session_file):
+        order = _ledger_order("5002", None, None, "Acme Corp", 100.0)
+        ledger = {**_LEDGER, "stocksWalletAssetRedemptionInstructions": [order]}
+        server = _FintualStocks(
+            _portfolio(_ACME_HELD, wallet=346.91), ledger=ledger
+        )
+
+        transactions, result = _run_cycle(monkeypatch, session_file, server)
+
+        assert "fintual_wallet_sell_5002" in _ids(transactions)
+        assert "fintual_stock_sell_5002" not in _ids(transactions)
+        assert result.warnings == [
+            "Fintual: 1 stock movement(s) without a stock id kept on the USD wallet only"
+        ]
+
+    def test_pending_movements_are_quiet_and_skip_the_balance_check(
+        self, monkeypatch, session_file
+    ):
+        """A buy not filled yet may already hold cash back in the balance."""
+        pending = _ledger_order("5003", "1001", "ACME", "Acme Corp", 100.0)
+        pending["assetOrder"]["fulfilledAt"] = None
+        pending["declaredAt"] = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        ledger = {
+            **_LEDGER,
+            "stocksWalletAssetSubscriptionInstructions": [
+                *_LEDGER["stocksWalletAssetSubscriptionInstructions"],
+                pending,
+            ],
+        }
+        server = _FintualStocks(_portfolio(_ACME_HELD, wallet=146.91), ledger=ledger)
+
+        transactions, result = _run_cycle(monkeypatch, session_file, server)
+
+        assert "fintual_wallet_buy_5003" not in _ids(transactions)
+        assert result.warnings == []
+
+    def test_a_movement_never_executed_for_over_a_week_is_taken_as_cancelled(
+        self, monkeypatch, session_file, caplog
+    ):
+        """It never moved the balance, so the balance check still runs."""
+        caplog.set_level("INFO")
+        stale = _ledger_order("5003", "1001", "ACME", "Acme Corp", 100.0)
+        stale["assetOrder"]["fulfilledAt"] = None  # declared on 2026-01-05
+        ledger = {
+            **_LEDGER,
+            "stocksWalletAssetSubscriptionInstructions": [
+                *_LEDGER["stocksWalletAssetSubscriptionInstructions"],
+                stale,
+            ],
+        }
+        server = _FintualStocks(_portfolio(_ACME_HELD, wallet=999.99), ledger=ledger)
+
+        transactions, result = _run_cycle(monkeypatch, session_file, server)
+
+        assert "fintual_wallet_buy_5003" not in _ids(transactions)
+        assert result.warnings == [_MISMATCH]
+        assert "1 stock movement(s) never executed, taken as cancelled" in caplog.text
+
+    def test_a_ledger_that_doesnt_add_up_is_a_warning_without_amounts(
+        self, monkeypatch, session_file
+    ):
+        server = _FintualStocks(_portfolio(_ACME_HELD, wallet=999.99), ledger=_LEDGER)
+
+        _, result = _run_cycle(monkeypatch, session_file, server)
+
+        assert result.warnings == [_MISMATCH]
+        assert not re.search(r"\d", result.warnings[0])
+
+    def test_no_balance_check_without_a_readable_wallet(self, monkeypatch, session_file):
+        server = _FintualStocks(_portfolio(_ACME_HELD, wallet=None), ledger=_LEDGER)
+
+        _, result = _run_cycle(monkeypatch, session_file, server)
+
+        assert result.warnings == []
+
+
+class TestSoldOutStocks:
+    """A stock the positions list dropped after the ledger shows it sold is
+    valued at zero from its ledger."""
+
+    _GLBX_ROUND_TRIP = {
+        "stocksWalletAssetSubscriptionInstructions": [
+            _ledger_order("5011", "1002", "GLBX", "Globex Corporation", 999.99)
+        ],
+        "stocksWalletAssetRedemptionInstructions": [
+            _ledger_order("5012", "1002", "GLBX", "Globex Corporation", 1234.56)
+        ],
+        "stocksWalletDividends": [_ledger_dividend("6011", "1002", "GLBX", 12.34)],
+    }
+
+    def test_a_sold_out_stock_gets_a_zero_valued_product(self, monkeypatch, session_file):
+        server = _FintualStocks(
+            _portfolio(_ACME_HELD, wallet=246.91), ledger=self._GLBX_ROUND_TRIP
+        )
+
+        transactions, result = _run_cycle(monkeypatch, session_file, server)
+
+        glbx = _by_ref(result.products)[("investment", "USD", "stock:1002")]
+        assert glbx.name == "Globex Corporation"
+        assert glbx.attributes.ticker == "GLBX"
+        assert (glbx.metrics.nav, glbx.metrics.units) == (0.0, 0.0)
+        assert (glbx.metrics.deposited, glbx.metrics.profit) == (-234.57, 234.57)
+        assert glbx.metrics.dividends == 12.34
+        assert ("investment", "USD", "stock:1001") in _by_ref(result.products)
+        assert "fintual_stock_sell_5012" in _ids(transactions)
+        assert result.warnings == []
+
+    def test_a_held_stock_skipped_for_its_price_is_not_zeroed(
+        self, monkeypatch, session_file
+    ):
+        """It is still on the positions list: only the price is missing."""
+        server = _FintualStocks(
+            _portfolio(_ACME_HELD, _GLBX_HELD, wallet=246.91),
+            prices={"ACME": 100.0},
+            ledger=self._GLBX_ROUND_TRIP,
+        )
+
+        _, result = _run_cycle(monkeypatch, session_file, server)
+
+        assert ("investment", "USD", "stock:1002") not in _by_ref(result.products)
+        assert result.warnings == [
+            "Fintual: skipped 1 stock position(s) without a current price"
+        ]
+
+    def test_a_listed_zero_share_position_is_not_duplicated(
+        self, monkeypatch, session_file
+    ):
+        initk_round_trip = {
+            "stocksWalletAssetSubscriptionInstructions": [
+                _ledger_order("5021", "1003", "INITK", "Initech Inc", 100.0)
+            ],
+            "stocksWalletAssetRedemptionInstructions": [
+                _ledger_order("5022", "1003", "INITK", "Initech Inc", 112.34)
+            ],
+        }
+        server = _FintualStocks(
+            _portfolio(_INITK_LISTED_SOLD, wallet=12.34), ledger=initk_round_trip
+        )
+
+        _, result = _run_cycle(monkeypatch, session_file, server)
+
+        refs = [p.external_ref for p in result.products]
+        assert refs.count("stock:1003") == 1
+        assert result.warnings == []
+
+    def test_a_stock_that_left_without_a_sale_is_not_zeroed(
+        self, monkeypatch, session_file
+    ):
+        """A share-only merger, a spinoff or shares moved out leave no cash
+        leg: zeroing it would book a loss that never happened."""
+        ledger = {
+            "stocksDomesticBankDeposits": [_ledger_deposit("2001", 1234.56)],
+            "stocksWalletAssetSubscriptionInstructions": [
+                _ledger_order("5011", "1002", "GLBX", "Globex Corporation", 999.99)
+            ],
+        }
+        server = _FintualStocks(_portfolio(_ACME_HELD, wallet=234.57), ledger=ledger)
+
+        _, result = _run_cycle(monkeypatch, session_file, server)
+
+        assert ("investment", "USD", "stock:1002") not in _by_ref(result.products)
+        assert result.warnings == []
+
+    def test_an_empty_list_after_selling_everything_zeroes_what_was_sold(
+        self, monkeypatch, session_file
+    ):
+        server = _FintualStocks(_portfolio(wallet=246.91), ledger=self._GLBX_ROUND_TRIP)
+
+        _, result = _run_cycle(monkeypatch, session_file, server)
+
+        assert ("investment", "USD", "stock:1002") in _by_ref(result.products)
+        assert result.warnings == []
+
+    def test_an_empty_list_next_to_unsold_stocks_zeroes_nothing(
+        self, monkeypatch, session_file
+    ):
+        """The ledger says ACME is still held, so the empty list is suspect:
+        not even the GLBX it shows sold is zeroed this run."""
+        ledger = {
+            **self._GLBX_ROUND_TRIP,
+            "stocksDomesticBankDeposits": [_ledger_deposit("2001", 1234.56)],
+            "stocksWalletAssetSubscriptionInstructions": [
+                _ledger_order("5001", "1001", "ACME", "Acme Corp", 999.99),
+                *self._GLBX_ROUND_TRIP["stocksWalletAssetSubscriptionInstructions"],
+            ],
+        }
+        server = _FintualStocks(_portfolio(wallet=481.48), ledger=ledger)
+
+        transactions, result = _run_cycle(monkeypatch, session_file, server)
+
+        assert [p.kind for p in result.products if p.currency == "USD"] == ["wallet"]
+        assert result.warnings == [
+            "Fintual: the stock positions list is empty while the movements show "
+            "stocks bought and never sold; no stock was valued at zero"
+        ]
+        assert not re.search(r"\d", result.warnings[0])
+        assert "fintual_stock_sell_5012" in _ids(transactions)
+
+    @pytest.mark.parametrize(
+        "portfolio",
+        [
+            pytest.param(
+                {
+                    "data": {**_portfolio(wallet=246.91)["data"], "stocksPositionsV2": None},
+                    "errors": [{"message": "synthetic error"}],
+                },
+                id="positions-failed",
+            ),
+            pytest.param(
+                {"data": {**_portfolio(wallet=246.91)["data"], "stocksPositionsV2": None}},
+                id="positions-null",
+            ),
+        ],
+    )
+    def test_no_zero_valued_products_without_the_positions_list(
+        self, monkeypatch, session_file, portfolio
+    ):
+        server = _FintualStocks(portfolio, ledger=self._GLBX_ROUND_TRIP)
+
+        _, result = _run_cycle(monkeypatch, session_file, server)
+
+        assert ("investment", "USD", "stock:1002") not in _by_ref(result.products)
+
+    def test_no_zero_valued_products_from_an_incomplete_ledger(
+        self, monkeypatch, session_file
+    ):
+        """Partial totals would be wrong figures; the next full run sets them."""
+        monkeypatch.setattr(fintual_mod, "PAGE_SIZE", 1)
+        monkeypatch.setattr(fintual_mod, "MAX_PAGES", 1)
+        server = _FintualStocks(_portfolio(wallet=246.91), ledger=self._GLBX_ROUND_TRIP)
+
+        _, result = _run_cycle(monkeypatch, session_file, server)
+
+        assert ("investment", "USD", "stock:1002") not in _by_ref(result.products)

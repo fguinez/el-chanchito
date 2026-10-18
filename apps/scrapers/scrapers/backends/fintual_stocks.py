@@ -18,7 +18,9 @@ row on that position's product, which they name by `stock_ref`. Signs follow
 the product: a buy is money out of the wallet and into the stock. Money that
 only changes product (deposits, buys, the wallet side of a dividend) is
 flagged an internal transfer; a dividend counts as income once, on the
-stock. Every figure in this module's tests is synthetic.
+stock. `sold_out_products` values at zero, from its ledger totals, a stock
+the positions list dropped after the ledger shows it sold. Every figure in
+this module's tests is synthetic.
 """
 
 import math
@@ -30,7 +32,12 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from product_model import ScrapedTransaction
+from product_model import (
+    InvestmentAttributes,
+    InvestmentMetrics,
+    ScrapedProduct,
+    ScrapedTransaction,
+)
 
 # The brokerage holds US stocks; the wallet and the positions are in USD.
 STOCKS_CURRENCY = "USD"
@@ -39,6 +46,8 @@ STOCK_REF_PREFIX = "stock:"
 # A movement's date is the day the wallet changed, in Chile.
 LOCAL_TZ = ZoneInfo("America/Santiago")
 PAGE_SIZE = 50
+# 2,000 movements per list; a ledger longer than that is cut with a warning.
+MAX_PAGES = 40
 
 _CENT = Decimal("0.01")
 
@@ -381,9 +390,10 @@ class LedgerEntry:
 class WalletPage:
     """What one WalletMovements page held.
 
-    `length` is its longest list, nested ones included: how far the next
-    page's offset moves (Fintual may cap a list below the limit asked for), 0
-    on the page after the last. `pending` counts movements not executed yet
+    `length` is its longest list, nested ones and lists of containers
+    included: how far the next page's offset moves, up to the page size
+    (Fintual may cap a list below the limit asked for), 0 on the page after
+    the last. `pending` counts movements not executed yet
     (left out without a warning; they come back once done) and `cancelled`
     the ones declared more than `PENDING_WINDOW` ago and still not executed
     (left out too, without holding up the balance check). `divestments`
@@ -588,7 +598,10 @@ def parse_wallet_page(data: Any, now: datetime) -> WalletPage:
     for name, movement_type, parse in _LISTS:
         add(movement_type, _rows(data.get(name), name), parse)
     for container, name, movement_type in _NESTED_LISTS:
-        for holder in _containers(data.get(container), container):
+        value = data.get(container)
+        if isinstance(value, list):  # the query pages the containers themselves
+            page.length = max(page.length, len(value))
+        for holder in _containers(value, container):
             add(movement_type, _rows(holder.get(name), f"{container}.{name}"), _dated("amount"))
 
     divestments = _rows(data.get(_DIVESTMENTS), _DIVESTMENTS)
@@ -640,3 +653,82 @@ def ledger_balance(entries: list[LedgerEntry]) -> Decimal:
     """What the entries add up to on the wallet: its balance, when the ledger
     is complete."""
     return sum((entry.wallet_amount for entry in entries), Decimal("0.00"))
+
+
+@dataclass
+class _StockTotals:
+    """What the ledger moved in and out of one stock."""
+
+    symbol: str | None = None
+    name: str | None = None
+    buys: Decimal = Decimal("0.00")
+    sells: Decimal = Decimal("0.00")
+    dividends: Decimal = Decimal("0.00")
+    # A sale or a cash merger: some of its shares left for cash.
+    sold: bool = False
+
+
+def _stock_totals(entries: list[LedgerEntry]) -> dict[str, _StockTotals]:
+    """The totals of every stock the ledger mirrors a movement on, by asset id."""
+    totals: dict[str, _StockTotals] = {}
+    for entry in entries:
+        if entry.stock_amount is None:
+            continue
+        stock = totals.setdefault(entry.asset.id, _StockTotals())
+        stock.symbol = stock.symbol or entry.asset.symbol
+        stock.name = stock.name or entry.asset.name
+        if entry.type is BUY:
+            stock.buys += entry.amount
+        elif entry.type is DIVIDEND:
+            stock.dividends += entry.amount
+        else:  # a sale or a cash merger
+            stock.sells += entry.amount
+            stock.sold = True
+    return totals
+
+
+def shows_unsold_stocks(entries: list[LedgerEntry]) -> bool:
+    """True when the ledger has a stock bought and never sold nor paid out in
+    a cash merger: one the positions list should still hold, unless it left
+    through a non-cash event."""
+    return any(
+        stock.buys > 0 and not stock.sold for stock in _stock_totals(entries).values()
+    )
+
+
+def sold_out_products(
+    entries: list[LedgerEntry], listed_asset_ids: frozenset[str]
+) -> list[ScrapedProduct]:
+    """A zero-valued product per stock the positions list no longer has that
+    the ledger shows sold (Fintual drops sold-out positions from the list).
+
+    Its product would otherwise sit at its last value forever. Only a stock
+    that left through a sale or a cash merger is zeroed: one that left
+    through a non-cash event (a share-only merger, a spinoff, shares moved out
+    by ACAT) has no cash leg in the ledger, and zeroing it would book its
+    whole cost as a loss, so it is left alone. The ledger counts money, not
+    shares: a stock partly sold that drops off the list reads as sold out.
+    The totals: deposited = buys - sells, profit = sells - buys (a cash
+    merger counts as a sale), dividends their sum. Only call it with the
+    complete ledger and the full positions list, or a stock still held would
+    read as sold.
+    """
+    return [
+        ScrapedProduct(
+            institution="fintual",
+            kind="investment",
+            currency=STOCKS_CURRENCY,
+            external_ref=stock_ref(asset_id),
+            name=stock.name or stock.symbol or "Acciones",
+            attributes=InvestmentAttributes(ticker=stock.symbol) if stock.symbol else None,
+            metrics=InvestmentMetrics(
+                nav=0.0,
+                units=0.0,
+                deposited=float(stock.buys - stock.sells),
+                profit=float(stock.sells - stock.buys),
+                dividends=float(stock.dividends),
+            ),
+        )
+        for asset_id, stock in _stock_totals(entries).items()
+        if stock.sold and asset_id not in listed_asset_ids
+    ]

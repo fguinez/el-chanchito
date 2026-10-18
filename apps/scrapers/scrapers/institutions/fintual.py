@@ -14,7 +14,9 @@ alone gets a 401. The working flow mirrors a browser sign-in:
     POST /gql/                           -> the stock brokerage ("Acciones"):
                                             StocksPortfolio lists the USD wallet
                                             and the positions, StocksDetails
-                                            batches each position's totals
+                                            batches each position's totals,
+                                            WalletMovements pages through the
+                                            USD wallet's ledger
     GET  /stocks-pricing-cl/current-prices -> latest price per symbol; wants a
                                             per-service JWT cookie minted by
                                             POST /auth/jwt
@@ -36,11 +38,20 @@ Each run emits one CLP `investment` product per goal, then the stocks: one USD
 `investment` product per position (`external_ref` "stock:<asset id>") and one
 USD `wallet` for the cash not yet invested in stocks. Position figures follow
 the web app's own formulas (see `stock_metrics`). The stocks are a separate
-leg of the same run: if they fail, the goals still land and the run is
+part of the same run: if they fail, the goals still land and the run is
 recorded partial; if only the positions fail, the wallet lands too. An
 account that never opened the brokerage (nothing resolves and GraphQL reports
-no error) gets no stock products and no warning; nothing resolving next to a
-GraphQL error is a failed leg.
+no error) gets no stock products, no movements and no warning; nothing
+resolving next to a GraphQL error is a failed leg.
+
+The transactions are the wallet's movements (`backends/fintual_stocks.py`):
+one row on the wallet each, plus a mirror row on the stock's product for buys,
+sells, dividends and cash mergers. The whole ledger is read every run (the
+writer skips the rows it has); a stock row whose product doesn't exist yet
+lands on the next run. A failure there costs the movements only. When the
+ledger is complete it is checked against the wallet's balance, and a stock it
+shows sold (or paid out in a cash merger) that Fintual no longer lists gets a
+zero-valued product.
 """
 
 import asyncio
@@ -49,7 +60,8 @@ import json
 import logging
 import os
 import tempfile
-from collections.abc import Awaitable
+from collections import Counter
+from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
@@ -62,11 +74,22 @@ from product_model import InvestmentAttributes, InvestmentMetrics, WalletMetrics
 
 from scrapers.backends.email import fetch_latest_code
 from scrapers.backends.fintual_stocks import (
+    MAX_PAGES,
+    PAGE_SIZE,
     STOCKS_CURRENCY,
+    WALLET_MOVEMENTS_QUERY,
+    LedgerEntry,
+    WalletPage,
     cents,
+    ledger_balance,
+    ledger_to_transactions,
     number,
+    parse_wallet_page,
+    shows_unsold_stocks,
+    sold_out_products,
     stock_ref,
     text,
+    usd,
 )
 from scrapers.base import (
     BaseScraper,
@@ -202,6 +225,27 @@ def parse_positions(portfolio: dict) -> tuple[list[StockPosition], int]:
     return positions, unreadable
 
 
+def listed_asset_ids(portfolio: dict) -> frozenset[str] | None:
+    """Every asset id the positions list holds, readable or not; None unless
+    the whole list was read (it failed to resolve, or a row has no id).
+
+    A stock is valued at zero for leaving this list, so a held position
+    skipped for lack of a price, still listed, is never zeroed.
+    """
+    container = portfolio.get("stocksPositionsV2")
+    rows = container.get("positions") if isinstance(container, dict) else None
+    if not isinstance(rows, list):
+        return None
+    ids: set[str] = set()
+    for row in rows:
+        asset = row.get("asset") if isinstance(row, dict) else None
+        asset_id = asset.get("id") if isinstance(asset, dict) else None
+        if asset_id is None:
+            return None
+        ids.add(str(asset_id))
+    return frozenset(ids)
+
+
 def parse_prices(payload: Any) -> dict[str, StockPrice]:
     """Map symbol -> latest price. A row without a positive price is left out,
     so its position is never silently valued at 0."""
@@ -306,21 +350,29 @@ def stock_attributes(symbol: str, asset: Any) -> InvestmentAttributes:
     )
 
 
-def stock_wallet_product(wallet: Any) -> ScrapedProduct | None:
-    """The USD cash wallet ("sin usar en acciones"); None when its balance is
-    unreadable or not in USD."""
+def wallet_balance(wallet: Any) -> Decimal | None:
+    """The USD cash wallet's balance, in cents; None when it is unreadable or
+    not in USD."""
     if not isinstance(wallet, dict):
         return None
     balance = wallet.get("balance") or {}
-    amount = number(balance.get("amount"))
-    if amount is None or balance.get("currency") != STOCKS_CURRENCY:
+    if balance.get("currency") != STOCKS_CURRENCY:
+        return None
+    return usd(balance.get("amount"))
+
+
+def stock_wallet_product(wallet: Any) -> ScrapedProduct | None:
+    """The USD cash wallet ("sin usar en acciones"); None when its balance is
+    unreadable or not in USD."""
+    balance = wallet_balance(wallet)
+    if balance is None:
         return None
     return ScrapedProduct(
         institution="fintual",
         kind="wallet",
         currency=STOCKS_CURRENCY,
         name=STOCKS_WALLET_NAME,
-        metrics=WalletMetrics(balance=_usd(amount)),
+        metrics=WalletMetrics(balance=float(balance)),
     )
 
 
@@ -339,6 +391,21 @@ class _Cycle:
     products: list[ScrapedProduct]
     transactions: list[ScrapedTransaction]
     warnings: list[str]
+
+
+@dataclass(frozen=True)
+class _Stocks:
+    """What the brokerage's portfolio read, for the movements read after it.
+
+    `listed_asset_ids` is None unless the full positions list was read, and
+    `wallet_balance` None unless the wallet's USD balance was.
+    """
+
+    products: list[ScrapedProduct]
+    warnings: list[str]
+    has_account: bool = True
+    listed_asset_ids: frozenset[str] | None = None
+    wallet_balance: Decimal | None = None
 
 
 class FintualScraper(BaseScraper):
@@ -702,9 +769,7 @@ class FintualScraper(BaseScraper):
             )
         return products, unpriced, without_totals
 
-    async def _scrape_stocks(
-        self, client: httpx.AsyncClient
-    ) -> tuple[list[ScrapedProduct], list[str]]:
+    async def _scrape_stocks(self, client: httpx.AsyncClient) -> _Stocks:
         """The brokerage: the USD cash wallet plus one product per position."""
         portfolio, errors = await self._graphql(
             client, "StocksPortfolio", _PORTFOLIO_QUERY, {}
@@ -717,11 +782,12 @@ class FintualScraper(BaseScraper):
                 # Nothing resolved and GraphQL said why: the leg failed, and
                 # stock products from earlier runs would freeze unnoticed.
                 logger.warning("Fintual: the stocks portfolio failed to resolve")
-                return [], ["Fintual: skipped the stocks leg (GraphQL error)"]
+                # The movements are still read, unchecked (see _Stocks).
+                return _Stocks([], ["Fintual: skipped the stocks leg (GraphQL error)"])
             # Never opened the brokerage: a null wallet and no positions, with
             # no GraphQL error. Not a failure. (This shape is unverified live.)
             logger.info("Fintual: no stocks account")
-            return [], []
+            return _Stocks([], [], has_account=False)
 
         products: list[ScrapedProduct] = []
         warnings: list[str] = []
@@ -779,7 +845,147 @@ class FintualScraper(BaseScraper):
             sum(p.kind == "investment" for p in products),
             ", plus the USD wallet" if any(p.kind == "wallet" for p in products) else "",
         )
-        return products, warnings
+        return _Stocks(
+            products,
+            warnings,
+            listed_asset_ids=None if errors else listed_asset_ids(portfolio),
+            wallet_balance=wallet_balance(wallet),
+        )
+
+    async def _wallet_pages(
+        self, client: httpx.AsyncClient, now: datetime
+    ) -> AsyncIterator[WalletPage]:
+        """Yield each WalletMovements page, up to the empty one that ends the
+        ledger (yielded too, so the caller knows it was reached). `now` dates
+        the movements still not executed (see `parse_wallet_page`).
+
+        Every list advances by the longest one returned, in case Fintual caps
+        a list below the limit asked for, but never by more than that limit:
+        a list that ignored it would push the offset past rows the others
+        haven't returned yet (the rows it repeats are deduplicated). Pages
+        already yielded survive a later page failing.
+        """
+        offset = 0
+        for _ in range(MAX_PAGES):
+            data, errors = await self._graphql(
+                client,
+                "WalletMovements",
+                WALLET_MOVEMENTS_QUERY,
+                {"limit": PAGE_SIZE, "offset": offset},
+            )
+            if errors:
+                # A list that failed to resolve answers null, which reads as
+                # empty: the page can't be trusted.
+                raise FintualStocksError(
+                    f"WalletMovements answered {errors} GraphQL error(s)"
+                )
+            page = parse_wallet_page(data, now)
+            yield page
+            if not page.length:
+                return
+            offset += min(page.length, PAGE_SIZE)
+
+    async def _scrape_movements(
+        self, client: httpx.AsyncClient, stocks: _Stocks | None
+    ) -> tuple[list[ScrapedTransaction], list[ScrapedProduct], list[str]]:
+        """The USD wallet ledger as transactions, the zero-valued products of
+        the stocks it shows sold out, and the warnings.
+
+        `stocks` is what the portfolio read this cycle, None if it failed: the
+        movements are read either way, but valuing sold-out stocks at zero and
+        checking the ledger against the wallet's balance need it.
+        """
+        warnings: list[str] = []
+
+        def warn(message: str) -> None:
+            logger.warning("%s", message)
+            warnings.append(message)
+
+        entries: dict[tuple[str, str], LedgerEntry] = {}
+        pending = cancelled = divestments = without_asset = 0
+        skipped: Counter = Counter()
+        # Reached the empty page that ends the ledger (never after a failure).
+        complete = failed = False
+        try:
+            async for page in self._wallet_pages(client, datetime.now(timezone.utc)):
+                complete = not page.length
+                for entry in page.entries:
+                    # A list that ignored the offset would repeat its rows.
+                    entries.setdefault((entry.type.tag, entry.source_id), entry)
+                pending += page.pending
+                cancelled += page.cancelled
+                divestments += page.divestments
+                without_asset += page.without_asset
+                skipped.update(page.skipped)
+        except Exception as exc:
+            failed = True
+            logger.exception("Fintual: stock movements failed; keeping the pages read")
+            warnings.append(
+                f"Fintual: stock movements failed ({_stocks_failure_reason(exc)})"
+            )
+        if not complete and not failed:
+            warn(
+                f"Fintual: stopped after {MAX_PAGES} pages of stock movements; "
+                "the rest were not read"
+            )
+
+        # One warning per kind of problem, with counts only.
+        if skipped["not_usd"]:
+            warn(f"Fintual: skipped {skipped['not_usd']} stock movement(s) not in USD")
+        if skipped["unreadable"]:
+            warn(f"Fintual: skipped {skipped['unreadable']} unreadable stock movement(s)")
+        if divestments:
+            warn(f"Fintual: skipped {divestments} stock divestment(s) (not imported)")
+        if without_asset:
+            warn(
+                f"Fintual: {without_asset} stock movement(s) without a stock id "
+                "kept on the USD wallet only"
+            )
+        if pending:
+            # They come back once executed; only the balance check minds.
+            logger.info("Fintual: %d stock movement(s) still pending", pending)
+        if cancelled:
+            # Never executed, so they never moved the balance: nothing to check.
+            logger.info(
+                "Fintual: %d stock movement(s) never executed, taken as cancelled",
+                cancelled,
+            )
+
+        ledger = list(entries.values())
+        sold_out: list[ScrapedProduct] = []
+        if complete and stocks is not None and stocks.listed_asset_ids is not None:
+            if not stocks.listed_asset_ids and shows_unsold_stocks(ledger):
+                # An empty list next to stocks bought and never sold looks like
+                # a list that failed to load, not a portfolio sold out.
+                warn(
+                    "Fintual: the stock positions list is empty while the movements "
+                    "show stocks bought and never sold; no stock was valued at zero"
+                )
+            else:
+                sold_out = sold_out_products(ledger, stocks.listed_asset_ids)
+        if (
+            complete
+            and stocks is not None
+            and stocks.wallet_balance is not None
+            and not (pending or divestments or skipped)
+        ):
+            if ledger_balance(ledger) == stocks.wallet_balance:
+                logger.info("Fintual: the USD wallet movements match its balance")
+            else:
+                # No amounts: the message reaches the dashboard.
+                warn(
+                    "Fintual: the USD wallet movements don't add up to its "
+                    "balance; a movement type may be missing"
+                )
+
+        transactions = ledger_to_transactions(ledger)
+        logger.info(
+            "Fintual: %d stock and wallet movements (%d transactions)%s",
+            len(ledger),
+            len(transactions),
+            f", {len(sold_out)} sold-out stock(s)" if sold_out else "",
+        )
+        return transactions, sold_out, warnings
 
     async def _goal_products(
         self, client: httpx.AsyncClient
@@ -871,14 +1077,32 @@ class FintualScraper(BaseScraper):
 
             # The stocks are a separate leg: whatever fails there, the goals
             # still land and the warning records the run as partial.
+            stocks: _Stocks | None = None
             try:
-                stock_products, stock_warnings = await self._scrape_stocks(client)
+                stocks = await self._scrape_stocks(client)
             except Exception as exc:
                 logger.exception("Fintual: stocks failed; keeping the goals")
                 warnings.append(f"Fintual stocks skipped: {_stocks_failure_reason(exc)}")
             else:
-                products.extend(stock_products)
-                warnings.extend(stock_warnings)
+                products.extend(stocks.products)
+                warnings.extend(stocks.warnings)
+
+            # So are the movements, read even when the portfolio failed (an
+            # account without the brokerage has none).
+            transactions: list[ScrapedTransaction] = []
+            if stocks is None or stocks.has_account:
+                try:
+                    transactions, sold_out, movement_warnings = (
+                        await self._scrape_movements(client, stocks)
+                    )
+                except Exception as exc:
+                    logger.exception("Fintual: stock movements failed; keeping the rest")
+                    warnings.append(
+                        f"Fintual: stock movements failed ({_stocks_failure_reason(exc)})"
+                    )
+                else:
+                    products.extend(sold_out)
+                    warnings.extend(movement_warnings)
 
             # Keep the newest jar on disk (the stocks leg may have refreshed the
             # session or minted the pricing cookie). The refresh token itself
@@ -889,7 +1113,7 @@ class FintualScraper(BaseScraper):
             except OSError:
                 logger.warning("Fintual: could not save the session", exc_info=True)
 
-            return _Cycle(products, [], warnings)
+            return _Cycle(products, transactions, warnings)
 
     async def _scrape_cycle(self) -> _Cycle:
         """Drive the session once, caching the cycle (or its error) for the
@@ -906,11 +1130,9 @@ class FintualScraper(BaseScraper):
         return cycle
 
     async def scrape_transactions(self) -> list[ScrapedTransaction]:
-        # Goals expose no individual movements, and stock movements aren't
-        # read yet (they'd need transactions that target one position). The
-        # cycle still runs here, first, so the products leg reuses it.
-        await self._scrape_cycle()
-        return []
+        """The stock and USD wallet movements (goals expose none). The cycle
+        runs here, first, so the products leg reuses it."""
+        return (await self._scrape_cycle()).transactions
 
     async def scrape_products(self) -> ProductScrapeResult:
         """The products of the cycle the transactions leg drove.

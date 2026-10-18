@@ -18,6 +18,8 @@ from scrapers.backends.fintual_stocks import (
     ledger_to_transactions,
     local_date,
     parse_wallet_page,
+    shows_unsold_stocks,
+    sold_out_products,
     stock_ref,
     usd,
 )
@@ -589,6 +591,11 @@ class TestPageShape:
 
         assert page.length == 3
 
+    def test_each_container_of_a_list_counts_toward_the_length(self):
+        holders = [{"id": f"70{n:02}", "returnOfCapitals": []} for n in range(3)]
+
+        assert _parse(_page(stocksWalletReturnOfCapitals=holders)).length == 3
+
     def test_an_empty_page_has_no_length(self):
         assert _parse(_page()).length == 0
 
@@ -626,3 +633,122 @@ class TestLedgerBalance:
 
     def test_an_empty_ledger_is_zero(self):
         assert ledger_balance([]) == Decimal("0.00")
+
+
+class TestSoldOutProducts:
+    def _entries(self, **lists):
+        return _parse(_page(**lists)).entries
+
+    def test_a_stock_off_the_list_is_valued_at_zero_from_its_ledger(self):
+        """A cash merger pays the shares out in cash: it counts as a sale."""
+        initk = _asset("1003", "INITK", "Initech Inc")
+        entries = self._entries(
+            stocksWalletAssetSubscriptionInstructions=[_order("5001", asset=initk, capital=999.99)],
+            stocksWalletCashMergers=[
+                {**_dated("6601", _money(1234.56), key="capital"), "asset": initk}
+            ],
+            stocksWalletDividends=[_dividend(asset={"id": "1003", "symbol": "INITK"})],
+        )
+
+        (product,) = sold_out_products(entries, frozenset())
+
+        assert (product.kind, product.currency, product.external_ref) == (
+            "investment",
+            "USD",
+            "stock:1003",
+        )
+        assert product.name == "Initech Inc"
+        assert product.attributes.ticker == "INITK"
+        assert (product.metrics.nav, product.metrics.units) == (0.0, 0.0)
+        assert (product.metrics.deposited, product.metrics.profit) == (-234.57, 234.57)
+        assert product.metrics.dividends == 12.34
+
+    def test_a_sale_values_the_stock_at_zero(self):
+        entries = self._entries(
+            stocksWalletAssetSubscriptionInstructions=[_order("5001", capital=999.99)],
+            stocksWalletAssetRedemptionInstructions=[_order("5002", capital=1234.56)],
+        )
+
+        (product,) = sold_out_products(entries, frozenset())
+
+        assert (product.external_ref, product.metrics.nav) == ("stock:1001", 0.0)
+        assert (product.metrics.deposited, product.metrics.profit) == (-234.57, 234.57)
+
+    def test_a_listed_stock_is_left_alone(self):
+        entries = self._entries(
+            stocksWalletAssetSubscriptionInstructions=[_order("5001")],
+            stocksWalletAssetRedemptionInstructions=[_order("5002", capital=100.0)],
+        )
+
+        assert sold_out_products(entries, frozenset({"1001"})) == []
+
+    @pytest.mark.parametrize(
+        "lists",
+        [
+            pytest.param(
+                {"stocksWalletAssetSubscriptionInstructions": [_order()]},
+                id="bought-then-merged-spun-off-or-moved-out",
+            ),
+            pytest.param(
+                {"stocksWalletDividends": [_dividend(asset={"id": "1002", "symbol": "GLBX"})]},
+                id="moved-in-paid-a-dividend-then-left",
+            ),
+        ],
+    )
+    def test_a_stock_that_left_without_a_sale_is_left_alone(self, lists):
+        """No cash leg: zeroing it would book its cost as a loss."""
+        assert sold_out_products(self._entries(**lists), frozenset()) == []
+
+    def test_wallet_only_movements_make_no_product(self):
+        entries = self._entries(
+            stocksDomesticBankDeposits=[_deposit()],
+            stocksWalletAssetSubscriptionInstructions=[_order(asset={"id": None})],
+        )
+
+        assert sold_out_products(entries, frozenset()) == []
+
+    def test_a_stock_known_only_by_its_ticker_is_named_by_it(self):
+        glbx = {"id": "1002", "symbol": "GLBX"}
+        entries = self._entries(
+            stocksWalletAssetRedemptionInstructions=[_order("5002", asset=glbx, capital=100.0)]
+        )
+
+        (product,) = sold_out_products(entries, frozenset())
+
+        assert product.name == "GLBX"
+        assert (product.metrics.deposited, product.metrics.profit) == (-100.0, 100.0)
+
+
+class TestShowsUnsoldStocks:
+    @pytest.mark.parametrize(
+        ("lists", "unsold"),
+        [
+            pytest.param(
+                {"stocksWalletAssetSubscriptionInstructions": [_order()]}, True, id="bought"
+            ),
+            pytest.param(
+                {
+                    "stocksWalletAssetSubscriptionInstructions": [_order("5001")],
+                    "stocksWalletAssetRedemptionInstructions": [_order("5002", capital=100.0)],
+                },
+                False,
+                id="bought-and-sold",
+            ),
+            pytest.param(
+                {
+                    "stocksWalletAssetSubscriptionInstructions": [_order("5001")],
+                    "stocksWalletCashMergers": [
+                        {**_dated("6601", _money(100.0), key="capital"), "asset": _asset()}
+                    ],
+                },
+                False,
+                id="bought-and-merged-for-cash",
+            ),
+            pytest.param({"stocksWalletDividends": [_dividend()]}, False, id="dividend-only"),
+            pytest.param(
+                {"stocksDomesticBankDeposits": [_deposit()]}, False, id="wallet-only"
+            ),
+        ],
+    )
+    def test_a_stock_bought_and_never_sold(self, lists, unsold):
+        assert shows_unsold_stocks(_parse(_page(**lists)).entries) is unsold
