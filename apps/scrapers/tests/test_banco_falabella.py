@@ -250,6 +250,7 @@ class TestMovementsFromRows:
         [
             pytest.param("NOTA CREDITO SINTETICA", "$-12.345", id="signed-credit"),
             pytest.param("PAGO PESOS SINTETICO", "-$ 12.345", id="signed-payment"),
+            pytest.param("PAGO TARJETA SINTETICA", "-$12.345", id="portal-card-payment"),
         ],
     )
     def test_printed_sign_is_a_credit(self, descripcion, monto):
@@ -448,7 +449,7 @@ class TestScraperLegs:
 
     def test_partial_coverage_reaches_products_warnings(self, monkeypatch):
         """A surface that failed in the transactions drive surfaces as a warning."""
-        warning = "Banco Falabella: unbilled movements surface failed after 3 attempts"
+        warning = "Banco Falabella: unbilled movements surface never loaded"
         self._install(monkeypatch, result=_session(movements=[], warnings=[warning]))
 
         transactions = asyncio.run(self.scraper.scrape_transactions())
@@ -579,12 +580,15 @@ class _NoMatch:
 class _SurfacePage:
     """A page with scripted movements-table reads, on a fake clock (no browser)."""
 
-    def __init__(self, reads, empty_state=False, backdrop=False):
+    def __init__(self, reads, empty_state=False, backdrop=False, retry_shown=False, retry_lands=True):
         self.reads = list(reads)
         self.empty_state = empty_state
         self.backdrop = backdrop
+        self.retry_shown = retry_shown
+        self.retry_lands = retry_lands
         self.clock = 0.0
         self.scripts = []
+        self.clicks = []
 
     def evaluate(self, script, *args):
         self.scripts.append(script)
@@ -592,8 +596,15 @@ class _SurfacePage:
             return self.reads.pop(0) if len(self.reads) > 1 else self.reads[0]
         if script is web._EMPTY_STATE_JS:
             return self.empty_state
+        if script is web._RETRY_SHOWN_JS:
+            return self.retry_shown
         if script is web._DISMISS_OVERLAY_JS:
             return self.backdrop
+        if script is web._CLICK_TEXT_JS:
+            self.clicks.append(args[0])
+        if script is web._CLICK_RETRY_JS:
+            self.clicks.append("Reintentar")
+            return self.retry_lands
         return False
 
     def get_by_text(self, *args, **kwargs):
@@ -613,57 +624,342 @@ def _table(*rows):
 _NO_TABLE = {"found": False, "rows": []}
 
 
+class _ScriptedFeed:
+    """A movements feed whose load state is scripted per poll (the last one sticks)."""
+
+    def __init__(self, states):
+        self.states = list(states)
+
+    def mark(self):
+        return 0
+
+    def state(self, since):
+        return self.states.pop(0) if len(self.states) > 1 else self.states[0]
+
+
 class TestReadSurface:
-    def _read(self, monkeypatch, page, previous=None):
+    def _read(self, monkeypatch, page, states, previous=None):
         monkeypatch.setattr(web, "time", SimpleNamespace(monotonic=lambda: page.clock))
-        return web._read_surface(page, web._BILLED_TAB, previous)
+        return web._read_surface(page, web._BILLED_TAB, _ScriptedFeed(states), previous)
 
     def test_rows_are_returned(self, monkeypatch):
         """A table with rows is read on the first poll."""
         page = _SurfacePage([_table(_row())])
 
-        assert self._read(monkeypatch, page) == [_row()]
+        assert self._read(monkeypatch, page, [None]) == [_row()]
 
     def test_late_rows_beat_an_early_empty_table(self, monkeypatch):
         """A header-only table that fills in a poll later is not filed as empty."""
         page = _SurfacePage([_table(), _table(_row())])
 
-        assert self._read(monkeypatch, page) == [_row()]
+        assert self._read(monkeypatch, page, [web._LOAD_DONE]) == [_row()]
 
-    def test_empty_table_counts_once_it_holds(self, monkeypatch):
-        """A table that stays header-only is a confirmed empty tab."""
+    def test_empty_table_counts_once_its_load_answered(self, monkeypatch):
+        """A header-only table after the load answered, held, is a confirmed empty tab."""
         page = _SurfacePage([_table()])
 
-        result = self._read(monkeypatch, page)
+        result = self._read(monkeypatch, page, [web._LOAD_DONE])
 
         assert result == []
         assert page.scripts.count(web._MOVEMENTS_ROWS_JS) == web._EMPTY_CONFIRM_POLLS
 
-    def test_empty_state_message_counts_once_it_holds(self, monkeypatch):
+    def test_empty_state_message_counts_once_its_load_answered(self, monkeypatch):
         """No table plus the component's "no movements" message is an empty tab."""
         page = _SurfacePage([_NO_TABLE], empty_state=True)
 
-        assert self._read(monkeypatch, page) == []
+        assert self._read(monkeypatch, page, [web._LOAD_DONE]) == []
+
+    @pytest.mark.parametrize(
+        "previous",
+        [
+            pytest.param(None, id="first-load"),
+            pytest.param([], id="stale-empty-table-from-the-other-tab"),
+        ],
+    )
+    def test_empty_looking_table_during_the_load_is_not_empty(self, monkeypatch, previous):
+        """Header-only table and "no movements" art while the load runs wait for its rows."""
+        polls = web._EMPTY_CONFIRM_POLLS * 4
+        page = _SurfacePage([_table()] * polls + [_table(_row())], empty_state=True)
+
+        result = self._read(monkeypatch, page, [None] * polls, previous=previous)
+
+        assert result == [_row()]
+
+    def test_failed_load_is_retried_not_filed_empty(self, monkeypatch):
+        """The header-only table a failed load leaves is retried via Reintentar."""
+        page = _SurfacePage([_table(), _table(), _table(_row())], retry_shown=True)
+
+        result = self._read(monkeypatch, page, [web._LOAD_FAILED, None])
+
+        assert result == [_row()]
+        assert page.clicks.count("Reintentar") == 1
+
+    def test_load_that_keeps_failing_is_none(self, monkeypatch):
+        """A tab whose every load fails is None (a warning upstream), never empty."""
+        page = _SurfacePage([_table()], retry_shown=True)
+
+        result = self._read(monkeypatch, page, [web._LOAD_FAILED])
+
+        assert result is None
+        assert page.clicks.count("Reintentar") == web._FAILED_LOAD_RETRIES
+
+    def test_failed_step_without_an_error_view_keeps_waiting(self, monkeypatch):
+        """A failed step the component rides out is neither retried nor empty."""
+        page = _SurfacePage([_table()] * 3 + [_table(_row())])
+
+        result = self._read(monkeypatch, page, [web._LOAD_FAILED] * 3 + [None])
+
+        assert result == [_row()]
+        assert "Reintentar" not in page.clicks
+
+    def test_error_view_behind_a_2xx_is_not_empty(self, monkeypatch):
+        """A header-only table next to Reintentar is a failure even if the call said 2xx."""
+        page = _SurfacePage([_table()], retry_shown=True)
+
+        result = self._read(monkeypatch, page, [web._LOAD_DONE])
+
+        assert result is None
+
+    def test_hung_load_runs_out_its_budgets(self, monkeypatch):
+        """A load that never answers is retried once per budget, then None."""
+        page = _SurfacePage([_table()])
+
+        result = self._read(monkeypatch, page, [None])
+
+        assert result is None
+        assert page.clicks.count("Reintentar") == len(web._RENDER_TIMEOUTS_MS) - 1
 
     def test_previous_tab_rows_are_ignored(self, monkeypatch):
         """Rows still showing from the other tab are skipped until the new ones load."""
         stale = _row(descripcion="COMERCIO SINTETICO ANTERIOR")
         page = _SurfacePage([_table(stale), _table(stale), _table(_row())])
 
-        assert self._read(monkeypatch, page, previous=[stale]) == [_row()]
-
-    def test_slow_rows_after_an_empty_previous_tab_are_read(self, monkeypatch):
-        """An empty tab switched from an empty one waits out a slow render."""
-        reads = [_table()] * web._EMPTY_CONFIRM_POLLS + [_table(_row())]
-        page = _SurfacePage(reads)
-
-        assert self._read(monkeypatch, page, previous=[]) == [_row()]
+        assert self._read(monkeypatch, page, [None], previous=[stale]) == [_row()]
 
     def test_never_rendered_is_none(self, monkeypatch):
         """A surface with no table and no empty message is None (a warning upstream)."""
         page = _SurfacePage([_NO_TABLE])
 
-        assert self._read(monkeypatch, page) is None
+        assert self._read(monkeypatch, page, [None]) is None
+
+
+class _Request:
+    """A Playwright request stand-in (hashable by identity, like the real one)."""
+
+    def __init__(self, path, method="POST"):
+        self.url = f"https://bff.example.invalid{path}"
+        self.method = method
+
+
+_CARD_CALL = "/movement-cc/v2.0/credit-card"
+_MOVEMENTS_CALL = "/movement-cc/v2.0/credit-card/movements"
+
+
+def _answer(feed, path, status=200, method="POST"):
+    request = _Request(path, method)
+    feed.on_request(request)
+    feed.on_response(SimpleNamespace(request=request, status=status))
+    feed.on_request_finished(request)
+
+
+class _ChainPage(_SurfacePage):
+    """A surface page whose Reintentar click starts a new load on the real feed.
+
+    The error view lingers until the next poll; then the new load's request
+    goes out, and its 2xx answer on the poll after, as the component's fetch
+    does after a click.
+    """
+
+    def __init__(self, reads, feed, retry_shown=False):
+        super().__init__(reads, retry_shown=retry_shown)
+        self.feed = feed
+        self.scheduled = []
+
+    def evaluate(self, script, *args):
+        if script is web._CLICK_RETRY_JS:
+            request = _Request(_MOVEMENTS_CALL)
+            self.scheduled += [
+                lambda: (setattr(self, "retry_shown", False), self.feed.on_request(request)),
+                lambda: (
+                    self.feed.on_response(SimpleNamespace(request=request, status=200)),
+                    self.feed.on_request_finished(request),
+                ),
+            ]
+        return super().evaluate(script, *args)
+
+    def wait_for_timeout(self, ms):
+        super().wait_for_timeout(ms)
+        if self.scheduled:
+            self.scheduled.pop(0)()
+
+
+class TestReadSurfaceWithTheFeed:
+    def _read(self, monkeypatch, page, feed, since=None):
+        monkeypatch.setattr(web, "time", SimpleNamespace(monotonic=lambda: page.clock))
+        return web._read_surface(page, web._UNBILLED_TAB, feed, since=since)
+
+    def test_retried_load_is_judged_on_its_own_answer(self, monkeypatch):
+        """After Reintentar, the earlier failure and its lingering view no longer count."""
+        feed = web._MovementsFeed()
+        since = feed.mark()
+        _answer(feed, _MOVEMENTS_CALL, 500)
+        page = _ChainPage([_table()], feed, retry_shown=True)
+
+        result = self._read(monkeypatch, page, feed, since=since)
+
+        assert result == []
+        assert page.clicks.count("Reintentar") == 1
+
+    def test_load_answered_before_the_read_counts_from_the_callers_mark(self, monkeypatch):
+        """The unbilled load that answered while the card detail opened is not missed."""
+        feed = web._MovementsFeed()
+        since = feed.mark()
+        _answer(feed, _MOVEMENTS_CALL)
+        page = _ChainPage([_table()], feed)
+
+        result = self._read(monkeypatch, page, feed, since=since)
+
+        assert result == []
+        assert "Reintentar" not in page.clicks
+
+    def test_slow_load_still_counts_when_no_reintentar_showed(self, monkeypatch):
+        """A load that outlives its budget, with no Reintentar to click, may still answer."""
+        feed = web._MovementsFeed()
+        since = feed.mark()
+        slow = _Request(_MOVEMENTS_CALL)
+        feed.on_request(slow)
+        page = _SlowAnswerPage([_table()], feed, slow, answer_at_s=15)
+
+        result = self._read(monkeypatch, page, feed, since=since)
+
+        assert result == []
+
+
+class _SlowAnswerPage(_SurfacePage):
+    """A surface page with no Reintentar control whose pending call answers 2xx late."""
+
+    def __init__(self, reads, feed, request, answer_at_s):
+        super().__init__(reads, retry_lands=False)
+        self.feed = feed
+        self.request = request
+        self.answer_at_s = answer_at_s
+
+    def wait_for_timeout(self, ms):
+        super().wait_for_timeout(ms)
+        if self.request is not None and self.clock >= self.answer_at_s:
+            self.feed.on_response(SimpleNamespace(request=self.request, status=200))
+            self.feed.on_request_finished(self.request)
+            self.request = None
+
+
+class TestMovementsFeed:
+    def test_load_is_done_once_movements_answers(self):
+        """A chain that ends in a 2xx /movements call is a finished load."""
+        feed = web._MovementsFeed()
+
+        _answer(feed, _CARD_CALL)
+        _answer(feed, _MOVEMENTS_CALL)
+
+        assert feed.state(0) == web._LOAD_DONE
+
+    def test_load_is_under_way_mid_chain(self):
+        """A settled earlier step, with nothing pending, is no outcome yet."""
+        feed = web._MovementsFeed()
+
+        _answer(feed, _CARD_CALL)
+
+        assert feed.state(0) is None
+
+    def test_load_is_under_way_while_a_call_is_pending(self):
+        """A /movements call that has not finished yet is no outcome yet."""
+        feed = web._MovementsFeed()
+        request = _Request(_MOVEMENTS_CALL)
+        feed.on_request(request)
+
+        feed.on_response(SimpleNamespace(request=request, status=200))
+
+        assert feed.state(0) is None
+
+    @pytest.mark.parametrize(
+        ("path", "status"),
+        [
+            pytest.param(_CARD_CALL, 500, id="card-call-500"),
+            pytest.param(_MOVEMENTS_CALL, 500, id="movements-call-500"),
+            pytest.param(_MOVEMENTS_CALL, 403, id="movements-call-403"),
+        ],
+    )
+    def test_error_status_fails_the_load(self, path, status):
+        """Any call of the chain answering an error status fails the load."""
+        feed = web._MovementsFeed()
+
+        _answer(feed, path, status)
+
+        assert feed.state(0) == web._LOAD_FAILED
+
+    def test_network_failure_fails_the_load(self):
+        """A call that never got a response fails the load."""
+        feed = web._MovementsFeed()
+        request = _Request(_MOVEMENTS_CALL)
+        feed.on_request(request)
+
+        feed.on_request_failed(request)
+
+        assert feed.state(0) == web._LOAD_FAILED
+
+    def test_body_failure_after_a_2xx_status_fails_the_load(self):
+        """A call whose body dies after a 2xx status line is a failure, not a finished load."""
+        feed = web._MovementsFeed()
+        request = _Request(_MOVEMENTS_CALL)
+        feed.on_request(request)
+        feed.on_response(SimpleNamespace(request=request, status=200))
+
+        feed.on_request_failed(request)
+
+        assert feed.state(0) == web._LOAD_FAILED
+
+    def test_mark_skips_earlier_loads(self):
+        """Only calls started after the mark count."""
+        feed = web._MovementsFeed()
+        _answer(feed, _MOVEMENTS_CALL)
+
+        since = feed.mark()
+
+        assert feed.state(since) is None
+
+    def test_call_left_hanging_before_the_mark_is_ignored(self):
+        """A call an earlier load never finished neither blocks nor decides the next one."""
+        feed = web._MovementsFeed()
+        hung = _Request(_MOVEMENTS_CALL)
+        feed.on_request(hung)
+        since = feed.mark()
+
+        _answer(feed, _MOVEMENTS_CALL)
+        feed.on_request_failed(hung)
+
+        assert feed.state(since) == web._LOAD_DONE
+
+    def test_redirect_is_a_step_not_a_failure(self):
+        """A 3xx hop leaves the load under way until the redirected call answers."""
+        feed = web._MovementsFeed()
+
+        _answer(feed, _MOVEMENTS_CALL, 302)
+
+        assert feed.state(0) is None
+
+    @pytest.mark.parametrize(
+        ("path", "method"),
+        [
+            pytest.param("/credit-card-banking-statement/billing-date/list", "POST", id="other-bff"),
+            pytest.param(_MOVEMENTS_CALL, "OPTIONS", id="cors-preflight"),
+        ],
+    )
+    def test_calls_that_are_not_a_load_step_are_ignored(self, path, method):
+        """Calls outside /movement-cc/ and CORS preflights neither block nor decide a load."""
+        feed = web._MovementsFeed()
+
+        _answer(feed, path, 500 if method == "POST" else 204, method)
+
+        assert feed.state(0) is None
 
 
 class _CardLocator:
