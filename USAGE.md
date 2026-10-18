@@ -208,7 +208,7 @@ Scrapers run independently from the dashboard. They share a PostgreSQL database.
 
 ### Fintual sign-in
 
-Fintual retired its token-only API — reading your goals now requires a real web
+Fintual retired its token-only API: reading your goals now requires a real web
 session with e-mail 2FA. Sign in once and the session is cached to disk
 (`apps/scrapers/.fintual_session.json`, gitignored):
 
@@ -216,10 +216,22 @@ session with e-mail 2FA. Sign in once and the session is cached to disk
 make fintual-login   # signs in, prompts for the 6-digit code Fintual e-mails you
 ```
 
-Scheduled scrapes reuse the cached session automatically. When it eventually
-expires, the Fintual scraper reports `Fintual session expired. Run
-`make fintual-login`…` — just run the login again. (Override the cache location
-with `FINTUAL_SESSION_FILE` if needed.)
+Scheduled scrapes refresh the cached session the way the website does, with no
+2FA, so you only need `make fintual-login` again when:
+
+- the refresh token itself expires and `FINTUAL_EMAIL` is not the IMAP mailbox
+  (`EMAIL_IMAP_USER`); the scraper reports ``Fintual session expired. Run
+  `make fintual-login`…``. When the account *is* the IMAP mailbox, the scraper
+  reads the e-mailed code and signs in by itself.
+- an automatic sign-in failed. It is not retried (each attempt e-mails you a
+  new code) until a manual login succeeds; the scraper reports `Fintual
+  automatic sign-in failed earlier…`.
+
+Don't let two scraper processes share one session cache at the same time (for
+example `make scrapers-once` while `make dev` or `make scrapers-start` runs):
+the refresh token is single-use, so one process would spend the token the
+other still holds. (Override the cache location with `FINTUAL_SESSION_FILE` if
+needed.)
 
 Running scrapers in Docker? The session is cached in the `scraper_state` volume
 (`FINTUAL_SESSION_FILE=/data/fintual_session.json`). Sign in *inside* the
