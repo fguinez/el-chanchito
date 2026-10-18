@@ -514,6 +514,11 @@ def _write_transaction(
     movement already stored under its key is only claimed; one that adopts a
     stored row (see `write_transactions`) re-keys it in place. `claimed` is
     only read: the caller records the claim once this row's block commits.
+
+    `internal_transfer` is written only by the INSERT: neither a stored nor an
+    adopted row has its `is_internal_transfer` touched, so a user who unticks
+    it keeps it unticked. A row a scraper flags counts as a user edit for
+    `_carries_user_edits`, so the twin cleanup leaves it in place.
     """
     source = f"scraper_{txn.institution}"
     row = conn.execute(
@@ -573,9 +578,10 @@ def _write_transaction(
         INSERT INTO transactions
             (id, product_id, description, amount, transaction_date,
              accounting_date, scheduled_month, source, external_id,
+             is_internal_transfer,
              location_name, location_city, location_country,
              location_latitude, location_longitude)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s)
         ON CONFLICT (product_id, external_id) DO NOTHING
         """,
@@ -589,6 +595,7 @@ def _write_transaction(
             txn.scheduled_month,
             source,
             txn.external_id,
+            txn.internal_transfer,
             *_location_values(txn.location),
         ),
     )
@@ -596,18 +603,45 @@ def _write_transaction(
     return ("inserted" if cur.rowcount and cur.rowcount > 0 else "stored"), None
 
 
+def _lookup_transaction_product(
+    conn, institution_slug: str, kind: str, currency: str, external_ref: str
+) -> str | None:
+    """The existing product a transaction's `product_external_ref` names, or None.
+
+    Lookup only, like an exchange rate's product scope: nothing of the
+    institution -> account -> product chain is created. Creating it here would
+    file the rows of a per-holding product before its products leg ran, with a
+    generic name and no metrics. An inactive product still counts: a retired
+    holding keeps importing its movements.
+    """
+    row = conn.execute(
+        "SELECT id FROM institutions WHERE slug = %s", (institution_slug,)
+    ).fetchone()
+    if not row:
+        return None
+    return _lookup_product(conn, row[0], kind, currency, external_ref)
+
+
+def _product_key(txn: ScrapedTransaction) -> tuple:
+    """The identity `write_transactions` resolves a transaction's product by."""
+    return (txn.institution, txn.product_kind, txn.currency, txn.product_external_ref)
+
+
 @dataclass(frozen=True)
 class TransactionWriteResult:
     """What one `write_transactions` call did.
 
     `inserted` counts rows newly inserted and `failed` the transactions that
-    raised and were skipped. `persisted_external_ids` holds the keys a stored
-    row carries once the call returns: inserted, already stored, or adopted
-    onto.
+    raised and were skipped. `unresolved` counts the transactions whose
+    `product_external_ref` names a product that does not exist yet: nothing
+    was written for them, and a later run (after the products leg stored the
+    product) lands them. `persisted_external_ids` holds the keys a stored row
+    carries once the call returns: inserted, already stored, or adopted onto.
     """
 
     inserted: int = 0
     failed: int = 0
+    unresolved: int = 0
     persisted_external_ids: frozenset[str] = frozenset()
 
 
@@ -635,6 +669,15 @@ def write_transactions(transactions: list[ScrapedTransaction]) -> TransactionWri
     location: NULL location columns take the scraped values, non-NULL ones and
     rows the user edited the location of are left alone (`_fill_location`).
 
+    Transactions are grouped by (institution, kind, currency,
+    product_external_ref). Without a ref they land on the product with no
+    external_ref, created if missing (`_resolve_product`). With one they land
+    on that existing product, looked up and never created
+    (`_lookup_transaction_product`); when it doesn't exist yet they are counted
+    in `unresolved` and written by a later run, once the products leg has
+    stored it (it runs after this one, so a new holding's first movements wait
+    one run).
+
     A row that never gets adopted, because its movement fell out of the bank's
     window before the first post-#57 scrape, keeps the date it was imported with
     (BanChile's legacy rows hold the *posting* date) and a NULL
@@ -656,24 +699,49 @@ def write_transactions(transactions: list[ScrapedTransaction]) -> TransactionWri
     pool = get_pool()
     inserted = 0
     failed = 0
+    unresolved = 0
     persisted: set[str] = set()
 
     with pool.connection() as conn:
-        products: dict[tuple, str] = {}
+        # None caches a product ref that names no product yet.
+        products: dict[tuple, str | None] = {}
 
         # Every key this scrape carries, per product: a stored row already
         # holding one of them belongs to that movement and is never adopted.
         # Only a product whose block committed is cached.
         incoming: dict[str, set[str]] = {}
         for txn in transactions:
-            key = (txn.institution, txn.product_kind, txn.currency)
+            key = _product_key(txn)
             try:
                 if key not in products:
                     with conn.transaction():
-                        product_id = _resolve_product(
-                            conn, txn.institution, txn.product_kind, txn.currency
-                        )
+                        # A ref never falls back to the get-or-create path: a
+                        # created ref-less product of a per-holding kind would
+                        # be retired, snapshots and all, by the next product
+                        # write of a holding (`_retire_rollup_sibling`).
+                        if txn.product_external_ref is None:
+                            product_id = _resolve_product(
+                                conn, txn.institution, txn.product_kind, txn.currency
+                            )
+                        else:
+                            product_id = _lookup_transaction_product(
+                                conn,
+                                txn.institution,
+                                txn.product_kind,
+                                txn.currency,
+                                txn.product_external_ref,
+                            )
                     products[key] = product_id
+                    if product_id is None:
+                        # The ref (a holding's id) stays out of the log.
+                        logger.warning(
+                            "No %s %s product of '%s' with the external_ref a "
+                            "transaction names yet; its transactions are left "
+                            "for a later run",
+                            txn.product_kind,
+                            txn.currency,
+                            txn.institution,
+                        )
             except Exception:
                 if conn.broken:
                     raise
@@ -681,15 +749,19 @@ def write_transactions(transactions: list[ScrapedTransaction]) -> TransactionWri
                     "Failed to resolve the product for: %s", txn.external_id
                 )
                 continue
-            incoming.setdefault(products[key], set()).add(txn.external_id)
+            if products[key] is not None:
+                incoming.setdefault(products[key], set()).add(txn.external_id)
 
         claimed: set = set()
         for txn in transactions:
-            key = (txn.institution, txn.product_kind, txn.currency)
-            product_id = products.get(key)
-            if product_id is None:
+            key = _product_key(txn)
+            if key not in products:
                 # Its product failed to resolve, and was logged, above.
                 failed += 1
+                continue
+            product_id = products[key]
+            if product_id is None:
+                unresolved += 1
                 continue
             try:
                 with conn.transaction():
@@ -712,6 +784,7 @@ def write_transactions(transactions: list[ScrapedTransaction]) -> TransactionWri
     return TransactionWriteResult(
         inserted=inserted,
         failed=failed,
+        unresolved=unresolved,
         persisted_external_ids=frozenset(persisted),
     )
 
@@ -725,7 +798,11 @@ def _like_prefix(prefix: str) -> str:
 def _carries_user_edits(
     is_manually_categorized, is_internal_transfer, notes, location_is_manual=False
 ) -> bool:
-    """True for a row the user touched: categorised, annotated, paired or located."""
+    """True for a row the user touched: categorised, annotated, paired or located.
+
+    A flag a scraper set on insert (`ScrapedTransaction.internal_transfer`)
+    can't be told apart from the user's, so it counts too.
+    """
     return bool(
         is_manually_categorized
         or is_internal_transfer

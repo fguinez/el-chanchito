@@ -675,6 +675,7 @@ class _FakeTxConn:
                 month,
                 source,
                 ext,
+                internal_transfer,
                 *location,
             ) = p
             if ext in self.fail_on:
@@ -696,6 +697,7 @@ class _FakeTxConn:
                     "accounting_date": accounting_date,
                     "scheduled_month": month,
                     "source": source,
+                    "is_internal_transfer": internal_transfer,
                     "created_at": self._clock,
                     "location": tuple(location),
                 }
@@ -1181,6 +1183,143 @@ class TestWriteTransactionsPersistedKeys:
         _use_tx_conn(monkeypatch, _FakeTxConn([]))
 
         assert upsert_transactions([_txn("bch_op_10000000001")]) == 1
+
+
+def _stock_txn(external_id, ref="stock:1001", amount="1234.56", internal=True):
+    """A synthetic stock purchase naming its per-holding product."""
+    return ScrapedTransaction(
+        institution="fintual",
+        product_kind="investment",
+        product_external_ref=ref,
+        description="Compra ACME",
+        amount=amount,
+        currency="USD",
+        transaction_date=date(2026, 1, 2),
+        external_id=external_id,
+        scheduled_month=date(2026, 1, 1),
+        internal_transfer=internal,
+    )
+
+
+class TestProductRefTransactions:
+    """A transaction with `product_external_ref` only lands on a product that
+    exists; it never takes the get-or-create path."""
+
+    def _install(self, monkeypatch, conn, existing):
+        """`existing` maps a ref to its product id; returns the call logs."""
+        calls = {"resolve": [], "lookup": []}
+        monkeypatch.setattr(writer, "get_pool", lambda: _FakePool(conn))
+
+        def resolve(conn, institution, kind, currency="CLP", external_ref=None, name=None):
+            calls["resolve"].append((institution, kind, currency))
+            return "wallet-1"
+
+        def lookup(conn, institution, kind, currency, external_ref):
+            calls["lookup"].append((institution, kind, currency, external_ref))
+            return existing.get(external_ref)
+
+        monkeypatch.setattr(writer, "_resolve_product", resolve)
+        monkeypatch.setattr(writer, "_lookup_transaction_product", lookup)
+        return calls
+
+    def test_each_ref_lands_on_its_own_product(self, monkeypatch):
+        conn = _FakeTxConn()
+        calls = self._install(
+            monkeypatch, conn, {"stock:1001": "acme-1", "stock:1002": "glbx-1"}
+        )
+
+        result = write_transactions(
+            [
+                _stock_txn("fintual_stock_buy_1001"),
+                _stock_txn("fintual_stock_buy_1002", ref="stock:1002"),
+                _stock_txn("fintual_stock_div_1003"),
+            ]
+        )
+
+        assert (result.inserted, result.failed, result.unresolved) == (3, 0, 0)
+        assert [(r["external_id"], r["product_id"]) for r in conn.rows] == [
+            ("fintual_stock_buy_1001", "acme-1"),
+            ("fintual_stock_buy_1002", "glbx-1"),
+            ("fintual_stock_div_1003", "acme-1"),
+        ]
+        assert calls["resolve"] == []
+        assert calls["lookup"] == [
+            ("fintual", "investment", "USD", "stock:1001"),
+            ("fintual", "investment", "USD", "stock:1002"),
+        ]
+
+    def test_a_missing_product_counts_unresolved_and_creates_nothing(
+        self, monkeypatch, caplog
+    ):
+        """Its rows wait for a later run; the ref itself stays out of the log."""
+        conn = _FakeTxConn()
+        calls = self._install(monkeypatch, conn, {"stock:1001": "acme-1"})
+
+        result = write_transactions(
+            [
+                _stock_txn("fintual_stock_buy_1001"),
+                _stock_txn("fintual_stock_buy_1002", ref="stock:1003"),
+                _stock_txn("fintual_stock_div_1002", ref="stock:1003"),
+            ]
+        )
+
+        assert (result.inserted, result.failed, result.unresolved) == (1, 0, 2)
+        assert result.persisted_external_ids == {"fintual_stock_buy_1001"}
+        assert [r["external_id"] for r in conn.rows] == ["fintual_stock_buy_1001"]
+        assert calls["resolve"] == []
+        assert len(calls["lookup"]) == 2
+        (warning,) = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert "stock:1003" not in warning.getMessage()
+
+    def test_rows_without_a_ref_keep_the_singleton_path(self, monkeypatch):
+        conn = _FakeTxConn()
+        calls = self._install(monkeypatch, conn, {"stock:1001": "acme-1"})
+        wallet_row = _stock_txn("fintual_wallet_buy_1001", ref=None, amount="-1234.56")
+        wallet_row = wallet_row.model_copy(update={"product_kind": "wallet"})
+
+        result = write_transactions([wallet_row, _stock_txn("fintual_stock_buy_1001")])
+
+        assert result.inserted == 2
+        assert calls["resolve"] == [("fintual", "wallet", "USD")]
+        assert [r["product_id"] for r in conn.rows] == ["wallet-1", "acme-1"]
+
+    def test_a_lookup_that_raises_counts_failed_not_unresolved(self, monkeypatch, caplog):
+        """A lookup error is a failure; only a product found missing waits for
+        a later run. The other ref's rows still land."""
+        conn = _FakeTxConn()
+        self._install(monkeypatch, conn, {"stock:1001": "acme-1"})
+
+        def lookup(conn, institution, kind, currency, external_ref):
+            if external_ref == "stock:1002":
+                raise RuntimeError("synthetic lookup failure")
+            return "acme-1"
+
+        monkeypatch.setattr(writer, "_lookup_transaction_product", lookup)
+
+        result = write_transactions(
+            [
+                _stock_txn("fintual_stock_buy_1001"),
+                _stock_txn("fintual_stock_buy_1002", ref="stock:1002"),
+                _stock_txn("fintual_stock_div_1002", ref="stock:1002"),
+            ]
+        )
+
+        assert (result.inserted, result.failed, result.unresolved) == (1, 2, 0)
+        assert [r["external_id"] for r in conn.rows] == ["fintual_stock_buy_1001"]
+        assert "Failed to resolve the product" in caplog.text
+
+    def test_the_internal_flag_is_inserted(self, monkeypatch):
+        conn = _FakeTxConn()
+        self._install(monkeypatch, conn, {"stock:1001": "acme-1"})
+
+        write_transactions(
+            [
+                _stock_txn("fintual_stock_buy_1001"),
+                _stock_txn("fintual_stock_div_1001", internal=False),
+            ]
+        )
+
+        assert [r["is_internal_transfer"] for r in conn.rows] == [True, False]
 
 
 # Synthetic place: no real city or country.
