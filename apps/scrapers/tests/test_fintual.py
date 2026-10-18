@@ -1425,3 +1425,104 @@ class TestStocksLeg:
         assert server.paths().count("/app/goals") == 1
         assert [p.external_ref for p in result.products] == ["34567"]
         assert result.warnings == ["Fintual stocks skipped: StocksPortfolio answered HTTP 401"]
+
+
+# -- one session per cycle ---------------------------------------------------
+
+
+def _both_legs(scraper):
+    """Run both legs in run_scraper's order; return (transactions, products
+    or the exception each leg raised)."""
+
+    async def run():
+        outcomes = []
+        for leg in (scraper.scrape_transactions, scraper.scrape_products):
+            try:
+                outcomes.append(await leg())
+            except Exception as exc:
+                outcomes.append(exc)
+        return outcomes
+
+    return asyncio.run(run())
+
+
+def _serve(monkeypatch, session_file, server, **cookies):
+    """Cache a session and route every client to `server`."""
+    _write_session(session_file, auth_refresh_token="synthetic-refresh-1", **cookies)
+    monkeypatch.setattr(
+        fintual_mod.httpx,
+        "AsyncClient",
+        lambda **kwargs: _REAL_ASYNC_CLIENT(
+            transport=httpx.MockTransport(server.handler), **kwargs
+        ),
+    )
+
+
+class TestSessionCycle:
+    """Both legs share one session drive per run (the transactions leg runs it)."""
+
+    def test_both_legs_read_the_goals_once(self, monkeypatch, session_file):
+        server = _FintualStocks(_portfolio(_ACME))
+        _serve(monkeypatch, session_file, server)
+
+        transactions, result = _both_legs(FintualScraper())
+
+        assert transactions == []
+        assert server.paths().count("/api/goals") == 1
+        assert server.operations.count("StocksPortfolio") == 1
+        assert ("investment", "USD", "stock:000101") in _by_ref(result.products)
+
+    def test_an_expired_session_is_refreshed_once_per_run(self, monkeypatch, session_file):
+        server = _FintualStocks(
+            _portfolio(_ACME), answers={"/api/goals": [(401, {}), (200, _ONE_GOAL)]}
+        )
+        _serve(monkeypatch, session_file, server)
+
+        _, result = _both_legs(FintualScraper())
+
+        assert server.paths().count("/app/goals") == 1
+        assert server.paths().count("/api/goals") == 2
+        assert [p.external_ref for p in result.products][0] == "34567"
+
+    def test_a_failed_sign_in_is_re_raised_without_a_second_login(self, monkeypatch):
+        """The products leg re-raises the cached error: one 2FA mail per run."""
+        _imap_is_the_fintual_account(monkeypatch)
+        login = AsyncMock(side_effect=FintualSessionError("synthetic refusal"))
+        monkeypatch.setattr(FintualScraper, "login", login)
+        client = _install(monkeypatch, _RoutedClient({GOALS_URL: [(200, _ONE_GOAL)]}))
+
+        tx_outcome, products_outcome = _both_legs(FintualScraper())
+
+        assert isinstance(tx_outcome, FintualSessionError)
+        assert products_outcome is tx_outcome
+        login.assert_awaited_once()
+        assert client.calls == []
+
+    def test_each_run_drives_its_own_session(self, monkeypatch, session_file):
+        """A failed cycle's error doesn't leak into the next run."""
+        monkeypatch.setattr("scrapers.retry.BASE_DELAY_SECONDS", 0.0)
+        server = _FintualStocks(_portfolio(_ACME), answers={"/api/goals": [(404, {})]})
+        _serve(monkeypatch, session_file, server)
+        scraper = FintualScraper()
+
+        first = _both_legs(scraper)
+        server.answers.pop("/api/goals")
+        second = _both_legs(scraper)
+
+        assert all(isinstance(outcome, httpx.HTTPStatusError) for outcome in first)
+        assert second[0] == []
+        assert ("investment", "USD", "stock:000101") in _by_ref(second[1].products)
+        assert server.paths().count("/api/goals") == 2
+
+    def test_the_products_leg_alone_drives_the_session(self, monkeypatch, session_file):
+        """A products-only dry run works, and twice means two drives."""
+        server = _FintualStocks(_portfolio(_ACME))
+        _serve(monkeypatch, session_file, server)
+        scraper = FintualScraper()
+
+        first = asyncio.run(scraper.scrape_products())
+        second = asyncio.run(scraper.scrape_products())
+
+        assert ("investment", "USD", "stock:000101") in _by_ref(first.products)
+        assert _by_ref(second.products) == _by_ref(first.products)
+        assert server.paths().count("/api/goals") == 2

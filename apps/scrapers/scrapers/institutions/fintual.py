@@ -28,6 +28,10 @@ the mailbox and signs in by itself; otherwise run `make fintual-login` and type
 the code. An automatic login that fails once is not retried until
 `make fintual-login` succeeds.
 
+Both legs of a run share one session drive: the transactions leg (which
+`run_scraper` calls first) runs it and caches it, or its error, for the
+products leg, so a run refreshes the session or signs in at most once.
+
 Each run emits one CLP `investment` product per goal, then the stocks: one USD
 `investment` product per position (`external_ref` "stock:<asset id>") and one
 USD `wallet` for the cash not yet invested in stocks. Position figures follow
@@ -346,6 +350,15 @@ def _stocks_failure_reason(exc: Exception) -> str:
     return type(exc).__name__
 
 
+@dataclass(frozen=True)
+class _Cycle:
+    """What one session drive read, for both legs of a run."""
+
+    products: list[ScrapedProduct]
+    transactions: list[ScrapedTransaction]
+    warnings: list[str]
+
+
 class FintualScraper(BaseScraper):
     method = "http_api"
     institution = "fintual"
@@ -364,6 +377,12 @@ class FintualScraper(BaseScraper):
         # Set once this run has refreshed the session, so a later 401 doesn't
         # spend the rotated refresh token again.
         self._refreshed_this_run = False
+        # One session feeds both legs: the transactions leg runs first
+        # (run_scraper's order) and caches the cycle, or its error, for the
+        # products leg, so a run never refreshes or signs in (and mails a
+        # 2FA code) twice.
+        self._cached: _Cycle | None = None
+        self._error: Exception | None = None
 
     # -- session persistence ------------------------------------------------
 
@@ -526,11 +545,6 @@ class FintualScraper(BaseScraper):
         )
 
     # -- scraping -----------------------------------------------------------
-
-    async def scrape_transactions(self) -> list[ScrapedTransaction]:
-        # Goals expose no individual movements, and stock movements aren't
-        # read yet (they'd need transactions that target one position).
-        return []
 
     async def _get_goals(self, client: httpx.AsyncClient) -> httpx.Response:
         """GET /api/goals, retrying transient failures. A 401 is returned, not
@@ -785,81 +799,93 @@ class FintualScraper(BaseScraper):
         )
         return products, warnings
 
-    async def scrape_products(self) -> ProductScrapeResult:
+    async def _goal_products(
+        self, client: httpx.AsyncClient
+    ) -> tuple[list[ScrapedProduct], list[str]]:
+        """Make sure the session works, then read one product per goal.
+
+        A session that can't be refreshed or signed in again raises: without
+        it there is nothing to read.
+        """
+        signed_in = await self._ensure_session(client)
+
+        resp = await self._get_goals(client)
+        if resp.status_code == 401 and await self._refresh_session(client):
+            resp = await self._get_goals(client)
+        if resp.status_code == 401:
+            # The refresh token itself expired or was revoked: only a full
+            # sign-in helps.
+            if signed_in:
+                raise FintualSessionError(
+                    f"Fintual rejected the session it just issued. {_RELOGIN_HINT}"
+                )
+            if not self._can_auto_login:
+                raise FintualSessionError(f"Fintual session expired. {_RELOGIN_HINT}")
+            logger.info("Fintual: session expired; signing in again.")
+            await self._auto_login()
+            self._load_session(client)
+            resp = await self._get_goals(client)
+        resp.raise_for_status()
+
+        # One product per goal: the JSON:API resource id is the stable
+        # external_ref, so each goal keeps its own balance history.
+        products: list[ScrapedProduct] = []
+        warnings: list[str] = []
+        total_nav = 0
+        skipped = 0
+
+        for goal in resp.json().get("data", []):
+            goal_id = goal.get("id")
+            if goal_id is None:
+                # Without an id there is no stable external_ref; skip the
+                # entry rather than abort the run.
+                skipped += 1
+                continue
+
+            attrs = goal.get("attributes", {})
+            # A brand-new goal can report `"nav": null`; value it at 0.
+            nav = int(round(float(attrs.get("nav") or 0)))
+            total_nav += nav
+
+            # deposited/profit ride along when the payload reports them.
+            deposited = attrs.get("deposited")
+            profit = attrs.get("profit")
+
+            products.append(
+                ScrapedProduct(
+                    institution="fintual",
+                    kind="investment",
+                    currency="CLP",
+                    external_ref=str(goal_id),
+                    name=attrs.get("name", "Unknown"),
+                    metrics=InvestmentMetrics(
+                        nav=nav,
+                        deposited=(
+                            float(deposited) if deposited is not None else None
+                        ),
+                        profit=float(profit) if profit is not None else None,
+                    ),
+                )
+            )
+
+        if skipped:
+            logger.warning("Fintual: skipped %d goal(s) without an id", skipped)
+            warnings.append(f"Fintual: skipped {skipped} goal(s) without an id")
+
+        logger.info(
+            "Fintual: %d goals, total nav $%s CLP",
+            len(products),
+            f"{total_nav:,}",
+        )
+        return products, warnings
+
+    async def _run_cycle(self) -> _Cycle:
+        """One session drive: the goals, then the stocks, then save the jar."""
         async with self._session_lock, httpx.AsyncClient(
             timeout=30.0, follow_redirects=True, headers=self._base_headers()
         ) as client:
             self._refreshed_this_run = False
-            signed_in = await self._ensure_session(client)
-
-            resp = await self._get_goals(client)
-            if resp.status_code == 401 and await self._refresh_session(client):
-                resp = await self._get_goals(client)
-            if resp.status_code == 401:
-                # The refresh token itself expired or was revoked: only a full
-                # sign-in helps.
-                if signed_in:
-                    raise FintualSessionError(
-                        f"Fintual rejected the session it just issued. {_RELOGIN_HINT}"
-                    )
-                if not self._can_auto_login:
-                    raise FintualSessionError(f"Fintual session expired. {_RELOGIN_HINT}")
-                logger.info("Fintual: session expired; signing in again.")
-                await self._auto_login()
-                self._load_session(client)
-                resp = await self._get_goals(client)
-            resp.raise_for_status()
-
-            # One product per goal: the JSON:API resource id is the stable
-            # external_ref, so each goal keeps its own balance history.
-            products: list[ScrapedProduct] = []
-            warnings: list[str] = []
-            total_nav = 0
-            skipped = 0
-
-            for goal in resp.json().get("data", []):
-                goal_id = goal.get("id")
-                if goal_id is None:
-                    # Without an id there is no stable external_ref; skip the
-                    # entry rather than abort the run.
-                    skipped += 1
-                    continue
-
-                attrs = goal.get("attributes", {})
-                # A brand-new goal can report `"nav": null`; value it at 0.
-                nav = int(round(float(attrs.get("nav") or 0)))
-                total_nav += nav
-
-                # deposited/profit ride along when the payload reports them.
-                deposited = attrs.get("deposited")
-                profit = attrs.get("profit")
-
-                products.append(
-                    ScrapedProduct(
-                        institution="fintual",
-                        kind="investment",
-                        currency="CLP",
-                        external_ref=str(goal_id),
-                        name=attrs.get("name", "Unknown"),
-                        metrics=InvestmentMetrics(
-                            nav=nav,
-                            deposited=(
-                                float(deposited) if deposited is not None else None
-                            ),
-                            profit=float(profit) if profit is not None else None,
-                        ),
-                    )
-                )
-
-            if skipped:
-                logger.warning("Fintual: skipped %d goal(s) without an id", skipped)
-                warnings.append(f"Fintual: skipped {skipped} goal(s) without an id")
-
-            logger.info(
-                "Fintual: %d goals, total nav $%s CLP",
-                len(products),
-                f"{total_nav:,}",
-            )
+            products, warnings = await self._goal_products(client)
 
             # The stocks are a separate leg: whatever fails there, the goals
             # still land and the warning records the run as partial.
@@ -881,7 +907,47 @@ class FintualScraper(BaseScraper):
             except OSError:
                 logger.warning("Fintual: could not save the session", exc_info=True)
 
-            return ProductScrapeResult(products, warnings)
+            return _Cycle(products, [], warnings)
+
+    async def _scrape_cycle(self) -> _Cycle:
+        """Drive the session once, caching the cycle (or its error) for the
+        products leg. Resetting first matters: the instance lives as long as
+        the service."""
+        self._cached = None
+        self._error = None
+        try:
+            cycle = await self._run_cycle()
+        except Exception as exc:
+            self._error = exc
+            raise
+        self._cached = cycle
+        return cycle
+
+    async def scrape_transactions(self) -> list[ScrapedTransaction]:
+        # Goals expose no individual movements, and stock movements aren't
+        # read yet (they'd need transactions that target one position). The
+        # cycle still runs here, first, so the products leg reuses it.
+        await self._scrape_cycle()
+        return []
+
+    async def scrape_products(self) -> ProductScrapeResult:
+        """The products of the cycle the transactions leg drove.
+
+        If that drive failed, its error is re-raised without driving again (no
+        second refresh, sign-in or 2FA mail). Called alone (a products-only dry
+        run), it drives the session itself.
+        """
+        if self._cached is not None:
+            cycle, self._cached = self._cached, None
+        elif self._error is not None:
+            error, self._error = self._error, None
+            raise error
+        else:
+            try:
+                cycle = await self._scrape_cycle()
+            finally:
+                self._cached = self._error = None
+        return ProductScrapeResult(cycle.products, cycle.warnings)
 
 
 def _login_cli() -> None:
