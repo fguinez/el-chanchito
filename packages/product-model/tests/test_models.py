@@ -1,7 +1,7 @@
 """Tests for the per-kind payload models, unions, and ingest envelopes."""
 
 import re
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pytest
@@ -12,6 +12,8 @@ from product_model import (
     PRODUCT_KINDS,
     REGISTRY,
     CreditCardAttributes,
+    InvestmentAttributes,
+    InvestmentMetrics,
     ProductMetrics,
     ProductRef,
     ScrapedExchangeRate,
@@ -173,6 +175,57 @@ def test_date_round_trips_through_json_dump():
 
     assert dumped["maturity_date"] == "2026-07-15"
     assert restored == original
+
+
+def test_wallet_balance_keeps_cents():
+    """A USD wallet keeps its cents; CLP wallets keep sending whole pesos."""
+    usd = METRICS_ADAPTER.validate_python({"kind": "wallet", "balance": 1234.56})
+    clp = METRICS_ADAPTER.validate_python({"kind": "wallet", "balance": 999_999})
+
+    assert usd.headline() == 1234.56
+    assert clp.headline() == 999_999
+
+
+def test_investment_metrics_carry_a_stock_position():
+    """The per-unit fields ride along with nav; the quote time round-trips."""
+    metrics = InvestmentMetrics(
+        nav=250.0,
+        deposited=250.0,
+        profit=0.0,
+        units=2.5,
+        unit_price=100.0,
+        average_cost=104.0,
+        unrealized_profit=-10.0,
+        unrealized_profit_pct=-3.85,
+        realized_profit=10.0,
+        dividends=1.5,
+        unit_price_as_of=datetime(2026, 1, 2, 15, 4, 5, tzinfo=timezone.utc),
+    )
+
+    dumped = metrics.model_dump(mode="json", exclude_none=True)
+    restored = InvestmentMetrics.model_validate(dumped)
+
+    assert metrics.headline() == 250.0
+    assert dumped["unit_price_as_of"] == "2026-01-02T15:04:05Z"
+    assert restored == metrics
+
+
+def test_investment_attributes_carry_a_ticker_and_tags():
+    """Stock identity: ticker, description and a list of labels."""
+    attributes = InvestmentAttributes(
+        ticker="ACME",
+        description="Empresa sintetica de prueba.",
+        tags=["Tecnología", "Estados Unidos"],
+    )
+
+    dumped = attributes.model_dump(mode="json", exclude_none=True)
+
+    assert dumped == {
+        "kind": "investment",
+        "ticker": "ACME",
+        "description": "Empresa sintetica de prueba.",
+        "tags": ["Tecnología", "Estados Unidos"],
+    }
 
 
 def test_scraped_product_envelope_discriminates_payloads():

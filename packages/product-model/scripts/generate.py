@@ -41,6 +41,7 @@ HEADER = (
 _TS_SCALARS = {
     "string": "string",
     "date": "string",
+    "datetime": "string",
     "integer": "number",
     "number": "number",
     "boolean": "boolean",
@@ -49,6 +50,7 @@ _TS_SCALARS = {
 _MD_SCALARS = {
     "string": "str",
     "date": "date",
+    "datetime": "datetime",
     "integer": "int",
     "number": "float",
     "boolean": "bool",
@@ -64,9 +66,10 @@ class UnsupportedSchemaError(ValueError):
 def _resolve_type(prop: dict[str, Any], where: str) -> tuple[Any, bool]:
     """Resolve a property schema to (token, nullable).
 
-    Token is a scalar name ("string"/"integer"/"number"/"boolean"/"date") or
-    ("const", value). The supported constructs are a closed set; anything
-    else raises UnsupportedSchemaError.
+    Token is a scalar name ("string"/"integer"/"number"/"boolean"/"date"/
+    "datetime"), ("const", value), or ("array", scalar token) for a list of
+    scalars. The supported constructs are a closed set; anything else raises
+    UnsupportedSchemaError.
     """
     if "anyOf" in prop:
         members = prop["anyOf"]
@@ -86,21 +89,36 @@ def _resolve_type(prop: dict[str, Any], where: str) -> tuple[Any, bool]:
         fmt = prop.get("format")
         if fmt == "date":
             return "date", False
+        if fmt == "date-time":
+            return "datetime", False
         if fmt is None:
             return "string", False
         raise UnsupportedSchemaError(f"{where}: unsupported string format {fmt!r}")
     if type_ in ("integer", "number", "boolean"):
         return type_, False
+    if type_ == "array":
+        items, nullable = _resolve_type(prop.get("items", {}), f"{where}[]")
+        if nullable or isinstance(items, tuple):
+            raise UnsupportedSchemaError(f"{where}: lists hold non-null scalars only")
+        return ("array", items), False
     raise UnsupportedSchemaError(f"{where}: unsupported schema {prop!r}")
 
 
+def _is_array(token: Any) -> bool:
+    return isinstance(token, tuple) and token[0] == "array"
+
+
 def _ts_type(token: Any) -> str:
+    if _is_array(token):
+        return f"{_TS_SCALARS[token[1]]}[]"
     if isinstance(token, tuple):
         return json.dumps(token[1], ensure_ascii=False)
     return _TS_SCALARS[token]
 
 
 def _md_type(token: Any) -> str:
+    if _is_array(token):
+        return f"list[{_MD_SCALARS[token[1]]}]"
     if isinstance(token, tuple):
         return json.dumps(token[1], ensure_ascii=False)
     return _MD_SCALARS[token]
@@ -148,12 +166,17 @@ def _metric_denominations(cls: type[BaseModel]) -> list[tuple[str, str]]:
     Every int/float metric field must declare a denomination via
     `json_schema_extra={"denomination": ...}`; a missing or unknown value
     raises UnsupportedSchemaError so future kinds cannot forget it. Date
-    fields and the `kind` discriminator carry no marker.
+    fields and the `kind` discriminator carry no marker. Lists are for
+    attributes only: a metric is one observed value.
     """
     schema = cls.model_json_schema()
     fields: list[tuple[str, str]] = []
     for name, prop in _ordered_properties(schema):
         token, _ = _resolve_type(prop, where=f"{cls.__name__}.{name}")
+        if _is_array(token):
+            raise UnsupportedSchemaError(
+                f"{cls.__name__}.{name}: metric fields cannot be lists"
+            )
         if token not in ("integer", "number"):
             continue
         denomination = prop.get("denomination")
@@ -417,7 +440,8 @@ keeps the latest one per scope in `exchange_rates` and never creates a product
 for it.
 
 Conventions: snake_case keys; CLP amounts `int`, USD/crypto amounts `float`;
-dates as ISO `YYYY-MM-DD` strings; percentages as percent numbers (4.2 = 4.2%).
+dates as ISO `YYYY-MM-DD` strings, quote times as ISO 8601 datetimes;
+percentages as percent numbers (4.2 = 4.2%).
 Optional fields are marked `?`. Every numeric metric field declares a
 denomination: `currency` (amount in the product's `currency` column,
 convertible), `percent` (raw percent number), or `count` (raw unit count).

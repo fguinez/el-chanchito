@@ -26,7 +26,8 @@ keeps the latest one per scope in `exchange_rates` and never creates a product
 for it.
 
 Conventions: snake_case keys; CLP amounts `int`, USD/crypto amounts `float`;
-dates as ISO `YYYY-MM-DD` strings; percentages as percent numbers (4.2 = 4.2%).
+dates as ISO `YYYY-MM-DD` strings, quote times as ISO 8601 datetimes;
+percentages as percent numbers (4.2 = 4.2%).
 Optional fields are marked `?`. Every numeric metric field declares a
 denomination: `currency` (amount in the product's `currency` column,
 convertible), `percent` (raw percent number), or `count` (raw unit count).
@@ -190,7 +191,7 @@ Net-worth role: **asset** · balance convention: **value** · family: **cash**
 | Field | Type | Denomination | Description |
 | --- | --- | --- | --- |
 | `kind` | `"wallet"` |  | Payload discriminator; always "wallet". |
-| `balance` | `int` | currency | Wallet balance in CLP. |
+| `balance` | `float` | currency | Wallet balance in the wallet currency (whole pesos for CLP). |
 
 ## Depósito a plazo (`term_deposit`)
 
@@ -359,6 +360,9 @@ Net-worth role: **asset** · balance convention: **value** · family: **investme
 | `portfolio` | `str?` | Portfolio the money is invested in (e.g. 'Risky Norris'). |
 | `risk_profile` | `str?` | Risk profile label (e.g. 'Arriesgado'). |
 | `fund_name` | `str?` | Fund name for single-fund products (e.g. a fondo mutuo). |
+| `ticker` | `str?` | Ticker symbol of a listed security (e.g. 'ACME'). |
+| `description` | `str?` | Short description of the security, as the institution shows it. |
+| `tags` | `list[str]?` | Labels the institution gives the security (e.g. 'Tecnología'), each prefixed by its emoji when it has one; a new list replaces the old one. |
 
 ### Metrics
 
@@ -366,11 +370,19 @@ Net-worth role: **asset** · balance convention: **value** · family: **investme
 | --- | --- | --- | --- |
 | `kind` | `"investment"` |  | Payload discriminator; always "investment". |
 | `nav` | `float` | currency | Current market value of the position (net asset value). |
-| `deposited` | `float?` | currency | Total amount deposited to date. |
+| `deposited` | `float?` | currency | Net amount invested to date: deposits minus withdrawals and sales (negative once more came out than went in). |
 | `profit` | `float?` | currency | Cumulative profit as reported (nav minus deposited). |
 | `var_daily_pct` | `float?` | percent | Daily variation as a percent number (Var. diaria). |
 | `var_30d_pct` | `float?` | percent | 30-day variation as a percent number (Var. 30 días). |
 | `var_ytd_pct` | `float?` | percent | Year-to-date variation as a percent number (Var. año). |
+| `units` | `float?` | count | Units held, e.g. shares of a stock position (fractional). |
+| `unit_price` | `float?` | currency | Latest market price per unit, in the product currency. |
+| `average_cost` | `float?` | currency | Average cost per unit of the units held. |
+| `unrealized_profit` | `float?` | currency | Gain or loss on the units still held (nav minus their cost). |
+| `unrealized_profit_pct` | `float?` | percent | Unrealized profit as a percent number of the cost of the units held. |
+| `realized_profit` | `float?` | currency | Gain or loss already realized by selling units. |
+| `dividends` | `float?` | currency | Total dividends received (net). |
+| `unit_price_as_of` | `datetime?` |  | When `unit_price` was quoted. |
 
 ## Cripto (`crypto`)
 

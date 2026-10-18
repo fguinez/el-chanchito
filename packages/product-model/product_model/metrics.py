@@ -5,7 +5,8 @@ value on the product. Each class promotes one field via `headline()`; the
 writer stores it in the universal `current_balance` column.
 
 Conventions: CLP amounts are int, USD/crypto amounts are float, dates are
-`datetime.date`, percentages are percent numbers (e.g. 4.2 for 4.2%). Every
+`datetime.date` (a quote time is a `datetime.datetime`), percentages are
+percent numbers (e.g. 4.2 for 4.2%). Every
 numeric field carries a `json_schema_extra={"denomination": ...}` marker
 ("currency" for amounts in the product's currency, "percent" for percent
 numbers, "count" for unit counts); the codegen raises if one is missing.
@@ -124,8 +125,8 @@ class WalletMetrics(BaseMetrics):
     kind: Literal["wallet"] = Field(
         "wallet", description='Payload discriminator; always "wallet".'
     )
-    balance: int = Field(
-        description="Wallet balance in CLP.",
+    balance: float = Field(
+        description="Wallet balance in the wallet currency (whole pesos for CLP).",
         json_schema_extra={"denomination": "currency"},
     )
 
@@ -221,7 +222,10 @@ class InvestmentMetrics(BaseMetrics):
     )
     deposited: float | None = Field(
         None,
-        description="Total amount deposited to date.",
+        description=(
+            "Net amount invested to date: deposits minus withdrawals and sales "
+            "(negative once more came out than went in)."
+        ),
         json_schema_extra={"denomination": "currency"},
     )
     profit: float | None = Field(
@@ -243,6 +247,44 @@ class InvestmentMetrics(BaseMetrics):
         None,
         description="Year-to-date variation as a percent number (Var. año).",
         json_schema_extra={"denomination": "percent"},
+    )
+    units: float | None = Field(
+        None,
+        description="Units held, e.g. shares of a stock position (fractional).",
+        json_schema_extra={"denomination": "count"},
+    )
+    unit_price: float | None = Field(
+        None,
+        description="Latest market price per unit, in the product currency.",
+        json_schema_extra={"denomination": "currency"},
+    )
+    average_cost: float | None = Field(
+        None,
+        description="Average cost per unit of the units held.",
+        json_schema_extra={"denomination": "currency"},
+    )
+    unrealized_profit: float | None = Field(
+        None,
+        description="Gain or loss on the units still held (nav minus their cost).",
+        json_schema_extra={"denomination": "currency"},
+    )
+    unrealized_profit_pct: float | None = Field(
+        None,
+        description="Unrealized profit as a percent number of the cost of the units held.",
+        json_schema_extra={"denomination": "percent"},
+    )
+    realized_profit: float | None = Field(
+        None,
+        description="Gain or loss already realized by selling units.",
+        json_schema_extra={"denomination": "currency"},
+    )
+    dividends: float | None = Field(
+        None,
+        description="Total dividends received (net).",
+        json_schema_extra={"denomination": "currency"},
+    )
+    unit_price_as_of: datetime.datetime | None = Field(
+        None, description="When `unit_price` was quoted."
     )
 
     def headline(self) -> float | None:
