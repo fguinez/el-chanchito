@@ -196,6 +196,20 @@ desktop User-Agent.
   target to run.
 - Inject the code provider as a callable (sync prompt or async IMAP reader) so
   login logic doesn't care where the code comes from.
+- **Per-service tokens.** One web app can front several services that each
+  check their own short-lived token (Fintual's stocks pricing service wants a
+  JWT cookie minted by `POST /auth/jwt` for its audience). Mint it on a 401 and
+  retry once, as the web app does, dropping any stale copy first so two cookies
+  of the same name never ride together.
+
+**GraphQL backends** answer errors inside a 200. An answer without a `data` key
+means the request was refused (a parse or validation error, say a renamed
+field): fail the leg. `data` with null fields next to `errors` means a
+resolver failed: decide per field what that costs. Only a null with no
+`errors` means "nothing there" (Fintual reads a null brokerage as "no stocks"
+only then; next to an error it fails the leg). Batch per-item lookups into one
+query with index aliases (`p0: ...(assetSymbol: $s0)`) instead of one request
+per item.
 
 **Step down when.** The login needs JavaScript-computed tokens you can't
 reproduce reasonably (obfuscated fingerprinting, encrypted password fields with

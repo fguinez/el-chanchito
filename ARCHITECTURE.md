@@ -718,6 +718,26 @@ money in, WITHDRAWAL and SELL (pesos spent on a coin) money out. Coin ledgers
 are skipped for Buda's reason. A 401 or 403 fails the leg with the HTTP status
 and the API's problem code, never the key.
 
+Fintual reads the website's own backend with a cached web session (see "Fintual
+sign-in" in USAGE.md). `GET /api/goals` gives one CLP `investment` product per
+goal (`external_ref` = goal id). The stock brokerage ("Acciones") comes from
+`POST /gql/`: `StocksPortfolio` lists the USD cash wallet and the positions,
+and one `StocksDetails` query batches every position's totals and profile under
+index aliases. Prices come from `GET /stocks-pricing-cl/current-prices`, which
+checks a per-service JWT cookie: on a 401 the scraper mints it with
+`POST /auth/jwt` and retries once, as the web app does. Each position becomes a
+USD `investment` product (`external_ref` `stock:<asset id>`; ticker, description
+and tags as attributes; nav, net invested, profit, units, price, average cost,
+unrealized and realized profit and dividends as metrics, by the web app's
+formulas), and the cash a USD `wallet`. A sold-out position drops to nav 0 and
+stops counting, for as long as Fintual keeps listing zero-share positions; a
+held one without a price or totals is skipped with a counted warning. The
+stocks are an isolated leg of the same run: a failure there keeps the goals
+and records the run as `partial` (a failure on the positions' own requests
+keeps the wallet too). An account that never opened the brokerage (nothing
+resolves and GraphQL reports no error) gets no stock products and no warning;
+nothing resolving next to a GraphQL error fails the leg. No transactions yet.
+
 **Balance conventions & net worth** are registry-driven: each kind's `role`
 (asset/liability/none) and `balance_convention` (value/available/owed/units)
 live in `packages/product-model` — see `packages/product-model/PRODUCTS.md`
@@ -744,7 +764,8 @@ latest legacy date (e.g. pre-migration scraper rows) are hidden by legacy
 totals anyway, and the V009 backfill rows (`source = 'wealth_snapshot'`, the
 three legacy component columns decomposed into per-product rows on legacy
 dates) never count as observations, so deleting the last legacy row and
-posting it again still works.
+posting it again still works. The informational Fintual column sums the CLP
+goals only; Fintual's USD stock products count in patrimonio alone.
 
 Each institution scraper implements:
 
@@ -776,9 +797,10 @@ instead of aborting the transaction for every row after it. The dashboard's
 and failed and partial rows expand to their `error_message`.
 
 **Retries.** `scrapers/retry.py` retries idempotent work only, three attempts
-with 1 s / 2 s backoff: Buda's and Fintual's GETs on transport errors and
-429/5xx (re-signing each Buda attempt, since a nonce can't be reused; the
-last response is returned as-is, so Fintual's 401 re-login is unchanged), and
+with 1 s / 2 s backoff: Buda's and Fintual's GETs, Fintual's read-only `/gql/`
+query POSTs and its `/auth/jwt` token POST on transport errors and 429/5xx
+(re-signing each Buda attempt, since a nonce can't be reused; the last
+response is returned as-is, so Fintual's 401 re-login is unchanged), and
 the DB writers (`with_db_retry`) on `psycopg.OperationalError`, which covers a
 dropped connection, a pool timeout and serialization/deadlock rollbacks
 (inside `write_transactions` a per-row error, those included, counts as
@@ -818,7 +840,7 @@ place (see [Exchange rates](#exchange-rates)).
 
 | Institution | Method | Source | Auth | Schedule |
 |---|---|---|---|---|
-| `fintual` | `http_api` | REST API (`/api/goals`) | Web session + e-mail 2FA (cached; `make fintual-login`) | 6h |
+| `fintual` | `http_api` | REST API (`/api/goals`), GraphQL (`/gql/`) and the stocks pricing service | Web session + e-mail 2FA (cached; `make fintual-login`) | 6h |
 | `buda` | `http_api` | REST API | HMAC-SHA384 signed requests | 1h |
 | `skipo` | `http_api` | REST API (`/v2`) | Read-only API key (bearer) | 1h |
 | `banchile` | `web` | Browser (Playwright: `banchile_web` + `banchile_movements`) | RUT + password | 24h |
