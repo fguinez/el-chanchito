@@ -1,5 +1,5 @@
-"""Tests for the Fintual scraper: per-goal products, stock positions, stock
-and USD wallet movements, and session handling.
+"""Tests for the Fintual scraper: per-goal products, stock positions, their
+daily price history, stock and USD wallet movements, and session handling.
 
 These never hit the network: `httpx.AsyncClient` is swapped for a fake that
 answers each Fintual URL from a canned queue (or a real client over
@@ -12,7 +12,7 @@ import json
 import os
 import re
 import stat
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -36,11 +36,15 @@ from scrapers.institutions.fintual import (
     FintualSessionError,
     StockPrice,
     details_query,
+    history_start,
     listed_asset_ids,
+    parse_price_history,
     parse_prices,
     stock_attributes,
     stock_metrics,
+    trading_date,
 )
+from scrapers.base import DailyPrice
 
 # Captured before any test swaps the module's AsyncClient for a fake.
 _REAL_ASYNC_CLIENT = httpx.AsyncClient
@@ -826,6 +830,11 @@ _DETAILS = {
     ),
 }
 _PRICES = {"ACME": 100.0, "GLBX": 250.5}
+# Two daily bars stamped at New York midnight, as historical-prices answers.
+_CLOSES = [
+    {"time": "2026-01-02T05:00:00Z", "price": 100.0},
+    {"time": "2026-01-05T05:00:00Z", "price": 250.5},
+]
 
 
 def _ledger_deposit(dep_id, amount, executed_at="2026-01-02T15:04:05Z"):
@@ -889,8 +898,9 @@ class _FintualStocks:
     (every row from the offset on). By default the ledger is one deposit that
     adds up to the wallet. The pricing service answers 401 until a request carries
     the cookie /auth/jwt mints; with `jwt_accepted=False` it never takes it.
-    `answers` maps a GraphQL operation or a path to (status, payload) answers
-    given in order, the last repeating.
+    historical-prices answers `history[symbol]` (bars, an HTTP status to
+    fail with, or an exception to raise), `_CLOSES` by default. `answers` maps a GraphQL operation or a
+    path to (status, payload) answers given in order, the last repeating.
     """
 
     def __init__(
@@ -904,10 +914,12 @@ class _FintualStocks:
         ledger=None,
         page_cap=None,
         unlimited=(),
+        history=None,
     ):
         self.portfolio = portfolio
         self.details = details
         self.prices = prices
+        self.history = history or {}
         self.jwt_accepted = jwt_accepted
         self.answers = {key: list(queue) for key, queue in (answers or {}).items()}
         self.ledger = _ledger_matching(portfolio) if ledger is None else ledger
@@ -951,9 +963,18 @@ class _FintualStocks:
                 headers=[("set-cookie", f"{_JWT_COOKIE}={token}; Path=/")],
                 json={"message": "synthetic"},
             )
+        if path.startswith("/stocks-pricing-cl/") and (
+            f"{_JWT_COOKIE}=synthetic-jwt" not in request.headers.get("cookie", "")
+        ):
+            return httpx.Response(401, json={"title": "Unauthorized"})
+        if path == "/stocks-pricing-cl/historical-prices":
+            bars = self.history.get(request.url.params["symbol"], _CLOSES)
+            if isinstance(bars, Exception):
+                raise bars
+            if isinstance(bars, int):
+                return httpx.Response(bars, json={"title": "synthetic failure"})
+            return httpx.Response(200, json={"prices": bars})
         if path == "/stocks-pricing-cl/current-prices":
-            if f"{_JWT_COOKIE}=synthetic-jwt" not in request.headers.get("cookie", ""):
-                return httpx.Response(401, json={"title": "Unauthorized"})
             symbols = request.url.params["symbols"].split(",")
             return httpx.Response(
                 200,
@@ -1002,6 +1023,13 @@ class _FintualStocks:
 
     def paths(self):
         return [request.url.path for request in self.requests]
+
+    def history_requests(self):
+        return [
+            request
+            for request in self.requests
+            if request.url.path == "/stocks-pricing-cl/historical-prices"
+        ]
 
 
 def _run_stocks(monkeypatch, session_file, server, **cookies):
@@ -1198,7 +1226,8 @@ class TestStocksLeg:
 
     def test_the_pricing_token_is_minted_on_a_401_and_saved(self, monkeypatch, session_file):
         """current-prices 401 -> POST /auth/jwt -> retry 200, as the web app
-        does; the new cookie lands in the private session cache."""
+        does; the price histories, read after the movements, reuse the
+        cookie, and it lands in the private session cache."""
         server = _FintualStocks(_portfolio(_ACME, _GLBX))
 
         result = _run_stocks(monkeypatch, session_file, server)
@@ -1213,6 +1242,8 @@ class TestStocksLeg:
             "/stocks-pricing-cl/current-prices",
             "/gql/",
             "/gql/",
+            "/stocks-pricing-cl/historical-prices",
+            "/stocks-pricing-cl/historical-prices",
         ]
         assert server.operations == [
             "StocksPortfolio",
@@ -1542,6 +1573,427 @@ class TestStocksLeg:
         assert server.paths().count("/app/goals") == 1
         assert [p.external_ref for p in result.products] == ["34567"]
         assert result.warnings == ["Fintual stocks skipped: StocksPortfolio answered HTTP 401"]
+
+
+# -- daily price history -------------------------------------------------------
+
+
+class TestPriceHistoryParsers:
+    def test_the_window_starts_a_year_back_at_utc_midnight(self):
+        """historical-prices wants an RFC 3339 instant; a bare date is a 422."""
+        assert history_start(date(2026, 3, 2)) == "2025-03-02T00:00:00Z"
+
+    @pytest.mark.parametrize(
+        ("time", "expected"),
+        [
+            pytest.param("2026-07-02T04:00:00Z", date(2026, 7, 2), id="ny-midnight-edt"),
+            pytest.param("2026-01-02T05:00:00Z", date(2026, 1, 2), id="ny-midnight-est"),
+            pytest.param("2026-01-02T00:00:00Z", date(2026, 1, 2), id="utc-midnight"),
+            pytest.param("2026-01-01T23:00:00-05:00", date(2026, 1, 2), id="offset"),
+            pytest.param("2026-01-02T04:00:00", date(2026, 1, 2), id="no-offset-is-utc"),
+            pytest.param("2026-01-02", date(2026, 1, 2), id="bare-date"),
+        ],
+    )
+    def test_a_bar_trades_on_its_utc_date(self, time, expected):
+        """Never converted to Santiago, where a T04:00Z bar is the day before."""
+        assert trading_date(time) == expected
+
+    @pytest.mark.parametrize("time", ["not a time", "", None, 1767326400])
+    def test_an_unreadable_time_raises(self, time):
+        with pytest.raises(ValueError):
+            trading_date(time)
+
+    def test_unusable_bars_are_dropped_and_counted(self):
+        payload = {
+            "prices": [
+                {"time": "2026-01-02T05:00:00Z", "price": 100.0},
+                {"time": "2026-01-05T05:00:00Z", "price": 0},
+                {"time": "2026-01-06T05:00:00Z", "price": -1.5},
+                {"time": "2026-01-07T05:00:00Z", "price": "250.5"},
+                {"time": "2026-01-08T05:00:00Z", "price": None},
+                {"time": "2026-01-09T05:00:00Z", "price": 1e30},
+                {"time": "2026-01-12T05:00:00Z", "price": 0.000000001},
+                {"time": "not a time", "price": 250.5},
+                {"price": 250.5},
+                "not a bar",
+                {"time": "2026-01-13T05:00:00Z", "price": 250.5},
+            ]
+        }
+
+        points, skipped = parse_price_history(payload)
+
+        assert points == [
+            DailyPrice(date=date(2026, 1, 2), price=Decimal("100.0")),
+            DailyPrice(date=date(2026, 1, 13), price=Decimal("250.5")),
+        ]
+        assert skipped == 9
+
+    def test_two_bars_on_one_day_keep_the_later(self):
+        payload = {
+            "prices": [
+                {"time": "2026-01-05T05:00:00Z", "price": 250.5},
+                {"time": "2026-01-02T15:30:00Z", "price": 250.5},
+                {"time": "2026-01-02T05:00:00Z", "price": 100.0},
+            ]
+        }
+
+        points, skipped = parse_price_history(payload)
+
+        assert points == [
+            DailyPrice(date=date(2026, 1, 2), price=Decimal("250.5")),
+            DailyPrice(date=date(2026, 1, 5), price=Decimal("250.5")),
+        ]
+        assert skipped == 0
+
+    def test_prices_round_half_up_to_eight_decimals(self):
+        payload = {"prices": [{"time": "2026-01-02T05:00:00Z", "price": 100.123456785}]}
+
+        (point,), _ = parse_price_history(payload)
+
+        assert point.price == Decimal("100.12345679")
+
+    @pytest.mark.parametrize(
+        "payload",
+        [{}, {"prices": None}, {"prices": {"time": "x"}}, [], None],
+        ids=["no-key", "null", "object", "list", "none"],
+    )
+    def test_an_answer_without_a_price_list_raises(self, payload):
+        with pytest.raises(ValueError):
+            parse_price_history(payload)
+
+
+class TestPriceHistoryLeg:
+    @pytest.fixture(autouse=True)
+    def _today(self, monkeypatch):
+        monkeypatch.setattr(fintual_mod, "_utc_today", lambda: date(2026, 3, 2))
+
+    def test_each_held_stock_gets_a_year_of_closes(self, monkeypatch, session_file):
+        """One request per held stock, with the window, timeframe and the
+        forward-counting limit; each series names its product exactly as the
+        product does."""
+        server = _FintualStocks(_portfolio(_ACME, _GLBX))
+
+        result = _run_stocks(monkeypatch, session_file, server)
+
+        assert result.warnings == []
+        assert [dict(r.url.params) for r in server.history_requests()] == [
+            {
+                "symbol": symbol,
+                "start": "2025-03-02T00:00:00Z",
+                "timeframe": "1Day",
+                "limit": "400",
+            }
+            for symbol in ("ACME", "GLBX")
+        ]
+        products = _by_ref(result.products)
+        tickers = []
+        for history in result.price_histories:
+            ref = history.product
+            product = products[(ref.kind, ref.currency, ref.external_ref)]
+            tickers.append(product.attributes.ticker)
+            assert history.institution == product.institution == "fintual"
+            assert history.points == [
+                DailyPrice(date=date(2026, 1, 2), price=Decimal("100.0")),
+                DailyPrice(date=date(2026, 1, 5), price=Decimal("250.5")),
+            ]
+        assert tickers == ["ACME", "GLBX"]
+        assert [h.product.external_ref for h in result.price_histories] == [
+            "stock:000101",
+            "stock:000102",
+        ]
+
+    def test_a_refused_cookie_is_minted_again_and_retried(self, monkeypatch, session_file):
+        """The pricing cookie lives minutes: a 401 on historical-prices gets a
+        fresh one and one retry, like current-prices."""
+        server = _FintualStocks(
+            _portfolio(_ACME),
+            answers={
+                "/stocks-pricing-cl/historical-prices": [
+                    (401, {"title": "Unauthorized"}),
+                    (200, {"prices": _CLOSES}),
+                ]
+            },
+        )
+
+        result = _run_stocks(
+            monkeypatch, session_file, server, **{_JWT_COOKIE: "synthetic-jwt"}
+        )
+
+        assert result.warnings == []
+        assert len(result.price_histories) == 1
+        assert [p for p in server.paths() if p.startswith(("/stocks", "/auth"))] == [
+            "/stocks-pricing-cl/current-prices",
+            "/stocks-pricing-cl/historical-prices",
+            "/auth/jwt",
+            "/stocks-pricing-cl/historical-prices",
+        ]
+
+    @pytest.mark.parametrize(
+        ("history", "reason"),
+        [
+            pytest.param({"GLBX": 422}, "FintualStocksError", id="http-error"),
+            pytest.param(
+                {"GLBX": [{"time": "x", "price": 0}]},
+                "FintualStocksError",
+                id="no-usable-close",
+            ),
+        ],
+    )
+    def test_a_failing_stock_costs_only_its_history(
+        self, monkeypatch, session_file, history, reason
+    ):
+        """Counted in one warning with no ticker or URL; the products land."""
+        server = _FintualStocks(_portfolio(_ACME, _GLBX), history=history)
+
+        result = _run_stocks(monkeypatch, session_file, server)
+
+        assert [h.product.external_ref for h in result.price_histories] == ["stock:000101"]
+        assert set(_by_ref(result.products)) == {
+            ("investment", "CLP", "34567"),
+            ("investment", "USD", "stock:000101"),
+            ("investment", "USD", "stock:000102"),
+            ("wallet", "USD", None),
+        }
+        assert result.warnings == [
+            f"Fintual: stock price history failed for 1 of 2 stock(s) ({reason})"
+        ]
+        assert "GLBX" not in result.warnings[0] and "://" not in result.warnings[0]
+
+    def test_a_symbol_failure_does_not_stop_the_next(self, monkeypatch, session_file):
+        """A 404 is that symbol's answer: the stocks after it are still read."""
+        server = _FintualStocks(_portfolio(_ACME, _GLBX), history={"ACME": 404})
+
+        result = _run_stocks(monkeypatch, session_file, server)
+
+        assert [r.url.params["symbol"] for r in server.history_requests()] == [
+            "ACME",
+            "GLBX",
+        ]
+        assert [h.product.external_ref for h in result.price_histories] == ["stock:000102"]
+        assert result.warnings == [
+            "Fintual: stock price history failed for 1 of 2 stock(s) (FintualStocksError)"
+        ]
+
+    def test_a_series_the_envelope_refuses_costs_only_that_stock(
+        self, monkeypatch, session_file
+    ):
+        envelope = fintual_mod.ScrapedPriceHistory
+
+        def refuse_acme(**fields):
+            if fields["product"].external_ref == "stock:000101":
+                raise ValueError("synthetic refusal")
+            return envelope(**fields)
+
+        monkeypatch.setattr(fintual_mod, "ScrapedPriceHistory", refuse_acme)
+        server = _FintualStocks(_portfolio(_ACME, _GLBX))
+
+        result = _run_stocks(monkeypatch, session_file, server)
+
+        assert [h.product.external_ref for h in result.price_histories] == ["stock:000102"]
+        assert result.warnings == [
+            "Fintual: stock price history failed for 1 of 2 stock(s) (ValueError)"
+        ]
+
+    @pytest.mark.parametrize(
+        ("mint", "asked"),
+        [
+            pytest.param((201, {"message": "synthetic"}), 2, id="fresh-token-refused"),
+            pytest.param((403, {"title": "Forbidden"}), 1, id="mint-refused"),
+        ],
+    )
+    def test_a_refused_token_is_minted_once_not_per_stock(
+        self, monkeypatch, session_file, mint, asked
+    ):
+        """The first stock's 401 -> mint -> 401 (or a refused mint) would
+        repeat for every stock: the step stops, the rest count as failed."""
+        server = _FintualStocks(
+            _portfolio(_ACME, _GLBX),
+            answers={
+                "/stocks-pricing-cl/historical-prices": [(401, {"title": "Unauthorized"})],
+                "/auth/jwt": [mint],
+            },
+        )
+
+        result = _run_stocks(
+            monkeypatch, session_file, server, **{_JWT_COOKIE: "synthetic-jwt"}
+        )
+
+        assert server.paths().count("/auth/jwt") == 1
+        assert [r.url.params["symbol"] for r in server.history_requests()] == (
+            ["ACME"] * asked
+        )
+        assert result.price_histories == []
+        assert result.warnings == [
+            "Fintual: stock price history failed for 2 of 2 stock(s) "
+            "(FintualPricingUnavailable)"
+        ]
+
+    @pytest.mark.parametrize(
+        ("failure", "reason"),
+        [
+            pytest.param(httpx.ConnectError("synthetic"), "ConnectError", id="transport"),
+            pytest.param(httpx.ReadTimeout("synthetic"), "ReadTimeout", id="timeout"),
+            pytest.param(503, "FintualPricingUnavailable", id="5xx"),
+        ],
+    )
+    def test_a_pricing_service_failure_stops_the_loop(
+        self, monkeypatch, session_file, failure, reason
+    ):
+        """Retried like any GET, then no other stock is tried: each would sit
+        through the same retries."""
+        monkeypatch.setattr("scrapers.retry.BASE_DELAY_SECONDS", 0.0)
+        server = _FintualStocks(_portfolio(_ACME, _GLBX), history={"ACME": failure})
+
+        result = _run_stocks(monkeypatch, session_file, server)
+
+        assert {r.url.params["symbol"] for r in server.history_requests()} == {"ACME"}
+        assert result.price_histories == []
+        assert result.warnings == [
+            f"Fintual: stock price history failed for 2 of 2 stock(s) ({reason})"
+        ]
+        assert ("investment", "USD", "stock:000102") in _by_ref(result.products)
+
+    def test_the_step_has_a_time_budget(self, monkeypatch, session_file):
+        """A hanging service costs the price history only, read after the
+        movements: they and every product still land, and the jar is saved."""
+        monkeypatch.setattr(fintual_mod, "PRICE_HISTORY_BUDGET_SECONDS", 0.05)
+        server = _FintualStocks(
+            _portfolio(_ACME_HELD, wallet=_LEDGER_BALANCE), ledger=_LEDGER
+        )
+        answer = server.handler
+
+        async def hanging(request):
+            if request.url.path == "/stocks-pricing-cl/historical-prices":
+                server.requests.append(request)
+                await asyncio.sleep(30)
+            return answer(request)
+
+        server.handler = hanging
+
+        transactions, result = _run_cycle(monkeypatch, session_file, server)
+
+        assert len(server.history_requests()) == 1
+        assert result.price_histories == []
+        assert result.warnings == [
+            "Fintual: stock price history ran over its 0 s budget "
+            "(1 of 1 stock(s) not read)"
+        ]
+        assert set(_by_ref(result.products)) == {
+            ("investment", "CLP", "34567"),
+            ("investment", "USD", "stock:1001"),
+            ("wallet", "USD", None),
+        }
+        assert len(transactions) == 5
+        assert server.paths()[-1] == "/stocks-pricing-cl/historical-prices"
+        assert json.loads(session_file.read_text())[_JWT_COOKIE] == "synthetic-jwt"
+
+    def test_running_over_the_budget_keeps_the_series_already_read(
+        self, monkeypatch, session_file
+    ):
+        """The budget spans the requests: a stock that hangs costs its own
+        series and the ones after it, never one read before it."""
+        monkeypatch.setattr(fintual_mod, "PRICE_HISTORY_BUDGET_SECONDS", 1.0)
+        server = _FintualStocks(_portfolio(_ACME, _GLBX))
+        answer = server.handler
+
+        async def hanging(request):
+            if request.url.params.get("symbol") == "GLBX":
+                await asyncio.sleep(30)
+            return answer(request)
+
+        server.handler = hanging
+
+        result = _run_stocks(monkeypatch, session_file, server)
+
+        assert [h.product.external_ref for h in result.price_histories] == ["stock:000101"]
+        assert result.warnings == [
+            "Fintual: stock price history ran over its 1 s budget "
+            "(1 of 2 stock(s) not read)"
+        ]
+
+    def test_a_failure_of_the_whole_step_keeps_everything_else(
+        self, monkeypatch, session_file
+    ):
+        server = _FintualStocks(
+            _portfolio(_ACME_HELD, wallet=_LEDGER_BALANCE), ledger=_LEDGER
+        )
+        monkeypatch.setattr(
+            FintualScraper,
+            "_price_histories",
+            AsyncMock(side_effect=RuntimeError("synthetic https://example.com/?s=ACME")),
+        )
+
+        transactions, result = _run_cycle(monkeypatch, session_file, server)
+
+        assert result.price_histories == []
+        assert result.warnings == ["Fintual: stock price history failed (RuntimeError)"]
+        assert set(_by_ref(result.products)) == {
+            ("investment", "CLP", "34567"),
+            ("investment", "USD", "stock:1001"),
+            ("wallet", "USD", None),
+        }
+        assert len(transactions) == 5
+        assert json.loads(session_file.read_text())[_JWT_COOKIE] == "synthetic-jwt"
+
+    @pytest.mark.parametrize(
+        "portfolio",
+        [
+            pytest.param(_portfolio(_INITK_SOLD), id="zero-shares"),
+            pytest.param(_portfolio(), id="wallet-only"),
+            pytest.param(_NO_STOCKS, id="no-stocks-account"),
+        ],
+    )
+    def test_no_held_stock_means_no_history_request(
+        self, monkeypatch, session_file, portfolio
+    ):
+        server = _FintualStocks(portfolio)
+
+        result = _run_stocks(monkeypatch, session_file, server)
+
+        assert server.history_requests() == []
+        assert result.price_histories == []
+        assert result.warnings == []
+
+    def test_only_the_held_stocks_of_a_mixed_portfolio_get_history(
+        self, monkeypatch, session_file
+    ):
+        """INITK, sold out, keeps its zero-valued product but gets no series."""
+        server = _FintualStocks(_portfolio(_ACME, _INITK_SOLD, _GLBX))
+
+        result = _run_stocks(monkeypatch, session_file, server)
+
+        assert ("investment", "USD", "stock:000103") in _by_ref(result.products)
+        assert [r.url.params["symbol"] for r in server.history_requests()] == [
+            "ACME",
+            "GLBX",
+        ]
+        assert [h.product.external_ref for h in result.price_histories] == [
+            "stock:000101",
+            "stock:000102",
+        ]
+        assert result.warnings == []
+
+    def test_a_stock_without_a_product_gets_no_history(self, monkeypatch, session_file):
+        """GLBX has no current price, so no product this run: no series that
+        could only end unresolved."""
+        server = _FintualStocks(_portfolio(_ACME, _GLBX), prices={"ACME": 100.0})
+
+        result = _run_stocks(monkeypatch, session_file, server)
+
+        assert [r.url.params["symbol"] for r in server.history_requests()] == ["ACME"]
+        assert [h.product.external_ref for h in result.price_histories] == ["stock:000101"]
+
+    def test_the_symbol_cap_is_a_warning(self, monkeypatch, session_file):
+        monkeypatch.setattr(fintual_mod, "MAX_PRICE_HISTORY_SYMBOLS", 1)
+        server = _FintualStocks(_portfolio(_ACME, _GLBX))
+
+        result = _run_stocks(monkeypatch, session_file, server)
+
+        assert [r.url.params["symbol"] for r in server.history_requests()] == ["ACME"]
+        assert len(result.price_histories) == 1
+        assert result.warnings == [
+            "Fintual: read the price history of 1 of 2 stocks (at most 1 per run)"
+        ]
 
 
 # -- one session per cycle ---------------------------------------------------
