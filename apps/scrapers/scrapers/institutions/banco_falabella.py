@@ -32,10 +32,10 @@ Identity: the DOM exposes no movement id, so each purchase is emitted once at
 its full "Monto total" under a fingerprint of its immutable fields; see
 `external_id_for` for the scheme and its collision limit.
 
-Verified live: the headless login, both legs and the writer invariants.
-UNVERIFIED: the payment/credit sign heuristic (no payment row was seen live),
-and whether a per-row id exists in the decrypted BFF payload that would make a
-sturdier key than the fingerprint.
+Verified live: the headless login, both legs, the writer invariants and a card
+payment's sign (printed "-$..." on the unbilled tab, emitted as money in).
+UNVERIFIED: whether a per-row id exists in the decrypted BFF payload that would
+make a sturdier key than the fingerprint.
 
 Set `BANCO_FALABELLA_HEADLESS=0` to watch the browser while debugging.
 """

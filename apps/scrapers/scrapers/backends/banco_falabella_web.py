@@ -152,9 +152,10 @@ _BRANDS = ("Mastercard", "Visa", "American Express", "Amex")
 # A movement whose description carries one of these WORDS is money in (a
 # payment, abono, refund or reversal), so its amount flips positive. Matched on
 # word boundaries against the accent-free, lower-cased description, so a
-# merchant like "MERCADOPAGO*..." or "GRANULADOS ..." stays a charge.
-# UNVERIFIED: no payment or credit row was seen live, so the word set is a best
-# guess and must be confirmed against a real statement.
+# merchant like "MERCADOPAGO*..." or "GRANULADOS ..." stays a charge. Seen
+# live: a card payment ("PAGO TARJETA ...") is printed with a "-" ("-$..."),
+# so the printed sign already marks it; the word set is the fallback for a
+# credit printed unsigned, and only "pago" has been seen on a real row.
 _PAYMENT_RE = re.compile(r"\b(?:pagos?|abonos?|devoluc\w*|revers\w*|anula\w*)\b")
 
 # Dashboard product-card labels, matched accent- and case-insensitively. The
@@ -242,7 +243,7 @@ def _brand_from_name(name: Optional[str]) -> Optional[str]:
 
 
 def _is_payment(description: str) -> bool:
-    """Whether a description reads as money in rather than a charge (UNVERIFIED)."""
+    """Whether a description reads as money in rather than a charge."""
     return _PAYMENT_RE.search(_normalize(description)) is not None
 
 

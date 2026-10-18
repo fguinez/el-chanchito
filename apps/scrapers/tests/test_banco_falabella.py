@@ -250,6 +250,7 @@ class TestMovementsFromRows:
         [
             pytest.param("NOTA CREDITO SINTETICA", "$-12.345", id="signed-credit"),
             pytest.param("PAGO PESOS SINTETICO", "-$ 12.345", id="signed-payment"),
+            pytest.param("PAGO TARJETA SINTETICA", "-$12.345", id="portal-card-payment"),
         ],
     )
     def test_printed_sign_is_a_credit(self, descripcion, monto):
