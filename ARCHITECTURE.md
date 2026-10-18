@@ -40,7 +40,7 @@
 │  transactions | categories | category_rules | monitors          │
 │  monitor_adjustments | fixed_expenses | internal_transfers      │
 │  dismissed_transfer_suggestions | confirmed_transfer_patterns   │
-│  scraper_runs | wealth_snapshots (legacy)                       │
+│  scraper_runs | product_prices | wealth_snapshots (legacy)      │
 └────────────────────────────────▲────────────────────────────────┘
                                  │
                                  │ writes directly (psycopg3)
@@ -92,6 +92,7 @@
         │         ScrapedTransaction         │
         │         ScrapedProduct             │
         │         ScrapedExchangeRate        │
+        │         ScrapedPriceHistory        │
         │   (pydantic envelopes from         │
         │    packages/product-model)         │
         └──────────────────┬─────────────────┘
@@ -102,6 +103,7 @@
         │  - upsert_transactions()           │
         │  - upsert_product()                │
         │  - upsert_exchange_rate()          │
+        │  - upsert_price_history()          │
         │  - start/finish_scraper_run()      │
         │  - ON CONFLICT DO NOTHING (dedup)  │
         └──────────────────┬─────────────────┘
@@ -375,6 +377,16 @@ exchange_rates (V024)
   observed_at                 -- last scrape that read it
   UNIQUE (institution_id, COALESCE(product_id, nil uuid),
           base_currency, quote_currency)
+
+
+product_prices (V038)
+  id PK
+  product_id FK (cascade)
+  price_date                  -- trading day: the daily bar's UTC date
+  price NUMERIC(20,8), > 0    -- closing price per unit
+  currency                    -- the product's, when written
+  created_at, updated_at      -- updated_at moves only when the price changes
+  UNIQUE (product_id, price_date)
 ```
 
 New transactions are categorized in the database itself (V021): a `BEFORE
@@ -424,6 +436,7 @@ the same function over the rows that are still uncategorized.
 | `V032__auto_linked_transfers.sql` | internal_transfers gain `auto_linked` (default false): set on transfers the suggestions confirmed on their own, cleared when the user edits their links |
 | `V033__transactions_soft_delete.sql` | transactions gain `deleted_at`: a deleted row with an `external_id` is soft-deleted (keeps its key, so a scrape cannot re-import it), manual rows are hard-deleted (see "Deleting a transaction") |
 | `V037__seed_banco_falabella_institution.sql` | seeds the Banco Falabella institution row (upsert, so it also fixes a row the writer auto-created) |
+| `V038__product_prices.sql` | product_prices: one daily closing price per product and trading day (the bar's UTC date), upserted by the scrapers and never pruned |
 
 ## Scraper Architecture
 
@@ -438,8 +451,8 @@ Scrapers are split into **agnostic backends** (how we scrape) and
 ```
 apps/scrapers/scrapers/
   base.py                  # BaseScraper; re-exports the ScrapedProduct /
-                           # ScrapedTransaction / ScrapedExchangeRate
-                           # envelopes from product_model
+                           # ScrapedTransaction / ScrapedExchangeRate /
+                           # ScrapedPriceHistory envelopes from product_model
   backends/
     email.py               # ImapSession (shared login + NOOP keepalive),
                            # EmailPattern, fetch_transactions_for_pattern
@@ -775,6 +788,24 @@ wallet row would create the USD wallet under the generic slug
 `fintual-wallet-usd` (the products write corrects its name; slugs are
 create-only).
 
+Every run also reads, after the movements, for each stock still held that got
+a product, the last 365 days of daily closes from
+`GET /stocks-pricing-cl/historical-prices` (`timeframe=1Day`, `limit=400`:
+the limit counts bars forward from `start`; one symbol per call, at most 30
+stocks, in turn), through the same 401 -> `POST /auth/jwt` -> retry-once path
+as the current prices (the service cookie lives 180 s, so a stale one is just
+minted again). Each becomes a `ScrapedPriceHistory` on the stock's product
+(named with `stock_ref`), dated by the bar's UTC date. The window is a
+stateless trailing year: a cursor would save no request, and the upsert skips
+unchanged days. A bar without a positive price or a readable time is dropped;
+a stock whose history fails is counted into one warning (no tickers). A
+failure no other stock would escape (a transport error or timeout, a refused
+or failed token mint, a 429/5xx after the retries) stops the loop, and the
+stocks not read yet count as failed. The whole step has a 120 s budget, since
+it holds the session lock; running over it keeps the series already read and
+counts the rest as not read, and any other failure of the step is one warning
+that costs nothing else.
+
 **Balance conventions & net worth** are registry-driven: each kind's `role`
 (asset/liability/none) and `balance_convention` (value/available/owed/units)
 live in `packages/product-model` — see `packages/product-model/PRODUCTS.md`
@@ -823,9 +854,10 @@ failure and warning joined into `error_message`:
   while the other wrote, or some products or transactions failed to write
   while the rest were written), or a scraper reported warnings, e.g. a
   BanChile surface that failed all its retries, Fintual goals skipped for
-  lacking an id or Fintual stock movements that failed to load. Transactions
-  that name a product (`product_external_ref`) the database doesn't have yet
-  are a warning too, and don't count as landed: the next run writes them.
+  lacking an id or Fintual stock movements (or a stock's price history) that
+  failed to load. Transactions that name a product (`product_external_ref`)
+  the database doesn't have yet are a warning too, and don't count as landed:
+  the next run writes them. So is a price history that can't be written.
 - `error`: something failed and nothing landed.
 
 Writes are isolated per row: `run_scraper` writes each product separately, and
@@ -881,6 +913,23 @@ product up by the same identity rule but never creates anything: a rate naming
 an unknown institution or product raises `UnresolvedRateScope` and becomes a
 run warning (`partial`), as does a failed write. A re-scrape updates the row in
 place (see [Exchange rates](#exchange-rates)).
+
+`ScrapedPriceHistory` is the fourth: the daily closing prices of one
+product's unit (a stock position), as `points` of (`date`, `price`), each day
+once, naming the product through a `ProductRef` built from the same helper as
+the product's `external_ref`. `run_scraper` writes a leg's `price_histories`
+after its products and rates with `upsert_price_history`, which looks the
+product up the same lookup-only way (`UnresolvedPriceScope` for an unknown
+institution or product, a run warning) and upserts every point in one
+transaction into `product_prices` (V038), in the product's currency: a new day
+is inserted, a day whose price changed is updated in place, and an unchanged
+day is left alone. Nothing is pruned. Each series is written on its own, a
+failed one counts into a single warning (by exception type), and none counts
+as landed; a transient database error (any `OperationalError`, already
+retried) stops the remaining series rather than retrying each. A daily bar's
+trading day is its UTC date: Fintual stamps bars at New York midnight
+(`T04:00:00Z`), which America/Santiago would move to the day before, so this
+is the one place a scraped timestamp is not dated in Chile.
 
 | Institution | Method | Source | Auth | Schedule |
 |---|---|---|---|---|
@@ -947,8 +996,8 @@ products table per family), `generated/product-model.schema.json`
 with placement rationale). A codegen drift test under `make test-py`
 regenerates to a temp dir and diffs against the committed output, so the
 artifacts can't silently fall behind the registry. The `ScrapedProduct` /
-`ScrapedTransaction` / `ScrapedExchangeRate` envelopes are that wire contract
-in motion: today they
+`ScrapedTransaction` / `ScrapedExchangeRate` / `ScrapedPriceHistory` envelopes
+are that wire contract in motion: today they
 travel in-process from scraper to `db/writer.py`, and the plan is to put the
 same validation behind a REST ingest API so non-Python scrapers can submit
 data without direct DB access.
@@ -1364,7 +1413,7 @@ el-chanchito/
 │
 ├── packages/
 │   ├── db-schema/                    # Shared SQL migrations
-│   │   ├── migrations/               # V001 through V037 (V026 reserved by an open branch)
+│   │   ├── migrations/               # V001 through V038 (V026 reserved by an open branch)
 │   │   └── migrate.mjs               # Migration runner
 │   └── product-model/                # Product-kind registry (pydantic v2)
 │       ├── product_model/            # kinds, attributes, metrics, display, envelopes

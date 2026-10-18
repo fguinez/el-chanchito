@@ -195,6 +195,14 @@ creates a new product and splits the history.
   The writer stores it as `is_internal_transfer` on insert only, so a user's
   change survives re-scrapes, and the row stays out of spending and income.
   `scripts/dry_run.py` flags violations of these rules.
+- **Daily price series** of a product's unit (a stock's closes) go in
+  `ProductScrapeResult.price_histories` as `ScrapedPriceHistory`, naming the
+  product with a `ProductRef` built from the same helper as its
+  `external_ref` (Fintual's `stock_ref`). `run_scraper` writes them into
+  `product_prices` after the products, lookup-only like an exchange rate, so
+  send them only for products the same run emits. A market's daily bar is
+  dated by its UTC date, the one exception to the America/Santiago rule
+  below (Fintual's bars are stamped at New York midnight).
 - `name` is used only when the product is created; user renames win
   afterwards. Use a generic label, never an account number.
 - `metrics` is the per-scrape observation (snapshotted on change);
