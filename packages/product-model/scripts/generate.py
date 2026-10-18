@@ -27,6 +27,7 @@ from product_model import (
     ColumnSource,
     ResolvedColumn,
     ScrapedExchangeRate,
+    ScrapedPriceHistory,
     ScrapedProduct,
     ScrapedTransaction,
     family_kinds,
@@ -368,6 +369,7 @@ def _render_schema_json() -> str:
         ScrapedProduct,
         ScrapedTransaction,
         ScrapedExchangeRate,
+        ScrapedPriceHistory,
     ]
     for kind in PRODUCT_KINDS:
         models.append(REGISTRY[kind].attributes_cls)
@@ -380,9 +382,9 @@ def _render_schema_json() -> str:
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "chanchito product model",
         "description": (
-            "Ingest contract for scraped products, transactions and exchange "
-            "rates; ScrapedProduct, ScrapedTransaction and ScrapedExchangeRate "
-            "are the envelope models."
+            "Ingest contract for scraped products, transactions, exchange "
+            "rates and price histories; ScrapedProduct, ScrapedTransaction, "
+            "ScrapedExchangeRate and ScrapedPriceHistory are the envelope models."
         ),
         "$defs": defs["$defs"],
     }
@@ -433,11 +435,20 @@ Promotion rationale: only universal fields get real columns. No kind-specific
 field is aggregated in SQL (all product math lives in JS), so per-kind fields
 stay in JSONB typed by this registry rather than widening the table per kind.
 Scrapers submit data through the `ScrapedProduct` / `ScrapedTransaction`
-envelopes; the generated JSON Schema is the future REST wire contract. A third
+envelopes; the generated JSON Schema is the future REST wire contract. A
+transaction lands on its institution's product of its `product_kind` and
+`currency` with no `external_ref` (created if missing), or, when it names one in
+`product_external_ref`, on that existing product; the writer never creates a
+product for a named ref, so such a transaction waits until a product leg has
+stored it. `internal_transfer` sets the row's `is_internal_transfer` flag on
+insert only, so a user's change survives later scrapes. A third
 envelope, `ScrapedExchangeRate`, carries a rate an institution applies (scoped
 to one of its products through a `ProductRef`, or institution-wide); the writer
 keeps the latest one per scope in `exchange_rates` and never creates a product
-for it.
+for it. A fourth, `ScrapedPriceHistory`, carries the daily closing prices of one
+product's unit (a stock position, named by a `ProductRef`); the writer keeps one
+price per product and day in `product_prices`, again without creating the
+product.
 
 Conventions: snake_case keys; CLP amounts `int`, USD/crypto amounts `float`;
 dates as ISO `YYYY-MM-DD` strings, quote times as ISO 8601 datetimes;

@@ -2,9 +2,10 @@
 
 test_writer.py pins the writer's decisions with fake connections; these tests
 run the SQL that carries them out: the institution -> account -> product
-resolution chain, transaction dedup and issue #57's in-place re-key, snapshot
-history only on change, the roll-up guards, the exchange-rate upsert (V024)
-and the scraper run log. Each test
+resolution chain, transaction dedup and issue #57's in-place re-key,
+transactions that name an existing product by its ref, snapshot
+history only on change, the roll-up guards, the exchange-rate upsert (V024),
+the price-history upsert (V038) and the scraper run log. Each test
 gets its own freshly migrated database (see conftest.py) and is skipped unless
 TEST_DATABASE_URL is set. Every figure and identifier is synthetic.
 """
@@ -22,11 +23,13 @@ from psycopg.rows import dict_row
 from db import writer
 from tests.conftest import apply_migrations
 from db.writer import (
+    UnresolvedPriceScope,
     UnresolvedRateScope,
     delete_superseded_transactions,
     finish_scraper_run,
     start_scraper_run,
     upsert_exchange_rate,
+    upsert_price_history,
     upsert_product,
     upsert_transactions,
     write_transactions,
@@ -35,9 +38,12 @@ from product_model import (
     CheckingMetrics,
     CreditCardAttributes,
     CreditCardMetrics,
+    DailyPrice,
     DebitCardMetrics,
+    InvestmentMetrics,
     ProductRef,
     ScrapedExchangeRate,
+    ScrapedPriceHistory,
     ScrapedProduct,
     ScrapedTransaction,
     TermDepositMetrics,
@@ -752,6 +758,222 @@ class TestDecimalAmounts:
         ]
 
 
+class TestProductRefTransactions:
+    """A transaction naming its product by `product_external_ref` lands on that
+    existing product only; nothing is ever created for it.
+
+    Two synthetic USD stock positions at Fintual: stock:1001 (ACME) and
+    stock:1002 (GLBX).
+    """
+
+    def _position(self, ref, name):
+        upsert_product(
+            ScrapedProduct(
+                institution="fintual",
+                kind="investment",
+                currency="USD",
+                external_ref=ref,
+                name=name,
+                metrics=InvestmentMetrics(nav=1234.56, deposited=999.99, profit=234.57),
+            )
+        )
+
+    def _txn(
+        self,
+        external_id,
+        ref="stock:1001",
+        institution="fintual",
+        internal=True,
+        kind="investment",
+        amount="1234.56",
+    ):
+        return ScrapedTransaction(
+            institution=institution,
+            product_kind=kind,
+            product_external_ref=ref,
+            description="Compra ACME",
+            amount=Decimal(amount),
+            currency="USD",
+            transaction_date=date(2026, 1, 2),
+            external_id=external_id,
+            scheduled_month=date(2026, 1, 1),
+            internal_transfer=internal,
+        )
+
+    def _rows(self, conn):
+        return conn.execute(
+            """
+            SELECT t.external_id, p.external_ref, t.is_internal_transfer
+            FROM transactions t JOIN products p ON t.product_id = p.id
+            ORDER BY t.external_id, p.external_ref
+            """
+        ).fetchall()
+
+    def test_each_row_lands_on_its_own_product(self, db_conn):
+        self._position("stock:1001", "Acme Corp")
+        self._position("stock:1002", "Globex Corporation")
+
+        result = write_transactions(
+            [
+                self._txn("fintual_stock_buy_1001"),
+                self._txn("fintual_stock_buy_1002", ref="stock:1002"),
+            ]
+        )
+
+        assert (result.inserted, result.unresolved) == (2, 0)
+        assert self._rows(db_conn) == [
+            {
+                "external_id": "fintual_stock_buy_1001",
+                "external_ref": "stock:1001",
+                "is_internal_transfer": True,
+            },
+            {
+                "external_id": "fintual_stock_buy_1002",
+                "external_ref": "stock:1002",
+                "is_internal_transfer": True,
+            },
+        ]
+        assert len(_products(db_conn, "fintual")) == 2
+
+    def test_a_missing_product_creates_nothing_and_is_unresolved(self, db_conn):
+        self._position("stock:1001", "Acme Corp")
+        products_before = _count(db_conn, "products")
+
+        result = write_transactions(
+            [
+                self._txn("fintual_stock_buy_1001"),
+                self._txn("fintual_stock_buy_1003", ref="stock:1003"),
+            ]
+        )
+
+        assert (result.inserted, result.failed, result.unresolved) == (1, 0, 1)
+        assert result.persisted_external_ids == {"fintual_stock_buy_1001"}
+        assert _count(db_conn, "products") == products_before
+        assert [row["external_id"] for row in self._rows(db_conn)] == [
+            "fintual_stock_buy_1001"
+        ]
+
+    def test_a_ref_never_falls_back_to_the_ref_less_product(self, db_conn):
+        """An existing investment/USD product without a ref is not a fallback:
+        a row lands on the product its ref names, or waits for it."""
+        upsert_product(
+            ScrapedProduct(
+                institution="fintual",
+                kind="investment",
+                currency="USD",
+                name="Acciones sinteticas",
+                metrics=InvestmentMetrics(nav=999.99),
+            )
+        )
+        products_before = _count(db_conn, "products")
+
+        result = write_transactions([self._txn("fintual_stock_buy_1003", ref="stock:1003")])
+
+        assert (result.inserted, result.failed, result.unresolved) == (0, 0, 1)
+        assert _count(db_conn, "transactions") == 0
+        assert _count(db_conn, "products") == products_before
+        (product,) = _products(db_conn, "fintual")
+        assert (product["external_ref"], product["is_active"]) == (None, True)
+
+    def test_a_mixed_wallet_and_stock_batch_lands_on_each_product(self, db_conn):
+        """Fintual's shape: wallet rows by kind alone (their product created
+        if missing), stock mirrors by ref, one missing ref left for later."""
+        self._position("stock:1001", "Acme Corp")
+
+        result = write_transactions(
+            [
+                self._txn("fintual_wallet_dep_2001", ref=None, kind="wallet"),
+                self._txn("fintual_wallet_buy_5001", ref=None, kind="wallet", amount="-999.99"),
+                self._txn("fintual_stock_buy_5001", amount="999.99"),
+                self._txn("fintual_wallet_div_6001", ref=None, kind="wallet", amount="12.34"),
+                self._txn("fintual_stock_div_6001", amount="12.34", internal=False),
+                self._txn("fintual_stock_buy_5002", ref="stock:1002", amount="100.00"),
+            ]
+        )
+
+        assert (result.inserted, result.failed, result.unresolved) == (5, 0, 1)
+        rows = db_conn.execute(
+            """
+            SELECT t.external_id, p.kind, p.external_ref, t.amount,
+                   t.is_internal_transfer
+            FROM transactions t JOIN products p ON t.product_id = p.id
+            ORDER BY t.external_id
+            """
+        ).fetchall()
+        assert [tuple(row.values()) for row in rows] == [
+            ("fintual_stock_buy_5001", "investment", "stock:1001", Decimal("999.99"), True),
+            ("fintual_stock_div_6001", "investment", "stock:1001", Decimal("12.34"), False),
+            ("fintual_wallet_buy_5001", "wallet", None, Decimal("-999.99"), True),
+            ("fintual_wallet_dep_2001", "wallet", None, Decimal("1234.56"), True),
+            ("fintual_wallet_div_6001", "wallet", None, Decimal("12.34"), True),
+        ]
+        products = _products(db_conn, "fintual")
+        assert sorted((p["kind"], p["external_ref"] or "") for p in products) == [
+            ("investment", "stock:1001"),
+            ("wallet", ""),
+        ]
+        assert all(p["is_active"] for p in products)
+
+    def test_a_missing_institution_is_unresolved_and_not_created(self, db_conn):
+        institutions_before = _count(db_conn, "institutions")
+
+        result = write_transactions(
+            [self._txn("sintetico_stock_buy_1001", institution="banco_sintetico")]
+        )
+
+        assert (result.inserted, result.unresolved) == (0, 1)
+        assert _count(db_conn, "institutions") == institutions_before
+        assert _count(db_conn, "transactions") == 0
+
+    def test_the_same_external_id_on_two_products_inserts_twice(self, db_conn):
+        """The dedup key is per product, so each position keeps its own row."""
+        self._position("stock:1001", "Acme Corp")
+        self._position("stock:1002", "Globex Corporation")
+
+        inserted = upsert_transactions(
+            [
+                self._txn("fintual_stock_buy_1001"),
+                self._txn("fintual_stock_buy_1001", ref="stock:1002"),
+            ]
+        )
+
+        assert inserted == 2
+
+    def test_sending_the_batch_again_inserts_nothing(self, db_conn):
+        self._position("stock:1001", "Acme Corp")
+        batch = [self._txn("fintual_stock_buy_1001"), self._txn("fintual_stock_div_1001")]
+
+        assert (upsert_transactions(batch), upsert_transactions(batch)) == (2, 0)
+
+    def test_the_flag_is_stored_once_and_a_cleared_one_stays_cleared(self, db_conn):
+        """The user's untick wins over every later scrape."""
+        self._position("stock:1001", "Acme Corp")
+        upsert_transactions([self._txn("fintual_stock_buy_1001")])
+        db_conn.execute("UPDATE transactions SET is_internal_transfer = false")
+
+        upsert_transactions([self._txn("fintual_stock_buy_1001")])
+
+        (row,) = self._rows(db_conn)
+        assert row["is_internal_transfer"] is False
+
+    def test_an_unflagged_row_is_stored_unflagged(self, db_conn):
+        self._position("stock:1001", "Acme Corp")
+
+        upsert_transactions([self._txn("fintual_stock_div_1001", internal=False)])
+
+        (row,) = self._rows(db_conn)
+        assert row["is_internal_transfer"] is False
+
+    def test_an_inactive_product_still_receives_rows(self, db_conn):
+        """A retired holding keeps importing its movements."""
+        self._position("stock:1001", "Acme Corp")
+        db_conn.execute("UPDATE products SET is_active = false")
+
+        result = write_transactions([self._txn("fintual_stock_sell_1001")])
+
+        assert (result.inserted, result.unresolved) == (1, 0)
+
+
 class TestSupersededTransactions:
     """Issue #79: USD charges the CLP-only scraper stored on the CLP card.
 
@@ -1424,4 +1646,154 @@ class TestExchangeRates:
                 "(institution_id, base_currency, quote_currency, rate, source) "
                 "VALUES (%s, 'USD', %s, %s, 'Sintetico')",
                 (institution_id, values["quote_currency"], values["rate"]),
+            )
+
+
+def _stock_position(external_ref, name):
+    return ScrapedProduct(
+        institution="fintual",
+        kind="investment",
+        currency="USD",
+        external_ref=external_ref,
+        name=name,
+        metrics=InvestmentMetrics(nav=250.5, deposited=100.0, profit=150.5),
+    )
+
+
+def _closes(*points, external_ref="stock:0001", institution="fintual"):
+    """A synthetic daily series; each point is (YYYY-MM-DD, price)."""
+    return ScrapedPriceHistory(
+        institution=institution,
+        product=ProductRef(
+            kind="investment", currency="USD", external_ref=external_ref
+        ),
+        points=[DailyPrice(date=day, price=price) for day, price in points],
+    )
+
+
+class TestPriceHistory:
+    """`upsert_price_history` keeps one close per product and day (V038).
+
+    Two synthetic USD stock positions at Fintual: stock:0001 (ACME) and
+    stock:0002 (GLBX).
+    """
+
+    def _prices(self, conn):
+        return conn.execute(
+            """
+            SELECT pp.*, p.external_ref FROM product_prices pp
+            JOIN products p ON pp.product_id = p.id
+            ORDER BY p.external_ref, pp.price_date
+            """
+        ).fetchall()
+
+    def _positions(self):
+        upsert_product(_stock_position("stock:0001", "Acme Corp"))
+        upsert_product(_stock_position("stock:0002", "Globex Corporation"))
+
+    def test_a_series_lands_on_its_product_in_its_currency(self, db_conn):
+        self._positions()
+
+        written = upsert_price_history(
+            _closes(
+                ("2026-01-02", "100.0"),
+                ("2026-01-05", "250.5"),
+                external_ref="stock:0002",
+            )
+        )
+
+        rows = self._prices(db_conn)
+        assert written == 2
+        assert [
+            (r["external_ref"], r["price_date"], r["price"], r["currency"])
+            for r in rows
+        ] == [
+            ("stock:0002", date(2026, 1, 2), Decimal("100.0"), "USD"),
+            ("stock:0002", date(2026, 1, 5), Decimal("250.5"), "USD"),
+        ]
+        assert all(r["created_at"] == r["updated_at"] for r in rows)
+
+    def test_sending_the_series_again_changes_nothing(self, db_conn):
+        self._positions()
+        series = _closes(("2026-01-02", "100.0"), ("2026-01-05", "250.5"))
+        upsert_price_history(series)
+        first = self._prices(db_conn)
+
+        written = upsert_price_history(series)
+
+        assert written == 0
+        assert self._prices(db_conn) == first
+
+    def test_a_changed_close_is_updated_in_place(self, db_conn):
+        self._positions()
+        upsert_price_history(_closes(("2026-01-02", "100.0"), ("2026-01-05", "250.5")))
+        before = {r["price_date"]: r for r in self._prices(db_conn)}
+
+        written = upsert_price_history(
+            _closes(("2026-01-05", "250.75"), ("2026-01-06", "250.5"))
+        )
+
+        after = {r["price_date"]: r for r in self._prices(db_conn)}
+        assert written == 2
+        assert sorted(after) == [date(2026, 1, 2), date(2026, 1, 5), date(2026, 1, 6)]
+        changed, kept = after[date(2026, 1, 5)], after[date(2026, 1, 2)]
+        assert changed["id"] == before[date(2026, 1, 5)]["id"]
+        assert changed["price"] == Decimal("250.75")
+        assert changed["created_at"] == before[date(2026, 1, 5)]["created_at"]
+        assert changed["updated_at"] > before[date(2026, 1, 5)]["updated_at"]
+        assert kept == before[date(2026, 1, 2)]
+
+    def test_an_unknown_product_is_reported_and_nothing_is_created(self, db_conn):
+        upsert_product(_stock_position("stock:0001", "Acme Corp"))
+
+        with pytest.raises(
+            UnresolvedPriceScope,
+            match="no investment product in USD with that external_ref at 'fintual'",
+        ):
+            upsert_price_history(
+                _closes(("2026-01-02", "100.0"), external_ref="stock:0003")
+            )
+
+        refs = [p["external_ref"] for p in _products(db_conn, "fintual")]
+        assert refs == ["stock:0001"]
+        assert _count(db_conn, "product_prices") == 0
+
+    def test_an_unknown_institution_is_reported_and_not_created(self, db_conn):
+        with pytest.raises(UnresolvedPriceScope, match="institution 'sintetico'"):
+            upsert_price_history(
+                _closes(("2026-01-02", "100.0"), institution="sintetico")
+            )
+
+        assert (
+            db_conn.execute(
+                "SELECT 1 FROM institutions WHERE slug = 'sintetico'"
+            ).fetchone()
+            is None
+        )
+        assert _count(db_conn, "product_prices") == 0
+
+    def test_deleting_the_product_drops_its_prices(self, db_conn):
+        self._positions()
+        upsert_price_history(_closes(("2026-01-02", "100.0")))
+        upsert_price_history(
+            _closes(("2026-01-02", "250.5"), external_ref="stock:0002")
+        )
+
+        db_conn.execute(
+            "DELETE FROM product_snapshots WHERE product_id = "
+            "(SELECT id FROM products WHERE external_ref = 'stock:0001')"
+        )
+        db_conn.execute("DELETE FROM products WHERE external_ref = 'stock:0001'")
+
+        assert [r["external_ref"] for r in self._prices(db_conn)] == ["stock:0002"]
+
+    def test_the_table_rejects_a_non_positive_price(self, db_conn):
+        upsert_product(_stock_position("stock:0001", "Acme Corp"))
+        product_id = _only_product(db_conn, "fintual")["id"]
+
+        with pytest.raises(psycopg.errors.CheckViolation):
+            db_conn.execute(
+                "INSERT INTO product_prices (product_id, price_date, price, currency) "
+                "VALUES (%s, '2026-01-02', 0, 'USD')",
+                (product_id,),
             )

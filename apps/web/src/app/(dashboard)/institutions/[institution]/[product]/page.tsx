@@ -43,6 +43,7 @@ import {
   CupoUtilizationCard,
   InvestmentCompositionCard,
   MonthlyFlowCard,
+  PriceHistoryCard,
   TransactionWaterfallCard,
   TRANSACTION_KINDS,
   type ProductHistoryPoint,
@@ -51,6 +52,11 @@ import {
 import { BalanceHistorySheet } from "@/components/institutions/balance-history-sheet";
 import { ExchangeRateCard } from "@/components/institutions/exchange-rate-card";
 import { ProductTransactionsCard } from "@/components/institutions/product-transactions";
+import {
+  productTicker,
+  showsPriceHistory,
+  type ProductPricePoint,
+} from "@/lib/price-history";
 
 interface ProductDetailResponse {
   institution: {
@@ -63,6 +69,8 @@ interface ProductDetailResponse {
   history: ProductHistoryPoint[];
   transactions: ProductTransaction[];
   transactionsTruncated: boolean;
+  /** A stock's daily closes, oldest first; empty without a ticker. */
+  prices: ProductPricePoint[];
 }
 
 /** Recharts rows from the balance history, own-currency balance. */
@@ -162,6 +170,7 @@ export default function ProductDetailPage() {
     history,
     transactions,
     transactionsTruncated,
+    prices,
   } = data;
   const isLiability = KIND_INFO[product.kind].role === "liability";
   const chips = productDetailChips(product);
@@ -174,6 +183,7 @@ export default function ProductDetailPage() {
     product.kind === "credit_card" || product.kind === "line_of_credit";
   const anchorBalance = product.currentBalance ?? latestBalance;
   const showRate = product.currency !== "CLP";
+  const ticker = productTicker(product.attributes);
 
   return (
     <div className="space-y-6">
@@ -308,6 +318,14 @@ export default function ProductDetailPage() {
       {isCreditKind && <CupoUtilizationCard product={product} history={history} />}
       {product.kind === "investment" && (
         <InvestmentCompositionCard product={product} />
+      )}
+      {ticker && showsPriceHistory(prices, product.metrics) && (
+        <PriceHistoryCard
+          product={product}
+          ticker={ticker}
+          prices={prices}
+          institutionName={institution.name}
+        />
       )}
       {TRANSACTION_KINDS.has(product.kind) && (
         <TransactionWaterfallCard

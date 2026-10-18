@@ -219,6 +219,37 @@ export const exchangeRates = pgTable(
   ]
 );
 
+// Daily closing prices of a product's unit (a stock), read by its scraper
+// (V038). One row per product and trading day; a rescrape updates a changed
+// price in place and nothing is pruned. `priceDate` is the trading day (the
+// daily bar's UTC date), a plain YYYY-MM-DD string.
+export const productPrices = pgTable(
+  "product_prices",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    productId: uuid("product_id")
+      .notNull()
+      .references(() => products.id, { onDelete: "cascade" }),
+    priceDate: date("price_date", { mode: "string" }).notNull(),
+    // Closing price per unit.
+    price: numeric("price", { precision: 20, scale: 8 }).notNull(),
+    // The product's currency when the scraper wrote it.
+    currency: text("currency").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    unique("uq_product_prices_product_date").on(
+      table.productId,
+      table.priceDate
+    ),
+  ]
+);
+
 // ---------------------------------------------------------------------------
 // Transactions & categorization
 // ---------------------------------------------------------------------------

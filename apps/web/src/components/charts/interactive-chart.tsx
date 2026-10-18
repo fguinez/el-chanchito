@@ -44,6 +44,7 @@ import {
 import { cn, formatAxisValue, formatDateMs } from "@/lib/utils";
 import {
   DEFAULT_Y_AXIS_RANGE,
+  sameYAxisRange,
   useYAxisRange,
   type YAxisRange,
 } from "@/components/charts/y-axis-range";
@@ -74,6 +75,8 @@ interface PlotGeometry {
 export interface YAxisRangeControl {
   range: YAxisRange;
   setRange: (range: YAxisRange) => void;
+  /** The range a reset restores ("auto" when absent). */
+  initial?: YAxisRange;
 }
 
 /** The narrowest an axis window may get, as a fraction of the drag-start span. */
@@ -176,10 +179,16 @@ function YAxisOverlay({
   geometry,
   range,
   setRange,
+  reset,
+  formatValue,
 }: {
   geometry: PlotGeometry;
   range: YAxisRange;
   setRange: (range: YAxisRange) => void;
+  /** What double-click restores; any other range shows the axis modified. */
+  reset: YAxisRange;
+  /** Labels a Y value (grip labels, live drag value). */
+  formatValue: (value: number) => string;
 }) {
   const stripRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<DragState | null>(null);
@@ -198,7 +207,7 @@ function YAxisOverlay({
     setRangeRef.current = setRange;
   }, [geometry, setRange]);
 
-  const modified = range.kind !== "auto";
+  const modified = !sameYAxisRange(range, reset);
   const revealed = cn(
     "opacity-0 transition-opacity duration-150 group-hover/chart:opacity-100 group-focus-within/chart:opacity-100",
     (modified || dragging || editing) && "opacity-100"
@@ -392,7 +401,7 @@ function YAxisOverlay({
         onPointerMove={moveDrag}
         onPointerUp={endDrag}
         onPointerCancel={cancelDrag}
-        onDoubleClick={() => setRange(DEFAULT_Y_AXIS_RANGE)}
+        onDoubleClick={() => setRange(reset)}
       />
 
       {/* Edge grips: drag to stretch one bound, click or Enter for exact value. */}
@@ -402,8 +411,8 @@ function YAxisOverlay({
           type="button"
           aria-label={
             bound === "max"
-              ? `Límite superior del eje Y: ${formatAxisValue(gripValue(bound))}. Flechas para ajustar, Enter para escribir un valor exacto`
-              : `Límite inferior del eje Y: ${formatAxisValue(gripValue(bound))}. Flechas para ajustar, Enter para escribir un valor exacto`
+              ? `Límite superior del eje Y: ${formatValue(gripValue(bound))}. Flechas para ajustar, Enter para escribir un valor exacto`
+              : `Límite inferior del eje Y: ${formatValue(gripValue(bound))}. Flechas para ajustar, Enter para escribir un valor exacto`
           }
           className={cn(
             "absolute z-20 flex h-3.5 -translate-y-1/2 cursor-row-resize touch-none items-center justify-center rounded outline-none focus-visible:ring-2 focus-visible:ring-ring",
@@ -463,7 +472,7 @@ function YAxisOverlay({
               dragging === "max" ? geometry.y + 12 : geometry.y + geometry.height - 28,
           }}
         >
-          {formatAxisValue(dragValue)}
+          {formatValue(dragValue)}
         </div>
       )}
 
@@ -841,16 +850,20 @@ function XAxisOverlay({
 /** Drop-in replacement for a chart's <ResponsiveContainer> that makes its
  *  axes directly manipulable. Wire `yControl` to `useYAxisRange` (and spread
  *  the hook's `yAxisProps` on the <YAxis>); pass `xControl` too for charts
- *  with a numeric time axis (see `useTimeSeriesChart`). */
+ *  with a numeric time axis (see `useTimeSeriesChart`). A chart whose <YAxis>
+ *  has its own tickFormatter passes it as `formatYValue` too, so the axis
+ *  controls label values the same way. */
 export function InteractiveChart({
   yControl,
   xControl,
+  formatYValue = formatAxisValue,
   height,
   children,
   className,
 }: {
   yControl: YAxisRangeControl;
   xControl?: XAxisRangeControl;
+  formatYValue?: (value: number) => string;
   height: number;
   children: ReactElement<{ children?: ReactNode; data?: unknown }>;
   className?: string;
@@ -912,6 +925,8 @@ export function InteractiveChart({
           geometry={geometry}
           range={yControl.range}
           setRange={yControl.setRange}
+          reset={yControl.initial ?? DEFAULT_Y_AXIS_RANGE}
+          formatValue={formatYValue}
         />
       )}
       {geometry && xControl && geometry.xMin != null && geometry.xMax != null && (
@@ -930,10 +945,15 @@ export function InteractiveChart({
 }
 
 /** One hook for a chart over time: interactive Y range + time window, plus
- *  ready-to-spread axis props and the tooltip label formatter. See the
- *  recipe at the top of this file. */
-export function useTimeSeriesChart(initialX: XAxisRange = { kind: "all" }) {
-  const y = useYAxisRange();
+ *  ready-to-spread axis props and the tooltip label formatter. `initialY`
+ *  picks the starting Y range, and the one a reset restores: "fit" suits a
+ *  series far from zero (a price), which "auto" would squash against a zero
+ *  baseline. See the recipe at the top of this file. */
+export function useTimeSeriesChart(
+  initialX: XAxisRange = { kind: "all" },
+  initialY: YAxisRange = DEFAULT_Y_AXIS_RANGE
+) {
+  const y = useYAxisRange(initialY);
   const x = useXAxisRange(initialX);
   return {
     y,

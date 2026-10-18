@@ -40,7 +40,7 @@
 │  transactions | categories | category_rules | monitors          │
 │  monitor_adjustments | fixed_expenses | internal_transfers      │
 │  dismissed_transfer_suggestions | confirmed_transfer_patterns   │
-│  scraper_runs | wealth_snapshots (legacy)                       │
+│  scraper_runs | product_prices | wealth_snapshots (legacy)      │
 └────────────────────────────────▲────────────────────────────────┘
                                  │
                                  │ writes directly (psycopg3)
@@ -92,6 +92,7 @@
         │         ScrapedTransaction         │
         │         ScrapedProduct             │
         │         ScrapedExchangeRate        │
+        │         ScrapedPriceHistory        │
         │   (pydantic envelopes from         │
         │    packages/product-model)         │
         └──────────────────┬─────────────────┘
@@ -102,6 +103,7 @@
         │  - upsert_transactions()           │
         │  - upsert_product()                │
         │  - upsert_exchange_rate()          │
+        │  - upsert_price_history()          │
         │  - start/finish_scraper_run()      │
         │  - ON CONFLICT DO NOTHING (dedup)  │
         └──────────────────┬─────────────────┘
@@ -294,7 +296,7 @@ transactions ──────────┐
   source                        id PK
   external_id (unique w/       keyword
     product_id)                 category_id FK ──────>
-  is_internal_transfer        -- set while a transfer links it
+  is_internal_transfer        -- set while a transfer links it, or by a scraper on insert
   is_manually_categorized
   location_name, _city,
     _country (nullable text)
@@ -375,6 +377,16 @@ exchange_rates (V024)
   observed_at                 -- last scrape that read it
   UNIQUE (institution_id, COALESCE(product_id, nil uuid),
           base_currency, quote_currency)
+
+
+product_prices (V038)
+  id PK
+  product_id FK (cascade)
+  price_date                  -- trading day: the daily bar's UTC date
+  price NUMERIC(20,8), > 0    -- closing price per unit
+  currency                    -- the product's, when written
+  created_at, updated_at      -- updated_at moves only when the price changes
+  UNIQUE (product_id, price_date)
 ```
 
 New transactions are categorized in the database itself (V021): a `BEFORE
@@ -424,6 +436,7 @@ the same function over the rows that are still uncategorized.
 | `V032__auto_linked_transfers.sql` | internal_transfers gain `auto_linked` (default false): set on transfers the suggestions confirmed on their own, cleared when the user edits their links |
 | `V033__transactions_soft_delete.sql` | transactions gain `deleted_at`: a deleted row with an `external_id` is soft-deleted (keeps its key, so a scrape cannot re-import it), manual rows are hard-deleted (see "Deleting a transaction") |
 | `V037__seed_banco_falabella_institution.sql` | seeds the Banco Falabella institution row (upsert, so it also fixes a row the writer auto-created) |
+| `V038__product_prices.sql` | product_prices: one daily closing price per product and trading day (the bar's UTC date), upserted by the scrapers and never pruned |
 
 ## Scraper Architecture
 
@@ -438,8 +451,8 @@ Scrapers are split into **agnostic backends** (how we scrape) and
 ```
 apps/scrapers/scrapers/
   base.py                  # BaseScraper; re-exports the ScrapedProduct /
-                           # ScrapedTransaction / ScrapedExchangeRate
-                           # envelopes from product_model
+                           # ScrapedTransaction / ScrapedExchangeRate /
+                           # ScrapedPriceHistory envelopes from product_model
   backends/
     email.py               # ImapSession (shared login + NOOP keepalive),
                            # EmailPattern, fetch_transactions_for_pattern
@@ -449,13 +462,15 @@ apps/scrapers/scrapers/
     bci_lider_web.py       # real Chrome over CDP -> scrape_card() / save_login_session()
     santander_web.py       # headless Santander login + the SPA's JSON -> fetch_session()
     banco_falabella_web.py # headless Banco Falabella login + the rendered DOM -> fetch_session()
+    fintual_stocks.py      # Fintual's WalletMovements query + pure ledger parsers (no I/O)
   institutions/
     mach.py  mercadopago.py  tenpo.py       -> consume backends/email
     banchile.py                              -> banchile_movements (one login: tx + balances)
     bci_lider.py                             -> bci_lider_web (one CDP drive: tx + balances)
     santander.py                             -> santander_web (one headless login: tx + balance)
     banco_falabella.py                       -> banco_falabella_web (one headless login: tx + balance)
-    buda.py  fintual.py  skipo.py            -> self-contained (HTTP APIs)
+    fintual.py                               -> fintual_stocks (one web session: tx + balances)
+    buda.py  skipo.py                        -> self-contained (HTTP APIs)
 ```
 
 BanChile drives **one self-contained Playwright session per run** (issue #57,
@@ -732,11 +747,64 @@ unrealized and realized profit and dividends as metrics, by the web app's
 formulas), and the cash a USD `wallet`. A sold-out position drops to nav 0 and
 stops counting, for as long as Fintual keeps listing zero-share positions; a
 held one without a price or totals is skipped with a counted warning. The
-stocks are an isolated leg of the same run: a failure there keeps the goals
+stocks are an isolated part of the same run: a failure there keeps the goals
 and records the run as `partial` (a failure on the positions' own requests
 keeps the wallet too). An account that never opened the brokerage (nothing
-resolves and GraphQL reports no error) gets no stock products and no warning;
-nothing resolving next to a GraphQL error fails the leg. No transactions yet.
+resolves and GraphQL reports no error) gets no stock products, no movements
+and no warning; nothing resolving next to a GraphQL error fails the leg (the
+movements are still read).
+
+Fintual's transactions are the USD wallet's ledger, from one `WalletMovements`
+query on `POST /gql/` (`backends/fintual_stocks.py` holds the query text and
+the pure parsers), paged 50 at a time until a page where every list is empty
+(the offset moves by the longest list returned, never more than the page size;
+40 pages at most, then a warning). Every movement is a row on the USD `wallet`;
+buys, sells, dividends and cash mergers also get a mirror row on the stock's
+`investment` product, named by `product_external_ref` `stock:<asset id>`. A buy
+is money out of the wallet and into the stock, and both rows are flagged
+internal transfers, as are deposits from a bank; a dividend is income once, on
+the stock; cash interest and compensations are income and fees expenses. Dates
+are the day the wallet changed, in America/Santiago. Pending movements wait
+until executed (the query has no state field, so a deposit, withdrawal or order
+declared over a week ago and never executed is taken as cancelled and left out
+without blocking the balance check); divestments, rows in another currency and
+unreadable rows are skipped with counted warnings (the row shapes come from
+Fintual's query text, and not all of them are verified against live data
+yet). The full ledger is read every run and the writer skips what it has; a
+new stock's rows wait one run for its product. Both legs share
+one session drive per run: the transactions leg runs it first and caches it for
+the products leg. A movements failure is a warning that costs the movements
+only. When the ledger is complete and nothing was pending or skipped, it must
+add up to the wallet's balance to the cent, or the run warns (no amounts). A
+stock the positions list no longer has gets a zero-valued product when the
+ledger shows it left through a sale or a cash merger (deposited = buys - sells,
+profit = sells - buys). One that left through a non-cash event (a share-only
+merger, a spinoff, shares moved out by ACAT) has no cash leg, so it is skipped
+rather than booked as a loss, and its product keeps its last values; an empty
+positions list next to stocks bought and never sold zeroes nothing that run and
+warns. On a fresh database, deploy the stock products and let one Fintual run
+finish before deploying the movements: the transactions leg writes first, so a
+wallet row would create the USD wallet under the generic slug
+`fintual-wallet-usd` (the products write corrects its name; slugs are
+create-only).
+
+Every run also reads, after the movements, for each stock still held that got
+a product, the last 365 days of daily closes from
+`GET /stocks-pricing-cl/historical-prices` (`timeframe=1Day`, `limit=400`:
+the limit counts bars forward from `start`; one symbol per call, at most 30
+stocks, in turn), through the same 401 -> `POST /auth/jwt` -> retry-once path
+as the current prices (the service cookie lives 180 s, so a stale one is just
+minted again). Each becomes a `ScrapedPriceHistory` on the stock's product
+(named with `stock_ref`), dated by the bar's UTC date. The window is a
+stateless trailing year: a cursor would save no request, and the upsert skips
+unchanged days. A bar without a positive price or a readable time is dropped;
+a stock whose history fails is counted into one warning (no tickers). A
+failure no other stock would escape (a transport error or timeout, a refused
+or failed token mint, a 429/5xx after the retries) stops the loop, and the
+stocks not read yet count as failed. The whole step has a 120 s budget, since
+it holds the session lock; running over it keeps the series already read and
+counts the rest as not read, and any other failure of the step is one warning
+that costs nothing else.
 
 **Balance conventions & net worth** are registry-driven: each kind's `role`
 (asset/liability/none) and `balance_convention` (value/available/owed/units)
@@ -785,8 +853,11 @@ failure and warning joined into `error_message`:
 - `partial`: something went wrong but part of the data landed (one leg raised
   while the other wrote, or some products or transactions failed to write
   while the rest were written), or a scraper reported warnings, e.g. a
-  BanChile surface that failed all its retries or Fintual goals skipped for
-  lacking an id.
+  BanChile surface that failed all its retries, Fintual goals skipped for
+  lacking an id or Fintual stock movements (or a stock's price history) that
+  failed to load. Transactions that name a product (`product_external_ref`)
+  the database doesn't have yet are a warning too, and don't count as landed:
+  the next run writes them. So is a price history that can't be written.
 - `error`: something failed and nothing landed.
 
 Writes are isolated per row: `run_scraper` writes each product separately, and
@@ -822,7 +893,12 @@ killed are replaced rather than failing a write, recycles connections after
 goal). The writer resolves the chain institution → account → product
 (creating missing links via the `uq_products_identity` upsert;
 single-user: everything attaches to the oldest user), so e.g. each Buda
-currency becomes its own `crypto` product. `upsert_product`
+currency becomes its own `crypto` product. A transaction lands on the product
+of its kind and currency with no `external_ref`, unless it names one in
+`product_external_ref` (a Fintual stock position): that product is looked up,
+never created, and a miss is counted `unresolved` for a later run.
+`internal_transfer` is written to `is_internal_transfer` on insert only, so a
+user's change survives re-scrapes. `upsert_product`
 shallow-merges `attributes`, always refreshes
 `products.current_balance`/`metrics`/`balance_as_of`, and appends a
 `product_snapshots` history row only when the metrics payload changed.
@@ -837,6 +913,23 @@ product up by the same identity rule but never creates anything: a rate naming
 an unknown institution or product raises `UnresolvedRateScope` and becomes a
 run warning (`partial`), as does a failed write. A re-scrape updates the row in
 place (see [Exchange rates](#exchange-rates)).
+
+`ScrapedPriceHistory` is the fourth: the daily closing prices of one
+product's unit (a stock position), as `points` of (`date`, `price`), each day
+once, naming the product through a `ProductRef` built from the same helper as
+the product's `external_ref`. `run_scraper` writes a leg's `price_histories`
+after its products and rates with `upsert_price_history`, which looks the
+product up the same lookup-only way (`UnresolvedPriceScope` for an unknown
+institution or product, a run warning) and upserts every point in one
+transaction into `product_prices` (V038), in the product's currency: a new day
+is inserted, a day whose price changed is updated in place, and an unchanged
+day is left alone. Nothing is pruned. Each series is written on its own, a
+failed one counts into a single warning (by exception type), and none counts
+as landed; a transient database error (any `OperationalError`, already
+retried) stops the remaining series rather than retrying each. A daily bar's
+trading day is its UTC date: Fintual stamps bars at New York midnight
+(`T04:00:00Z`), which America/Santiago would move to the day before, so this
+is the one place a scraped timestamp is not dated in Chile.
 
 | Institution | Method | Source | Auth | Schedule |
 |---|---|---|---|---|
@@ -903,8 +996,8 @@ products table per family), `generated/product-model.schema.json`
 with placement rationale). A codegen drift test under `make test-py`
 regenerates to a temp dir and diffs against the committed output, so the
 artifacts can't silently fall behind the registry. The `ScrapedProduct` /
-`ScrapedTransaction` / `ScrapedExchangeRate` envelopes are that wire contract
-in motion: today they
+`ScrapedTransaction` / `ScrapedExchangeRate` / `ScrapedPriceHistory` envelopes
+are that wire contract in motion: today they
 travel in-process from scraper to `db/writer.py`, and the plan is to put the
 same validation behind a REST ingest API so non-Python scrapers can submit
 data without direct DB access.
@@ -947,7 +1040,10 @@ product with its denormalized balance.
 
 Transactions are deduplicated via `UNIQUE(product_id, external_id)`:
 
-- Fintual: no transactions (balance-only)
+- Fintual: `fintual_wallet_{type}_{id}` on the USD wallet and
+  `fintual_stock_{type}_{id}` on the stock position (`type` is `dep`, `buy`,
+  `sell`, `div`, `int`, ...; the id is Fintual's own, the asset order's for buys
+  and sells), each leg its own key since keys are unique across a batch
 - Buda: `buda_{deposit/withdrawal_id}` (CLP movements only)
 - Skipo: `skipo_{ledger_entry_id}` (CLP ledger only)
 - BanChile: the bank's own operation id where the portal exposes one, else a
@@ -1304,7 +1400,7 @@ el-chanchito/
 │   └── scrapers/                     # Python scraper service
 │       ├── scrapers/
 │       │   ├── backends/             # email, banchile_web, banchile_movements, bci_lider_web,
-│       │   │                         #   santander_web, banco_falabella_web
+│       │   │                         #   santander_web, banco_falabella_web, fintual_stocks
 │       │   └── institutions/         # 10 scrapers: banchile, banco_falabella, bci_lider, buda,
 │       │                             #   fintual, mach, mercadopago, santander, skipo, tenpo
 │       ├── db/                       # Connection pool + writer + slug
@@ -1317,7 +1413,7 @@ el-chanchito/
 │
 ├── packages/
 │   ├── db-schema/                    # Shared SQL migrations
-│   │   ├── migrations/               # V001 through V037 (V026 reserved by an open branch)
+│   │   ├── migrations/               # V001 through V038 (V026 reserved by an open branch)
 │   │   └── migrate.mjs               # Migration runner
 │   └── product-model/                # Product-kind registry (pydantic v2)
 │       ├── product_model/            # kinds, attributes, metrics, display, envelopes

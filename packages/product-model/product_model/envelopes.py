@@ -4,7 +4,7 @@ These are the ingest contract — today validated in-process, tomorrow the REST
 wire format for external scrapers (the generated JSON Schema is the spec).
 No envelope carries an `as_of`: the writer stamps `now()` at persist time;
 bank-printed dates travel as `reported_as_of` (inside metrics for a product,
-on the envelope for an exchange rate).
+on the envelope for an exchange rate), and a price history dates each point.
 """
 
 import datetime
@@ -143,6 +143,14 @@ ExchangeRateValue = Annotated[
 # An upper-case currency code: ISO 4217 for fiat ("USD"), a ticker for crypto.
 _CURRENCY_CODE_PATTERN = r"^[A-Z]{3,10}$"
 
+# What `product_prices.price` (NUMERIC(20, 8), CHECK > 0) can hold: the same
+# bounds, and so the same wire forms, as an exchange rate.
+_PRICE_PATTERN = _RATE_PATTERN
+PriceValue = ExchangeRateValue
+# A daily series of the longest window a scraper is expected to send (about
+# 15 years of trading days), so one envelope stays a bounded write.
+_MAX_PRICE_POINTS = 4000
+
 
 class ScrapedProduct(BaseModel):
     """One scraped observation of a product."""
@@ -208,6 +216,18 @@ class ScrapedTransaction(BaseModel):
     product_kind: str = Field(
         description="Kind of the product the transaction belongs to, e.g. 'checking'."
     )
+    product_external_ref: str | None = Field(
+        None,
+        min_length=1,
+        description=(
+            "external_ref of the product of this institution, product_kind and "
+            "currency the transaction belongs to, for kinds with one product per "
+            "holding (e.g. a stock position). Such a product is never created "
+            "for a transaction: until a product leg has stored it, the "
+            "transaction is left for a later run. None files it on the product "
+            "with no external_ref, created if missing."
+        ),
+    )
     description: str = Field(description="Human-readable transaction description.")
     amount: TransactionAmount = Field(
         description=(
@@ -232,6 +252,16 @@ class ScrapedTransaction(BaseModel):
     currency: str = Field("CLP", description="ISO currency code (default 'CLP').")
     category_hint: str | None = Field(
         None, description="Scraper's best-guess category."
+    )
+    internal_transfer: bool = Field(
+        False,
+        description=(
+            "True when the movement only moves the user's money between their "
+            "own products (e.g. a stock purchase paid from a cash wallet), so "
+            "it is neither spending nor income. Stored as is_internal_transfer "
+            "when the row is first written, and never rewritten by a re-scrape, "
+            "so a user's change wins."
+        ),
     )
     scheduled_month: datetime.date | None = Field(
         None,
@@ -373,3 +403,60 @@ class ScrapedExchangeRate(BaseModel):
                 f"base_currency '{self.base_currency}'"
             )
         return self
+
+
+class DailyPrice(BaseModel):
+    """One day's closing price of a product's unit."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    date: datetime.date = Field(
+        description="The trading day the price closed on, as the source dates it."
+    )
+    price: PriceValue = Field(
+        description=(
+            "Closing price per unit in the product's currency; positive, at most "
+            "8 decimals (stored as NUMERIC(20, 8))."
+        ),
+    )
+
+    @field_validator("price", mode="before")
+    @classmethod
+    def _price_string_matches_the_wire_pattern(cls, value):
+        """A string price must be the schema's form: plain digits, a dot decimal."""
+        if isinstance(value, str) and not re.fullmatch(_PRICE_PATTERN, value):
+            raise ValueError(f"price string {value!r} must match {_PRICE_PATTERN}")
+        return value
+
+
+class ScrapedPriceHistory(BaseModel):
+    """Daily closing prices of one product's unit (e.g. a stock), as read.
+
+    `product` names the product exactly as the scraper emits it. The writer
+    keeps one price per product and day, updates a day whose price changed,
+    and only ever attaches a series to a product that already exists: it
+    never creates one to hang prices on.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    institution: str = Field(
+        description="Institution slug, e.g. 'banchile', 'fintual'."
+    )
+    product: ProductRef = Field(
+        description="The product of this institution whose unit the prices are for."
+    )
+    points: list[DailyPrice] = Field(
+        min_length=1,
+        max_length=_MAX_PRICE_POINTS,
+        description="One closing price per trading day, each day at most once.",
+    )
+
+    @field_validator("points")
+    @classmethod
+    def _one_price_per_day(cls, points: list[DailyPrice]) -> list[DailyPrice]:
+        days = [point.date for point in points]
+        if len(set(days)) != len(days):
+            repeated = sorted({day for day in days if days.count(day) > 1})
+            raise ValueError(f"points repeat the day(s) {repeated[:3]}")
+        return points

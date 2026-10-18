@@ -39,8 +39,10 @@ product_model                envelopes (ScrapedProduct / ScrapedTransaction), ki
   validates envelopes it receives.
 - Create a `backends/` module only when the transport is big (a browser
   session with many surfaces) or shared by several institutions (the e-mail
-  backend serves three). A self-contained HTTP scraper (Buda, Fintual) keeps
-  everything in `institutions/<slug>.py`.
+  backend serves three). A self-contained HTTP scraper (Buda) keeps
+  everything in `institutions/<slug>.py`; one whose parsing grows big may move
+  just the pure parsers to a backend (`backends/fintual_stocks.py`: a query
+  text and the ledger parsers, no I/O).
 - Parsers are where the institution's quirks live. Keep them pure so most tests
   are a fixture in and an assertion out, with no fakes.
 
@@ -76,8 +78,8 @@ blindly. So a scraper:
   behind `if __name__ == "__main__"` and a make target;
 - signals failure by raising, never by returning an error value;
 - returns `[]` or `ProductScrapeResult([])` for a leg the institution can't
-  provide, with a one-line comment or docstring saying why (Fintual: no
-  per-transaction data).
+  provide, with a one-line comment or docstring saying why (the e-mail
+  scrapers' products leg: a notification carries no balance).
 
 **Interface segregation.** `BaseScraper` is deliberately small: `method`,
 `institution`, two legs, and an optional `superseded_transactions()` hook.
@@ -103,8 +105,8 @@ replace:
 | Adapter | `institutions/<slug>.py` mapping source records onto envelopes | always |
 | Facade | `backends/bci_lider_web.scrape_card`, `backends/banchile_movements.fetch_session` | the transport has many steps |
 | Data-driven strategy | `EmailPattern` consumed by `fetch_transactions_for_pattern` | institutions differ only in configuration |
-| Per-cycle session cache | `BciLiderScraper._cached` / `_error` | one login must feed both legs |
-| Async generator pagination | `BudaScraper._pages` | paged APIs; earlier pages survive a later failure |
+| Per-cycle session cache | `BciLiderScraper._cached` / `_error`, `FintualScraper._scrape_cycle` | one login must feed both legs |
+| Async generator pagination | `BudaScraper._pages`, `FintualScraper._wallet_pages` | paged APIs; earlier pages survive a later failure |
 | Value objects | frozen dataclasses for raw records; pydantic envelopes at the boundary | always |
 | Typed, actionable errors | `FintualSessionError("... Run make fintual-login ...")` | any human-recoverable failure |
 
@@ -163,25 +165,44 @@ creates a new product and splits the history.
 - One real-world product, one product row. Don't sum several products into
   one (V012 and V013 retired summed products); emit one observation each,
   told apart by `external_ref`.
-- **The singleton rule.** `ScrapedTransaction` carries no product reference.
-  `db.writer.write_transactions` files every transaction on the product with
-  the same `(institution, kind, currency)` **and no `external_ref`**, and
-  creates that product if it is missing. So:
-  - a (kind, currency) that receives transactions must be one singleton
-    product (`external_ref=None`), and its `product_kind` / `currency` must
-    match what the balance leg emits (Buda's comment on `PRODUCT_KIND`);
-  - multi-instance products (per goal, per deposit, per fund: each with an
-    `external_ref`) receive no transactions;
+- **The singleton rule.** By default a `ScrapedTransaction` lands on the
+  product with the same `(institution, kind, currency)` **and no
+  `external_ref`**: `db.writer.write_transactions` creates that product if it
+  is missing. So:
+  - a (kind, currency) whose transactions carry no product ref must be one
+    singleton product (`external_ref=None`), and its `product_kind` /
+    `currency` must match what the balance leg emits (Buda's comment on
+    `PRODUCT_KIND`);
   - never mix a singleton and per-ref products of the same (kind, currency).
     The writer treats the singleton as a summed roll-up: the first per-ref
     write retires it (`_retire_rollup_sibling` deactivates it, nulls its
     balance and **deletes its snapshots**), and later writes to it are
     skipped. Transactions still land on the retired row, because product
     resolution ignores `is_active`.
-  An institution with two accounts of the same kind and currency that both
-  have movements needs the ingest contract to grow a product reference first.
-  That is a separate change touching `envelopes.py` and the writer.
-  `scripts/dry_run.py` flags violations.
+- **Transactions on a per-ref product.** A multi-instance product (per goal,
+  per deposit, per stock position: each with an `external_ref`) receives
+  transactions only when they name it: set `product_external_ref` to the
+  exact `external_ref` the balance leg emits for it (build both from one
+  helper, as Fintual's `stock_ref` does). The writer looks that product up and
+  **never creates it**.
+  `run_scraper` writes transactions before products, so a holding's first
+  movements find no product, are counted `unresolved` (a run warning,
+  `partial`) and land on the next run. Never send such a row without its
+  ref: it would create a ref-less roll-up of that kind and currency, which
+  the next per-ref product write retires.
+- **Movements between the user's own products** (a stock purchase paid from a
+  cash wallet, a deposit from the user's bank) set `internal_transfer=True`.
+  The writer stores it as `is_internal_transfer` on insert only, so a user's
+  change survives re-scrapes, and the row stays out of spending and income.
+  `scripts/dry_run.py` flags violations of these rules.
+- **Daily price series** of a product's unit (a stock's closes) go in
+  `ProductScrapeResult.price_histories` as `ScrapedPriceHistory`, naming the
+  product with a `ProductRef` built from the same helper as its
+  `external_ref` (Fintual's `stock_ref`). `run_scraper` writes them into
+  `product_prices` after the products, lookup-only like an exchange rate, so
+  send them only for products the same run emits. A market's daily bar is
+  dated by its UTC date, the one exception to the America/Santiago rule
+  below (Fintual's bars are stamped at New York midnight).
 - `name` is used only when the product is created; user renames win
   afterwards. Use a generic label, never an account number.
 - `metrics` is the per-scrape observation (snapshotted on change);

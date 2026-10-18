@@ -241,6 +241,52 @@ container so it writes to that volume:
 docker compose run --rm scrapers python -m scrapers.institutions.fintual
 ```
 
+### Fintual stocks
+
+If you use Fintual's stock brokerage ("Acciones"), each run also imports it,
+in USD: one product per position, one for the cash not yet invested
+("Acciones: saldo disponible"), and every movement of that cash as
+transactions:
+
+- A **deposit** from your bank lands on the cash wallet; a **buy** shows twice,
+  as money out of the wallet and into the stock, and a **sell** the other way
+  round. All of these are flagged "Transferencia interna", so they stay out of
+  Gastos and Ingresos.
+- A **dividend** is income on the stock (its wallet side is flagged
+  internal); the **interest** Fintual pays on the uninvested cash is income
+  on the cash wallet. Withdrawals, cash mergers, compensations, returns of
+  capital, ACAT transfers and warrant exercises are imported too. Not every
+  movement shape is verified against live data yet; each run checks that the
+  movements add up to the wallet's balance and warns when they don't.
+- Movements still pending show up once Fintual executes them; one still not
+  executed a week after it was requested is taken as cancelled. Divestments
+  are not imported (the run says how many it skipped).
+- A stock bought for the first time gets its movements one run after its
+  product appears. A stock you sold entirely stays as a product valued at 0;
+  one that left without a sale (a share-only merger, a spinoff, shares moved
+  out by ACAT) keeps its last values.
+- Your [category](#categories) keyword rules apply to these rows like to any
+  other, so a rule matching "Compra ACME" or "Intereses saldo USD" files them
+  under its category; USD rows and internal transfers still stay out of the
+  CLP totals.
+- Each stock you hold gets its daily closing prices for the last year, kept
+  from then on: its product page charts them in "Historial de precio", with
+  your average cost as a dashed line.
+
+The "Transferencia interna" flag is set once, when a movement is first
+imported: untick it in the transaction panel and later scrapes leave it
+unticked.
+
+On a fresh database, deploy the stock products first and let one Fintual run
+finish before deploying the movements. Otherwise the movements, written
+first, create the USD wallet under the generic slug `fintual-wallet-usd`: its
+name corrects itself, but a product's slug never changes.
+
+Tip: the bank debit that funded a USD deposit is spending in CLP as far as
+the dashboard knows, and transfers on `/transfers` only link CLP rows. Open
+that debit in the transaction panel and tick **Transferencia interna** so it
+drops out of Gastos too.
+
 ### Tarjeta Lider Bci
 
 The Tarjeta Lider Bci portal guards its login with a Cloudflare "Verifique que es
@@ -613,7 +659,7 @@ All API routes are under `/api/`:
 | PATCH/DELETE | `/api/monitors/[id]/adjustments/[adjustmentId]` | Edit or delete one variación |
 | GET | `/api/institutions` | Institutions + nested products (balances included) + CLP subtotals |
 | GET/PATCH | `/api/institutions/[slug]` | One institution, same shape as a list item; edit `name`, `kind`, `country`, `url` |
-| GET/PATCH | `/api/institutions/[slug]/products/[product]` | One product (with its `defaultName`) plus its balance history and recent transactions; edit `name` (`null` resets it to `defaultName`), `slug`, `parentProductId`, `isActive`, `displayOrder` |
+| GET/PATCH | `/api/institutions/[slug]/products/[product]` | One product (with its `defaultName`) plus its balance history, recent transactions and, for a stock, its daily closes (`prices`: `{date, price}` oldest first, empty without a ticker); edit `name` (`null` resets it to `defaultName`), `slug`, `parentProductId`, `isActive`, `displayOrder` |
 | PATCH | `/api/accounts/[id]` | Rename an account (`name`) |
 | POST | `/api/institutions/refresh` | Trigger a scrape (all, or `{institution}`) |
 | GET | `/api/scrapers` | Latest run per scraper |

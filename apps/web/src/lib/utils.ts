@@ -131,6 +131,13 @@ export function formatDateTickMs(ms: number): string {
   return date.toLocaleDateString("es-CL", options);
 }
 
+/** Epoch ms of a plain YYYY-MM-DD's local midnight; local parsing keeps the
+ *  point on its calendar day across timezones. */
+export function dayStartMs(day: string): number {
+  const [year, month, date] = day.split("-").map(Number);
+  return new Date(year, month - 1, date).getTime();
+}
+
 /** Full es-CL date for tooltips and badges over a numeric time axis. */
 export function formatDateMs(ms: number): string {
   return new Date(ms).toLocaleDateString("es-CL");
@@ -145,4 +152,16 @@ export function formatAxisValue(value: number): string {
   // 3 significant digits: keeps small values exact enough while hiding the
   // float noise interactive domains produce (e.g. 250.0000001).
   return Number(value.toPrecision(3)).toString();
+}
+
+/** Axis labels for a unit price: 4 significant digits, so ticks a few units
+ *  apart stay distinct (1234.5 reads "1235", where formatAxisValue's "1K"
+ *  would repeat on every tick); compact only from 100K up. */
+export function formatPriceAxisValue(value: number): string {
+  if (Math.abs(value) < 1e-6) return "0";
+  const rounded = Number(value.toPrecision(4));
+  const abs = Math.abs(rounded);
+  if (abs >= 1_000_000) return `${Number((rounded / 1_000_000).toPrecision(4))}M`;
+  if (abs >= 100_000) return `${Number((rounded / 1_000).toPrecision(4))}K`;
+  return rounded.toString();
 }

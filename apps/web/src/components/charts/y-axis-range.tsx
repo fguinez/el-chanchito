@@ -56,8 +56,17 @@ export function yAxisRangeProps(range: YAxisRange): YAxisRangeProps {
   }
 }
 
-/** Selection state plus the matching <YAxis> props, one per chart. */
+/** Whether two selections pick the same bounds. */
+export function sameYAxisRange(a: YAxisRange, b: YAxisRange): boolean {
+  if (a.kind === "custom" && b.kind === "custom") {
+    return a.min === b.min && a.max === b.max;
+  }
+  return a.kind === b.kind;
+}
+
+/** Selection state plus the matching <YAxis> props, one per chart.
+ *  `initial` is also what a reset (double-click on the axis) goes back to. */
 export function useYAxisRange(initial: YAxisRange = DEFAULT_Y_AXIS_RANGE) {
   const [range, setRange] = useState<YAxisRange>(initial);
-  return { range, setRange, yAxisProps: yAxisRangeProps(range) };
+  return { range, setRange, initial, yAxisProps: yAxisRangeProps(range) };
 }

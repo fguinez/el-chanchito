@@ -14,10 +14,14 @@ alone gets a 401. The working flow mirrors a browser sign-in:
     POST /gql/                           -> the stock brokerage ("Acciones"):
                                             StocksPortfolio lists the USD wallet
                                             and the positions, StocksDetails
-                                            batches each position's totals
+                                            batches each position's totals,
+                                            WalletMovements pages through the
+                                            USD wallet's ledger
     GET  /stocks-pricing-cl/current-prices -> latest price per symbol; wants a
                                             per-service JWT cookie minted by
                                             POST /auth/jwt
+    GET  /stocks-pricing-cl/historical-prices -> one symbol's daily closes,
+                                            same cookie
 
 The session cookies are cached to disk. The monolith_token that /api/goals
 checks lives only a few minutes, so scheduled scrapes refresh the session the
@@ -28,27 +32,46 @@ the mailbox and signs in by itself; otherwise run `make fintual-login` and type
 the code. An automatic login that fails once is not retried until
 `make fintual-login` succeeds.
 
+Both legs of a run share one session drive: the transactions leg (which
+`run_scraper` calls first) runs it and caches it, or its error, for the
+products leg, so a run refreshes the session or signs in at most once.
+
 Each run emits one CLP `investment` product per goal, then the stocks: one USD
 `investment` product per position (`external_ref` "stock:<asset id>") and one
 USD `wallet` for the cash not yet invested in stocks. Position figures follow
 the web app's own formulas (see `stock_metrics`). The stocks are a separate
-leg of the same run: if they fail, the goals still land and the run is
+part of the same run: if they fail, the goals still land and the run is
 recorded partial; if only the positions fail, the wallet lands too. An
 account that never opened the brokerage (nothing resolves and GraphQL reports
-no error) gets no stock products and no warning; nothing resolving next to a
-GraphQL error is a failed leg.
+no error) gets no stock products, no movements and no warning; nothing
+resolving next to a GraphQL error is a failed leg.
+
+The transactions are the wallet's movements (`backends/fintual_stocks.py`):
+one row on the wallet each, plus a mirror row on the stock's product for buys,
+sells, dividends and cash mergers. The whole ledger is read every run (the
+writer skips the rows it has); a stock row whose product doesn't exist yet
+lands on the next run. A failure there costs the movements only. When the
+ledger is complete it is checked against the wallet's balance, and a stock it
+shows sold (or paid out in a cash merger) that Fintual no longer lists gets a
+zero-valued product.
+
+Each run also reads, after the movements, the last year of daily closes of
+every stock still held (one request per stock) as a price history for its
+product. A stock whose history fails is skipped, counted in one warning; a
+failure of the pricing service itself stops the step, which also has a time
+budget. The rest of the run never depends on it.
 """
 
 import asyncio
 import inspect
 import json
 import logging
-import math
 import os
 import tempfile
-from collections.abc import Awaitable
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from collections import Counter
+from collections.abc import AsyncIterator, Awaitable
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, Callable
@@ -58,9 +81,30 @@ import httpx
 from product_model import InvestmentAttributes, InvestmentMetrics, WalletMetrics
 
 from scrapers.backends.email import fetch_latest_code
+from scrapers.backends.fintual_stocks import (
+    MAX_PAGES,
+    PAGE_SIZE,
+    STOCKS_CURRENCY,
+    WALLET_MOVEMENTS_QUERY,
+    LedgerEntry,
+    WalletPage,
+    cents,
+    ledger_balance,
+    ledger_to_transactions,
+    number,
+    parse_wallet_page,
+    shows_unsold_stocks,
+    sold_out_products,
+    stock_ref,
+    text,
+    usd,
+)
 from scrapers.base import (
     BaseScraper,
+    DailyPrice,
+    ProductRef,
     ProductScrapeResult,
+    ScrapedPriceHistory,
     ScrapedProduct,
     ScrapedTransaction,
 )
@@ -77,6 +121,7 @@ GOALS_URL = f"{FINTUAL_ORIGIN}/api/goals"
 APP_URL = f"{FINTUAL_ORIGIN}/app/goals"
 GRAPHQL_URL = f"{FINTUAL_ORIGIN}/gql/"
 STOCK_PRICES_URL = f"{FINTUAL_ORIGIN}/stocks-pricing-cl/current-prices"
+HISTORICAL_PRICES_URL = f"{FINTUAL_ORIGIN}/stocks-pricing-cl/historical-prices"
 # Mints the per-service JWT cookie the stocks pricing service checks.
 SERVICE_JWT_URL = f"{FINTUAL_ORIGIN}/auth/jwt"
 # The web app page the stocks requests come from.
@@ -102,12 +147,7 @@ _CODE_CLOCK_SKEW = timedelta(seconds=30)
 
 _RELOGIN_HINT = "Run `make fintual-login` to sign in again."
 
-# The brokerage holds US stocks; positions and the cash wallet are in USD.
-STOCKS_CURRENCY = "USD"
 STOCKS_WALLET_NAME = "Acciones: saldo disponible"
-# Goal refs are bare digits, so the prefix keeps stock refs apart.
-_STOCK_REF_PREFIX = "stock:"
-_CENT = Decimal("0.01")
 # Per-share costs keep more places: a quote can be under a dollar.
 _AVERAGE_COST_STEP = Decimal("0.0001")
 
@@ -116,6 +156,19 @@ query StocksPortfolio {
   stocksWallet { id balance { amount currency } updatedAt }
   stocksPositionsV2 { positions { id shares asset { id symbol name } } }
 }"""
+# Every run reads a trailing year of daily closes per held stock: the endpoint
+# takes one symbol per call, so a cursor of what is stored would save nothing.
+PRICE_HISTORY_DAYS = 365
+# `limit` counts bars forward from `start`; a year is about 250 trading days.
+_PRICE_HISTORY_LIMIT = 400
+# One request per stock; a wider portfolio gets the first ones and a warning.
+MAX_PRICE_HISTORY_SYMBOLS = 30
+# The whole step's time budget: it runs holding the session lock, and a
+# degraded service could otherwise stall the run for minutes.
+PRICE_HISTORY_BUDGET_SECONDS = 120.0
+# What `product_prices.price` keeps.
+_PRICE_STEP = Decimal("1e-8")
+
 _PERFORMANCE_FIELDS = (
     "id realizedPl totalCompletedSubscriptions totalCompletedRedemptions "
     "totalReceivedDividends shares"
@@ -134,6 +187,11 @@ class FintualSessionError(RuntimeError):
 class FintualStocksError(RuntimeError):
     """The stocks leg failed. The message is ours, safe for the dashboard: no
     URLs (they carry the held symbols), tokens or response bodies."""
+
+
+class FintualPricingUnavailable(FintualStocksError):
+    """The stocks pricing service itself failed (a refused or failed token
+    mint, or a 429/5xx that outlived the retries), whatever the symbol."""
 
 
 # -- stocks: pure parsing and maths ----------------------------------------
@@ -157,27 +215,8 @@ class StockPrice:
     as_of: datetime | None
 
 
-def _number(value: Any) -> Decimal | None:
-    """A JSON number as an exact Decimal of its repr; None if it isn't one."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    if not math.isfinite(value):
-        return None
-    return Decimal(str(value))
-
-
-def _text(value: Any) -> str | None:
-    if not isinstance(value, str) or not value.strip():
-        return None
-    return value.strip()
-
-
-def _cents(value: Decimal) -> Decimal:
-    return value.quantize(_CENT, rounding=ROUND_HALF_UP)
-
-
 def _usd(value: Decimal) -> float:
-    return float(_cents(value))
+    return float(cents(value))
 
 
 def _parse_datetime(value: Any) -> datetime | None:
@@ -200,8 +239,8 @@ def parse_positions(portfolio: dict) -> tuple[list[StockPosition], int]:
     for row in container.get("positions") or []:
         row = row or {}
         asset = row.get("asset") or {}
-        symbol = _text(asset.get("symbol"))
-        shares = _number(row.get("shares"))
+        symbol = text(asset.get("symbol"))
+        shares = number(row.get("shares"))
         if asset.get("id") is None or symbol is None or shares is None or shares < 0:
             unreadable += 1
             continue
@@ -209,11 +248,32 @@ def parse_positions(portfolio: dict) -> tuple[list[StockPosition], int]:
             StockPosition(
                 asset_id=str(asset["id"]),
                 symbol=symbol,
-                name=_text(asset.get("name")) or symbol,
+                name=text(asset.get("name")) or symbol,
                 shares=shares,
             )
         )
     return positions, unreadable
+
+
+def listed_asset_ids(portfolio: dict) -> frozenset[str] | None:
+    """Every asset id the positions list holds, readable or not; None unless
+    the whole list was read (it failed to resolve, or a row has no id).
+
+    A stock is valued at zero for leaving this list, so a held position
+    skipped for lack of a price, still listed, is never zeroed.
+    """
+    container = portfolio.get("stocksPositionsV2")
+    rows = container.get("positions") if isinstance(container, dict) else None
+    if not isinstance(rows, list):
+        return None
+    ids: set[str] = set()
+    for row in rows:
+        asset = row.get("asset") if isinstance(row, dict) else None
+        asset_id = asset.get("id") if isinstance(asset, dict) else None
+        if asset_id is None:
+            return None
+        ids.add(str(asset_id))
+    return frozenset(ids)
 
 
 def parse_prices(payload: Any) -> dict[str, StockPrice]:
@@ -225,11 +285,77 @@ def parse_prices(payload: Any) -> dict[str, StockPrice]:
         if not isinstance(row, dict):
             continue
         symbol = row.get("symbol")
-        price = _number(row.get("price"))
+        price = number(row.get("price"))
         if not isinstance(symbol, str) or price is None or price <= 0:
             continue
         prices[symbol] = StockPrice(price, _parse_datetime(row.get("price_datetime")))
     return prices
+
+
+def history_start(today: date) -> str:
+    """The `start` of a trailing year of daily bars, as the RFC 3339 instant
+    historical-prices wants (a bare date is refused)."""
+    return f"{today - timedelta(days=PRICE_HISTORY_DAYS):%Y-%m-%d}T00:00:00Z"
+
+
+def _bar_time(time: Any) -> datetime:
+    """A bar's ISO timestamp in UTC (no offset reads as UTC); ValueError if
+    it isn't one."""
+    if not isinstance(time, str):
+        raise ValueError("a bar's time must be an ISO datetime string")
+    stamp = datetime.fromisoformat(time)
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(timezone.utc)
+
+
+def trading_date(time: str) -> date:
+    """The trading day of a daily bar: the UTC date of its timestamp.
+
+    Fintual stamps a day's bar at New York midnight (`T04:00:00Z`, or
+    `T05:00:00Z` under standard time), so unlike a movement's date, which is
+    read in America/Santiago, the bar is never converted: in Chile it would
+    land on the day before. A timestamp without an offset is read as UTC.
+    Raises ValueError when it isn't an ISO datetime.
+    """
+    return _bar_time(time).date()
+
+
+def parse_price_history(payload: Any) -> tuple[list[DailyPrice], int]:
+    """The daily closes of a historical-prices answer, oldest first, plus how
+    many bars were unusable.
+
+    A bar without a positive price (after rounding to the stored 8 decimals)
+    or a readable time is dropped and counted. Two bars on one trading day
+    collapse to the later one. Raises ValueError when the answer has no
+    price list at all.
+    """
+    rows = payload.get("prices") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        raise ValueError("historical-prices answered no price list")
+    latest: dict[date, tuple[datetime, DailyPrice]] = {}
+    skipped = 0
+    for row in rows:
+        try:
+            if not isinstance(row, dict):
+                raise ValueError("not a bar")
+            # The stamp orders a day's bars; the day itself is trading_date's.
+            stamp = _bar_time(row.get("time"))
+            day = trading_date(row.get("time"))
+            price = number(row.get("price"))
+            if price is None:
+                raise ValueError("no price")
+            price = price.quantize(_PRICE_STEP, rounding=ROUND_HALF_UP)
+            point = DailyPrice(date=day, price=price)
+        # pydantic's ValidationError is a ValueError; an absurd price can
+        # overflow the quantize (decimal.InvalidOperation, an ArithmeticError).
+        except (ValueError, ArithmeticError):
+            skipped += 1
+            continue
+        kept = latest.get(day)
+        if kept is None or stamp >= kept[0]:
+            latest[day] = (stamp, point)
+    return [latest[day][1] for day in sorted(latest)], skipped
 
 
 def details_query(count: int) -> str:
@@ -263,19 +389,19 @@ def stock_metrics(
     worth 0. Raises ValueError when a performance total is missing, or a held
     position has no price.
     """
-    subscriptions = _number(performance.get("totalCompletedSubscriptions"))
-    redemptions = _number(performance.get("totalCompletedRedemptions"))
-    realized = _number(performance.get("realizedPl"))
+    subscriptions = number(performance.get("totalCompletedSubscriptions"))
+    redemptions = number(performance.get("totalCompletedRedemptions"))
+    realized = number(performance.get("realizedPl"))
     if subscriptions is None or redemptions is None or realized is None:
         raise ValueError("stock position performance totals are missing")
     if price is None and shares:
         raise ValueError("a held stock position needs a price")
-    dividends = _number(performance.get("totalReceivedDividends"))
+    dividends = number(performance.get("totalReceivedDividends"))
 
-    value = _cents(shares * price.price) if price else Decimal(0)
-    net_invested = _cents(subscriptions - redemptions)
+    value = cents(shares * price.price) if price else Decimal(0)
+    net_invested = cents(subscriptions - redemptions)
     total_pl = value - net_invested
-    unrealized = total_pl - _cents(realized)
+    unrealized = total_pl - cents(realized)
     if shares:
         cost = value - unrealized
         average_cost = cost / shares
@@ -283,7 +409,7 @@ def stock_metrics(
     else:
         average_cost = unrealized_pct = Decimal(0)
     average_cost = average_cost.quantize(_AVERAGE_COST_STEP, rounding=ROUND_HALF_UP)
-    unrealized_pct = unrealized_pct.quantize(_CENT, rounding=ROUND_HALF_UP)
+    unrealized_pct = cents(unrealized_pct)
 
     return InvestmentMetrics(
         nav=float(value),
@@ -310,32 +436,51 @@ def stock_attributes(symbol: str, asset: Any) -> InvestmentAttributes:
     if isinstance(raw_tags, list):
         tags = []
         for tag in raw_tags:
-            label = _text(tag.get("displayName")) if isinstance(tag, dict) else None
+            label = text(tag.get("displayName")) if isinstance(tag, dict) else None
             if label is None:
                 continue
-            emoji = _text(tag.get("emoji"))
+            emoji = text(tag.get("emoji"))
             tags.append(f"{emoji} {label}" if emoji else label)
     return InvestmentAttributes(
-        ticker=symbol, description=_text(asset.get("overview")), tags=tags
+        ticker=symbol, description=text(asset.get("overview")), tags=tags
     )
+
+
+def wallet_balance(wallet: Any) -> Decimal | None:
+    """The USD cash wallet's balance, in cents; None when it is unreadable or
+    not in USD."""
+    if not isinstance(wallet, dict):
+        return None
+    balance = wallet.get("balance") or {}
+    if balance.get("currency") != STOCKS_CURRENCY:
+        return None
+    return usd(balance.get("amount"))
 
 
 def stock_wallet_product(wallet: Any) -> ScrapedProduct | None:
     """The USD cash wallet ("sin usar en acciones"); None when its balance is
     unreadable or not in USD."""
-    if not isinstance(wallet, dict):
-        return None
-    balance = wallet.get("balance") or {}
-    amount = _number(balance.get("amount"))
-    if amount is None or balance.get("currency") != STOCKS_CURRENCY:
+    balance = wallet_balance(wallet)
+    if balance is None:
         return None
     return ScrapedProduct(
         institution="fintual",
         kind="wallet",
         currency=STOCKS_CURRENCY,
         name=STOCKS_WALLET_NAME,
-        metrics=WalletMetrics(balance=_usd(amount)),
+        metrics=WalletMetrics(balance=float(balance)),
     )
+
+
+def _utc_today() -> date:
+    return datetime.now(timezone.utc).date()
+
+
+def _pricing_service_failed(exc: Exception) -> bool:
+    """Whether a stock's price history failed for a reason the next symbol
+    would meet too: the network (timeouts included) or the pricing service
+    itself, not that symbol's answer."""
+    return isinstance(exc, (httpx.TransportError, FintualPricingUnavailable))
 
 
 def _stocks_failure_reason(exc: Exception) -> str:
@@ -344,6 +489,34 @@ def _stocks_failure_reason(exc: Exception) -> str:
     if isinstance(exc, FintualStocksError):
         return str(exc)
     return type(exc).__name__
+
+
+@dataclass(frozen=True)
+class _Cycle:
+    """What one session drive read, for both legs of a run."""
+
+    products: list[ScrapedProduct]
+    transactions: list[ScrapedTransaction]
+    warnings: list[str]
+    price_histories: list[ScrapedPriceHistory] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class _Stocks:
+    """What the brokerage's portfolio read, for the movements read after it.
+
+    `listed_asset_ids` is None unless the full positions list was read, and
+    `wallet_balance` None unless the wallet's USD balance was.
+    `held_positions` are the positions with shares that got a product, the
+    ones whose price history is read.
+    """
+
+    products: list[ScrapedProduct]
+    warnings: list[str]
+    has_account: bool = True
+    listed_asset_ids: frozenset[str] | None = None
+    wallet_balance: Decimal | None = None
+    held_positions: tuple[StockPosition, ...] = ()
 
 
 class FintualScraper(BaseScraper):
@@ -364,6 +537,12 @@ class FintualScraper(BaseScraper):
         # Set once this run has refreshed the session, so a later 401 doesn't
         # spend the rotated refresh token again.
         self._refreshed_this_run = False
+        # One session feeds both legs: the transactions leg runs first
+        # (run_scraper's order) and caches the cycle, or its error, for the
+        # products leg, so a run never refreshes or signs in (and mails a
+        # 2FA code) twice.
+        self._cached: _Cycle | None = None
+        self._error: Exception | None = None
 
     # -- session persistence ------------------------------------------------
 
@@ -527,11 +706,6 @@ class FintualScraper(BaseScraper):
 
     # -- scraping -----------------------------------------------------------
 
-    async def scrape_transactions(self) -> list[ScrapedTransaction]:
-        # Goals expose no individual movements, and stock movements aren't
-        # read yet (they'd need transactions that target one position).
-        return []
-
     async def _get_goals(self, client: httpx.AsyncClient) -> httpx.Response:
         """GET /api/goals, retrying transient failures. A 401 is returned, not
         retried: it means the session expired, which the caller handles."""
@@ -629,24 +803,30 @@ class FintualScraper(BaseScraper):
             label="Fintual POST /auth/jwt",
         )
         if not resp.is_success:
-            raise FintualStocksError(
+            raise FintualPricingUnavailable(
                 f"the stocks pricing token request answered HTTP {resp.status_code}"
             )
 
-    async def _stock_prices(
-        self, client: httpx.AsyncClient, symbols: list[str]
-    ) -> dict[str, StockPrice]:
-        """Latest price per symbol. On a 401 the service JWT is minted once
-        and the request retried once; a second 401 fails the stocks leg."""
+    async def _pricing_get(
+        self, client: httpx.AsyncClient, url: str, params: dict[str, str], label: str
+    ) -> httpx.Response:
+        """GET from the stocks pricing service, retrying transient failures.
+
+        On a 401 the service JWT is minted once and the request retried once,
+        as the web app does (the cookie lives minutes, so a long run may need
+        a new one); a second 401, or any other failure, raises. A failure no
+        other symbol would escape (the token, or a 429/5xx) raises
+        `FintualPricingUnavailable`.
+        """
 
         async def get() -> httpx.Response:
             return await send_with_retry(
                 lambda: client.get(
-                    STOCK_PRICES_URL,
-                    params={"symbols": ",".join(symbols)},
+                    url,
+                    params=params,
                     headers={"Accept": "application/json", "Referer": _STOCKS_REFERER},
                 ),
-                label="Fintual GET current-prices",
+                label=label,
             )
 
         resp = await get()
@@ -654,13 +834,29 @@ class FintualScraper(BaseScraper):
             await self._mint_pricing_jwt(client)
             resp = await get()
         if resp.status_code == 401:
-            raise FintualStocksError(
+            raise FintualPricingUnavailable(
                 "the stocks pricing service refused a fresh token (HTTP 401)"
+            )
+        if resp.status_code in TRANSIENT_HTTP_STATUSES:
+            raise FintualPricingUnavailable(
+                f"the stocks pricing service answered HTTP {resp.status_code}"
             )
         if not resp.is_success:
             raise FintualStocksError(
                 f"the stocks pricing service answered HTTP {resp.status_code}"
             )
+        return resp
+
+    async def _stock_prices(
+        self, client: httpx.AsyncClient, symbols: list[str]
+    ) -> dict[str, StockPrice]:
+        """Latest price per symbol; a refused token fails the stocks leg."""
+        resp = await self._pricing_get(
+            client,
+            STOCK_PRICES_URL,
+            {"symbols": ",".join(symbols)},
+            "Fintual GET current-prices",
+        )
         return parse_prices(resp.json())
 
     async def _position_products(
@@ -698,7 +894,7 @@ class FintualScraper(BaseScraper):
                     institution="fintual",
                     kind="investment",
                     currency=STOCKS_CURRENCY,
-                    external_ref=f"{_STOCK_REF_PREFIX}{position.asset_id}",
+                    external_ref=stock_ref(position.asset_id),
                     name=position.name,
                     attributes=stock_attributes(position.symbol, details.get(f"a{i}")),
                     metrics=metrics,
@@ -706,9 +902,7 @@ class FintualScraper(BaseScraper):
             )
         return products, unpriced, without_totals
 
-    async def _scrape_stocks(
-        self, client: httpx.AsyncClient
-    ) -> tuple[list[ScrapedProduct], list[str]]:
+    async def _scrape_stocks(self, client: httpx.AsyncClient) -> _Stocks:
         """The brokerage: the USD cash wallet plus one product per position."""
         portfolio, errors = await self._graphql(
             client, "StocksPortfolio", _PORTFOLIO_QUERY, {}
@@ -721,11 +915,12 @@ class FintualScraper(BaseScraper):
                 # Nothing resolved and GraphQL said why: the leg failed, and
                 # stock products from earlier runs would freeze unnoticed.
                 logger.warning("Fintual: the stocks portfolio failed to resolve")
-                return [], ["Fintual: skipped the stocks leg (GraphQL error)"]
+                # The movements are still read, unchecked (see _Stocks).
+                return _Stocks([], ["Fintual: skipped the stocks leg (GraphQL error)"])
             # Never opened the brokerage: a null wallet and no positions, with
             # no GraphQL error. Not a failure. (This shape is unverified live.)
             logger.info("Fintual: no stocks account")
-            return [], []
+            return _Stocks([], [], has_account=False)
 
         products: list[ScrapedProduct] = []
         warnings: list[str] = []
@@ -752,6 +947,7 @@ class FintualScraper(BaseScraper):
                 warnings.append("Fintual: skipped the stock positions (GraphQL error)")
 
         unpriced = without_totals = 0
+        held: list[StockPosition] = []
         if positions:
             # Whatever fails on the positions' own requests, the wallet lands.
             try:
@@ -765,6 +961,12 @@ class FintualScraper(BaseScraper):
                 )
             else:
                 products.extend(position_products)
+                emitted = {p.external_ref for p in position_products}
+                held = [
+                    p
+                    for p in positions
+                    if p.shares > 0 and stock_ref(p.asset_id) in emitted
+                ]
 
         if unpriced:
             logger.warning(
@@ -783,94 +985,410 @@ class FintualScraper(BaseScraper):
             sum(p.kind == "investment" for p in products),
             ", plus the USD wallet" if any(p.kind == "wallet" for p in products) else "",
         )
+        return _Stocks(
+            products,
+            warnings,
+            listed_asset_ids=None if errors else listed_asset_ids(portfolio),
+            wallet_balance=wallet_balance(wallet),
+            held_positions=tuple(held),
+        )
+
+    async def _price_history(
+        self, client: httpx.AsyncClient, symbol: str, start: str
+    ) -> tuple[list[DailyPrice], int]:
+        """One symbol's daily closes since `start`, plus the bars dropped.
+        Raises when the request fails or no close is usable."""
+        resp = await self._pricing_get(
+            client,
+            HISTORICAL_PRICES_URL,
+            {
+                "symbol": symbol,
+                "start": start,
+                "timeframe": "1Day",
+                "limit": str(_PRICE_HISTORY_LIMIT),
+            },
+            "Fintual GET historical-prices",
+        )
+        points, skipped = parse_price_history(resp.json())
+        if not points:
+            raise FintualStocksError("historical-prices answered no usable close")
+        return points, skipped
+
+    async def _price_histories(
+        self, client: httpx.AsyncClient, positions: list[StockPosition]
+    ) -> tuple[list[ScrapedPriceHistory], list[str]]:
+        """A trailing year of daily closes for each held position, one request
+        each, in turn, plus the warnings.
+
+        Each series names its product through `stock_ref`, exactly as the
+        position's product does. A stock whose history fails is skipped and
+        counted into one warning that carries only counts and exception types
+        (an httpx error's message has the URL, and so the ticker). A failure
+        that isn't the symbol's own (see `_pricing_service_failed`) stops the
+        loop, and the stocks not read yet count as failed too: one token mint
+        and one round of retries per run, not one per stock. Running over the
+        step's time budget stops it too, keeping the series already read.
+        """
+        warnings: list[str] = []
+        # One series per product, even if a position were listed twice.
+        unique = list({p.asset_id: p for p in positions}.values())
+        targets = unique[:MAX_PRICE_HISTORY_SYMBOLS]
+        if len(unique) > len(targets):
+            logger.warning(
+                "Fintual: price history limited to %d of %d stocks",
+                len(targets),
+                len(unique),
+            )
+            warnings.append(
+                f"Fintual: read the price history of {len(targets)} of "
+                f"{len(unique)} stocks (at most {MAX_PRICE_HISTORY_SYMBOLS} per run)"
+            )
+
+        start = history_start(_utc_today())
+        deadline = asyncio.get_running_loop().time() + PRICE_HISTORY_BUDGET_SECONDS
+        histories: list[ScrapedPriceHistory] = []
+        failures: Counter = Counter()
+        dropped = 0
+        not_read = 0
+        for i, position in enumerate(targets):
+            try:
+                async with asyncio.timeout_at(deadline):
+                    points, skipped = await self._price_history(
+                        client, position.symbol, start
+                    )
+                history = ScrapedPriceHistory(
+                    institution="fintual",
+                    product=ProductRef(
+                        kind="investment",
+                        currency=STOCKS_CURRENCY,
+                        external_ref=stock_ref(position.asset_id),
+                    ),
+                    points=points,
+                )
+            except TimeoutError:
+                not_read = len(targets) - i
+                logger.warning(
+                    "Fintual: stock price history ran over its %.0f s budget; "
+                    "%d stock(s) not read",
+                    PRICE_HISTORY_BUDGET_SECONDS,
+                    not_read,
+                )
+                break
+            except Exception as exc:
+                reason = type(exc).__name__
+                if not _pricing_service_failed(exc):
+                    logger.warning("Fintual: a stock's price history failed (%s)", reason)
+                    failures[reason] += 1
+                    continue
+                # The next stock would fail the same way: count this one and
+                # every one not read yet, and stop.
+                left = len(targets) - i
+                logger.warning(
+                    "Fintual: price history stopped at a pricing service failure "
+                    "(%s); %d stock(s) not read",
+                    reason,
+                    left,
+                )
+                failures[reason] += left
+                break
+            dropped += skipped
+            histories.append(history)
+
+        if failures:
+            warnings.append(
+                f"Fintual: stock price history failed for {sum(failures.values())} "
+                f"of {len(targets)} stock(s) ({', '.join(sorted(failures))})"
+            )
+        if not_read:
+            warnings.append(
+                "Fintual: stock price history ran over its "
+                f"{PRICE_HISTORY_BUDGET_SECONDS:.0f} s budget ({not_read} of "
+                f"{len(targets)} stock(s) not read)"
+            )
+        if dropped:
+            # Noise in the provider's series, not a gap worth a partial run.
+            logger.info("Fintual: dropped %d unusable daily price bar(s)", dropped)
+        logger.info(
+            "Fintual: price history for %d of %d stock(s), %d daily closes",
+            len(histories),
+            len(targets),
+            sum(len(h.points) for h in histories),
+        )
+        return histories, warnings
+
+    async def _wallet_pages(
+        self, client: httpx.AsyncClient, now: datetime
+    ) -> AsyncIterator[WalletPage]:
+        """Yield each WalletMovements page, up to the empty one that ends the
+        ledger (yielded too, so the caller knows it was reached). `now` dates
+        the movements still not executed (see `parse_wallet_page`).
+
+        Every list advances by the longest one returned, in case Fintual caps
+        a list below the limit asked for, but never by more than that limit:
+        a list that ignored it would push the offset past rows the others
+        haven't returned yet (the rows it repeats are deduplicated). Pages
+        already yielded survive a later page failing.
+        """
+        offset = 0
+        for _ in range(MAX_PAGES):
+            data, errors = await self._graphql(
+                client,
+                "WalletMovements",
+                WALLET_MOVEMENTS_QUERY,
+                {"limit": PAGE_SIZE, "offset": offset},
+            )
+            if errors:
+                # A list that failed to resolve answers null, which reads as
+                # empty: the page can't be trusted.
+                raise FintualStocksError(
+                    f"WalletMovements answered {errors} GraphQL error(s)"
+                )
+            page = parse_wallet_page(data, now)
+            yield page
+            if not page.length:
+                return
+            offset += min(page.length, PAGE_SIZE)
+
+    async def _scrape_movements(
+        self, client: httpx.AsyncClient, stocks: _Stocks | None
+    ) -> tuple[list[ScrapedTransaction], list[ScrapedProduct], list[str]]:
+        """The USD wallet ledger as transactions, the zero-valued products of
+        the stocks it shows sold out, and the warnings.
+
+        `stocks` is what the portfolio read this cycle, None if it failed: the
+        movements are read either way, but valuing sold-out stocks at zero and
+        checking the ledger against the wallet's balance need it.
+        """
+        warnings: list[str] = []
+
+        def warn(message: str) -> None:
+            logger.warning("%s", message)
+            warnings.append(message)
+
+        entries: dict[tuple[str, str], LedgerEntry] = {}
+        pending = cancelled = divestments = without_asset = 0
+        skipped: Counter = Counter()
+        # Reached the empty page that ends the ledger (never after a failure).
+        complete = failed = False
+        try:
+            async for page in self._wallet_pages(client, datetime.now(timezone.utc)):
+                complete = not page.length
+                for entry in page.entries:
+                    # A list that ignored the offset would repeat its rows.
+                    entries.setdefault((entry.type.tag, entry.source_id), entry)
+                pending += page.pending
+                cancelled += page.cancelled
+                divestments += page.divestments
+                without_asset += page.without_asset
+                skipped.update(page.skipped)
+        except Exception as exc:
+            failed = True
+            logger.exception("Fintual: stock movements failed; keeping the pages read")
+            warnings.append(
+                f"Fintual: stock movements failed ({_stocks_failure_reason(exc)})"
+            )
+        if not complete and not failed:
+            warn(
+                f"Fintual: stopped after {MAX_PAGES} pages of stock movements; "
+                "the rest were not read"
+            )
+
+        # One warning per kind of problem, with counts only.
+        if skipped["not_usd"]:
+            warn(f"Fintual: skipped {skipped['not_usd']} stock movement(s) not in USD")
+        if skipped["unreadable"]:
+            warn(f"Fintual: skipped {skipped['unreadable']} unreadable stock movement(s)")
+        if divestments:
+            warn(f"Fintual: skipped {divestments} stock divestment(s) (not imported)")
+        if without_asset:
+            warn(
+                f"Fintual: {without_asset} stock movement(s) without a stock id "
+                "kept on the USD wallet only"
+            )
+        if pending:
+            # They come back once executed; only the balance check minds.
+            logger.info("Fintual: %d stock movement(s) still pending", pending)
+        if cancelled:
+            # Never executed, so they never moved the balance: nothing to check.
+            logger.info(
+                "Fintual: %d stock movement(s) never executed, taken as cancelled",
+                cancelled,
+            )
+
+        ledger = list(entries.values())
+        sold_out: list[ScrapedProduct] = []
+        if complete and stocks is not None and stocks.listed_asset_ids is not None:
+            if not stocks.listed_asset_ids and shows_unsold_stocks(ledger):
+                # An empty list next to stocks bought and never sold looks like
+                # a list that failed to load, not a portfolio sold out.
+                warn(
+                    "Fintual: the stock positions list is empty while the movements "
+                    "show stocks bought and never sold; no stock was valued at zero"
+                )
+            else:
+                sold_out = sold_out_products(ledger, stocks.listed_asset_ids)
+        if (
+            complete
+            and stocks is not None
+            and stocks.wallet_balance is not None
+            and not (pending or divestments or skipped)
+        ):
+            if ledger_balance(ledger) == stocks.wallet_balance:
+                logger.info("Fintual: the USD wallet movements match its balance")
+            else:
+                # No amounts: the message reaches the dashboard.
+                warn(
+                    "Fintual: the USD wallet movements don't add up to its "
+                    "balance; a movement type may be missing"
+                )
+
+        transactions = ledger_to_transactions(ledger)
+        logger.info(
+            "Fintual: %d stock and wallet movements (%d transactions)%s",
+            len(ledger),
+            len(transactions),
+            f", {len(sold_out)} sold-out stock(s)" if sold_out else "",
+        )
+        return transactions, sold_out, warnings
+
+    async def _goal_products(
+        self, client: httpx.AsyncClient
+    ) -> tuple[list[ScrapedProduct], list[str]]:
+        """Make sure the session works, then read one product per goal.
+
+        A session that can't be refreshed or signed in again raises: without
+        it there is nothing to read.
+        """
+        signed_in = await self._ensure_session(client)
+
+        resp = await self._get_goals(client)
+        if resp.status_code == 401 and await self._refresh_session(client):
+            resp = await self._get_goals(client)
+        if resp.status_code == 401:
+            # The refresh token itself expired or was revoked: only a full
+            # sign-in helps.
+            if signed_in:
+                raise FintualSessionError(
+                    f"Fintual rejected the session it just issued. {_RELOGIN_HINT}"
+                )
+            if not self._can_auto_login:
+                raise FintualSessionError(f"Fintual session expired. {_RELOGIN_HINT}")
+            logger.info("Fintual: session expired; signing in again.")
+            await self._auto_login()
+            self._load_session(client)
+            resp = await self._get_goals(client)
+        resp.raise_for_status()
+
+        # One product per goal: the JSON:API resource id is the stable
+        # external_ref, so each goal keeps its own balance history.
+        products: list[ScrapedProduct] = []
+        warnings: list[str] = []
+        total_nav = 0
+        skipped = 0
+
+        for goal in resp.json().get("data", []):
+            goal_id = goal.get("id")
+            if goal_id is None:
+                # Without an id there is no stable external_ref; skip the
+                # entry rather than abort the run.
+                skipped += 1
+                continue
+
+            attrs = goal.get("attributes", {})
+            # A brand-new goal can report `"nav": null`; value it at 0.
+            nav = int(round(float(attrs.get("nav") or 0)))
+            total_nav += nav
+
+            # deposited/profit ride along when the payload reports them.
+            deposited = attrs.get("deposited")
+            profit = attrs.get("profit")
+
+            products.append(
+                ScrapedProduct(
+                    institution="fintual",
+                    kind="investment",
+                    currency="CLP",
+                    external_ref=str(goal_id),
+                    name=attrs.get("name", "Unknown"),
+                    metrics=InvestmentMetrics(
+                        nav=nav,
+                        deposited=(
+                            float(deposited) if deposited is not None else None
+                        ),
+                        profit=float(profit) if profit is not None else None,
+                    ),
+                )
+            )
+
+        if skipped:
+            logger.warning("Fintual: skipped %d goal(s) without an id", skipped)
+            warnings.append(f"Fintual: skipped {skipped} goal(s) without an id")
+
+        logger.info(
+            "Fintual: %d goals, total nav $%s CLP",
+            len(products),
+            f"{total_nav:,}",
+        )
         return products, warnings
 
-    async def scrape_products(self) -> ProductScrapeResult:
+    async def _run_cycle(self) -> _Cycle:
+        """One session drive: the goals, then the stocks (portfolio,
+        movements, price history), then save the jar."""
         async with self._session_lock, httpx.AsyncClient(
             timeout=30.0, follow_redirects=True, headers=self._base_headers()
         ) as client:
             self._refreshed_this_run = False
-            signed_in = await self._ensure_session(client)
-
-            resp = await self._get_goals(client)
-            if resp.status_code == 401 and await self._refresh_session(client):
-                resp = await self._get_goals(client)
-            if resp.status_code == 401:
-                # The refresh token itself expired or was revoked: only a full
-                # sign-in helps.
-                if signed_in:
-                    raise FintualSessionError(
-                        f"Fintual rejected the session it just issued. {_RELOGIN_HINT}"
-                    )
-                if not self._can_auto_login:
-                    raise FintualSessionError(f"Fintual session expired. {_RELOGIN_HINT}")
-                logger.info("Fintual: session expired; signing in again.")
-                await self._auto_login()
-                self._load_session(client)
-                resp = await self._get_goals(client)
-            resp.raise_for_status()
-
-            # One product per goal: the JSON:API resource id is the stable
-            # external_ref, so each goal keeps its own balance history.
-            products: list[ScrapedProduct] = []
-            warnings: list[str] = []
-            total_nav = 0
-            skipped = 0
-
-            for goal in resp.json().get("data", []):
-                goal_id = goal.get("id")
-                if goal_id is None:
-                    # Without an id there is no stable external_ref; skip the
-                    # entry rather than abort the run.
-                    skipped += 1
-                    continue
-
-                attrs = goal.get("attributes", {})
-                # A brand-new goal can report `"nav": null`; value it at 0.
-                nav = int(round(float(attrs.get("nav") or 0)))
-                total_nav += nav
-
-                # deposited/profit ride along when the payload reports them.
-                deposited = attrs.get("deposited")
-                profit = attrs.get("profit")
-
-                products.append(
-                    ScrapedProduct(
-                        institution="fintual",
-                        kind="investment",
-                        currency="CLP",
-                        external_ref=str(goal_id),
-                        name=attrs.get("name", "Unknown"),
-                        metrics=InvestmentMetrics(
-                            nav=nav,
-                            deposited=(
-                                float(deposited) if deposited is not None else None
-                            ),
-                            profit=float(profit) if profit is not None else None,
-                        ),
-                    )
-                )
-
-            if skipped:
-                logger.warning("Fintual: skipped %d goal(s) without an id", skipped)
-                warnings.append(f"Fintual: skipped {skipped} goal(s) without an id")
-
-            logger.info(
-                "Fintual: %d goals, total nav $%s CLP",
-                len(products),
-                f"{total_nav:,}",
-            )
+            products, warnings = await self._goal_products(client)
 
             # The stocks are a separate leg: whatever fails there, the goals
             # still land and the warning records the run as partial.
+            stocks: _Stocks | None = None
             try:
-                stock_products, stock_warnings = await self._scrape_stocks(client)
+                stocks = await self._scrape_stocks(client)
             except Exception as exc:
                 logger.exception("Fintual: stocks failed; keeping the goals")
                 warnings.append(f"Fintual stocks skipped: {_stocks_failure_reason(exc)}")
             else:
-                products.extend(stock_products)
-                warnings.extend(stock_warnings)
+                products.extend(stocks.products)
+                warnings.extend(stocks.warnings)
+
+            # So are the movements, read even when the portfolio failed (an
+            # account without the brokerage has none).
+            transactions: list[ScrapedTransaction] = []
+            if stocks is None or stocks.has_account:
+                try:
+                    transactions, sold_out, movement_warnings = (
+                        await self._scrape_movements(client, stocks)
+                    )
+                except Exception as exc:
+                    logger.exception("Fintual: stock movements failed; keeping the rest")
+                    warnings.append(
+                        f"Fintual: stock movements failed ({_stocks_failure_reason(exc)})"
+                    )
+                else:
+                    products.extend(sold_out)
+                    warnings.extend(movement_warnings)
+
+            # The held stocks' daily closes, last: a slow pricing service
+            # must not age the session before the movements are read (a
+            # stale pricing cookie is just minted again). Its own part too,
+            # under a time budget: a failure costs the price history only.
+            price_histories: list[ScrapedPriceHistory] = []
+            if stocks is not None and stocks.held_positions:
+                try:
+                    price_histories, history_warnings = await self._price_histories(
+                        client, list(stocks.held_positions)
+                    )
+                except Exception as exc:
+                    logger.exception(
+                        "Fintual: stock price history failed; keeping the rest"
+                    )
+                    warnings.append(
+                        "Fintual: stock price history failed "
+                        f"({_stocks_failure_reason(exc)})"
+                    )
+                else:
+                    warnings.extend(history_warnings)
 
             # Keep the newest jar on disk (the stocks leg may have refreshed the
             # session or minted the pricing cookie). The refresh token itself
@@ -881,7 +1399,47 @@ class FintualScraper(BaseScraper):
             except OSError:
                 logger.warning("Fintual: could not save the session", exc_info=True)
 
-            return ProductScrapeResult(products, warnings)
+            return _Cycle(products, transactions, warnings, price_histories)
+
+    async def _scrape_cycle(self) -> _Cycle:
+        """Drive the session once, caching the cycle (or its error) for the
+        products leg. Resetting first matters: the instance lives as long as
+        the service."""
+        self._cached = None
+        self._error = None
+        try:
+            cycle = await self._run_cycle()
+        except Exception as exc:
+            self._error = exc
+            raise
+        self._cached = cycle
+        return cycle
+
+    async def scrape_transactions(self) -> list[ScrapedTransaction]:
+        """The stock and USD wallet movements (goals expose none). The cycle
+        runs here, first, so the products leg reuses it."""
+        return (await self._scrape_cycle()).transactions
+
+    async def scrape_products(self) -> ProductScrapeResult:
+        """The products of the cycle the transactions leg drove.
+
+        If that drive failed, its error is re-raised without driving again (no
+        second refresh, sign-in or 2FA mail). Called alone (a products-only dry
+        run), it drives the session itself.
+        """
+        if self._cached is not None:
+            cycle, self._cached = self._cached, None
+        elif self._error is not None:
+            error, self._error = self._error, None
+            raise error
+        else:
+            try:
+                cycle = await self._scrape_cycle()
+            finally:
+                self._cached = self._error = None
+        return ProductScrapeResult(
+            cycle.products, cycle.warnings, price_histories=cycle.price_histories
+        )
 
 
 def _login_cli() -> None:
