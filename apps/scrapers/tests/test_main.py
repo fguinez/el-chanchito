@@ -269,6 +269,45 @@ class TestPerRowIsolation:
             error_message="transactions: 1 of 2 not written",
         )
 
+    def test_rows_waiting_for_their_product_are_a_warning(self, writer, finish):
+        """They don't count as landed, so with nothing else stored the run is
+        still partial, not error: the next run lands them."""
+        writer["write_transactions"].return_value = TransactionWriteResult(
+            inserted=0, unresolved=2
+        )
+        scraper = _StubScraper(transactions=[_transaction(1), _transaction(2)])
+
+        asyncio.run(run_scraper(scraper))
+
+        finish.assert_called_once_with(
+            "run-1",
+            "partial",
+            transactions_imported=0,
+            error_message=(
+                "transactions: 2 of 2 not written: their product does not exist yet"
+            ),
+        )
+
+    def test_waiting_rows_are_not_counted_as_landed(self, writer, finish):
+        """With the products leg failing too, nothing landed: an error."""
+        writer["write_transactions"].return_value = TransactionWriteResult(unresolved=2)
+        scraper = _StubScraper(
+            transactions=[_transaction(1), _transaction(2)],
+            prod_exc=RuntimeError("login failed"),
+        )
+
+        asyncio.run(run_scraper(scraper))
+
+        finish.assert_called_once_with(
+            "run-1",
+            "error",
+            transactions_imported=0,
+            error_message=(
+                "products: login failed; "
+                "transactions: 2 of 2 not written: their product does not exist yet"
+            ),
+        )
+
 
 class TestRunOutcome:
     @pytest.mark.parametrize(

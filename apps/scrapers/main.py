@@ -90,9 +90,11 @@ async def run_scraper(scraper: BaseScraper) -> None:
     cooldown is refused).
 
     Writes are isolated per row too: a product or transaction that fails to
-    write is logged and counted, and the rest are still written. The final
-    status comes from `run_outcome`, and the products leg's non-fatal warnings
-    (e.g. a BanChile surface that failed all its retries) join the message.
+    write is logged and counted, and the rest are still written. Transactions
+    that name a product not stored yet are a warning and land on a later run.
+    The final status comes from `run_outcome`, and the products leg's
+    non-fatal warnings (e.g. a BanChile surface that failed all its retries)
+    join the message.
     The exchange rates it read are written after its products, each on its
     own: a rate that names an unknown product, or fails to write, is a
     warning.
@@ -112,9 +114,16 @@ async def run_scraper(scraper: BaseScraper) -> None:
         n_tx = len(transactions)
         written = write_transactions(transactions)
         inserted = written.inserted
-        landed += n_tx - written.failed
+        landed += n_tx - written.failed - written.unresolved
         if written.failed:
             errors.append(f"transactions: {written.failed} of {n_tx} not written")
+        if written.unresolved:
+            # Rows naming a product the products leg (which runs next) has
+            # not stored yet: the next run lands them.
+            warnings.append(
+                f"transactions: {written.unresolved} of {n_tx} not written: "
+                "their product does not exist yet"
+            )
     except Exception as e:
         logger.exception("Scraper %s: transactions failed", scraper.name)
         errors.append(f"transactions: {e}")
