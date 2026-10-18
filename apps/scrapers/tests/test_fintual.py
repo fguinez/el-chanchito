@@ -1,15 +1,19 @@
-"""Tests for the Fintual scraper: per-goal products and session handling.
+"""Tests for the Fintual scraper: per-goal products, stock positions and
+session handling.
 
 These never hit the network: `httpx.AsyncClient` is swapped for a fake that
-answers each Fintual URL from a canned queue, and the session cache lives in a
-per-test tmp file. Every cookie value is a synthetic placeholder.
+answers each Fintual URL from a canned queue (or a real client over
+`httpx.MockTransport` for the stocks leg), and the session cache lives in a
+per-test tmp file. Every cookie value, ticker and figure is synthetic.
 """
 
 import asyncio
 import json
 import os
+import re
 import stat
 from datetime import datetime, timezone
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -24,11 +28,25 @@ from scrapers.institutions.fintual import (
     APP_URL,
     FINALIZE_LOGIN_URL,
     GOALS_URL,
+    GRAPHQL_URL,
     INITIATE_LOGIN_URL,
     SIGN_IN_URL,
+    STOCKS_WALLET_NAME,
     FintualScraper,
     FintualSessionError,
+    StockPrice,
+    details_query,
+    parse_prices,
+    stock_attributes,
+    stock_metrics,
 )
+
+# Captured before any test swaps the module's AsyncClient for a fake.
+_REAL_ASYNC_CLIENT = httpx.AsyncClient
+
+# What StocksPortfolio is taken to answer for an account that never opened the
+# brokerage (this shape is unverified live).
+_NO_STOCKS = {"data": {"stocksWallet": None, "stocksPositionsV2": None}}
 
 
 @pytest.fixture(autouse=True)
@@ -45,10 +63,12 @@ def _goal(goal_id, **attributes):
 
 
 class _FakeClient:
-    """Async-context stand-in for httpx.AsyncClient with a canned GET."""
+    """Async-context stand-in for httpx.AsyncClient with a canned GET; the
+    stocks query finds no brokerage account."""
 
     def __init__(self, payload):
         self._payload = payload
+        self.cookies = httpx.Cookies()
 
     async def __aenter__(self):
         return self
@@ -61,6 +81,9 @@ class _FakeClient:
         response.status_code = 200
         response.json.return_value = self._payload
         return response
+
+    async def post(self, url, **kwargs):
+        return httpx.Response(200, json=_NO_STOCKS, request=httpx.Request("POST", url))
 
 
 class TestScrapeProducts:
@@ -166,10 +189,12 @@ class _RoutedClient:
     `routes` maps a URL to (status, payload) answers given in order, the last
     one repeating; an exception instance as an answer is raised instead.
     `set_cookies` maps a URL to the cookies a 2xx answer from it sets, like a
-    Set-Cookie header would.
+    Set-Cookie header would. Unless routed, the stocks query finds no
+    brokerage account.
     """
 
     def __init__(self, routes, set_cookies=None):
+        routes = {GRAPHQL_URL: [(200, _NO_STOCKS)], **routes}
         self._routes = {url: list(answers) for url, answers in routes.items()}
         self._set_cookies = set_cookies or {}
         self.cookies = httpx.Cookies()
@@ -264,10 +289,16 @@ class _SingleUseRefreshServer:
                 await asyncio.sleep(0)
                 return server.answer(self.cookies, url)
 
+            async def post(self, url, **kwargs):
+                await asyncio.sleep(0)
+                return server.answer(self.cookies, url)
+
         return Client()
 
     def answer(self, cookies, url):
         status, payload = 401, {}
+        if url == GRAPHQL_URL:
+            status, payload = 200, _NO_STOCKS
         if url == APP_URL and cookies.get("auth_refresh_token") == self.refresh:
             self.refreshes += 1
             self.token = f"synthetic-token-{self.refreshes}"
@@ -309,7 +340,7 @@ class TestSessionRefresh:
         result = asyncio.run(FintualScraper().scrape_products())
 
         login.assert_not_awaited()
-        assert client.calls == [GOALS_URL, APP_URL, GOALS_URL]
+        assert client.calls == [GOALS_URL, APP_URL, GOALS_URL, GRAPHQL_URL]
         assert [p.external_ref for p in result.products] == ["34567"]
         assert json.loads(session_file.read_text()) == {
             "monolith_token": "synthetic-fresh",
@@ -332,7 +363,7 @@ class TestSessionRefresh:
         result = asyncio.run(FintualScraper().scrape_products())
 
         login.assert_awaited_once()
-        assert client.calls == [GOALS_URL, APP_URL, GOALS_URL]
+        assert client.calls == [GOALS_URL, APP_URL, GOALS_URL, GRAPHQL_URL]
         assert [p.external_ref for p in result.products] == ["34567"]
 
     def test_failed_refresh_without_imap_match_keeps_manual_error(
@@ -427,7 +458,8 @@ class TestSessionRefresh:
         result = asyncio.run(FintualScraper().scrape_products())
 
         login.assert_not_awaited()
-        assert (client.calls, len(result.products)) == ([GOALS_URL, GOALS_URL], 1)
+        assert client.calls == [GOALS_URL, GOALS_URL, GRAPHQL_URL]
+        assert len(result.products) == 1
 
     def test_a_refresh_outage_fails_the_run_without_a_login(
         self, monkeypatch, session_file
@@ -716,3 +748,680 @@ class TestLoadSession:
 
         assert loaded is hit
         assert dict(client.cookies) == cookies
+
+
+# -- stocks -----------------------------------------------------------------
+
+_JWT_COOKIE = fintual_mod._PRICING_JWT_COOKIE
+_QUOTED_AT = datetime(2026, 1, 2, 15, 4, 5, tzinfo=timezone.utc)
+
+
+def _position(asset_id, symbol, name, shares):
+    """One StocksPortfolio position (stocksPositionsV2.positions[])."""
+    return {
+        "id": f"9{asset_id}",
+        "shares": shares,
+        "asset": {"id": asset_id, "symbol": symbol, "name": name},
+    }
+
+
+_ACME = _position("000101", "ACME", "Acme Corp", 2.5)
+_GLBX = _position("000102", "GLBX", "Globex Corporation", 4.0)
+_INITK_SOLD = _position("000103", "INITK", "Initech Inc", 0.0)
+
+
+def _portfolio(*positions, wallet=1234.56, currency="USD"):
+    """A StocksPortfolio answer; `wallet=None` means no cash wallet."""
+    stocks_wallet = None
+    if wallet is not None:
+        stocks_wallet = {
+            "id": "000001",
+            "balance": {"amount": wallet, "currency": currency},
+            "updatedAt": "2026-01-02T15:04:05Z",
+        }
+    return {
+        "data": {
+            "stocksWallet": stocks_wallet,
+            "stocksPositionsV2": {"positions": list(positions)},
+        }
+    }
+
+
+def _performance(subscriptions=300.0, redemptions=50.0, realized=10.0, dividends=1.5):
+    """stocksPositionPerformance totals; the defaults are the spec's example."""
+    return {
+        "id": "000001",
+        "realizedPl": realized,
+        "totalCompletedSubscriptions": subscriptions,
+        "totalCompletedRedemptions": redemptions,
+        "totalReceivedDividends": dividends,
+        "shares": 2.5,
+    }
+
+
+def _profile(asset_id, symbol, name):
+    """A stocksAsset profile with one emoji tag and one without."""
+    return {
+        "id": asset_id,
+        "name": name,
+        "symbol": symbol,
+        "overview": f"{name} es una empresa sintetica de prueba.",
+        "assetTags": [
+            {"id": "1", "emoji": "💻", "displayName": "Tecnología"},
+            {"id": "2", "emoji": "", "displayName": "Sintetica"},
+        ],
+    }
+
+
+_DETAILS = {
+    "ACME": (_performance(), _profile("000101", "ACME", "Acme Corp")),
+    "GLBX": (
+        _performance(subscriptions=999.99, redemptions=0.0, realized=0.0, dividends=0.0),
+        _profile("000102", "GLBX", "Globex Corporation"),
+    ),
+    "INITK": (
+        _performance(subscriptions=300.0, redemptions=320.0, realized=20.0),
+        _profile("000103", "INITK", "Initech Inc"),
+    ),
+}
+_PRICES = {"ACME": 100.0, "GLBX": 250.5}
+
+
+class _FintualStocks:
+    """fintual.cl stand-in for a whole run, behind a real httpx client over
+    MockTransport so the cookie jar and query strings behave for real.
+
+    StocksDetails answers each `$s{i}` from `details[symbol]` (performance,
+    profile) under the aliases p{i}/a{i}. The pricing service answers 401
+    until a request carries the cookie /auth/jwt mints; with
+    `jwt_accepted=False` it never takes it. `answers` maps a GraphQL operation
+    or a path to (status, payload) answers given in order, the last repeating.
+    """
+
+    def __init__(
+        self, portfolio, details=_DETAILS, prices=_PRICES, *, jwt_accepted=True, answers=None
+    ):
+        self.portfolio = portfolio
+        self.details = details
+        self.prices = prices
+        self.jwt_accepted = jwt_accepted
+        self.answers = {key: list(queue) for key, queue in (answers or {}).items()}
+        self.requests: list[httpx.Request] = []
+        self.operations: list[str] = []
+        self.details_variables = None
+
+    def _canned(self, key):
+        queue = self.answers.get(key)
+        if not queue:
+            return None
+        status, payload = queue.pop(0) if len(queue) > 1 else queue[0]
+        return httpx.Response(status, json=payload)
+
+    def handler(self, request):
+        self.requests.append(request)
+        path = request.url.path
+        if path == "/gql/":
+            body = json.loads(request.content)
+            operation = re.match(r"query (\w+)", body["query"]).group(1)
+            self.operations.append(operation)
+            return self._canned(operation) or self._graphql(operation, body["variables"])
+        canned = self._canned(path)
+        if canned is not None:
+            return canned
+        if path == "/api/goals":
+            return httpx.Response(200, json=_ONE_GOAL)
+        if path == "/app/goals":
+            return httpx.Response(
+                200,
+                headers=[("set-cookie", "auth_refresh_token=synthetic-refresh-2; Path=/")],
+                text="<html></html>",
+            )
+        if path == "/auth/jwt":
+            token = "synthetic-jwt" if self.jwt_accepted else "synthetic-stale-jwt"
+            return httpx.Response(
+                201,
+                headers=[("set-cookie", f"{_JWT_COOKIE}={token}; Path=/")],
+                json={"message": "synthetic"},
+            )
+        if path == "/stocks-pricing-cl/current-prices":
+            if f"{_JWT_COOKIE}=synthetic-jwt" not in request.headers.get("cookie", ""):
+                return httpx.Response(401, json={"title": "Unauthorized"})
+            symbols = request.url.params["symbols"].split(",")
+            return httpx.Response(
+                200,
+                json={
+                    "prices": [
+                        {
+                            "symbol": symbol,
+                            "price": self.prices[symbol],
+                            "price_datetime": "2026-01-02T15:04:05Z",
+                            "provider": "synthetic",
+                        }
+                        for symbol in symbols
+                        if symbol in self.prices
+                    ]
+                },
+            )
+        return httpx.Response(404, json={})
+
+    def _graphql(self, operation, variables):
+        if operation == "StocksPortfolio":
+            return httpx.Response(200, json=self.portfolio)
+        self.details_variables = variables
+        data = {}
+        for name, symbol in variables.items():
+            performance, profile = self.details.get(symbol, (None, None))
+            data[f"p{name[1:]}"] = performance
+            data[f"a{name[1:]}"] = profile
+        return httpx.Response(200, json={"data": data})
+
+    def paths(self):
+        return [request.url.path for request in self.requests]
+
+
+def _run_stocks(monkeypatch, session_file, server, **cookies):
+    """Run scrape_products() against `server` with a cached session."""
+    _write_session(session_file, auth_refresh_token="synthetic-refresh-1", **cookies)
+    monkeypatch.setattr(
+        fintual_mod.httpx,
+        "AsyncClient",
+        lambda **kwargs: _REAL_ASYNC_CLIENT(
+            transport=httpx.MockTransport(server.handler), **kwargs
+        ),
+    )
+    return asyncio.run(FintualScraper().scrape_products())
+
+
+def _by_ref(products):
+    return {(p.kind, p.currency, p.external_ref): p for p in products}
+
+
+class TestStockMetrics:
+    def test_the_web_apps_formulas(self):
+        """The spec's worked example: 2.5 shares at 100.0, 300.0 in, 50.0 out,
+        10.0 realized."""
+        metrics = stock_metrics(
+            Decimal("2.5"), StockPrice(Decimal("100.0"), _QUOTED_AT), _performance()
+        )
+
+        assert metrics.nav == 250.0
+        assert metrics.deposited == 250.0
+        assert metrics.profit == 0.0
+        assert metrics.unrealized_profit == -10.0
+        assert metrics.average_cost == 104.0
+        assert metrics.unrealized_profit_pct == -3.85  # -10 / 260, to 2 places
+        assert metrics.realized_profit == 10.0
+        assert metrics.dividends == 1.5
+        assert (metrics.units, metrics.unit_price) == (2.5, 100.0)
+        assert metrics.unit_price_as_of == _QUOTED_AT
+
+    def test_a_sold_out_position_is_worth_zero_without_a_price(self):
+        """No shares, no price needed: nav 0 and the per-share figures 0."""
+        performance = _performance(subscriptions=300.0, redemptions=320.0, realized=20.0)
+
+        metrics = stock_metrics(Decimal("0"), None, performance)
+
+        assert metrics.nav == 0.0
+        assert metrics.deposited == -20.0
+        assert metrics.profit == 20.0
+        assert (metrics.unrealized_profit, metrics.average_cost) == (0.0, 0.0)
+        assert metrics.unrealized_profit_pct == 0.0
+        assert (metrics.unit_price, metrics.unit_price_as_of) == (None, None)
+
+    def test_figures_round_half_up_to_cents(self):
+        """0.25 x 12.34 = 3.085 rounds to 3.09; a float would give 3.08."""
+        performance = _performance(subscriptions=3.0, redemptions=0.0, realized=0.0)
+
+        metrics = stock_metrics(Decimal("0.25"), StockPrice(Decimal("12.34"), None), performance)
+
+        assert metrics.nav == 3.09
+        assert metrics.profit == 0.09
+
+    def test_profit_is_derived_from_the_rounded_value(self):
+        """profit = nav - deposited to the cent: 3.09 - 5.00 = -1.91, where
+        rounding the exact -1.915 on its own would give -1.92."""
+        performance = _performance(subscriptions=5.0, redemptions=0.0, realized=0.0)
+
+        metrics = stock_metrics(Decimal("0.25"), StockPrice(Decimal("12.34"), None), performance)
+
+        assert (metrics.nav, metrics.deposited, metrics.profit) == (3.09, 5.0, -1.91)
+        assert metrics.unrealized_profit == -1.91
+        assert metrics.average_cost == 20.0  # the held shares' 5.00 cost per share
+
+    def test_a_quote_under_a_dollar_keeps_its_average_cost(self):
+        """The average cost keeps 4 places and the percent 2."""
+        performance = _performance(subscriptions=2.0, redemptions=0.0, realized=0.0)
+
+        metrics = stock_metrics(Decimal("3"), StockPrice(Decimal("0.5"), None), performance)
+
+        assert metrics.average_cost == 0.6667
+        assert metrics.unrealized_profit_pct == -25.0
+
+    @pytest.mark.parametrize(
+        ("shares", "price", "performance"),
+        [
+            pytest.param(
+                Decimal("2.5"),
+                StockPrice(Decimal("100.0"), None),
+                {"totalCompletedSubscriptions": 300.0, "totalCompletedRedemptions": 50.0},
+                id="missing-realized",
+            ),
+            pytest.param(Decimal("2.5"), None, _performance(), id="held-without-price"),
+        ],
+    )
+    def test_unusable_inputs_raise(self, shares, price, performance):
+        with pytest.raises(ValueError):
+            stock_metrics(shares, price, performance)
+
+
+class TestStockParsers:
+    def test_prices_without_a_positive_number_are_left_out(self):
+        """So a position is never valued at 0 by accident."""
+        payload = {
+            "prices": [
+                {"symbol": "ACME", "price": 100.0, "price_datetime": "2026-01-02T15:04:05Z"},
+                {"symbol": "GLBX", "price": 0},
+                {"symbol": "INITK", "price": "250.5"},
+                {"price": 250.5},
+            ]
+        }
+
+        prices = parse_prices(payload)
+
+        assert prices == {"ACME": StockPrice(Decimal("100.0"), _QUOTED_AT)}
+
+    def test_the_details_query_aliases_each_position(self):
+        query = details_query(2)
+
+        assert query.startswith("query StocksDetails($s0: String!, $s1: String!) {")
+        assert "p0: stocksPositionPerformance(assetSymbol: $s0) {" in query
+        assert "a1: stocksAsset(assetSymbol: $s1) {" in query
+
+    def test_null_tags_keep_the_stored_ones(self):
+        """A null assetTags leaves tags None (the writer keeps the stored
+        list); an empty list replaces it; entries that aren't tags are skipped."""
+        profile = _profile("000101", "ACME", "Acme Corp")
+
+        assert stock_attributes("ACME", {**profile, "assetTags": None}).tags is None
+        assert stock_attributes("ACME", {**profile, "assetTags": []}).tags == []
+        assert stock_attributes(
+            "ACME", {**profile, "assetTags": ["x", None, *profile["assetTags"]]}
+        ).tags == ["💻 Tecnología", "Sintetica"]
+
+
+class TestStocksLeg:
+    def test_goals_positions_and_wallet_become_products(self, monkeypatch, session_file):
+        """One CLP product per goal, one USD investment per position keyed by
+        asset id, and the USD cash wallet; no warnings."""
+        server = _FintualStocks(_portfolio(_ACME, _GLBX))
+
+        result = _run_stocks(monkeypatch, session_file, server)
+
+        assert result.warnings == []
+        products = _by_ref(result.products)
+        assert set(products) == {
+            ("investment", "CLP", "34567"),
+            ("investment", "USD", "stock:000101"),
+            ("investment", "USD", "stock:000102"),
+            ("wallet", "USD", None),
+        }
+        acme = products[("investment", "USD", "stock:000101")]
+        assert acme.institution == "fintual"
+        assert acme.name == "Acme Corp"
+        assert (acme.metrics.nav, acme.metrics.deposited, acme.metrics.profit) == (
+            250.0,
+            250.0,
+            0.0,
+        )
+        assert acme.metrics.average_cost == 104.0
+        assert acme.metrics.unit_price_as_of == _QUOTED_AT
+        assert acme.attributes.ticker == "ACME"
+        assert acme.attributes.description == "Acme Corp es una empresa sintetica de prueba."
+        assert acme.attributes.tags == ["💻 Tecnología", "Sintetica"]
+        glbx = products[("investment", "USD", "stock:000102")]
+        assert (glbx.name, glbx.metrics.nav, glbx.metrics.profit) == (
+            "Globex Corporation",
+            1002.0,
+            2.01,
+        )
+        wallet = products[("wallet", "USD", None)]
+        assert (wallet.name, wallet.metrics.balance) == (STOCKS_WALLET_NAME, 1234.56)
+        assert server.details_variables == {"s0": "ACME", "s1": "GLBX"}
+
+    def test_the_pricing_token_is_minted_on_a_401_and_saved(self, monkeypatch, session_file):
+        """current-prices 401 -> POST /auth/jwt -> retry 200, as the web app
+        does; the new cookie lands in the private session cache."""
+        server = _FintualStocks(_portfolio(_ACME, _GLBX))
+
+        result = _run_stocks(monkeypatch, session_file, server)
+
+        assert result.warnings == []
+        assert server.paths() == [
+            "/api/goals",
+            "/gql/",
+            "/gql/",
+            "/stocks-pricing-cl/current-prices",
+            "/auth/jwt",
+            "/stocks-pricing-cl/current-prices",
+        ]
+        assert server.operations == ["StocksPortfolio", "StocksDetails"]
+        assert server.requests[-1].url.params["symbols"] == "ACME,GLBX"
+        assert json.loads(session_file.read_text()) == {
+            "auth_refresh_token": "synthetic-refresh-1",
+            _JWT_COOKIE: "synthetic-jwt",
+        }
+        assert stat.S_IMODE(session_file.stat().st_mode) == 0o600
+
+    def test_a_cached_pricing_token_is_reused(self, monkeypatch, session_file):
+        """A token saved by an earlier run spares the mint."""
+        server = _FintualStocks(_portfolio(_ACME))
+
+        result = _run_stocks(
+            monkeypatch, session_file, server, **{_JWT_COOKIE: "synthetic-jwt"}
+        )
+
+        assert result.warnings == []
+        assert "/auth/jwt" not in server.paths()
+        assert ("investment", "USD", "stock:000101") in _by_ref(result.products)
+
+    def test_a_refused_pricing_token_keeps_the_goals(self, monkeypatch, session_file):
+        """A second 401 fails the positions only: the goals and the wallet
+        land and a short warning (no URL, no ticker) records the run as
+        partial."""
+        server = _FintualStocks(_portfolio(_ACME, _GLBX), jwt_accepted=False)
+
+        result = _run_stocks(monkeypatch, session_file, server)
+
+        assert set(_by_ref(result.products)) == {
+            ("investment", "CLP", "34567"),
+            ("wallet", "USD", None),
+        }
+        assert result.warnings == [
+            "Fintual stock positions skipped: the stocks pricing service refused "
+            "a fresh token (HTTP 401)"
+        ]
+        assert server.paths().count("/auth/jwt") == 1
+        assert "://" not in result.warnings[0] and "ACME" not in result.warnings[0]
+
+    @pytest.mark.parametrize(
+        "portfolio",
+        [
+            pytest.param(_NO_STOCKS, id="null-wallet-and-positions"),
+            pytest.param(_portfolio(wallet=None), id="no-wallet-empty-positions"),
+            pytest.param({**_NO_STOCKS, "errors": []}, id="empty-errors-list"),
+        ],
+    )
+    def test_an_account_without_stocks_yields_only_the_goals(
+        self, monkeypatch, session_file, portfolio
+    ):
+        """Never having opened the brokerage (nothing resolves, no GraphQL
+        error) is no failure: no stock products, no warning, and no further
+        stocks request."""
+        server = _FintualStocks(portfolio)
+
+        result = _run_stocks(monkeypatch, session_file, server)
+
+        assert [p.external_ref for p in result.products] == ["34567"]
+        assert result.warnings == []
+        assert server.paths() == ["/api/goals", "/gql/"]
+
+    @pytest.mark.parametrize(
+        "portfolio",
+        [
+            pytest.param(
+                {**_NO_STOCKS, "errors": [{"message": "synthetic error"}]},
+                id="resolver-error",
+            ),
+            pytest.param(
+                {"data": None, "errors": [{"message": "synthetic error"}]},
+                id="null-data",
+            ),
+        ],
+    )
+    def test_nothing_resolved_with_errors_fails_the_stocks_leg(
+        self, monkeypatch, session_file, portfolio
+    ):
+        """Nothing resolving next to a GraphQL error is a failed leg, not an
+        account without stocks: the goals land and a warning records the run
+        as partial, so earlier stock products never freeze unnoticed."""
+        server = _FintualStocks(portfolio)
+
+        result = _run_stocks(monkeypatch, session_file, server)
+
+        assert [p.external_ref for p in result.products] == ["34567"]
+        assert result.warnings == ["Fintual: skipped the stocks leg (GraphQL error)"]
+        assert server.paths() == ["/api/goals", "/gql/"]
+
+    @pytest.mark.parametrize(
+        ("answers", "reason"),
+        [
+            pytest.param(
+                {"StocksPortfolio": [(200, {"errors": [{"message": "synthetic"}]})]},
+                "StocksPortfolio was refused by the GraphQL server",
+                id="portfolio-refused",
+            ),
+            pytest.param(
+                {"StocksPortfolio": [(200, {"data": {"stocksPositionsV2": ["x"]}})]},
+                "AttributeError",
+                id="schema-surprise",
+            ),
+        ],
+    )
+    def test_a_failed_stocks_query_keeps_the_goals(
+        self, monkeypatch, session_file, answers, reason
+    ):
+        """GraphQL refusals and schema surprises cost the stocks only; an
+        unexpected error shows nothing but its type."""
+        server = _FintualStocks(_portfolio(_ACME), answers=answers)
+
+        result = _run_stocks(monkeypatch, session_file, server)
+
+        assert [p.external_ref for p in result.products] == ["34567"]
+        assert result.warnings == [f"Fintual stocks skipped: {reason}"]
+
+    @pytest.mark.parametrize(
+        ("answers", "reason"),
+        [
+            pytest.param(
+                {"StocksDetails": [(200, {"errors": [{"message": "synthetic"}]})]},
+                "StocksDetails was refused by the GraphQL server",
+                id="details-refused",
+            ),
+            pytest.param(
+                {"StocksDetails": [(200, {"data": None, "errors": [{"message": "x"}]})]},
+                "StocksDetails answered no data",
+                id="details-null-data",
+            ),
+            pytest.param(
+                {"StocksDetails": [(500, {})]},
+                "StocksDetails answered HTTP 500",
+                id="details-outage",
+            ),
+            pytest.param(
+                {"/stocks-pricing-cl/current-prices": [(500, {})]},
+                "the stocks pricing service answered HTTP 500",
+                id="pricing-outage",
+            ),
+            pytest.param(
+                {"/auth/jwt": [(403, {})]},
+                "the stocks pricing token request answered HTTP 403",
+                id="pricing-token-refused",
+            ),
+        ],
+    )
+    def test_a_failed_positions_query_keeps_the_wallet(
+        self, monkeypatch, session_file, answers, reason
+    ):
+        """A failure on the positions' own requests costs the positions only:
+        the goals and the USD wallet still land."""
+        monkeypatch.setattr("scrapers.retry.BASE_DELAY_SECONDS", 0.0)
+        server = _FintualStocks(_portfolio(_ACME), answers=answers)
+
+        result = _run_stocks(monkeypatch, session_file, server)
+
+        assert set(_by_ref(result.products)) == {
+            ("investment", "CLP", "34567"),
+            ("wallet", "USD", None),
+        }
+        assert result.warnings == [f"Fintual stock positions skipped: {reason}"]
+
+    @pytest.mark.parametrize(
+        ("portfolio", "kept", "warnings"),
+        [
+            pytest.param(
+                {
+                    "data": {**_portfolio()["data"], "stocksPositionsV2": None},
+                    "errors": [{"message": "synthetic error"}],
+                },
+                {("wallet", "USD", None)},
+                ["Fintual: skipped the stock positions (GraphQL error)"],
+                id="positions-failed",
+            ),
+            pytest.param(
+                {
+                    "data": {
+                        **_portfolio()["data"],
+                        "stocksPositionsV2": {"positions": None},
+                    },
+                    "errors": [{"message": "synthetic error"}],
+                },
+                {("wallet", "USD", None)},
+                ["Fintual: skipped the stock positions (GraphQL error)"],
+                id="positions-list-failed",
+            ),
+            pytest.param(
+                {
+                    "data": {**_portfolio(_ACME)["data"], "stocksWallet": None},
+                    "errors": [{"message": "synthetic error"}],
+                },
+                {("investment", "USD", "stock:000101")},
+                ["Fintual: skipped the stocks wallet (GraphQL error)"],
+                id="wallet-failed",
+            ),
+            pytest.param(
+                {"data": {**_portfolio()["data"], "stocksPositionsV2": None}},
+                {("wallet", "USD", None)},
+                [],
+                id="no-positions-without-errors",
+            ),
+        ],
+    )
+    def test_a_field_that_failed_to_resolve_is_a_warning(
+        self, monkeypatch, session_file, portfolio, kept, warnings
+    ):
+        """With the account there, a null field next to GraphQL errors failed
+        to resolve: what did answer lands, and a warning keeps the run from
+        passing as clean while the rest sits frozen."""
+        server = _FintualStocks(portfolio)
+
+        result = _run_stocks(monkeypatch, session_file, server)
+
+        assert set(_by_ref(result.products)) == {("investment", "CLP", "34567"), *kept}
+        assert result.warnings == warnings
+
+    def test_a_sold_out_position_is_valued_at_zero(self, monkeypatch, session_file):
+        """It stays a product at nav 0, so it drops out of net worth, and needs
+        no price (none is asked for)."""
+        server = _FintualStocks(_portfolio(_INITK_SOLD))
+
+        result = _run_stocks(monkeypatch, session_file, server)
+
+        assert result.warnings == []
+        initk = _by_ref(result.products)[("investment", "USD", "stock:000103")]
+        assert (initk.metrics.nav, initk.metrics.units, initk.metrics.unit_price) == (
+            0.0,
+            0.0,
+            None,
+        )
+        assert initk.metrics.profit == 20.0
+        assert "/stocks-pricing-cl/current-prices" not in server.paths()
+
+    def test_a_position_without_a_price_is_skipped_with_a_warning(
+        self, monkeypatch, session_file
+    ):
+        """Never valued at 0 silently: left out, counted in a warning."""
+        server = _FintualStocks(_portfolio(_ACME, _GLBX), prices={"ACME": 100.0})
+
+        result = _run_stocks(monkeypatch, session_file, server)
+
+        assert ("investment", "USD", "stock:000102") not in _by_ref(result.products)
+        assert ("investment", "USD", "stock:000101") in _by_ref(result.products)
+        assert result.warnings == [
+            "Fintual: skipped 1 stock position(s) without a current price"
+        ]
+
+    def test_a_position_without_totals_is_skipped_with_a_warning(
+        self, monkeypatch, session_file
+    ):
+        """A null performance (a resolver error) skips that position only."""
+        details = {**_DETAILS, "GLBX": (None, None)}
+        server = _FintualStocks(_portfolio(_ACME, _GLBX), details=details)
+
+        result = _run_stocks(monkeypatch, session_file, server)
+
+        assert ("investment", "USD", "stock:000101") in _by_ref(result.products)
+        assert ("investment", "USD", "stock:000102") not in _by_ref(result.products)
+        assert result.warnings == ["Fintual: skipped 1 stock position(s) without totals"]
+
+    def test_the_wallet_keeps_its_cents(self, monkeypatch, session_file):
+        """A brokerage with cash and no positions is the USD wallet alone."""
+        server = _FintualStocks(_portfolio(wallet=12.34))
+
+        result = _run_stocks(monkeypatch, session_file, server)
+
+        wallet = _by_ref(result.products)[("wallet", "USD", None)]
+        assert wallet.metrics.balance == 12.34
+        assert wallet.metrics.headline() == 12.34
+        assert result.warnings == []
+        assert server.paths() == ["/api/goals", "/gql/"]
+
+    def test_a_wallet_in_another_currency_is_skipped_with_a_warning(
+        self, monkeypatch, session_file
+    ):
+        server = _FintualStocks(_portfolio(_ACME, currency="CLP"))
+
+        result = _run_stocks(monkeypatch, session_file, server)
+
+        assert ("wallet", "USD", None) not in _by_ref(result.products)
+        assert ("investment", "USD", "stock:000101") in _by_ref(result.products)
+        assert result.warnings == [
+            "Fintual: skipped the stocks wallet (no readable USD balance)"
+        ]
+
+    def test_a_graphql_401_refreshes_the_session_once(self, monkeypatch, session_file):
+        """An expired token on /gql/ gets the website's refresh, never a login."""
+        login = AsyncMock()
+        monkeypatch.setattr(FintualScraper, "login", login)
+        server = _FintualStocks(
+            _portfolio(_ACME), answers={"StocksPortfolio": [(401, {}), (200, _portfolio(_ACME))]}
+        )
+
+        result = _run_stocks(monkeypatch, session_file, server)
+
+        login.assert_not_awaited()
+        assert result.warnings == []
+        assert server.paths().count("/app/goals") == 1
+        assert ("investment", "USD", "stock:000101") in _by_ref(result.products)
+        assert json.loads(session_file.read_text())["auth_refresh_token"] == (
+            "synthetic-refresh-2"
+        )
+
+    def test_a_run_refreshes_the_session_at_most_once(self, monkeypatch, session_file):
+        """Once the goals leg has refreshed, a /gql/ 401 doesn't spend the
+        rotated refresh token again: it fails the stocks leg instead."""
+        login = AsyncMock()
+        monkeypatch.setattr(FintualScraper, "login", login)
+        server = _FintualStocks(
+            _portfolio(_ACME),
+            answers={
+                "/api/goals": [(401, {}), (200, _ONE_GOAL)],
+                "StocksPortfolio": [(401, {})],
+            },
+        )
+
+        result = _run_stocks(monkeypatch, session_file, server)
+
+        login.assert_not_awaited()
+        assert server.paths().count("/app/goals") == 1
+        assert [p.external_ref for p in result.products] == ["34567"]
+        assert result.warnings == ["Fintual stocks skipped: StocksPortfolio answered HTTP 401"]

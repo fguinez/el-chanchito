@@ -54,6 +54,9 @@ logging.basicConfig(
 # scrape's start and end, and the heartbeat would add a pair every 30s.
 # Missed runs and job exceptions are WARNING/ERROR and still show.
 logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
+# httpx logs every request URL at INFO, and some carry account data (the
+# Fintual pricing request lists the held tickers).
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("scraper-service")
 
 
