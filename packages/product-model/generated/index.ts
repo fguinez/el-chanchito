@@ -277,7 +277,7 @@ export interface MortgageMetrics {
   next_payment_amount?: number | null;
 }
 
-/** Identity fields for an investment position (fund, goal, portfolio, stock). */
+/** Identity fields for an investment position (fund, goal, portfolio). */
 export interface InvestmentAttributes {
   /** Payload discriminator; always "investment". */
   kind: "investment";
@@ -287,12 +287,6 @@ export interface InvestmentAttributes {
   risk_profile?: string | null;
   /** Fund name for single-fund products (e.g. a fondo mutuo). */
   fund_name?: string | null;
-  /** Ticker symbol of a listed security (e.g. 'ACME'). */
-  ticker?: string | null;
-  /** Short description of the security, as the institution shows it. */
-  description?: string | null;
-  /** Labels the institution gives the security (e.g. 'Tecnología'), each prefixed by its emoji when it has one; a new list replaces the old one. */
-  tags?: string[] | null;
 }
 
 /** Observation for an investment position; headline is `nav`. */
@@ -301,7 +295,7 @@ export interface InvestmentMetrics {
   kind: "investment";
   /** Current market value of the position (net asset value). */
   nav: number;
-  /** Net amount invested to date: deposits minus withdrawals and sales (negative once more came out than went in). */
+  /** Total amount deposited to date. */
   deposited?: number | null;
   /** Cumulative profit as reported (nav minus deposited). */
   profit?: number | null;
@@ -311,22 +305,6 @@ export interface InvestmentMetrics {
   var_30d_pct?: number | null;
   /** Year-to-date variation as a percent number (Var. año). */
   var_ytd_pct?: number | null;
-  /** Units held, e.g. shares of a stock position (fractional). */
-  units?: number | null;
-  /** Latest market price per unit, in the product currency. */
-  unit_price?: number | null;
-  /** Average cost per unit of the units held. */
-  average_cost?: number | null;
-  /** Gain or loss on the units still held (nav minus their cost). */
-  unrealized_profit?: number | null;
-  /** Unrealized profit as a percent number of the cost of the units held. */
-  unrealized_profit_pct?: number | null;
-  /** Gain or loss already realized by selling units. */
-  realized_profit?: number | null;
-  /** Total dividends received (net). */
-  dividends?: number | null;
-  /** When `unit_price` was quoted. */
-  unit_price_as_of?: string | null;
 }
 
 /** Identity fields for a position in a listed security (acción). */
@@ -518,13 +496,6 @@ export const METRIC_FIELDS: Record<
     var_daily_pct: { denomination: "percent" },
     var_30d_pct: { denomination: "percent" },
     var_ytd_pct: { denomination: "percent" },
-    units: { denomination: "count" },
-    unit_price: { denomination: "currency" },
-    average_cost: { denomination: "currency" },
-    unrealized_profit: { denomination: "currency" },
-    unrealized_profit_pct: { denomination: "percent" },
-    realized_profit: { denomination: "currency" },
-    dividends: { denomination: "currency" },
   },
   stock: {
     nav: { denomination: "currency" },

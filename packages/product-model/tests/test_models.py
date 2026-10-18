@@ -15,6 +15,8 @@ from product_model import (
     REGISTRY,
     CreditCardAttributes,
     DailyPrice,
+    InvestmentAttributes,
+    InvestmentMetrics,
     ProductMetrics,
     ProductRef,
     ScrapedExchangeRate,
@@ -215,6 +217,32 @@ def test_stock_metrics_carry_a_position():
     assert metrics.headline() == 250.0
     assert dumped["unit_price_as_of"] == "2026-01-02T15:04:05Z"
     assert restored == metrics
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "units",
+        "unit_price",
+        "average_cost",
+        "unrealized_profit",
+        "unrealized_profit_pct",
+        "realized_profit",
+        "dividends",
+        "unit_price_as_of",
+    ],
+)
+def test_investment_metrics_reject_the_per_unit_fields(field):
+    """Units, prices and costs live on stock metrics only."""
+    with pytest.raises(ValidationError):
+        InvestmentMetrics.model_validate({"nav": 1234.56, field: 1.0})
+
+
+@pytest.mark.parametrize("field", ["ticker", "description", "tags"])
+def test_investment_attributes_reject_the_security_fields(field):
+    """A security's identity lives on stock attributes only."""
+    with pytest.raises(ValidationError):
+        InvestmentAttributes.model_validate({field: "ACME"})
 
 
 def test_stock_attributes_carry_a_ticker_and_tags():

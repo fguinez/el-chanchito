@@ -384,9 +384,6 @@ Net-worth role: **asset** · balance convention: **value** · family: **investme
 | `portfolio` | `str?` | Portfolio the money is invested in (e.g. 'Risky Norris'). |
 | `risk_profile` | `str?` | Risk profile label (e.g. 'Arriesgado'). |
 | `fund_name` | `str?` | Fund name for single-fund products (e.g. a fondo mutuo). |
-| `ticker` | `str?` | Ticker symbol of a listed security (e.g. 'ACME'). |
-| `description` | `str?` | Short description of the security, as the institution shows it. |
-| `tags` | `list[str]?` | Labels the institution gives the security (e.g. 'Tecnología'), each prefixed by its emoji when it has one; a new list replaces the old one. |
 
 ### Metrics
 
@@ -394,19 +391,11 @@ Net-worth role: **asset** · balance convention: **value** · family: **investme
 | --- | --- | --- | --- |
 | `kind` | `"investment"` |  | Payload discriminator; always "investment". |
 | `nav` | `float` | currency | Current market value of the position (net asset value). |
-| `deposited` | `float?` | currency | Net amount invested to date: deposits minus withdrawals and sales (negative once more came out than went in). |
+| `deposited` | `float?` | currency | Total amount deposited to date. |
 | `profit` | `float?` | currency | Cumulative profit as reported (nav minus deposited). |
 | `var_daily_pct` | `float?` | percent | Daily variation as a percent number (Var. diaria). |
 | `var_30d_pct` | `float?` | percent | 30-day variation as a percent number (Var. 30 días). |
 | `var_ytd_pct` | `float?` | percent | Year-to-date variation as a percent number (Var. año). |
-| `units` | `float?` | count | Units held, e.g. shares of a stock position (fractional). |
-| `unit_price` | `float?` | currency | Latest market price per unit, in the product currency. |
-| `average_cost` | `float?` | currency | Average cost per unit of the units held. |
-| `unrealized_profit` | `float?` | currency | Gain or loss on the units still held (nav minus their cost). |
-| `unrealized_profit_pct` | `float?` | percent | Unrealized profit as a percent number of the cost of the units held. |
-| `realized_profit` | `float?` | currency | Gain or loss already realized by selling units. |
-| `dividends` | `float?` | currency | Total dividends received (net). |
-| `unit_price_as_of` | `datetime?` |  | When `unit_price` was quoted. |
 
 ## Acción (`stock`)
 
