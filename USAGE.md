@@ -656,7 +656,7 @@ All API routes are under `/api/`:
 | PATCH/DELETE | `/api/monitors/[id]/adjustments/[adjustmentId]` | Edit or delete one variación |
 | GET | `/api/institutions` | Institutions + nested products (balances included) + CLP subtotals |
 | GET/PATCH | `/api/institutions/[slug]` | One institution, same shape as a list item; edit `name`, `kind`, `country`, `url` |
-| GET/PATCH | `/api/institutions/[slug]/products/[product]` | One product (with its `defaultName`) plus its balance history and recent transactions; edit `name` (`null` resets it to `defaultName`), `slug`, `parentProductId`, `isActive`, `displayOrder` |
+| GET/PATCH | `/api/institutions/[slug]/products/[product]` | One product (with its `defaultName`) plus its balance history, recent transactions and, for a stock, its daily closes (`prices`: `{date, price}` oldest first, empty without a ticker); edit `name` (`null` resets it to `defaultName`), `slug`, `parentProductId`, `isActive`, `displayOrder` |
 | PATCH | `/api/accounts/[id]` | Rename an account (`name`) |
 | POST | `/api/institutions/refresh` | Trigger a scrape (all, or `{institution}`) |
 | GET | `/api/scrapers` | Latest run per scraper |

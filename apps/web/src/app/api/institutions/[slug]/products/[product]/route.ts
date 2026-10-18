@@ -5,6 +5,7 @@ import {
   institutions,
   accounts,
   products,
+  productPrices,
   productSnapshots,
   transactions,
 } from "@/lib/db/schema";
@@ -20,6 +21,7 @@ import {
 } from "@/lib/management";
 import type { ProductKind, ProductMetrics } from "@/lib/db/schema";
 import { formatLocationText } from "@/lib/transaction-location";
+import { productTicker, type ProductPricePoint } from "@/lib/price-history";
 
 // Next 16: dynamic segment params arrive as a Promise on the context arg.
 type Context = { params: Promise<{ slug: string; product: string }> };
@@ -28,6 +30,9 @@ type Context = { params: Promise<{ slug: string; product: string }> };
 const MAX_HISTORY_POINTS = 500;
 /** Cap the returned transactions (most recent kept). */
 const MAX_TRANSACTIONS = 500;
+/** Cap the returned daily closes (most recent kept): about five years of
+ *  trading days. */
+const MAX_PRICE_POINTS = 1300;
 
 export interface ProductHistoryPoint {
   /** ISO timestamp of the observation. */
@@ -73,7 +78,9 @@ export interface ProductParent {
  * institution-unique slug, with its balance-over-time history from
  * `product_snapshots` (most recent first, capped at MAX_HISTORY_POINTS) and
  * its latest MAX_TRANSACTIONS transactions (`transactionsTruncated` says
- * whether older ones were left out). `product.exchangeRate` is the rate its
+ * whether older ones were left out). `prices` are a stock's daily closes from
+ * `product_prices`, oldest first (the latest MAX_PRICE_POINTS); empty for a
+ * product without a ticker. `product.exchangeRate` is the rate its
  * CLP figures use (institution/product override or provider, with staleness;
  * see lib/rates). Returns 404 when the institution or the product is unknown.
  */
@@ -118,7 +125,10 @@ export async function GET(_request: Request, { params }: Context) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  const [snapshots, txns, book, parent] = await Promise.all([
+  // Only a product with a ticker (a stock position) has a price history.
+  const ticker = productTicker(row.attributes);
+
+  const [snapshots, txns, priceRows, book, parent] = await Promise.all([
     db
       .select({
         balance: productSnapshots.balance,
@@ -158,6 +168,14 @@ export async function GET(_request: Request, { params }: Context) {
       )
       // One extra row tells whether the cap dropped anything.
       .limit(MAX_TRANSACTIONS + 1),
+    ticker
+      ? db
+          .select({ date: productPrices.priceDate, price: productPrices.price })
+          .from(productPrices)
+          .where(eq(productPrices.productId, row.productId))
+          .orderBy(desc(productPrices.priceDate))
+          .limit(MAX_PRICE_POINTS)
+      : [],
     getRateBook(),
     row.parentProductId ? loadParent(row.parentProductId) : null,
   ]);
@@ -202,6 +220,12 @@ export async function GET(_request: Request, { params }: Context) {
       }),
     }));
 
+  // Newest first makes the cap drop the oldest closes; returned ascending.
+  const prices: ProductPricePoint[] = priceRows
+    .slice()
+    .reverse()
+    .map((p) => ({ date: p.date, price: Number(p.price) }));
+
   const currentBalance =
     row.currentBalance != null ? Number(row.currentBalance) : null;
 
@@ -245,6 +269,7 @@ export async function GET(_request: Request, { params }: Context) {
     history,
     transactions: productTransactions,
     transactionsTruncated,
+    prices,
   });
 }
 
