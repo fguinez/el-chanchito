@@ -39,8 +39,10 @@ product_model                envelopes (ScrapedProduct / ScrapedTransaction), ki
   validates envelopes it receives.
 - Create a `backends/` module only when the transport is big (a browser
   session with many surfaces) or shared by several institutions (the e-mail
-  backend serves three). A self-contained HTTP scraper (Buda, Fintual) keeps
-  everything in `institutions/<slug>.py`.
+  backend serves three). A self-contained HTTP scraper (Buda) keeps
+  everything in `institutions/<slug>.py`; one whose parsing grows big may move
+  just the pure parsers to a backend (`backends/fintual_stocks.py`: a query
+  text and the ledger parsers, no I/O).
 - Parsers are where the institution's quirks live. Keep them pure so most tests
   are a fixture in and an assertion out, with no fakes.
 
@@ -76,8 +78,8 @@ blindly. So a scraper:
   behind `if __name__ == "__main__"` and a make target;
 - signals failure by raising, never by returning an error value;
 - returns `[]` or `ProductScrapeResult([])` for a leg the institution can't
-  provide, with a one-line comment or docstring saying why (Fintual: no
-  per-transaction data).
+  provide, with a one-line comment or docstring saying why (the e-mail
+  scrapers' products leg: a notification carries no balance).
 
 **Interface segregation.** `BaseScraper` is deliberately small: `method`,
 `institution`, two legs, and an optional `superseded_transactions()` hook.
@@ -103,8 +105,8 @@ replace:
 | Adapter | `institutions/<slug>.py` mapping source records onto envelopes | always |
 | Facade | `backends/bci_lider_web.scrape_card`, `backends/banchile_movements.fetch_session` | the transport has many steps |
 | Data-driven strategy | `EmailPattern` consumed by `fetch_transactions_for_pattern` | institutions differ only in configuration |
-| Per-cycle session cache | `BciLiderScraper._cached` / `_error` | one login must feed both legs |
-| Async generator pagination | `BudaScraper._pages` | paged APIs; earlier pages survive a later failure |
+| Per-cycle session cache | `BciLiderScraper._cached` / `_error`, `FintualScraper._scrape_cycle` | one login must feed both legs |
+| Async generator pagination | `BudaScraper._pages`, `FintualScraper._wallet_pages` | paged APIs; earlier pages survive a later failure |
 | Value objects | frozen dataclasses for raw records; pydantic envelopes at the boundary | always |
 | Typed, actionable errors | `FintualSessionError("... Run make fintual-login ...")` | any human-recoverable failure |
 
@@ -181,7 +183,8 @@ creates a new product and splits the history.
   per deposit, per stock position: each with an `external_ref`) receives
   transactions only when they name it: set `product_external_ref` to the
   exact `external_ref` the balance leg emits for it (build both from one
-  helper). The writer looks that product up and **never creates it**.
+  helper, as Fintual's `stock_ref` does). The writer looks that product up and
+  **never creates it**.
   `run_scraper` writes transactions before products, so a holding's first
   movements find no product, are counted `unresolved` (a run warning,
   `partial`) and land on the next run. Never send such a row without its

@@ -294,7 +294,7 @@ transactions ──────────┐
   source                        id PK
   external_id (unique w/       keyword
     product_id)                 category_id FK ──────>
-  is_internal_transfer        -- set while a transfer links it
+  is_internal_transfer        -- set while a transfer links it, or by a scraper on insert
   is_manually_categorized
   location_name, _city,
     _country (nullable text)
@@ -449,13 +449,15 @@ apps/scrapers/scrapers/
     bci_lider_web.py       # real Chrome over CDP -> scrape_card() / save_login_session()
     santander_web.py       # headless Santander login + the SPA's JSON -> fetch_session()
     banco_falabella_web.py # headless Banco Falabella login + the rendered DOM -> fetch_session()
+    fintual_stocks.py      # Fintual's WalletMovements query + pure ledger parsers (no I/O)
   institutions/
     mach.py  mercadopago.py  tenpo.py       -> consume backends/email
     banchile.py                              -> banchile_movements (one login: tx + balances)
     bci_lider.py                             -> bci_lider_web (one CDP drive: tx + balances)
     santander.py                             -> santander_web (one headless login: tx + balance)
     banco_falabella.py                       -> banco_falabella_web (one headless login: tx + balance)
-    buda.py  fintual.py  skipo.py            -> self-contained (HTTP APIs)
+    fintual.py                               -> fintual_stocks (one web session: tx + balances)
+    buda.py  skipo.py                        -> self-contained (HTTP APIs)
 ```
 
 BanChile drives **one self-contained Playwright session per run** (issue #57,
@@ -732,11 +734,46 @@ unrealized and realized profit and dividends as metrics, by the web app's
 formulas), and the cash a USD `wallet`. A sold-out position drops to nav 0 and
 stops counting, for as long as Fintual keeps listing zero-share positions; a
 held one without a price or totals is skipped with a counted warning. The
-stocks are an isolated leg of the same run: a failure there keeps the goals
+stocks are an isolated part of the same run: a failure there keeps the goals
 and records the run as `partial` (a failure on the positions' own requests
 keeps the wallet too). An account that never opened the brokerage (nothing
-resolves and GraphQL reports no error) gets no stock products and no warning;
-nothing resolving next to a GraphQL error fails the leg. No transactions yet.
+resolves and GraphQL reports no error) gets no stock products, no movements
+and no warning; nothing resolving next to a GraphQL error fails the leg (the
+movements are still read).
+
+Fintual's transactions are the USD wallet's ledger, from one `WalletMovements`
+query on `POST /gql/` (`backends/fintual_stocks.py` holds the query text and
+the pure parsers), paged 50 at a time until a page where every list is empty
+(the offset moves by the longest list returned, never more than the page size;
+40 pages at most, then a warning). Every movement is a row on the USD `wallet`;
+buys, sells, dividends and cash mergers also get a mirror row on the stock's
+`investment` product, named by `product_external_ref` `stock:<asset id>`. A buy
+is money out of the wallet and into the stock, and both rows are flagged
+internal transfers, as are deposits from a bank; a dividend is income once, on
+the stock; cash interest and compensations are income and fees expenses. Dates
+are the day the wallet changed, in America/Santiago. Pending movements wait
+until executed (the query has no state field, so a deposit, withdrawal or order
+declared over a week ago and never executed is taken as cancelled and left out
+without blocking the balance check); divestments, rows in another currency and
+unreadable rows are skipped with counted warnings (the row shapes come from
+Fintual's query text, and not all of them are verified against live data
+yet). The full ledger is read every run and the writer skips what it has; a
+new stock's rows wait one run for its product. Both legs share
+one session drive per run: the transactions leg runs it first and caches it for
+the products leg. A movements failure is a warning that costs the movements
+only. When the ledger is complete and nothing was pending or skipped, it must
+add up to the wallet's balance to the cent, or the run warns (no amounts). A
+stock the positions list no longer has gets a zero-valued product when the
+ledger shows it left through a sale or a cash merger (deposited = buys - sells,
+profit = sells - buys). One that left through a non-cash event (a share-only
+merger, a spinoff, shares moved out by ACAT) has no cash leg, so it is skipped
+rather than booked as a loss, and its product keeps its last values; an empty
+positions list next to stocks bought and never sold zeroes nothing that run and
+warns. On a fresh database, deploy the stock products and let one Fintual run
+finish before deploying the movements: the transactions leg writes first, so a
+wallet row would create the USD wallet under the generic slug
+`fintual-wallet-usd` (the products write corrects its name; slugs are
+create-only).
 
 **Balance conventions & net worth** are registry-driven: each kind's `role`
 (asset/liability/none) and `balance_convention` (value/available/owed/units)
@@ -785,8 +822,10 @@ failure and warning joined into `error_message`:
 - `partial`: something went wrong but part of the data landed (one leg raised
   while the other wrote, or some products or transactions failed to write
   while the rest were written), or a scraper reported warnings, e.g. a
-  BanChile surface that failed all its retries or Fintual goals skipped for
-  lacking an id.
+  BanChile surface that failed all its retries, Fintual goals skipped for
+  lacking an id or Fintual stock movements that failed to load. Transactions
+  that name a product (`product_external_ref`) the database doesn't have yet
+  are a warning too, and don't count as landed: the next run writes them.
 - `error`: something failed and nothing landed.
 
 Writes are isolated per row: `run_scraper` writes each product separately, and
@@ -822,7 +861,12 @@ killed are replaced rather than failing a write, recycles connections after
 goal). The writer resolves the chain institution → account → product
 (creating missing links via the `uq_products_identity` upsert;
 single-user: everything attaches to the oldest user), so e.g. each Buda
-currency becomes its own `crypto` product. `upsert_product`
+currency becomes its own `crypto` product. A transaction lands on the product
+of its kind and currency with no `external_ref`, unless it names one in
+`product_external_ref` (a Fintual stock position): that product is looked up,
+never created, and a miss is counted `unresolved` for a later run.
+`internal_transfer` is written to `is_internal_transfer` on insert only, so a
+user's change survives re-scrapes. `upsert_product`
 shallow-merges `attributes`, always refreshes
 `products.current_balance`/`metrics`/`balance_as_of`, and appends a
 `product_snapshots` history row only when the metrics payload changed.
@@ -947,7 +991,10 @@ product with its denormalized balance.
 
 Transactions are deduplicated via `UNIQUE(product_id, external_id)`:
 
-- Fintual: no transactions (balance-only)
+- Fintual: `fintual_wallet_{type}_{id}` on the USD wallet and
+  `fintual_stock_{type}_{id}` on the stock position (`type` is `dep`, `buy`,
+  `sell`, `div`, `int`, ...; the id is Fintual's own, the asset order's for buys
+  and sells), each leg its own key since keys are unique across a batch
 - Buda: `buda_{deposit/withdrawal_id}` (CLP movements only)
 - Skipo: `skipo_{ledger_entry_id}` (CLP ledger only)
 - BanChile: the bank's own operation id where the portal exposes one, else a
@@ -1304,7 +1351,7 @@ el-chanchito/
 │   └── scrapers/                     # Python scraper service
 │       ├── scrapers/
 │       │   ├── backends/             # email, banchile_web, banchile_movements, bci_lider_web,
-│       │   │                         #   santander_web, banco_falabella_web
+│       │   │                         #   santander_web, banco_falabella_web, fintual_stocks
 │       │   └── institutions/         # 10 scrapers: banchile, banco_falabella, bci_lider, buda,
 │       │                             #   fintual, mach, mercadopago, santander, skipo, tenpo
 │       ├── db/                       # Connection pool + writer + slug
