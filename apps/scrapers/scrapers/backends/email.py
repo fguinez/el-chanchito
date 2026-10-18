@@ -623,14 +623,35 @@ async def fetch_transactions_for_pattern(
         )
 
 
+def _received_at(
+    msg: email.message.Message, internal_date: Optional[datetime]
+) -> Optional[datetime]:
+    """When the mail server got `msg`: its INTERNALDATE, else its Date header.
+
+    Always tz-aware (a naive time is taken as UTC); None when neither is usable.
+    """
+    moment = internal_date
+    if moment is None:
+        try:
+            moment = email.utils.parsedate_to_datetime(str(msg.get("Date", "")))
+        except Exception:  # malformed headers raise ValueError, OverflowError, ...
+            return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment
+
+
 def _find_code(
     mail: imaplib.IMAP4_SSL,
     sender_contains: list[str],
     subject_contains: list[str],
     code_pattern: str,
     lookback_days: int,
+    received_after: Optional[datetime] = None,
 ) -> Optional[str]:
     """Blocking half of `fetch_latest_code`; runs in a thread."""
+    if received_after is not None and received_after.tzinfo is None:
+        received_after = received_after.replace(tzinfo=timezone.utc)
     since = (_today() - timedelta(days=lookback_days)).strftime("%d-%b-%Y")
     _select(mail, DEFAULT_MAILBOX)
     for sender_keyword in sender_contains:
@@ -640,10 +661,16 @@ def _find_code(
 
         ids = message_ids[0].split()
         for msg_id in reversed(ids[-20:]):
-            raw_email, _ = _fetch_message(mail, msg_id.decode())
+            raw_email, internal_date = _fetch_message(mail, msg_id.decode())
             if raw_email is None:
                 continue
             msg = email.message_from_bytes(raw_email)
+            if received_after is not None:
+                received = _received_at(msg, internal_date)
+                if received is None:
+                    continue  # can't be proven fresh, so it may hold a spent code
+                if received < received_after:
+                    break  # newest first: every message left is older still
 
             from_addr = _decode_header_value(msg.get("From", ""))
             subject = _decode_header_value(msg.get("Subject", ""))
@@ -667,6 +694,7 @@ async def fetch_latest_code(
     subject_contains: list[str],
     code_pattern: str = r"\b(\d{6})\b",
     lookback_days: int = 2,
+    received_after: Optional[datetime] = None,
 ) -> Optional[str]:
     """Return the first code matching `code_pattern` from the newest matching email.
 
@@ -674,9 +702,17 @@ async def fetch_latest_code(
     EMAIL_IMAP_MAILBOX says) for emails whose From contains one of
     `sender_contains` and whose Subject contains one of `subject_contains`,
     scans them newest-first, and returns the first regex capture (e.g. a 2FA
-    code) found in the body, or None.
+    code) found in the body, or None. With `received_after`, emails the server
+    received earlier (INTERNALDATE, else the Date header) are ignored, so a
+    code from a previous login is never returned.
     """
     async with get_session() as mail:
         return await asyncio.to_thread(
-            _find_code, mail, sender_contains, subject_contains, code_pattern, lookback_days
+            _find_code,
+            mail,
+            sender_contains,
+            subject_contains,
+            code_pattern,
+            lookback_days,
+            received_after,
         )
