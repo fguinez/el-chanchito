@@ -316,7 +316,7 @@ export default function ProductDetailPage() {
 
       {/* Per-kind insight graphs */}
       {isCreditKind && <CupoUtilizationCard product={product} history={history} />}
-      {product.kind === "investment" && (
+      {(product.kind === "investment" || product.kind === "stock") && (
         <InvestmentCompositionCard product={product} />
       )}
       {ticker && showsPriceHistory(prices, product.metrics) && (

@@ -1,7 +1,7 @@
 // Value split behind the product page's "Composición del valor" donut, kept
 // free of React so it can be unit tested.
 
-import type { InvestmentMetrics } from "@chanchito/product-model";
+import type { InvestmentMetrics, StockMetrics } from "@chanchito/product-model";
 
 export interface InvestmentComposition {
   /** What the value grew from (always positive): the net amount deposited
@@ -22,9 +22,9 @@ export interface InvestmentComposition {
  *  the cost of what it still holds, since its net invested goes negative
  *  once profitable sales returned more than went in. */
 export function investmentComposition(
-  m: InvestmentMetrics
+  m: InvestmentMetrics | StockMetrics
 ): InvestmentComposition | null {
-  if (m.units != null) {
+  if (m.kind === "stock" && m.units != null) {
     if (m.unrealized_profit == null) return null;
     const base = m.nav - m.unrealized_profit;
     if (!(base > 0)) return null;

@@ -20,7 +20,7 @@ import {
 } from "../product-columns";
 
 // Synthetic fixtures only: obviously fake CLP amounts (2.500.000 / 1.000.000 /
-// 999.999), USD 1.234,56 and a made-up BTC quantity.
+// 999.999), USD 1.234,56, a made-up BTC quantity and the fake ACME stock.
 function product(
   kind: ProductKind,
   overrides: Partial<ColumnProduct> = {}
@@ -59,6 +59,14 @@ describe("groupProductsByFamily", () => {
     expect(groups[0].products.map((p) => p.kind)).toEqual([
       "checking",
       "savings",
+    ]);
+  });
+
+  it("puts stocks in their own table, after the investments", () => {
+    const groups = groupProductsByFamily([product("stock"), product("investment")]);
+    expect(groups.map((g) => [g.family, g.products.map((p) => p.kind)])).toEqual([
+      ["investment", ["investment"]],
+      ["stock", ["stock"]],
     ]);
   });
 
@@ -110,6 +118,36 @@ describe("visibleColumns", () => {
       "cupo",
       "utilizado",
     ]);
+  });
+
+  it("shows Dividendos on the stock table only once a row has them", () => {
+    const held = product("stock", {
+      metrics: { kind: "stock", nav: 1234.56, units: 2.5 },
+    });
+    const paid = product("stock", {
+      metrics: { kind: "stock", nav: 1234.56, units: 2.5, dividends: 12.34 },
+    });
+    const keys = (rows: ColumnProduct[]) =>
+      visibleColumns("stock", rows).map((c) => c.key);
+    expect(keys([held])).toEqual([
+      "valor",
+      "unidades",
+      "precio",
+      "costo_prom",
+      "ganancia",
+      "rentabilidad",
+    ]);
+    expect(keys([held, paid]).at(-1)).toBe("dividendos");
+  });
+
+  it("shows Realizada once a row has sold shares", () => {
+    const soldOut = product("stock", {
+      currentBalance: 0,
+      metrics: { kind: "stock", nav: 0, units: 0, realized_profit: 234.56 },
+    });
+    expect(visibleColumns("stock", [soldOut]).map((c) => c.key)).toContain(
+      "realizada"
+    );
   });
 
   it("can hide every column of a family whose rows carry no values", () => {
@@ -282,6 +320,45 @@ describe("resolveColumnCell", () => {
       );
       expect(cell.tone).toBeNull();
       expect(cell.text).toBe(formatCLP(1_000_000));
+    });
+
+    it("resolves a stock position's per-unit columns", () => {
+      const acme = product("stock", {
+        currency: "USD",
+        currentBalance: 1234.56,
+        currentBalanceClp: 1_000_000,
+        metrics: {
+          kind: "stock",
+          nav: 1234.56,
+          units: 2.5,
+          unit_price: 493.824,
+          average_cost: 400,
+          unrealized_profit: 234.56,
+          unrealized_profit_pct: 23.46,
+        },
+      });
+      const cell = (key: string) => resolveColumnCell(acme, column("stock", key));
+
+      expect(cell("valor").text).toBe(formatAmount("USD", 1234.56));
+      expect(cell("valor").clp).toBe(1_000_000);
+      expect(cell("unidades").text).toMatch(/^2[.,]5$/);
+      expect(cell("unidades").sortValue).toBe(2.5);
+      expect(cell("precio").text).toBe(formatAmount("USD", 493.824));
+      expect(cell("costo_prom").text).toBe(formatAmount("USD", 400));
+      expect(cell("ganancia").text).toBe(`+${formatAmount("USD", 234.56)}`);
+      expect(cell("ganancia").tone).toBe("positive");
+      expect(cell("rentabilidad").text).toBe(formatPercent(23.46, { signed: true }));
+      expect(cell("rentabilidad").tone).toBe("positive");
+      expect(cell("realizada").text).toBeNull();
+      expect(cell("dividendos").text).toBeNull();
+
+      const sold = product("stock", {
+        currency: "USD",
+        metrics: { kind: "stock", nav: 0, units: 0, realized_profit: -12.34 },
+      });
+      const realizada = resolveColumnCell(sold, column("stock", "realizada"));
+      expect(realizada.text).toBe(formatAmount("USD", -12.34));
+      expect(realizada.tone).toBe("negative");
     });
 
     it("is empty for legacy {} / null metrics and non-numeric values", () => {

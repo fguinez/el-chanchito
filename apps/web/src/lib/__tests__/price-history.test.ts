@@ -12,19 +12,19 @@ import {
 
 describe("productTicker", () => {
   it("reads a stock position's ticker", () => {
-    expect(productTicker({ kind: "investment", ticker: "ACME" })).toBe("ACME");
+    expect(productTicker({ kind: "stock", ticker: "ACME" })).toBe("ACME");
   });
 
   it("trims it", () => {
-    expect(productTicker({ kind: "investment", ticker: " ACME " })).toBe("ACME");
+    expect(productTicker({ kind: "stock", ticker: " ACME " })).toBe("ACME");
   });
 
   it.each([
     ["no attributes", null],
     ["empty attributes", {}],
     ["a goal without a ticker", { kind: "investment" as const }],
-    ["a null ticker", { kind: "investment" as const, ticker: null }],
-    ["a blank ticker", { kind: "investment" as const, ticker: " " }],
+    ["a null ticker", { kind: "stock" as const, ticker: null }],
+    ["a blank ticker", { kind: "stock" as const, ticker: " " }],
     ["a card", { kind: "credit_card" as const, last4: "1234" }],
   ])("is null for %s", (_label, attributes) => {
     expect(productTicker(attributes)).toBeNull();
@@ -33,7 +33,7 @@ describe("productTicker", () => {
 
 describe("showsPriceHistory", () => {
   const held = (units: number | null | undefined): ProductMetrics => ({
-    kind: "investment",
+    kind: "stock",
     nav: 250.5,
     units,
   });
@@ -54,6 +54,7 @@ describe("showsPriceHistory", () => {
     ["without units", held(null)],
     ["with units unknown", held(undefined)],
     ["without metrics", null],
+    ["with a goal's metrics", { kind: "investment", nav: 250.5 } as ProductMetrics],
     ["with other metrics", { kind: "wallet", balance: 100 } as ProductMetrics],
   ])("hides a stock without closes %s", (_label, metrics) => {
     expect(showsPriceHistory([], metrics)).toBe(false);

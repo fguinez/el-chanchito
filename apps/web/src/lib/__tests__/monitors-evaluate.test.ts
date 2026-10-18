@@ -25,6 +25,7 @@ const LOAN_ID = "66666666-6666-4666-8666-666666666666";
 const EUR_WALLET_ID = "77777777-7777-4777-8777-777777777777";
 const CLOSED_ID = "88888888-8888-4888-8888-888888888888";
 const UNKNOWN_ID = "99999999-9999-4999-8999-999999999999";
+const STOCK_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
 const rates: RateBook = { provider: { CLP: 1, USD: 900 }, overrides: [] };
 
@@ -85,6 +86,14 @@ function buildProducts(checkingBalance: number): Map<string, ProductInfo> {
       institutionSlug: "fintual",
       currency: "USD",
       metrics: { kind: "investment", nav: 1000, var_daily_pct: 2.5 },
+    }),
+    productInfo({
+      id: STOCK_ID,
+      kind: "stock",
+      slug: "acme",
+      institutionSlug: "fintual",
+      currency: "USD",
+      metrics: { kind: "stock", nav: 250, units: 2.5, unit_price: 100 },
     }),
     productInfo({
       id: LOAN_ID,
@@ -182,6 +191,12 @@ describe("reference resolution and conversion", () => {
 
   it("does NOT convert count fields", () => {
     expect(value("banchile:credito:installments_paid")).toBe(12);
+  });
+
+  it("reads a stock position's per-unit fields", () => {
+    expect(value("fintual:acme:unit_price")).toBe(90000); // 100 * 900 / 1
+    expect(value("fintual:acme:units")).toBe(2.5);
+    expect(value("fintual:acme:nav")).toBe(225000);
   });
 
   it("converts across a cross rate into a non-CLP monitor currency", () => {

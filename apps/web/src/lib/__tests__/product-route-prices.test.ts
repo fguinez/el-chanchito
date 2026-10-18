@@ -53,14 +53,14 @@ function stockRow(overrides: Record<string, unknown> = {}) {
     accountName: "Personal",
     productId: PRODUCT_ID,
     parentProductId: null,
-    kind: "investment",
+    kind: "stock",
     productName: "Acme Corp",
     productSlug: "acme-corp",
     currency: "USD",
     currentBalance: "250.5",
     balanceAsOf: new Date("2026-01-05T15:00:00Z"),
     externalRef: "stock:0001",
-    attributes: { kind: "investment", ticker: "ACME" },
+    attributes: { kind: "stock", ticker: "ACME" },
     metrics: null,
     isActive: true,
     ...overrides,
@@ -127,8 +127,8 @@ describe("GET /api/institutions/[slug]/products/[product] prices", () => {
 
   it.each([
     ["no ticker attribute", {}],
-    ["a blank ticker", { kind: "investment", ticker: "  " }],
-    ["a null ticker", { kind: "investment", ticker: null }],
+    ["a blank ticker", { kind: "stock", ticker: "  " }],
+    ["a null ticker", { kind: "stock", ticker: null }],
   ])("skips the query for a product with %s", async (_label, attributes) => {
     queuedRows.push([stockRow({ attributes })], SNAPSHOTS, [], [RATE_ROW]);
 

@@ -581,7 +581,7 @@ export function MonthlyFlowCard({
 }
 
 // ---------------------------------------------------------------------------
-// Investment value composition (investment)
+// Investment value composition (investment, stock)
 // ---------------------------------------------------------------------------
 
 /** Current value split into what it grew from (a goal's deposits, or what a
@@ -592,7 +592,7 @@ export function InvestmentCompositionCard({
   product: InstitutionProduct;
 }) {
   const m = product.metrics;
-  if (!m || m.kind !== "investment") return null;
+  if (!m || (m.kind !== "investment" && m.kind !== "stock")) return null;
   const composition = investmentComposition(m);
   if (!composition) return null;
 
@@ -722,13 +722,13 @@ export function PriceHistoryCard({
   const latest = rows.at(-1) ?? null;
 
   const m = product.metrics;
-  const investment = m && m.kind === "investment" ? m : null;
+  const stock = m && m.kind === "stock" ? m : null;
   const averageCost =
-    investment?.average_cost != null && investment.average_cost > 0
-      ? investment.average_cost
+    stock?.average_cost != null && stock.average_cost > 0
+      ? stock.average_cost
       : null;
-  const unitPrice = investment?.unit_price ?? null;
-  const unitPriceAsOf = investment?.unit_price_as_of ?? null;
+  const unitPrice = stock?.unit_price ?? null;
+  const unitPriceAsOf = stock?.unit_price_as_of ?? null;
   const format = (value: number) => formatAmount(product.currency, value);
 
   return (
