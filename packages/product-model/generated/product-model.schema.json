@@ -280,6 +280,38 @@
       "title": "CryptoMetrics",
       "type": "object"
     },
+    "DailyPrice": {
+      "additionalProperties": false,
+      "description": "One day's closing price of a product's unit.",
+      "properties": {
+        "date": {
+          "description": "The trading day the price closed on, as the source dates it.",
+          "format": "date",
+          "title": "Date",
+          "type": "string"
+        },
+        "price": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "pattern": "^\\d{1,12}(\\.\\d{1,8})?$",
+              "type": "string"
+            }
+          ],
+          "description": "Closing price per unit in the product's currency; positive, at most 8 decimals (stored as NUMERIC(20, 8)).",
+          "title": "Price"
+        }
+      },
+      "required": [
+        "date",
+        "price"
+      ],
+      "title": "DailyPrice",
+      "type": "object"
+    },
     "DebitCardAttributes": {
       "additionalProperties": false,
       "description": "Identity fields for a debit card; money lives in the parent checking.",
@@ -1344,6 +1376,38 @@
       "title": "ScrapedExchangeRate",
       "type": "object"
     },
+    "ScrapedPriceHistory": {
+      "additionalProperties": false,
+      "description": "Daily closing prices of one product's unit (e.g. a stock), as read.\n\n`product` names the product exactly as the scraper emits it. The writer\nkeeps one price per product and day, updates a day whose price changed,\nand only ever attaches a series to a product that already exists: it\nnever creates one to hang prices on.",
+      "properties": {
+        "institution": {
+          "description": "Institution slug, e.g. 'banchile', 'fintual'.",
+          "title": "Institution",
+          "type": "string"
+        },
+        "points": {
+          "description": "One closing price per trading day, each day at most once.",
+          "items": {
+            "$ref": "#/$defs/DailyPrice"
+          },
+          "maxItems": 4000,
+          "minItems": 1,
+          "title": "Points",
+          "type": "array"
+        },
+        "product": {
+          "$ref": "#/$defs/ProductRef",
+          "description": "The product of this institution whose unit the prices are for."
+        }
+      },
+      "required": [
+        "institution",
+        "product",
+        "points"
+      ],
+      "title": "ScrapedPriceHistory",
+      "type": "object"
+    },
     "ScrapedProduct": {
       "additionalProperties": false,
       "description": "One scraped observation of a product.",
@@ -2031,6 +2095,6 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Ingest contract for scraped products, transactions and exchange rates; ScrapedProduct, ScrapedTransaction and ScrapedExchangeRate are the envelope models.",
+  "description": "Ingest contract for scraped products, transactions, exchange rates and price histories; ScrapedProduct, ScrapedTransaction, ScrapedExchangeRate and ScrapedPriceHistory are the envelope models.",
   "title": "chanchito product model"
 }
