@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
+import { TRANSACTION_NOTES_MAX_LENGTH } from "@/lib/transactions";
 
 // Fake db: insert(table).values(v).returning() echoes the values back.
 const valuesMock = vi.fn();
@@ -70,6 +71,26 @@ describe("POST /api/transactions location", () => {
       error: expect.any(String),
       field: "location.longitude",
     });
+    expect(valuesMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /api/transactions notes", () => {
+  it("stores a whitespace-only note as null", async () => {
+    const res = await post({ ...BASE, notes: "  \n\t " });
+    expect(res.status).toBe(201);
+    expect(valuesMock).toHaveBeenCalledWith(
+      expect.objectContaining({ notes: null })
+    );
+  });
+
+  it("rejects an overlong note with 400 on the notes field", async () => {
+    const res = await post({
+      ...BASE,
+      notes: "x".repeat(TRANSACTION_NOTES_MAX_LENGTH + 1),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).field).toBe("notes");
     expect(valuesMock).not.toHaveBeenCalled();
   });
 });

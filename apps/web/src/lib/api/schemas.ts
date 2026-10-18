@@ -5,6 +5,7 @@
 
 import { z } from "zod";
 import { PRODUCT_KINDS, TRANSFER_STATUSES } from "@/lib/db/schema";
+import { TRANSACTION_NOTES_MAX_LENGTH } from "@/lib/transactions";
 
 // ---------------------------------------------------------------------------
 // Shared fields
@@ -37,6 +38,15 @@ export const rowId = z.guid({ error: "Expected a uuid" });
 
 const requiredText = z.string().trim().min(1);
 const notes = z.string().nullish();
+
+/** A transaction's note: trimmed and capped; a blank string becomes null. */
+const transactionNotes = z
+  .string()
+  .trim()
+  .max(TRANSACTION_NOTES_MAX_LENGTH, {
+    error: `Notes must be at most ${TRANSACTION_NOTES_MAX_LENGTH} characters`,
+  })
+  .transform((text) => text || null);
 
 /** First day of the month of a YYYY-MM-DD day, read off the string so the
  *  server's time zone cannot move it (`new Date("2026-03-01")` is UTC midnight,
@@ -135,7 +145,7 @@ export const createTransactionSchema = z.object({
   amount: clpAmount,
   transactionDate: isoDate,
   scheduledMonth: month.nullish(),
-  notes,
+  notes: transactionNotes.nullish(),
   productId: rowId.nullish(),
   /** Legacy alias for `productId`. */
   accountId: rowId.nullish(),
@@ -149,7 +159,9 @@ export const createTransactionSchema = z.object({
  *  `customDescription` is the one-time override (V034): a non-empty string sets
  *  it, null clears it (restoring the original); an empty string is rejected.
  *  `location` is passed through untouched and checked by validateLocationInput
- *  in the route, as POST /api/transactions does. */
+ *  in the route, as POST /api/transactions does. `notes` is trimmed; a blank
+ *  string or null clears the note (so `{ notes: "" }` is a clear, not an empty
+ *  body). */
 export const updateTransactionSchema = z
   .object({
     description: requiredText,
@@ -162,6 +174,7 @@ export const updateTransactionSchema = z
     scheduledMonth: month.nullable(),
     isInternalTransfer: z.boolean(),
     productId: rowId,
+    notes: transactionNotes.nullable(),
     location: z.unknown(),
   })
   .partial()
