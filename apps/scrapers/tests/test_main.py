@@ -16,13 +16,19 @@ import pytest
 from product_model import CheckingMetrics, CreditCardMetrics
 
 import main as main_mod
-from db.writer import TransactionWriteResult, UnresolvedRateScope
+from db.writer import (
+    TransactionWriteResult,
+    UnresolvedPriceScope,
+    UnresolvedRateScope,
+)
 from main import run_outcome, run_scraper
 from scrapers.base import (
     BaseScraper,
+    DailyPrice,
     ProductRef,
     ProductScrapeResult,
     ScrapedExchangeRate,
+    ScrapedPriceHistory,
     ScrapedProduct,
     ScrapedTransaction,
     SupersededTransaction,
@@ -44,6 +50,7 @@ class _StubScraper(BaseScraper):
         transactions=None,
         superseded=(),
         exchange_rates=(),
+        price_histories=(),
     ):
         self._products = products or []
         self._warnings = warnings or []
@@ -52,6 +59,7 @@ class _StubScraper(BaseScraper):
         self._transactions = transactions or []
         self._superseded = list(superseded)
         self._exchange_rates = list(exchange_rates)
+        self._price_histories = list(price_histories)
 
     def superseded_transactions(self):
         return self._superseded
@@ -65,7 +73,10 @@ class _StubScraper(BaseScraper):
         if self._prod_exc is not None:
             raise self._prod_exc
         return ProductScrapeResult(
-            self._products, list(self._warnings), list(self._exchange_rates)
+            self._products,
+            list(self._warnings),
+            list(self._exchange_rates),
+            list(self._price_histories),
         )
 
 
@@ -103,6 +114,7 @@ def writer(monkeypatch):
         "write_transactions": MagicMock(return_value=TransactionWriteResult()),
         "upsert_product": MagicMock(),
         "upsert_exchange_rate": MagicMock(),
+        "upsert_price_history": MagicMock(return_value=0),
         "delete_superseded_transactions": MagicMock(),
         "finish_scraper_run": MagicMock(),
     }
@@ -474,4 +486,193 @@ class TestExchangeRates:
             "error",
             transactions_imported=0,
             error_message="products: 1 of 1 not written (banchile/checking CLP: db down)",
+        )
+
+
+def _stock():
+    return ScrapedProduct(
+        institution="fintual",
+        kind="investment",
+        currency="USD",
+        external_ref="stock:0001",
+    )
+
+
+def _history(external_ref="stock:0001"):
+    """A synthetic two-day ACME series."""
+    return ScrapedPriceHistory(
+        institution="fintual",
+        product=ProductRef(
+            kind="investment", currency="USD", external_ref=external_ref
+        ),
+        points=[
+            DailyPrice(date=date(2026, 1, 2), price="100.0"),
+            DailyPrice(date=date(2026, 1, 5), price="250.5"),
+        ],
+    )
+
+
+_UNRESOLVED_STOCK = "no investment product in USD with that external_ref at 'fintual'"
+
+
+class TestPriceHistories:
+    """The products leg's price histories are written after its products,
+    each on its own."""
+
+    def test_written_after_the_products(self, finish, monkeypatch):
+        calls = []
+        history = _history()
+        monkeypatch.setattr(
+            main_mod, "upsert_product", lambda sp: calls.append("product")
+        )
+        monkeypatch.setattr(
+            main_mod, "upsert_price_history", lambda h: calls.append(("history", h))
+        )
+
+        scraper = _StubScraper(products=[_stock()], price_histories=[history])
+
+        asyncio.run(run_scraper(scraper))
+
+        assert calls == ["product", ("history", history)]
+        finish.assert_called_once_with(
+            "run-1", "success", transactions_imported=0, error_message=None
+        )
+
+    def test_an_unresolvable_product_is_a_warning(self, finish, monkeypatch):
+        monkeypatch.setattr(
+            main_mod,
+            "upsert_price_history",
+            MagicMock(side_effect=UnresolvedPriceScope(_UNRESOLVED_STOCK)),
+        )
+
+        asyncio.run(
+            run_scraper(_StubScraper(products=[_stock()], price_histories=[_history()]))
+        )
+
+        finish.assert_called_once_with(
+            "run-1",
+            "partial",
+            transactions_imported=0,
+            error_message="price histories: 1 of 1 not written (UnresolvedPriceScope)",
+        )
+
+    def test_failed_series_share_one_counted_warning(self, finish, monkeypatch):
+        """N unresolved series are one warning, not N identical ones."""
+        refs = ("stock:0001", "stock:0002", "stock:0003")
+
+        def upsert(history):
+            if history.product.external_ref != "stock:0002":
+                raise UnresolvedPriceScope(_UNRESOLVED_STOCK)
+
+        monkeypatch.setattr(main_mod, "upsert_price_history", upsert)
+
+        asyncio.run(
+            run_scraper(
+                _StubScraper(
+                    products=[_stock()], price_histories=[_history(r) for r in refs]
+                )
+            )
+        )
+
+        finish.assert_called_once_with(
+            "run-1",
+            "partial",
+            transactions_imported=0,
+            error_message="price histories: 2 of 3 not written (UnresolvedPriceScope)",
+        )
+
+    def test_the_warning_names_each_failure_type_once(self, finish, monkeypatch):
+        upsert = MagicMock(
+            side_effect=[
+                UnresolvedPriceScope(_UNRESOLVED_STOCK),
+                RuntimeError("synthetic failure"),
+                UnresolvedPriceScope(_UNRESOLVED_STOCK),
+            ]
+        )
+        monkeypatch.setattr(main_mod, "upsert_price_history", upsert)
+        histories = [_history(f"stock:000{n}") for n in (1, 2, 3)]
+
+        asyncio.run(
+            run_scraper(_StubScraper(products=[_stock()], price_histories=histories))
+        )
+
+        assert upsert.call_count == 3
+        finish.assert_called_once_with(
+            "run-1",
+            "partial",
+            transactions_imported=0,
+            error_message=(
+                "price histories: 3 of 3 not written "
+                "(RuntimeError, UnresolvedPriceScope)"
+            ),
+        )
+
+    def test_a_write_failure_costs_only_that_series(self, finish, monkeypatch):
+        written = []
+
+        def upsert(history):
+            if not written:
+                written.append(None)
+                raise RuntimeError("synthetic failure")
+            written.append(history)
+
+        monkeypatch.setattr(main_mod, "upsert_price_history", upsert)
+        second = _history("stock:0002")
+
+        asyncio.run(
+            run_scraper(
+                _StubScraper(products=[_stock()], price_histories=[_history(), second])
+            )
+        )
+
+        assert written == [None, second]
+        finish.assert_called_once_with(
+            "run-1",
+            "partial",
+            transactions_imported=0,
+            error_message="price histories: 1 of 2 not written (RuntimeError)",
+        )
+
+    def test_a_connection_error_stops_the_remaining_series(self, finish, monkeypatch):
+        """upsert_price_history already retried: the rest would only block,
+        and they count as not written."""
+        upsert = MagicMock(side_effect=psycopg.OperationalError("db down"))
+        monkeypatch.setattr(main_mod, "upsert_price_history", upsert)
+        histories = [_history(f"stock:000{n}") for n in (1, 2, 3)]
+
+        asyncio.run(
+            run_scraper(_StubScraper(products=[_stock()], price_histories=histories))
+        )
+
+        upsert.assert_called_once()
+        finish.assert_called_once_with(
+            "run-1",
+            "partial",
+            transactions_imported=0,
+            error_message="price histories: 3 of 3 not written (OperationalError)",
+        )
+
+    def test_the_summary_counts_the_points_read(self, writer, finish, caplog):
+        caplog.set_level("INFO", logger="scraper-service")
+        histories = [_history("stock:0001"), _history("stock:0002")]
+
+        asyncio.run(
+            run_scraper(_StubScraper(products=[_stock()], price_histories=histories))
+        )
+
+        assert "1 products, 4 price points read" in caplog.text
+
+    def test_nothing_is_written_when_the_products_leg_fails(self, writer, finish):
+        scraper = _StubScraper(
+            prod_exc=RuntimeError("synthetic outage"), price_histories=[_history()]
+        )
+
+        asyncio.run(run_scraper(scraper))
+
+        writer["upsert_price_history"].assert_not_called()
+        finish.assert_called_once_with(
+            "run-1",
+            "error",
+            transactions_imported=0,
+            error_message="products: synthetic outage",
         )

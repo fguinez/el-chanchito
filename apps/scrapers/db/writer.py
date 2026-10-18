@@ -14,6 +14,7 @@ from db.connection import get_pool, with_db_retry
 from db.slug import slugify, unique_slug
 from scrapers.base import (
     ScrapedExchangeRate,
+    ScrapedPriceHistory,
     ScrapedProduct,
     ScrapedTransaction,
     SupersededTransaction,
@@ -1204,3 +1205,76 @@ def upsert_exchange_rate(rate: ScrapedExchangeRate) -> None:
             "product" if product_id is not None else "institution",
             rate.rate,
         )
+
+
+# --- Price histories (V038) ----------------------------------------------------
+
+
+class UnresolvedPriceScope(LookupError):
+    """A price history names an institution or product the database lacks.
+
+    `run_scraper` turns it into a run warning: the series is dropped, and
+    nothing is created to hang it on.
+    """
+
+
+@with_db_retry
+def upsert_price_history(history: ScrapedPriceHistory) -> int:
+    """Record one product's daily closing prices; return the days written.
+
+    One row per (product, day): a new day is inserted, a day whose price
+    changed is updated in place, and an unchanged day is left alone,
+    `updated_at` included, so the count returned is the new or changed days.
+    Nothing is pruned. Every point lands in one transaction, in the product's
+    currency. Raises `UnresolvedPriceScope` when the institution or the
+    product does not exist yet; neither is ever created.
+    """
+    ref = history.product
+    pool = get_pool()
+    with pool.connection() as conn, conn.transaction():
+        row = conn.execute(
+            "SELECT id FROM institutions WHERE slug = %s", (history.institution,)
+        ).fetchone()
+        if not row:
+            raise UnresolvedPriceScope(
+                f"institution '{history.institution}' not found"
+            )
+        product_id = _lookup_product(
+            conn, row[0], ref.kind, ref.currency, ref.external_ref
+        )
+        if product_id is None:
+            raise UnresolvedPriceScope(
+                f"no {ref.kind} product in {ref.currency}"
+                + (" with that external_ref" if ref.external_ref else "")
+                + f" at '{history.institution}'"
+            )
+
+        # The lookup matched the product on its currency, so `ref.currency`
+        # is the product's own.
+        cur = conn.execute(
+            """
+            INSERT INTO product_prices (product_id, price_date, price, currency)
+            SELECT %s, point.day, point.price, %s
+            FROM unnest(%s::date[], %s::numeric[]) AS point(day, price)
+            ON CONFLICT (product_id, price_date) DO UPDATE
+                SET price = EXCLUDED.price, updated_at = now()
+                WHERE product_prices.price IS DISTINCT FROM EXCLUDED.price
+            """,
+            (
+                product_id,
+                ref.currency,
+                [point.date for point in history.points],
+                [point.price for point in history.points],
+            ),
+        )
+        written = max(cur.rowcount, 0)
+        # Counts only: the prices and the product's ref would say what is held.
+        logger.info(
+            "Price history %s/%s %s: %d point(s), %d new or changed",
+            history.institution,
+            ref.kind,
+            ref.currency,
+            len(history.points),
+            written,
+        )
+        return written

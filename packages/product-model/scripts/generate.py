@@ -27,6 +27,7 @@ from product_model import (
     ColumnSource,
     ResolvedColumn,
     ScrapedExchangeRate,
+    ScrapedPriceHistory,
     ScrapedProduct,
     ScrapedTransaction,
     family_kinds,
@@ -368,6 +369,7 @@ def _render_schema_json() -> str:
         ScrapedProduct,
         ScrapedTransaction,
         ScrapedExchangeRate,
+        ScrapedPriceHistory,
     ]
     for kind in PRODUCT_KINDS:
         models.append(REGISTRY[kind].attributes_cls)
@@ -380,9 +382,9 @@ def _render_schema_json() -> str:
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "chanchito product model",
         "description": (
-            "Ingest contract for scraped products, transactions and exchange "
-            "rates; ScrapedProduct, ScrapedTransaction and ScrapedExchangeRate "
-            "are the envelope models."
+            "Ingest contract for scraped products, transactions, exchange "
+            "rates and price histories; ScrapedProduct, ScrapedTransaction, "
+            "ScrapedExchangeRate and ScrapedPriceHistory are the envelope models."
         ),
         "$defs": defs["$defs"],
     }
@@ -443,7 +445,10 @@ insert only, so a user's change survives later scrapes. A third
 envelope, `ScrapedExchangeRate`, carries a rate an institution applies (scoped
 to one of its products through a `ProductRef`, or institution-wide); the writer
 keeps the latest one per scope in `exchange_rates` and never creates a product
-for it.
+for it. A fourth, `ScrapedPriceHistory`, carries the daily closing prices of one
+product's unit (a stock position, named by a `ProductRef`); the writer keeps one
+price per product and day in `product_prices`, again without creating the
+product.
 
 Conventions: snake_case keys; CLP amounts `int`, USD/crypto amounts `float`;
 dates as ISO `YYYY-MM-DD` strings, quote times as ISO 8601 datetimes;

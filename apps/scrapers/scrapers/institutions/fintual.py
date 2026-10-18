@@ -20,6 +20,8 @@ alone gets a 401. The working flow mirrors a browser sign-in:
     GET  /stocks-pricing-cl/current-prices -> latest price per symbol; wants a
                                             per-service JWT cookie minted by
                                             POST /auth/jwt
+    GET  /stocks-pricing-cl/historical-prices -> one symbol's daily closes,
+                                            same cookie
 
 The session cookies are cached to disk. The monolith_token that /api/goals
 checks lives only a few minutes, so scheduled scrapes refresh the session the
@@ -52,6 +54,12 @@ lands on the next run. A failure there costs the movements only. When the
 ledger is complete it is checked against the wallet's balance, and a stock it
 shows sold (or paid out in a cash merger) that Fintual no longer lists gets a
 zero-valued product.
+
+Each run also reads, after the movements, the last year of daily closes of
+every stock still held (one request per stock) as a price history for its
+product. A stock whose history fails is skipped, counted in one warning; a
+failure of the pricing service itself stops the step, which also has a time
+budget. The rest of the run never depends on it.
 """
 
 import asyncio
@@ -62,8 +70,8 @@ import os
 import tempfile
 from collections import Counter
 from collections.abc import AsyncIterator, Awaitable
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, Callable
@@ -93,7 +101,10 @@ from scrapers.backends.fintual_stocks import (
 )
 from scrapers.base import (
     BaseScraper,
+    DailyPrice,
+    ProductRef,
     ProductScrapeResult,
+    ScrapedPriceHistory,
     ScrapedProduct,
     ScrapedTransaction,
 )
@@ -110,6 +121,7 @@ GOALS_URL = f"{FINTUAL_ORIGIN}/api/goals"
 APP_URL = f"{FINTUAL_ORIGIN}/app/goals"
 GRAPHQL_URL = f"{FINTUAL_ORIGIN}/gql/"
 STOCK_PRICES_URL = f"{FINTUAL_ORIGIN}/stocks-pricing-cl/current-prices"
+HISTORICAL_PRICES_URL = f"{FINTUAL_ORIGIN}/stocks-pricing-cl/historical-prices"
 # Mints the per-service JWT cookie the stocks pricing service checks.
 SERVICE_JWT_URL = f"{FINTUAL_ORIGIN}/auth/jwt"
 # The web app page the stocks requests come from.
@@ -144,6 +156,19 @@ query StocksPortfolio {
   stocksWallet { id balance { amount currency } updatedAt }
   stocksPositionsV2 { positions { id shares asset { id symbol name } } }
 }"""
+# Every run reads a trailing year of daily closes per held stock: the endpoint
+# takes one symbol per call, so a cursor of what is stored would save nothing.
+PRICE_HISTORY_DAYS = 365
+# `limit` counts bars forward from `start`; a year is about 250 trading days.
+_PRICE_HISTORY_LIMIT = 400
+# One request per stock; a wider portfolio gets the first ones and a warning.
+MAX_PRICE_HISTORY_SYMBOLS = 30
+# The whole step's time budget: it runs holding the session lock, and a
+# degraded service could otherwise stall the run for minutes.
+PRICE_HISTORY_BUDGET_SECONDS = 120.0
+# What `product_prices.price` keeps.
+_PRICE_STEP = Decimal("1e-8")
+
 _PERFORMANCE_FIELDS = (
     "id realizedPl totalCompletedSubscriptions totalCompletedRedemptions "
     "totalReceivedDividends shares"
@@ -162,6 +187,11 @@ class FintualSessionError(RuntimeError):
 class FintualStocksError(RuntimeError):
     """The stocks leg failed. The message is ours, safe for the dashboard: no
     URLs (they carry the held symbols), tokens or response bodies."""
+
+
+class FintualPricingUnavailable(FintualStocksError):
+    """The stocks pricing service itself failed (a refused or failed token
+    mint, or a 429/5xx that outlived the retries), whatever the symbol."""
 
 
 # -- stocks: pure parsing and maths ----------------------------------------
@@ -260,6 +290,72 @@ def parse_prices(payload: Any) -> dict[str, StockPrice]:
             continue
         prices[symbol] = StockPrice(price, _parse_datetime(row.get("price_datetime")))
     return prices
+
+
+def history_start(today: date) -> str:
+    """The `start` of a trailing year of daily bars, as the RFC 3339 instant
+    historical-prices wants (a bare date is refused)."""
+    return f"{today - timedelta(days=PRICE_HISTORY_DAYS):%Y-%m-%d}T00:00:00Z"
+
+
+def _bar_time(time: Any) -> datetime:
+    """A bar's ISO timestamp in UTC (no offset reads as UTC); ValueError if
+    it isn't one."""
+    if not isinstance(time, str):
+        raise ValueError("a bar's time must be an ISO datetime string")
+    stamp = datetime.fromisoformat(time)
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(timezone.utc)
+
+
+def trading_date(time: str) -> date:
+    """The trading day of a daily bar: the UTC date of its timestamp.
+
+    Fintual stamps a day's bar at New York midnight (`T04:00:00Z`, or
+    `T05:00:00Z` under standard time), so unlike a movement's date, which is
+    read in America/Santiago, the bar is never converted: in Chile it would
+    land on the day before. A timestamp without an offset is read as UTC.
+    Raises ValueError when it isn't an ISO datetime.
+    """
+    return _bar_time(time).date()
+
+
+def parse_price_history(payload: Any) -> tuple[list[DailyPrice], int]:
+    """The daily closes of a historical-prices answer, oldest first, plus how
+    many bars were unusable.
+
+    A bar without a positive price (after rounding to the stored 8 decimals)
+    or a readable time is dropped and counted. Two bars on one trading day
+    collapse to the later one. Raises ValueError when the answer has no
+    price list at all.
+    """
+    rows = payload.get("prices") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        raise ValueError("historical-prices answered no price list")
+    latest: dict[date, tuple[datetime, DailyPrice]] = {}
+    skipped = 0
+    for row in rows:
+        try:
+            if not isinstance(row, dict):
+                raise ValueError("not a bar")
+            # The stamp orders a day's bars; the day itself is trading_date's.
+            stamp = _bar_time(row.get("time"))
+            day = trading_date(row.get("time"))
+            price = number(row.get("price"))
+            if price is None:
+                raise ValueError("no price")
+            price = price.quantize(_PRICE_STEP, rounding=ROUND_HALF_UP)
+            point = DailyPrice(date=day, price=price)
+        # pydantic's ValidationError is a ValueError; an absurd price can
+        # overflow the quantize (decimal.InvalidOperation, an ArithmeticError).
+        except (ValueError, ArithmeticError):
+            skipped += 1
+            continue
+        kept = latest.get(day)
+        if kept is None or stamp >= kept[0]:
+            latest[day] = (stamp, point)
+    return [latest[day][1] for day in sorted(latest)], skipped
 
 
 def details_query(count: int) -> str:
@@ -376,6 +472,17 @@ def stock_wallet_product(wallet: Any) -> ScrapedProduct | None:
     )
 
 
+def _utc_today() -> date:
+    return datetime.now(timezone.utc).date()
+
+
+def _pricing_service_failed(exc: Exception) -> bool:
+    """Whether a stock's price history failed for a reason the next symbol
+    would meet too: the network (timeouts included) or the pricing service
+    itself, not that symbol's answer."""
+    return isinstance(exc, (httpx.TransportError, FintualPricingUnavailable))
+
+
 def _stocks_failure_reason(exc: Exception) -> str:
     """What a stocks failure may say on the dashboard: our own message, else
     only the exception type (httpx errors carry URLs)."""
@@ -391,6 +498,7 @@ class _Cycle:
     products: list[ScrapedProduct]
     transactions: list[ScrapedTransaction]
     warnings: list[str]
+    price_histories: list[ScrapedPriceHistory] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -399,6 +507,8 @@ class _Stocks:
 
     `listed_asset_ids` is None unless the full positions list was read, and
     `wallet_balance` None unless the wallet's USD balance was.
+    `held_positions` are the positions with shares that got a product, the
+    ones whose price history is read.
     """
 
     products: list[ScrapedProduct]
@@ -406,6 +516,7 @@ class _Stocks:
     has_account: bool = True
     listed_asset_ids: frozenset[str] | None = None
     wallet_balance: Decimal | None = None
+    held_positions: tuple[StockPosition, ...] = ()
 
 
 class FintualScraper(BaseScraper):
@@ -692,24 +803,30 @@ class FintualScraper(BaseScraper):
             label="Fintual POST /auth/jwt",
         )
         if not resp.is_success:
-            raise FintualStocksError(
+            raise FintualPricingUnavailable(
                 f"the stocks pricing token request answered HTTP {resp.status_code}"
             )
 
-    async def _stock_prices(
-        self, client: httpx.AsyncClient, symbols: list[str]
-    ) -> dict[str, StockPrice]:
-        """Latest price per symbol. On a 401 the service JWT is minted once
-        and the request retried once; a second 401 fails the stocks leg."""
+    async def _pricing_get(
+        self, client: httpx.AsyncClient, url: str, params: dict[str, str], label: str
+    ) -> httpx.Response:
+        """GET from the stocks pricing service, retrying transient failures.
+
+        On a 401 the service JWT is minted once and the request retried once,
+        as the web app does (the cookie lives minutes, so a long run may need
+        a new one); a second 401, or any other failure, raises. A failure no
+        other symbol would escape (the token, or a 429/5xx) raises
+        `FintualPricingUnavailable`.
+        """
 
         async def get() -> httpx.Response:
             return await send_with_retry(
                 lambda: client.get(
-                    STOCK_PRICES_URL,
-                    params={"symbols": ",".join(symbols)},
+                    url,
+                    params=params,
                     headers={"Accept": "application/json", "Referer": _STOCKS_REFERER},
                 ),
-                label="Fintual GET current-prices",
+                label=label,
             )
 
         resp = await get()
@@ -717,13 +834,29 @@ class FintualScraper(BaseScraper):
             await self._mint_pricing_jwt(client)
             resp = await get()
         if resp.status_code == 401:
-            raise FintualStocksError(
+            raise FintualPricingUnavailable(
                 "the stocks pricing service refused a fresh token (HTTP 401)"
+            )
+        if resp.status_code in TRANSIENT_HTTP_STATUSES:
+            raise FintualPricingUnavailable(
+                f"the stocks pricing service answered HTTP {resp.status_code}"
             )
         if not resp.is_success:
             raise FintualStocksError(
                 f"the stocks pricing service answered HTTP {resp.status_code}"
             )
+        return resp
+
+    async def _stock_prices(
+        self, client: httpx.AsyncClient, symbols: list[str]
+    ) -> dict[str, StockPrice]:
+        """Latest price per symbol; a refused token fails the stocks leg."""
+        resp = await self._pricing_get(
+            client,
+            STOCK_PRICES_URL,
+            {"symbols": ",".join(symbols)},
+            "Fintual GET current-prices",
+        )
         return parse_prices(resp.json())
 
     async def _position_products(
@@ -814,6 +947,7 @@ class FintualScraper(BaseScraper):
                 warnings.append("Fintual: skipped the stock positions (GraphQL error)")
 
         unpriced = without_totals = 0
+        held: list[StockPosition] = []
         if positions:
             # Whatever fails on the positions' own requests, the wallet lands.
             try:
@@ -827,6 +961,12 @@ class FintualScraper(BaseScraper):
                 )
             else:
                 products.extend(position_products)
+                emitted = {p.external_ref for p in position_products}
+                held = [
+                    p
+                    for p in positions
+                    if p.shares > 0 and stock_ref(p.asset_id) in emitted
+                ]
 
         if unpriced:
             logger.warning(
@@ -850,7 +990,131 @@ class FintualScraper(BaseScraper):
             warnings,
             listed_asset_ids=None if errors else listed_asset_ids(portfolio),
             wallet_balance=wallet_balance(wallet),
+            held_positions=tuple(held),
         )
+
+    async def _price_history(
+        self, client: httpx.AsyncClient, symbol: str, start: str
+    ) -> tuple[list[DailyPrice], int]:
+        """One symbol's daily closes since `start`, plus the bars dropped.
+        Raises when the request fails or no close is usable."""
+        resp = await self._pricing_get(
+            client,
+            HISTORICAL_PRICES_URL,
+            {
+                "symbol": symbol,
+                "start": start,
+                "timeframe": "1Day",
+                "limit": str(_PRICE_HISTORY_LIMIT),
+            },
+            "Fintual GET historical-prices",
+        )
+        points, skipped = parse_price_history(resp.json())
+        if not points:
+            raise FintualStocksError("historical-prices answered no usable close")
+        return points, skipped
+
+    async def _price_histories(
+        self, client: httpx.AsyncClient, positions: list[StockPosition]
+    ) -> tuple[list[ScrapedPriceHistory], list[str]]:
+        """A trailing year of daily closes for each held position, one request
+        each, in turn, plus the warnings.
+
+        Each series names its product through `stock_ref`, exactly as the
+        position's product does. A stock whose history fails is skipped and
+        counted into one warning that carries only counts and exception types
+        (an httpx error's message has the URL, and so the ticker). A failure
+        that isn't the symbol's own (see `_pricing_service_failed`) stops the
+        loop, and the stocks not read yet count as failed too: one token mint
+        and one round of retries per run, not one per stock. Running over the
+        step's time budget stops it too, keeping the series already read.
+        """
+        warnings: list[str] = []
+        # One series per product, even if a position were listed twice.
+        unique = list({p.asset_id: p for p in positions}.values())
+        targets = unique[:MAX_PRICE_HISTORY_SYMBOLS]
+        if len(unique) > len(targets):
+            logger.warning(
+                "Fintual: price history limited to %d of %d stocks",
+                len(targets),
+                len(unique),
+            )
+            warnings.append(
+                f"Fintual: read the price history of {len(targets)} of "
+                f"{len(unique)} stocks (at most {MAX_PRICE_HISTORY_SYMBOLS} per run)"
+            )
+
+        start = history_start(_utc_today())
+        deadline = asyncio.get_running_loop().time() + PRICE_HISTORY_BUDGET_SECONDS
+        histories: list[ScrapedPriceHistory] = []
+        failures: Counter = Counter()
+        dropped = 0
+        not_read = 0
+        for i, position in enumerate(targets):
+            try:
+                async with asyncio.timeout_at(deadline):
+                    points, skipped = await self._price_history(
+                        client, position.symbol, start
+                    )
+                history = ScrapedPriceHistory(
+                    institution="fintual",
+                    product=ProductRef(
+                        kind="investment",
+                        currency=STOCKS_CURRENCY,
+                        external_ref=stock_ref(position.asset_id),
+                    ),
+                    points=points,
+                )
+            except TimeoutError:
+                not_read = len(targets) - i
+                logger.warning(
+                    "Fintual: stock price history ran over its %.0f s budget; "
+                    "%d stock(s) not read",
+                    PRICE_HISTORY_BUDGET_SECONDS,
+                    not_read,
+                )
+                break
+            except Exception as exc:
+                reason = type(exc).__name__
+                if not _pricing_service_failed(exc):
+                    logger.warning("Fintual: a stock's price history failed (%s)", reason)
+                    failures[reason] += 1
+                    continue
+                # The next stock would fail the same way: count this one and
+                # every one not read yet, and stop.
+                left = len(targets) - i
+                logger.warning(
+                    "Fintual: price history stopped at a pricing service failure "
+                    "(%s); %d stock(s) not read",
+                    reason,
+                    left,
+                )
+                failures[reason] += left
+                break
+            dropped += skipped
+            histories.append(history)
+
+        if failures:
+            warnings.append(
+                f"Fintual: stock price history failed for {sum(failures.values())} "
+                f"of {len(targets)} stock(s) ({', '.join(sorted(failures))})"
+            )
+        if not_read:
+            warnings.append(
+                "Fintual: stock price history ran over its "
+                f"{PRICE_HISTORY_BUDGET_SECONDS:.0f} s budget ({not_read} of "
+                f"{len(targets)} stock(s) not read)"
+            )
+        if dropped:
+            # Noise in the provider's series, not a gap worth a partial run.
+            logger.info("Fintual: dropped %d unusable daily price bar(s)", dropped)
+        logger.info(
+            "Fintual: price history for %d of %d stock(s), %d daily closes",
+            len(histories),
+            len(targets),
+            sum(len(h.points) for h in histories),
+        )
+        return histories, warnings
 
     async def _wallet_pages(
         self, client: httpx.AsyncClient, now: datetime
@@ -1068,7 +1332,8 @@ class FintualScraper(BaseScraper):
         return products, warnings
 
     async def _run_cycle(self) -> _Cycle:
-        """One session drive: the goals, then the stocks, then save the jar."""
+        """One session drive: the goals, then the stocks (portfolio,
+        movements, price history), then save the jar."""
         async with self._session_lock, httpx.AsyncClient(
             timeout=30.0, follow_redirects=True, headers=self._base_headers()
         ) as client:
@@ -1104,6 +1369,27 @@ class FintualScraper(BaseScraper):
                     products.extend(sold_out)
                     warnings.extend(movement_warnings)
 
+            # The held stocks' daily closes, last: a slow pricing service
+            # must not age the session before the movements are read (a
+            # stale pricing cookie is just minted again). Its own part too,
+            # under a time budget: a failure costs the price history only.
+            price_histories: list[ScrapedPriceHistory] = []
+            if stocks is not None and stocks.held_positions:
+                try:
+                    price_histories, history_warnings = await self._price_histories(
+                        client, list(stocks.held_positions)
+                    )
+                except Exception as exc:
+                    logger.exception(
+                        "Fintual: stock price history failed; keeping the rest"
+                    )
+                    warnings.append(
+                        "Fintual: stock price history failed "
+                        f"({_stocks_failure_reason(exc)})"
+                    )
+                else:
+                    warnings.extend(history_warnings)
+
             # Keep the newest jar on disk (the stocks leg may have refreshed the
             # session or minted the pricing cookie). The refresh token itself
             # was saved the moment it rotated, so a failed save here costs at
@@ -1113,7 +1399,7 @@ class FintualScraper(BaseScraper):
             except OSError:
                 logger.warning("Fintual: could not save the session", exc_info=True)
 
-            return _Cycle(products, transactions, warnings)
+            return _Cycle(products, transactions, warnings, price_histories)
 
     async def _scrape_cycle(self) -> _Cycle:
         """Drive the session once, caching the cycle (or its error) for the
@@ -1151,7 +1437,9 @@ class FintualScraper(BaseScraper):
                 cycle = await self._scrape_cycle()
             finally:
                 self._cached = self._error = None
-        return ProductScrapeResult(cycle.products, cycle.warnings)
+        return ProductScrapeResult(
+            cycle.products, cycle.warnings, price_histories=cycle.price_histories
+        )
 
 
 def _login_cli() -> None:

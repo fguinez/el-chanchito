@@ -3,8 +3,9 @@
 // Per-product insight graphs for the product detail page. Which graphs render
 // depends on the product kind: credit products get cupo usage, products with
 // transactions get a movement waterfall + monthly flow, investments get their
-// value composition. Shared types with the product API response live here so
-// the page and the route stay in sync.
+// value composition, and stock positions their daily price history. Shared
+// types with the product API response live here so the page and the route
+// stay in sync.
 
 import {
   Area,
@@ -15,8 +16,10 @@ import {
   ComposedChart,
   Legend,
   Line,
+  LineChart,
   Pie,
   PieChart,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -36,18 +39,32 @@ import {
   useTimeSeriesChart,
 } from "@/components/charts/interactive-chart";
 import { TimeRangeControl } from "@/components/charts/time-range-control";
+import { fixedWindowMs } from "@/components/charts/x-axis-range";
 import {
   formatBalance,
   productLimit,
   type InstitutionProduct,
 } from "@/components/institutions/shared";
-import { cn, formatAxisValue } from "@/lib/utils";
+import {
+  cn,
+  formatAmount,
+  formatAxisValue,
+  formatPercent,
+  formatPlainDateEs,
+  formatPriceAxisValue,
+  formatTimestampEs,
+} from "@/lib/utils";
 import {
   buildWaterfallData,
   type WaterfallDatum,
 } from "@/lib/product-movements";
 import { countsTowardFlow } from "@/lib/transactions";
 import { investmentComposition } from "@/lib/investment-composition";
+import {
+  buildPriceRows,
+  rangeChange,
+  type ProductPricePoint,
+} from "@/lib/price-history";
 import type { ProductMetrics } from "@chanchito/product-model";
 
 export interface ProductTransaction {
@@ -671,6 +688,173 @@ export function InvestmentCompositionCard({
               </span>
             </p>
           </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Daily price history (stock positions)
+// ---------------------------------------------------------------------------
+
+/** A stock's daily closes over time, with the position's average cost as a
+ *  dashed reference line. Rendered for products with a ticker that have
+ *  closes or still hold units (`showsPriceHistory`); until the scraper has
+ *  stored two closes the card stays, with a note. */
+export function PriceHistoryCard({
+  product,
+  ticker,
+  prices,
+  institutionName,
+}: {
+  product: InstitutionProduct;
+  ticker: string;
+  /** Daily closes, oldest first (the product API's `prices`). */
+  prices: ProductPricePoint[];
+  institutionName: string;
+}) {
+  // "Fit": a price far from zero would sit squashed against an "auto" zero
+  // baseline.
+  const chart = useTimeSeriesChart({ kind: "all" }, { kind: "fit" });
+  const rows = buildPriceRows(prices);
+  const change = rangeChange(rows, fixedWindowMs(chart.x.range));
+  const latest = rows.at(-1) ?? null;
+
+  const m = product.metrics;
+  const investment = m && m.kind === "investment" ? m : null;
+  const averageCost =
+    investment?.average_cost != null && investment.average_cost > 0
+      ? investment.average_cost
+      : null;
+  const unitPrice = investment?.unit_price ?? null;
+  const unitPriceAsOf = investment?.unit_price_as_of ?? null;
+  const format = (value: number) => formatAmount(product.currency, value);
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Historial de precio</CardTitle>
+        <CardDescription>
+          Cierre diario de {ticker} en {product.currency}, según{" "}
+          {institutionName}
+        </CardDescription>
+        {rows.length >= 2 && (
+          <CardAction>
+            <TimeRangeControl control={chart.x} allowAll />
+          </CardAction>
+        )}
+      </CardHeader>
+      <CardContent>
+        {rows.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            Aún no hay historial de precios. Se carga en la próxima
+            actualización de {institutionName}.
+          </p>
+        ) : rows.length === 1 ? (
+          <p className="text-sm text-muted-foreground">
+            Hace falta más de un cierre para graficar.
+          </p>
+        ) : (
+          <InteractiveChart
+            {...chart.interactiveProps}
+            formatYValue={formatPriceAxisValue}
+            height={300}
+          >
+            <LineChart data={rows}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis {...chart.xAxisProps} />
+              <YAxis {...chart.yAxisProps} tickFormatter={formatPriceAxisValue} />
+              <Tooltip
+                formatter={(value) => [format(Number(value)), "Precio de cierre"]}
+                labelFormatter={chart.labelFormatter}
+              />
+              {averageCost != null && (
+                <ReferenceLine
+                  y={averageCost}
+                  stroke={COLORS.deposited}
+                  strokeDasharray="6 4"
+                  ifOverflow="extendDomain"
+                  label={{
+                    value: "Costo promedio",
+                    position: "insideTopLeft",
+                    fill: COLORS.deposited,
+                    fontSize: 12,
+                  }}
+                />
+              )}
+              <Line
+                type="monotone"
+                dataKey="price"
+                name="Precio de cierre"
+                stroke={COLORS.balance}
+                strokeWidth={2}
+                dot={false}
+                isAnimationActive={false}
+              />
+            </LineChart>
+          </InteractiveChart>
+        )}
+
+        <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-1 border-t pt-3 text-sm">
+          {latest && (
+            <span className="flex items-center gap-1.5">
+              <span
+                className="h-0.5 w-4 rounded"
+                style={{ backgroundColor: COLORS.balance }}
+              />
+              Último cierre{" "}
+              <span className="font-medium tabular-nums">
+                {format(latest.price)}
+              </span>
+              <span className="text-muted-foreground">
+                ({formatPlainDateEs(latest.date)})
+              </span>
+            </span>
+          )}
+          {averageCost != null && (
+            <span className="flex items-center gap-1.5">
+              <span
+                className="w-4 border-t-2 border-dashed"
+                style={{ borderColor: COLORS.deposited }}
+              />
+              Costo promedio{" "}
+              <span className="font-medium tabular-nums">
+                {format(averageCost)}
+              </span>
+            </span>
+          )}
+          {unitPrice != null && (
+            <span>
+              Precio actual{" "}
+              <span className="font-medium tabular-nums">{format(unitPrice)}</span>
+              {unitPriceAsOf && (
+                <span className="text-muted-foreground">
+                  {" "}
+                  ({formatTimestampEs(unitPriceAsOf)})
+                </span>
+              )}
+            </span>
+          )}
+          {rows.length >= 2 && (
+            <span className="ml-auto">
+              Variación en el rango{" "}
+              {change ? (
+                <span
+                  className={cn(
+                    "font-medium tabular-nums",
+                    change.change < 0 ? "text-red-600" : "text-green-600"
+                  )}
+                >
+                  {change.change >= 0 ? "+" : ""}
+                  {format(change.change)} (
+                  {formatPercent(change.pct, { signed: true })})
+                </span>
+              ) : (
+                <span className="text-muted-foreground">sin dato</span>
+              )}
+            </span>
+          )}
         </div>
       </CardContent>
     </Card>

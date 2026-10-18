@@ -1,8 +1,10 @@
 """Tests for the per-kind payload models, unions, and ingest envelopes."""
 
+import json
 import re
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
@@ -12,11 +14,13 @@ from product_model import (
     PRODUCT_KINDS,
     REGISTRY,
     CreditCardAttributes,
+    DailyPrice,
     InvestmentAttributes,
     InvestmentMetrics,
     ProductMetrics,
     ProductRef,
     ScrapedExchangeRate,
+    ScrapedPriceHistory,
     ScrapedProduct,
     ScrapedTransaction,
     TermDepositAttributes,
@@ -599,4 +603,108 @@ class TestScrapedExchangeRate:
 
         assert {"type": "number", "exclusiveMinimum": 0} in prop["anyOf"]
         (string_form,) = [m for m in prop["anyOf"] if m.get("type") == "string"]
+        assert string_form["pattern"] == r"^\d{1,12}(\.\d{1,8})?$"
+
+
+def _price_history(**fields) -> ScrapedPriceHistory:
+    """A synthetic two-day ACME series; `fields` override the defaults."""
+    values = {
+        "institution": "fintual",
+        "product": {"kind": "investment", "currency": "USD", "external_ref": "stock:0001"},
+        "points": [
+            {"date": "2026-01-02", "price": 100.0},
+            {"date": "2026-01-05", "price": "250.5"},
+        ],
+    }
+    values.update(fields)
+    return ScrapedPriceHistory(**values)
+
+
+class TestScrapedPriceHistory:
+    """The price-history envelope fits `product_prices` (V038)."""
+
+    def test_carries_the_product_identity_and_its_points(self):
+        history = _price_history()
+
+        assert history.product == ProductRef(
+            kind="investment", currency="USD", external_ref="stock:0001"
+        )
+        assert history.points == [
+            DailyPrice(date=date(2026, 1, 2), price=Decimal("100.0")),
+            DailyPrice(date=date(2026, 1, 5), price=Decimal("250.5")),
+        ]
+
+    @pytest.mark.parametrize("raw", [250.5, "250.5", Decimal("250.5")])
+    def test_number_string_and_decimal_prices_agree(self, raw):
+        assert DailyPrice(date="2026-01-02", price=raw).price == Decimal("250.5")
+
+    @pytest.mark.parametrize(
+        "raw",
+        [0, -1, "0", -0.5, "1.123456789", 10**12, "NaN", float("inf"), "1,5", "1E+3", " 1", True],
+        ids=[
+            "zero", "negative", "zero-string", "negative-fraction", "nine-decimals",
+            "too-large", "nan", "inf", "comma", "exponent", "padded", "bool",
+        ],
+    )
+    def test_prices_the_column_cannot_hold_are_rejected(self, raw):
+        with pytest.raises(ValidationError):
+            DailyPrice(date="2026-01-02", price=raw)
+
+    def test_eight_decimals_fit(self):
+        assert DailyPrice(date="2026-01-02", price="0.12345678").price == Decimal(
+            "0.12345678"
+        )
+
+    def test_a_day_appears_at_most_once(self):
+        with pytest.raises(ValidationError, match="repeat the day"):
+            _price_history(
+                points=[
+                    {"date": "2026-01-02", "price": 100.0},
+                    {"date": "2026-01-02", "price": 250.5},
+                ]
+            )
+
+    def test_a_history_has_at_least_one_point(self):
+        with pytest.raises(ValidationError):
+            _price_history(points=[])
+
+    def test_a_history_is_bounded(self):
+        start = date(2000, 1, 1).toordinal()
+        points = [
+            {"date": date.fromordinal(start + n), "price": 100.0} for n in range(4001)
+        ]
+
+        with pytest.raises(ValidationError):
+            _price_history(points=points)
+
+    def test_unknown_fields_are_rejected(self):
+        with pytest.raises(ValidationError):
+            _price_history(nombre="TITULAR SINTETICO")
+        with pytest.raises(ValidationError):
+            _price_history(points=[{"date": "2026-01-02", "price": 100.0, "volume": 1}])
+        with pytest.raises(ValidationError):
+            _price_history(
+                product={"kind": "investment", "currency": "USD", "id": "0001"}
+            )
+
+    def test_a_point_is_immutable(self):
+        point = DailyPrice(date="2026-01-02", price=100.0)
+
+        with pytest.raises(ValidationError):
+            point.price = Decimal("250.5")
+
+    def test_the_generated_json_schema_exports_it(self):
+        schema_path = (
+            Path(__file__).resolve().parent.parent
+            / "generated"
+            / "product-model.schema.json"
+        )
+        defs = json.loads(schema_path.read_text(encoding="utf-8"))["$defs"]
+
+        assert defs["ScrapedPriceHistory"]["properties"]["points"]["items"] == {
+            "$ref": "#/$defs/DailyPrice"
+        }
+        price = defs["DailyPrice"]["properties"]["price"]
+        assert {"type": "number", "exclusiveMinimum": 0} in price["anyOf"]
+        (string_form,) = [m for m in price["anyOf"] if m.get("type") == "string"]
         assert string_form["pattern"] == r"^\d{1,12}(\.\d{1,8})?$"
