@@ -47,6 +47,7 @@ import {
   type WaterfallDatum,
 } from "@/lib/product-movements";
 import { countsTowardFlow } from "@/lib/transactions";
+import { investmentComposition } from "@/lib/investment-composition";
 import type { ProductMetrics } from "@chanchito/product-model";
 
 export interface ProductTransaction {
@@ -566,7 +567,8 @@ export function MonthlyFlowCard({
 // Investment value composition (investment)
 // ---------------------------------------------------------------------------
 
-/** Current value split into contributed capital vs accumulated result. */
+/** Current value split into what it grew from (a goal's deposits, or what a
+ *  stock position's shares cost) and the result on top. */
 export function InvestmentCompositionCard({
   product,
 }: {
@@ -574,20 +576,26 @@ export function InvestmentCompositionCard({
 }) {
   const m = product.metrics;
   if (!m || m.kind !== "investment") return null;
-  if (m.deposited == null || m.profit == null) return null;
+  const composition = investmentComposition(m);
+  if (!composition) return null;
 
-  const deposited = m.deposited;
-  const profit = m.profit;
-  const nav = m.nav ?? deposited + profit;
-  const pct = deposited > 0 ? (profit / deposited) * 100 : 0;
-  const profitColor = profit >= 0 ? COLORS.income : COLORS.expense;
+  const { base, result, pct, nav, byUnits } = composition;
+  const baseLabel = byUnits ? "Costo" : "Aportado";
+  const resultLabel = result >= 0 ? "Ganancia" : "Pérdida";
+  const resultColor = result >= 0 ? COLORS.income : COLORS.expense;
+  const slices = [
+    { name: baseLabel, value: base, color: COLORS.deposited },
+    { name: resultLabel, value: Math.abs(result), color: resultColor },
+  ];
 
   return (
     <Card>
       <CardHeader>
         <CardTitle>Composición del valor</CardTitle>
         <CardDescription>
-          Valor actual dividido en lo aportado y el resultado acumulado
+          {byUnits
+            ? "Valor actual dividido en lo que costaron las unidades que tienes y su resultado"
+            : "Valor actual dividido en lo aportado y el resultado acumulado"}
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -596,14 +604,7 @@ export function InvestmentCompositionCard({
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
                 <Pie
-                  data={[
-                    { name: "Aportado", value: deposited, color: COLORS.deposited },
-                    {
-                      name: profit >= 0 ? "Ganancia" : "Pérdida",
-                      value: Math.abs(profit),
-                      color: profitColor,
-                    },
-                  ]}
+                  data={slices}
                   dataKey="value"
                   nameKey="name"
                   innerRadius={64}
@@ -611,13 +612,7 @@ export function InvestmentCompositionCard({
                   paddingAngle={2}
                   strokeWidth={0}
                 >
-                  {[
-                    { name: "Aportado", color: COLORS.deposited },
-                    {
-                      name: profit >= 0 ? "Ganancia" : "Pérdida",
-                      color: profitColor,
-                    },
-                  ].map((d) => (
+                  {slices.map((d) => (
                     <Cell key={d.name} fill={d.color} />
                   ))}
                 </Pie>
@@ -632,7 +627,7 @@ export function InvestmentCompositionCard({
               <span
                 className={cn(
                   "text-2xl font-semibold tabular-nums",
-                  profit < 0 && "text-red-600"
+                  result < 0 && "text-red-600"
                 )}
               >
                 {pct >= 0 ? "+" : ""}
@@ -650,19 +645,19 @@ export function InvestmentCompositionCard({
                 className="h-2.5 w-2.5 rounded-sm"
                 style={{ backgroundColor: COLORS.deposited }}
               />
-              Aportado
+              {baseLabel}
               <span className="pl-6 font-medium tabular-nums">
-                {formatBalance(product.currency, deposited)}
+                {formatBalance(product.currency, base)}
               </span>
             </p>
             <p className="flex items-center gap-2">
               <span
                 className="h-2.5 w-2.5 rounded-sm"
-                style={{ backgroundColor: profitColor }}
+                style={{ backgroundColor: resultColor }}
               />
-              {profit >= 0 ? "Ganancia" : "Pérdida"}
+              {resultLabel}
               <span className="pl-6 font-medium tabular-nums">
-                {formatBalance(product.currency, profit)}
+                {formatBalance(product.currency, result)}
               </span>
             </p>
             <p className="flex items-center gap-2 border-t pt-2">

@@ -24,7 +24,7 @@ are retried by `scrapers.retry`.
   Buda, also at zero units so a coin sold out stops counting. A coin the
   response leaves out can't be zeroed this way: making "absent means zero"
   a writer rule is a follow-up shared with Buda. Fiat other than CLP is
-  skipped with a warning (`WalletMetrics` holds whole CLP only), as are
+  skipped with a warning (only the CLP wallet is modelled), as are
   tokenized stocks (no product kind fits yet) and unclassified symbols. Skipped holdings are counted in the run's
   warnings, so the run is recorded partial;
 - `/v2/markets/{SYMBOL}-CLP/price?side=SELL` for each held coin: Skipo's

@@ -16,6 +16,7 @@ import type { RateBook } from "@/lib/rates";
 const GOAL_ID = "11111111-1111-4111-8111-111111111111";
 const CHECKING_ID = "22222222-2222-4222-8222-222222222222";
 const CARD_ID = "33333333-3333-4333-8333-333333333333";
+const STOCK_ID = "44444444-4444-4444-8444-444444444444";
 
 const book: RateBook = { provider: { CLP: 1 }, overrides: [] };
 
@@ -49,6 +50,18 @@ const goal = (
   source,
   kind: "investment",
   currency: "CLP",
+  slug: "fintual",
+});
+
+/** A Fintual stock position: an investment too, but in USD. */
+const stock = (asOf: Date, nav: number): WealthSnapshotRow => ({
+  productId: STOCK_ID,
+  balance: nav.toFixed(8),
+  metrics: { kind: "investment", nav },
+  asOf,
+  source: "scraper",
+  kind: "investment",
+  currency: "USD",
   slug: "fintual",
 });
 
@@ -164,6 +177,24 @@ describe("buildWealthSeries", () => {
       ["2026-03-05", "computed"],
     ]);
     expect(series[1].patrimonio).toBe(2500000);
+  });
+
+  it("keeps Fintual's USD stock positions out of the CLP Fintual column", () => {
+    const usdBook: RateBook = { provider: { CLP: 1, USD: 1000 }, overrides: [] };
+
+    const series = buildWealthSeries(
+      [],
+      [
+        goal(new Date(2026, 2, 5, 9), 1000000),
+        stock(new Date(2026, 2, 5, 9), 1234.56),
+      ],
+      usdBook
+    );
+
+    expect(series[0]).toMatchObject({
+      patrimonio: 2234560,
+      fintualBalance: 1000000,
+    });
   });
 
   it("derives deuda from a card's owed metric with no legacy rows", () => {

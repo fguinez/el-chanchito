@@ -11,6 +11,13 @@ alone gets a 401. The working flow mirrors a browser sign-in:
     GET  /app/goals                      -> with auth_refresh_token, re-issues a
                                             short-lived monolith_token and
                                             rotates the refresh token
+    POST /gql/                           -> the stock brokerage ("Acciones"):
+                                            StocksPortfolio lists the USD wallet
+                                            and the positions, StocksDetails
+                                            batches each position's totals
+    GET  /stocks-pricing-cl/current-prices -> latest price per symbol; wants a
+                                            per-service JWT cookie minted by
+                                            POST /auth/jwt
 
 The session cookies are cached to disk. The monolith_token that /api/goals
 checks lives only a few minutes, so scheduled scrapes refresh the session the
@@ -20,22 +27,35 @@ FINTUAL_EMAIL equals EMAIL_IMAP_USER the scraper reads the e-mailed code from
 the mailbox and signs in by itself; otherwise run `make fintual-login` and type
 the code. An automatic login that fails once is not retried until
 `make fintual-login` succeeds.
+
+Each run emits one CLP `investment` product per goal, then the stocks: one USD
+`investment` product per position (`external_ref` "stock:<asset id>") and one
+USD `wallet` for the cash not yet invested in stocks. Position figures follow
+the web app's own formulas (see `stock_metrics`). The stocks are a separate
+leg of the same run: if they fail, the goals still land and the run is
+recorded partial; if only the positions fail, the wallet lands too. An
+account that never opened the brokerage (nothing resolves and GraphQL reports
+no error) gets no stock products and no warning; nothing resolving next to a
+GraphQL error is a failed leg.
 """
 
 import asyncio
 import inspect
 import json
 import logging
+import math
 import os
 import tempfile
 from collections.abc import Awaitable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import httpx
 
-from product_model import InvestmentMetrics
+from product_model import InvestmentAttributes, InvestmentMetrics, WalletMetrics
 
 from scrapers.backends.email import fetch_latest_code
 from scrapers.base import (
@@ -55,6 +75,14 @@ FINALIZE_LOGIN_URL = f"{FINTUAL_ORIGIN}/auth/sessions/finalize_login_web"
 GOALS_URL = f"{FINTUAL_ORIGIN}/api/goals"
 # The web app page whose server render refreshes the session.
 APP_URL = f"{FINTUAL_ORIGIN}/app/goals"
+GRAPHQL_URL = f"{FINTUAL_ORIGIN}/gql/"
+STOCK_PRICES_URL = f"{FINTUAL_ORIGIN}/stocks-pricing-cl/current-prices"
+# Mints the per-service JWT cookie the stocks pricing service checks.
+SERVICE_JWT_URL = f"{FINTUAL_ORIGIN}/auth/jwt"
+# The web app page the stocks requests come from.
+_STOCKS_REFERER = f"{FINTUAL_ORIGIN}/f/stocks/wallet/"
+_PRICING_AUDIENCE = "stocks-pricing"
+_PRICING_JWT_COOKIE = "stocks-pricing_service_jwt"
 
 # A desktop Chrome UA; Fintual's session endpoints behave differently without one.
 BROWSER_USER_AGENT = (
@@ -74,6 +102,26 @@ _CODE_CLOCK_SKEW = timedelta(seconds=30)
 
 _RELOGIN_HINT = "Run `make fintual-login` to sign in again."
 
+# The brokerage holds US stocks; positions and the cash wallet are in USD.
+STOCKS_CURRENCY = "USD"
+STOCKS_WALLET_NAME = "Acciones: saldo disponible"
+# Goal refs are bare digits, so the prefix keeps stock refs apart.
+_STOCK_REF_PREFIX = "stock:"
+_CENT = Decimal("0.01")
+# Per-share costs keep more places: a quote can be under a dollar.
+_AVERAGE_COST_STEP = Decimal("0.0001")
+
+_PORTFOLIO_QUERY = """\
+query StocksPortfolio {
+  stocksWallet { id balance { amount currency } updatedAt }
+  stocksPositionsV2 { positions { id shares asset { id symbol name } } }
+}"""
+_PERFORMANCE_FIELDS = (
+    "id realizedPl totalCompletedSubscriptions totalCompletedRedemptions "
+    "totalReceivedDividends shares"
+)
+_ASSET_FIELDS = "id name symbol overview assetTags { id emoji displayName }"
+
 # apps/scrapers/, resolved from this file so cwd doesn't matter.
 _APP_DIR = Path(__file__).resolve().parents[2]
 _DEFAULT_SESSION_FILE = _APP_DIR / ".fintual_session.json"
@@ -81,6 +129,221 @@ _DEFAULT_SESSION_FILE = _APP_DIR / ".fintual_session.json"
 
 class FintualSessionError(RuntimeError):
     """Raised when there is no usable cached session and 2FA login is required."""
+
+
+class FintualStocksError(RuntimeError):
+    """The stocks leg failed. The message is ours, safe for the dashboard: no
+    URLs (they carry the held symbols), tokens or response bodies."""
+
+
+# -- stocks: pure parsing and maths ----------------------------------------
+
+
+@dataclass(frozen=True)
+class StockPosition:
+    """One holding from StocksPortfolio."""
+
+    asset_id: str
+    symbol: str
+    name: str
+    shares: Decimal
+
+
+@dataclass(frozen=True)
+class StockPrice:
+    """A symbol's latest price from the pricing service."""
+
+    price: Decimal
+    as_of: datetime | None
+
+
+def _number(value: Any) -> Decimal | None:
+    """A JSON number as an exact Decimal of its repr; None if it isn't one."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value):
+        return None
+    return Decimal(str(value))
+
+
+def _text(value: Any) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip()
+
+
+def _cents(value: Decimal) -> Decimal:
+    return value.quantize(_CENT, rounding=ROUND_HALF_UP)
+
+
+def _usd(value: Decimal) -> float:
+    return float(_cents(value))
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def parse_positions(portfolio: dict) -> tuple[list[StockPosition], int]:
+    """The positions of a StocksPortfolio answer, plus how many were unreadable.
+
+    A null or empty list (an account without stocks) is no positions.
+    """
+    container = portfolio.get("stocksPositionsV2") or {}
+    positions: list[StockPosition] = []
+    unreadable = 0
+    for row in container.get("positions") or []:
+        row = row or {}
+        asset = row.get("asset") or {}
+        symbol = _text(asset.get("symbol"))
+        shares = _number(row.get("shares"))
+        if asset.get("id") is None or symbol is None or shares is None or shares < 0:
+            unreadable += 1
+            continue
+        positions.append(
+            StockPosition(
+                asset_id=str(asset["id"]),
+                symbol=symbol,
+                name=_text(asset.get("name")) or symbol,
+                shares=shares,
+            )
+        )
+    return positions, unreadable
+
+
+def parse_prices(payload: Any) -> dict[str, StockPrice]:
+    """Map symbol -> latest price. A row without a positive price is left out,
+    so its position is never silently valued at 0."""
+    prices: dict[str, StockPrice] = {}
+    rows = payload.get("prices") if isinstance(payload, dict) else None
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        symbol = row.get("symbol")
+        price = _number(row.get("price"))
+        if not isinstance(symbol, str) or price is None or price <= 0:
+            continue
+        prices[symbol] = StockPrice(price, _parse_datetime(row.get("price_datetime")))
+    return prices
+
+
+def details_query(count: int) -> str:
+    """One StocksDetails query for `count` positions: position i's totals and
+    asset profile come back under the aliases p{i} and a{i}, for $s{i}."""
+    variables = ", ".join(f"$s{i}: String!" for i in range(count))
+    fields = "\n".join(
+        f"  p{i}: stocksPositionPerformance(assetSymbol: $s{i}) {{ {_PERFORMANCE_FIELDS} }}\n"
+        f"  a{i}: stocksAsset(assetSymbol: $s{i}) {{ {_ASSET_FIELDS} }}"
+        for i in range(count)
+    )
+    return f"query StocksDetails({variables}) {{\n{fields}\n}}"
+
+
+def stock_metrics(
+    shares: Decimal, price: StockPrice | None, performance: dict
+) -> InvestmentMetrics:
+    """A position's figures, by the web app's own formulas (verified to the cent):
+
+        value          = shares * price
+        total_pl       = value - subscriptions + redemptions
+        unrealized_pl  = total_pl - realized_pl
+        average_cost   = price - unrealized_pl / shares       (0 without shares)
+        unrealized_pct = unrealized_pl / (average_cost * shares)
+        net_invested   = subscriptions - redemptions
+
+    Amounts are rounded to cents before anything is derived from them, so
+    profit = nav - deposited to the cent, and average_cost is the held
+    shares' cost (nav - unrealized_profit) per share. nav/deposited/profit
+    keep the goals' meaning. A position without shares needs no price: it is
+    worth 0. Raises ValueError when a performance total is missing, or a held
+    position has no price.
+    """
+    subscriptions = _number(performance.get("totalCompletedSubscriptions"))
+    redemptions = _number(performance.get("totalCompletedRedemptions"))
+    realized = _number(performance.get("realizedPl"))
+    if subscriptions is None or redemptions is None or realized is None:
+        raise ValueError("stock position performance totals are missing")
+    if price is None and shares:
+        raise ValueError("a held stock position needs a price")
+    dividends = _number(performance.get("totalReceivedDividends"))
+
+    value = _cents(shares * price.price) if price else Decimal(0)
+    net_invested = _cents(subscriptions - redemptions)
+    total_pl = value - net_invested
+    unrealized = total_pl - _cents(realized)
+    if shares:
+        cost = value - unrealized
+        average_cost = cost / shares
+        unrealized_pct = unrealized / cost * 100 if cost else Decimal(0)
+    else:
+        average_cost = unrealized_pct = Decimal(0)
+    average_cost = average_cost.quantize(_AVERAGE_COST_STEP, rounding=ROUND_HALF_UP)
+    unrealized_pct = unrealized_pct.quantize(_CENT, rounding=ROUND_HALF_UP)
+
+    return InvestmentMetrics(
+        nav=float(value),
+        deposited=float(net_invested),
+        profit=float(total_pl),
+        units=float(shares),
+        unit_price=float(price.price) if price else None,
+        average_cost=float(average_cost),
+        unrealized_profit=float(unrealized),
+        unrealized_profit_pct=float(unrealized_pct),
+        realized_profit=_usd(realized),
+        dividends=_usd(dividends) if dividends is not None else None,
+        unit_price_as_of=price.as_of if price else None,
+    )
+
+
+def stock_attributes(symbol: str, asset: Any) -> InvestmentAttributes:
+    """Identity of a position: its ticker, plus the profile when StocksDetails
+    returned one (otherwise those fields stay None and keep their stored value)."""
+    if not isinstance(asset, dict):
+        return InvestmentAttributes(ticker=symbol)
+    raw_tags = asset.get("assetTags")
+    tags: list[str] | None = None  # a null list keeps the stored tags
+    if isinstance(raw_tags, list):
+        tags = []
+        for tag in raw_tags:
+            label = _text(tag.get("displayName")) if isinstance(tag, dict) else None
+            if label is None:
+                continue
+            emoji = _text(tag.get("emoji"))
+            tags.append(f"{emoji} {label}" if emoji else label)
+    return InvestmentAttributes(
+        ticker=symbol, description=_text(asset.get("overview")), tags=tags
+    )
+
+
+def stock_wallet_product(wallet: Any) -> ScrapedProduct | None:
+    """The USD cash wallet ("sin usar en acciones"); None when its balance is
+    unreadable or not in USD."""
+    if not isinstance(wallet, dict):
+        return None
+    balance = wallet.get("balance") or {}
+    amount = _number(balance.get("amount"))
+    if amount is None or balance.get("currency") != STOCKS_CURRENCY:
+        return None
+    return ScrapedProduct(
+        institution="fintual",
+        kind="wallet",
+        currency=STOCKS_CURRENCY,
+        name=STOCKS_WALLET_NAME,
+        metrics=WalletMetrics(balance=_usd(amount)),
+    )
+
+
+def _stocks_failure_reason(exc: Exception) -> str:
+    """What a stocks failure may say on the dashboard: our own message, else
+    only the exception type (httpx errors carry URLs)."""
+    if isinstance(exc, FintualStocksError):
+        return str(exc)
+    return type(exc).__name__
 
 
 class FintualScraper(BaseScraper):
@@ -98,6 +361,9 @@ class FintualScraper(BaseScraper):
         # scrape isn't a scheduler job, so a manual refresh can overlap it)
         # would both spend it. A run waits, then reads the rotated cache.
         self._session_lock = asyncio.Lock()
+        # Set once this run has refreshed the session, so a later 401 doesn't
+        # spend the rotated refresh token again.
+        self._refreshed_this_run = False
 
     # -- session persistence ------------------------------------------------
 
@@ -262,7 +528,8 @@ class FintualScraper(BaseScraper):
     # -- scraping -----------------------------------------------------------
 
     async def scrape_transactions(self) -> list[ScrapedTransaction]:
-        # Fintual doesn't expose individual buy/sell transactions via API.
+        # Goals expose no individual movements, and stock movements aren't
+        # read yet (they'd need transactions that target one position).
         return []
 
     async def _get_goals(self, client: httpx.AsyncClient) -> httpx.Response:
@@ -299,13 +566,230 @@ class FintualScraper(BaseScraper):
             )
             return False
         self._save_session(client)
+        self._refreshed_this_run = True
         logger.info("Fintual: session refreshed.")
         return True
+
+    # -- stocks -------------------------------------------------------------
+
+    async def _graphql(
+        self, client: httpx.AsyncClient, operation: str, query: str, variables: dict
+    ) -> tuple[Any, int]:
+        """POST a read-only GraphQL query; return its `data` and how many
+        errors came with it.
+
+        Queries only read, so transient failures are retried like a GET. A 401
+        gets a session refresh unless the run already refreshed, never a
+        sign-in. GraphQL reports errors in a 200: an answer without a `data`
+        key means the request itself was refused (a parse or validation
+        error, say a renamed field), which raises. Errors met while resolving
+        still answer `data`, with the failed fields null; the caller decides
+        what that means.
+        """
+
+        async def post() -> httpx.Response:
+            return await send_with_retry(
+                lambda: client.post(
+                    GRAPHQL_URL,
+                    headers={"Accept": "application/json", "Referer": _STOCKS_REFERER},
+                    json={"query": query, "variables": variables},
+                ),
+                label=f"Fintual POST /gql/ {operation}",
+            )
+
+        resp = await post()
+        if (
+            resp.status_code == 401
+            and not self._refreshed_this_run
+            and await self._refresh_session(client)
+        ):
+            resp = await post()
+        if not resp.is_success:
+            raise FintualStocksError(f"{operation} answered HTTP {resp.status_code}")
+        body = resp.json()
+        if not isinstance(body, dict) or "data" not in body:
+            raise FintualStocksError(f"{operation} was refused by the GraphQL server")
+        errors = len(body.get("errors") or [])
+        if errors:
+            logger.info("Fintual: %s answered %d GraphQL error(s)", operation, errors)
+        return body["data"], errors
+
+    async def _mint_pricing_jwt(self, client: httpx.AsyncClient) -> None:
+        """Get the pricing service's JWT cookie, as the web app does on a 401."""
+        # The cached one was refused. If the server scopes its new cookie to
+        # another path, a stale copy restored from the session cache would
+        # ride along with it, so drop the old one first.
+        client.cookies.delete(_PRICING_JWT_COOKIE)
+        resp = await send_with_retry(
+            lambda: client.post(
+                SERVICE_JWT_URL,
+                headers={"Accept": "application/json", "Referer": _STOCKS_REFERER},
+                json={"aud": _PRICING_AUDIENCE},
+            ),
+            label="Fintual POST /auth/jwt",
+        )
+        if not resp.is_success:
+            raise FintualStocksError(
+                f"the stocks pricing token request answered HTTP {resp.status_code}"
+            )
+
+    async def _stock_prices(
+        self, client: httpx.AsyncClient, symbols: list[str]
+    ) -> dict[str, StockPrice]:
+        """Latest price per symbol. On a 401 the service JWT is minted once
+        and the request retried once; a second 401 fails the stocks leg."""
+
+        async def get() -> httpx.Response:
+            return await send_with_retry(
+                lambda: client.get(
+                    STOCK_PRICES_URL,
+                    params={"symbols": ",".join(symbols)},
+                    headers={"Accept": "application/json", "Referer": _STOCKS_REFERER},
+                ),
+                label="Fintual GET current-prices",
+            )
+
+        resp = await get()
+        if resp.status_code == 401:
+            await self._mint_pricing_jwt(client)
+            resp = await get()
+        if resp.status_code == 401:
+            raise FintualStocksError(
+                "the stocks pricing service refused a fresh token (HTTP 401)"
+            )
+        if not resp.is_success:
+            raise FintualStocksError(
+                f"the stocks pricing service answered HTTP {resp.status_code}"
+            )
+        return parse_prices(resp.json())
+
+    async def _position_products(
+        self, client: httpx.AsyncClient, positions: list[StockPosition]
+    ) -> tuple[list[ScrapedProduct], int, int]:
+        """One product per position, plus how many were skipped for lack of a
+        price and of totals."""
+        details, _ = await self._graphql(
+            client,
+            "StocksDetails",
+            details_query(len(positions)),
+            {f"s{i}": position.symbol for i, position in enumerate(positions)},
+        )
+        if not isinstance(details, dict):
+            raise FintualStocksError("StocksDetails answered no data")
+        # A sold-out position needs no price: it is worth 0 either way.
+        held = list(dict.fromkeys(p.symbol for p in positions if p.shares))
+        prices = await self._stock_prices(client, held) if held else {}
+
+        products: list[ScrapedProduct] = []
+        unpriced = without_totals = 0
+        for i, position in enumerate(positions):
+            price = prices.get(position.symbol)
+            if price is None and position.shares:
+                unpriced += 1
+                continue
+            performance = details.get(f"p{i}")
+            try:
+                metrics = stock_metrics(position.shares, price, performance or {})
+            except ValueError:
+                without_totals += 1
+                continue
+            products.append(
+                ScrapedProduct(
+                    institution="fintual",
+                    kind="investment",
+                    currency=STOCKS_CURRENCY,
+                    external_ref=f"{_STOCK_REF_PREFIX}{position.asset_id}",
+                    name=position.name,
+                    attributes=stock_attributes(position.symbol, details.get(f"a{i}")),
+                    metrics=metrics,
+                )
+            )
+        return products, unpriced, without_totals
+
+    async def _scrape_stocks(
+        self, client: httpx.AsyncClient
+    ) -> tuple[list[ScrapedProduct], list[str]]:
+        """The brokerage: the USD cash wallet plus one product per position."""
+        portfolio, errors = await self._graphql(
+            client, "StocksPortfolio", _PORTFOLIO_QUERY, {}
+        )
+        portfolio = portfolio if isinstance(portfolio, dict) else {}
+        wallet = portfolio.get("stocksWallet")
+        positions, unreadable = parse_positions(portfolio)
+        if wallet is None and not positions and not unreadable:
+            if errors:
+                # Nothing resolved and GraphQL said why: the leg failed, and
+                # stock products from earlier runs would freeze unnoticed.
+                logger.warning("Fintual: the stocks portfolio failed to resolve")
+                return [], ["Fintual: skipped the stocks leg (GraphQL error)"]
+            # Never opened the brokerage: a null wallet and no positions, with
+            # no GraphQL error. Not a failure. (This shape is unverified live.)
+            logger.info("Fintual: no stocks account")
+            return [], []
+
+        products: list[ScrapedProduct] = []
+        warnings: list[str] = []
+        if wallet is not None:
+            wallet_product = stock_wallet_product(wallet)
+            if wallet_product is None:
+                warnings.append(
+                    "Fintual: skipped the stocks wallet (no readable USD balance)"
+                )
+            else:
+                products.append(wallet_product)
+        if unreadable:
+            warnings.append(f"Fintual: skipped {unreadable} unreadable stock position(s)")
+        if errors:
+            # The account exists (something answered), so a field that failed
+            # to resolve answered null: say so, or its products would sit
+            # frozen at their last values in a clean-looking run.
+            if wallet is None:
+                logger.warning("Fintual: the stocks wallet failed to resolve")
+                warnings.append("Fintual: skipped the stocks wallet (GraphQL error)")
+            container = portfolio.get("stocksPositionsV2") or {}
+            if not isinstance(container.get("positions"), list):
+                logger.warning("Fintual: the stock positions failed to resolve")
+                warnings.append("Fintual: skipped the stock positions (GraphQL error)")
+
+        unpriced = without_totals = 0
+        if positions:
+            # Whatever fails on the positions' own requests, the wallet lands.
+            try:
+                position_products, unpriced, without_totals = (
+                    await self._position_products(client, positions)
+                )
+            except Exception as exc:
+                logger.exception("Fintual: stock positions failed; keeping the wallet")
+                warnings.append(
+                    f"Fintual stock positions skipped: {_stocks_failure_reason(exc)}"
+                )
+            else:
+                products.extend(position_products)
+
+        if unpriced:
+            logger.warning(
+                "Fintual: %d stock position(s) without a current price", unpriced
+            )
+            warnings.append(
+                f"Fintual: skipped {unpriced} stock position(s) without a current price"
+            )
+        if without_totals:
+            logger.warning("Fintual: %d stock position(s) without totals", without_totals)
+            warnings.append(
+                f"Fintual: skipped {without_totals} stock position(s) without totals"
+            )
+        logger.info(
+            "Fintual: %d stock positions%s",
+            sum(p.kind == "investment" for p in products),
+            ", plus the USD wallet" if any(p.kind == "wallet" for p in products) else "",
+        )
+        return products, warnings
 
     async def scrape_products(self) -> ProductScrapeResult:
         async with self._session_lock, httpx.AsyncClient(
             timeout=30.0, follow_redirects=True, headers=self._base_headers()
         ) as client:
+            self._refreshed_this_run = False
             signed_in = await self._ensure_session(client)
 
             resp = await self._get_goals(client)
@@ -376,6 +860,26 @@ class FintualScraper(BaseScraper):
                 len(products),
                 f"{total_nav:,}",
             )
+
+            # The stocks are a separate leg: whatever fails there, the goals
+            # still land and the warning records the run as partial.
+            try:
+                stock_products, stock_warnings = await self._scrape_stocks(client)
+            except Exception as exc:
+                logger.exception("Fintual: stocks failed; keeping the goals")
+                warnings.append(f"Fintual stocks skipped: {_stocks_failure_reason(exc)}")
+            else:
+                products.extend(stock_products)
+                warnings.extend(stock_warnings)
+
+            # Keep the newest jar on disk (the stocks leg may have refreshed the
+            # session or minted the pricing cookie). The refresh token itself
+            # was saved the moment it rotated, so a failed save here costs at
+            # most a new pricing cookie on the next run.
+            try:
+                self._save_session(client)
+            except OSError:
+                logger.warning("Fintual: could not save the session", exc_info=True)
 
             return ProductScrapeResult(products, warnings)
 

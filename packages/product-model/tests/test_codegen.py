@@ -40,13 +40,38 @@ def test_generated_ts_marks_nullable_optionals():
 
 
 def test_generator_raises_on_unsupported_construct():
-    """Constructs outside the closed scalar set must fail generation loudly."""
+    """Constructs outside the closed set (here a list of objects) must fail
+    generation loudly."""
+
+    class Tag(BaseModel):
+        label: str
 
     class Unsupported(BaseModel):
-        tags: list[str]
+        tags: list[Tag]
 
     with pytest.raises(generate.UnsupportedSchemaError):
         generate._emit_interface(Unsupported)
+
+
+def test_generator_maps_scalar_lists_and_datetimes():
+    """A list of scalars becomes `T[]` and a datetime an ISO string."""
+    index_ts = (PACKAGE_ROOT / "generated" / "index.ts").read_text(encoding="utf-8")
+    products_md = (PACKAGE_ROOT / "PRODUCTS.md").read_text(encoding="utf-8")
+
+    assert "  tags?: string[] | null;" in index_ts
+    assert "  unit_price_as_of?: string | null;" in index_ts
+    assert "| `tags` | `list[str]?` |" in products_md
+    assert "| `unit_price_as_of` | `datetime?` |" in products_md
+
+
+def test_generator_raises_on_a_list_metric():
+    """A metric is one observed value, so a list metric must fail loudly."""
+
+    class Listed(BaseModel):
+        units: list[float] = Field(json_schema_extra={"denomination": "count"})
+
+    with pytest.raises(generate.UnsupportedSchemaError, match="cannot be lists"):
+        generate._metric_denominations(Listed)
 
 
 def test_generated_ts_exports_metric_fields():

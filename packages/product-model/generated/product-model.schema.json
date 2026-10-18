@@ -338,8 +338,21 @@
     },
     "InvestmentAttributes": {
       "additionalProperties": false,
-      "description": "Identity fields for an investment position (fund, goal, portfolio).",
+      "description": "Identity fields for an investment position (fund, goal, portfolio, stock).",
       "properties": {
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Short description of the security, as the institution shows it.",
+          "title": "Description"
+        },
         "fund_name": {
           "anyOf": [
             {
@@ -385,6 +398,35 @@
           "default": null,
           "description": "Risk profile label (e.g. 'Arriesgado').",
           "title": "Risk Profile"
+        },
+        "tags": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Labels the institution gives the security (e.g. 'Tecnología'), each prefixed by its emoji when it has one; a new list replaces the old one.",
+          "title": "Tags"
+        },
+        "ticker": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Ticker symbol of a listed security (e.g. 'ACME').",
+          "title": "Ticker"
         }
       },
       "title": "InvestmentAttributes",
@@ -394,6 +436,20 @@
       "additionalProperties": false,
       "description": "Observation for an investment position; headline is `nav`.",
       "properties": {
+        "average_cost": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "denomination": "currency",
+          "description": "Average cost per unit of the units held.",
+          "title": "Average Cost"
+        },
         "deposited": {
           "anyOf": [
             {
@@ -405,8 +461,22 @@
           ],
           "default": null,
           "denomination": "currency",
-          "description": "Total amount deposited to date.",
+          "description": "Net amount invested to date: deposits minus withdrawals and sales (negative once more came out than went in).",
           "title": "Deposited"
+        },
+        "dividends": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "denomination": "currency",
+          "description": "Total dividends received (net).",
+          "title": "Dividends"
         },
         "kind": {
           "const": "investment",
@@ -434,6 +504,90 @@
           "denomination": "currency",
           "description": "Cumulative profit as reported (nav minus deposited).",
           "title": "Profit"
+        },
+        "realized_profit": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "denomination": "currency",
+          "description": "Gain or loss already realized by selling units.",
+          "title": "Realized Profit"
+        },
+        "unit_price": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "denomination": "currency",
+          "description": "Latest market price per unit, in the product currency.",
+          "title": "Unit Price"
+        },
+        "unit_price_as_of": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "When `unit_price` was quoted.",
+          "title": "Unit Price As Of"
+        },
+        "units": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "denomination": "count",
+          "description": "Units held, e.g. shares of a stock position (fractional).",
+          "title": "Units"
+        },
+        "unrealized_profit": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "denomination": "currency",
+          "description": "Gain or loss on the units still held (nav minus their cost).",
+          "title": "Unrealized Profit"
+        },
+        "unrealized_profit_pct": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "denomination": "percent",
+          "description": "Unrealized profit as a percent number of the cost of the units held.",
+          "title": "Unrealized Profit Pct"
         },
         "var_30d_pct": {
           "anyOf": [
@@ -1837,9 +1991,9 @@
       "properties": {
         "balance": {
           "denomination": "currency",
-          "description": "Wallet balance in CLP.",
+          "description": "Wallet balance in the wallet currency (whole pesos for CLP).",
           "title": "Balance",
-          "type": "integer"
+          "type": "number"
         },
         "kind": {
           "const": "wallet",

@@ -208,9 +208,9 @@ Scrapers run independently from the dashboard. They share a PostgreSQL database.
 
 ### Fintual sign-in
 
-Fintual retired its token-only API: reading your goals now requires a real web
-session with e-mail 2FA. Sign in once and the session is cached to disk
-(`apps/scrapers/.fintual_session.json`, gitignored):
+Fintual retired its token-only API: reading your goals and stock positions
+now requires a real web session with e-mail 2FA. Sign in once and the session
+is cached to disk (`apps/scrapers/.fintual_session.json`, gitignored):
 
 ```bash
 make fintual-login   # signs in, prompts for the 6-digit code Fintual e-mails you
