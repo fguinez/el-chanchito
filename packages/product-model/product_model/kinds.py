@@ -16,6 +16,7 @@ PRODUCT_KINDS: tuple[str, ...] = (
     "loan",
     "mortgage",
     "investment",
+    "stock",
     "crypto",
     "other",
 )
@@ -33,6 +34,7 @@ ProductKind = Literal[
     "loan",
     "mortgage",
     "investment",
+    "stock",
     "crypto",
     "other",
 ]
@@ -43,6 +45,7 @@ PRODUCT_FAMILIES: tuple[str, ...] = (
     "revolving_credit",
     "installment_loan",
     "investment",
+    "stock",
     "crypto",
     "other",
 )
@@ -53,6 +56,7 @@ ProductFamily = Literal[
     "revolving_credit",
     "installment_loan",
     "investment",
+    "stock",
     "crypto",
     "other",
 ]

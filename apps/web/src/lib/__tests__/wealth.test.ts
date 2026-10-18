@@ -53,14 +53,14 @@ const goal = (
   slug: "fintual",
 });
 
-/** A Fintual stock position: an investment too, but in USD. */
+/** A Fintual stock position, in USD. */
 const stock = (asOf: Date, nav: number): WealthSnapshotRow => ({
   productId: STOCK_ID,
   balance: nav.toFixed(8),
-  metrics: { kind: "investment", nav },
+  metrics: { kind: "stock", nav },
   asOf,
   source: "scraper",
-  kind: "investment",
+  kind: "stock",
   currency: "USD",
   slug: "fintual",
 });

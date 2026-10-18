@@ -28,6 +28,7 @@ EXPECTED_KINDS: dict[str, tuple[str, ...]] = {
     "revolving_credit": ("credit_card", "line_of_credit"),
     "installment_loan": ("loan", "mortgage"),
     "investment": ("investment",),
+    "stock": ("stock",),
     "crypto": ("crypto",),
     "other": ("debit_card", "other"),
 }
@@ -206,6 +207,32 @@ def test_investment_columns_derive_percent_and_keep_signed():
     assert columns["aportado"].signed is False
 
 
+def test_stock_columns_show_the_position():
+    """Stocks get per-unit columns: shares are a count, Rentab. a signed percent."""
+    columns = {column.key: column for column in resolve_columns("stock")}
+
+    assert tuple(columns) == (
+        "valor",
+        "unidades",
+        "precio",
+        "costo_prom",
+        "ganancia",
+        "rentabilidad",
+        "realizada",
+        "dividendos",
+    )
+    assert columns["unidades"].format is ColumnFormat.COUNT
+    assert columns["precio"].format is ColumnFormat.CURRENCY
+    assert columns["ganancia"].field == "unrealized_profit"
+    assert columns["ganancia"].signed is True
+    assert columns["rentabilidad"].format is ColumnFormat.PERCENT
+    assert columns["rentabilidad"].signed is True
+    assert columns["realizada"].field == "realized_profit"
+    assert columns["realizada"].signed is True
+    assert columns["realizada"].optional is True
+    assert columns["dividendos"].optional is True
+
+
 def test_installments_resolve_to_count():
     """The derived installments column is a count with no backing field."""
     columns = {column.key: column for column in resolve_columns("installment_loan")}
@@ -229,7 +256,7 @@ def test_alignment_follows_format(family):
 def test_resolve_columns_rejects_unknown_family():
     """A family id outside PRODUCT_FAMILIES fails loudly."""
     with pytest.raises(DisplaySpecError, match="unknown family"):
-        resolve_columns("stocks")
+        resolve_columns("bonds")
 
 
 @pytest.mark.parametrize(

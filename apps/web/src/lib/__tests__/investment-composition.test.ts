@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import type { InvestmentMetrics } from "@chanchito/product-model";
+import type { InvestmentMetrics, StockMetrics } from "@chanchito/product-model";
 import { investmentComposition } from "../investment-composition";
 
 // Synthetic figures only (see the repo's personal data policy): CLP goals
@@ -8,6 +8,10 @@ import { investmentComposition } from "../investment-composition";
 
 function metrics(fields: Omit<InvestmentMetrics, "kind">): InvestmentMetrics {
   return { kind: "investment", ...fields };
+}
+
+function stock(fields: Omit<StockMetrics, "kind">): StockMetrics {
+  return { kind: "stock", ...fields };
 }
 
 describe("investmentComposition", () => {
@@ -36,7 +40,7 @@ describe("investmentComposition", () => {
   it("splits a stock position by the cost of the shares it holds", () => {
     // Profitable sales left net invested negative; the share held cost 100.
     const c = investmentComposition(
-      metrics({
+      stock({
         nav: 250.5,
         deposited: -12.34,
         profit: 262.84,
@@ -54,7 +58,7 @@ describe("investmentComposition", () => {
 
   it("derives a stock's percent when it isn't reported", () => {
     const c = investmentComposition(
-      metrics({ nav: 250, units: 2.5, unrealized_profit: -10 })
+      stock({ nav: 250, units: 2.5, unrealized_profit: -10 })
     );
     expect(c?.base).toBe(260);
     expect(c?.pct).toBeCloseTo((-10 / 260) * 100, 6);
@@ -69,7 +73,7 @@ describe("investmentComposition", () => {
     ["a goal without a profit", metrics({ nav: 2500000, deposited: 1000000 })],
     [
       "a sold-out stock position",
-      metrics({
+      stock({
         nav: 0,
         deposited: -20,
         profit: 20,
@@ -80,7 +84,7 @@ describe("investmentComposition", () => {
     ],
     [
       "a stock position without its unrealized profit",
-      metrics({ nav: 250, deposited: 250, profit: 0, units: 2.5 }),
+      stock({ nav: 250, deposited: 250, profit: 0, units: 2.5 }),
     ],
   ])("hides the card for %s", (_label, m) => {
     expect(investmentComposition(m)).toBeNull();

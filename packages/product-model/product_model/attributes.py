@@ -177,7 +177,7 @@ class MortgageAttributes(InstallmentLoanAttributes):
 
 
 class InvestmentAttributes(BaseAttributes):
-    """Identity fields for an investment position (fund, goal, portfolio, stock)."""
+    """Identity fields for an investment position (fund, goal, portfolio)."""
 
     kind: Literal["investment"] = Field(
         "investment", description='Payload discriminator; always "investment".'
@@ -190,6 +190,14 @@ class InvestmentAttributes(BaseAttributes):
     )
     fund_name: str | None = Field(
         None, description="Fund name for single-fund products (e.g. a fondo mutuo)."
+    )
+
+
+class StockAttributes(BaseAttributes):
+    """Identity fields for a position in a listed security (acción)."""
+
+    kind: Literal["stock"] = Field(
+        "stock", description='Payload discriminator; always "stock".'
     )
     ticker: str | None = Field(
         None, description="Ticker symbol of a listed security (e.g. 'ACME')."

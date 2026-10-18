@@ -32,7 +32,7 @@ export function showsPriceHistory(
   metrics: ProductMetrics | null | undefined
 ): boolean {
   if (prices.length > 0) return true;
-  const units = metrics?.kind === "investment" ? metrics.units : null;
+  const units = metrics?.kind === "stock" ? metrics.units : null;
   return units != null && units > 0;
 }
 

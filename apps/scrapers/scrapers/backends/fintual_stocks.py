@@ -33,10 +33,10 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from product_model import (
-    InvestmentAttributes,
-    InvestmentMetrics,
     ScrapedProduct,
     ScrapedTransaction,
+    StockAttributes,
+    StockMetrics,
 )
 
 # The brokerage holds US stocks; the wallet and the positions are in USD.
@@ -638,7 +638,7 @@ def ledger_to_transactions(entries: list[LedgerEntry]) -> list[ScrapedTransactio
         if stock_amount is not None:
             transactions.append(
                 ScrapedTransaction(
-                    product_kind="investment",
+                    product_kind="stock",
                     product_external_ref=stock_ref(entry.asset.id),
                     amount=stock_amount,
                     external_id=f"fintual_stock_{entry.type.tag}_{entry.source_id}",
@@ -709,24 +709,26 @@ def sold_out_products(
     whole cost as a loss, so it is left alone. The ledger counts money, not
     shares: a stock partly sold that drops off the list reads as sold out.
     The totals: deposited = buys - sells, profit = sells - buys (a cash
-    merger counts as a sale), dividends their sum. Only call it with the
-    complete ledger and the full positions list, or a stock still held would
-    read as sold.
+    merger counts as a sale), all of it realized, dividends their sum (a zero
+    realized or dividend total is left out). Only call it with the complete
+    ledger and the full positions list, or a stock still held would read as
+    sold.
     """
     return [
         ScrapedProduct(
             institution="fintual",
-            kind="investment",
+            kind="stock",
             currency=STOCKS_CURRENCY,
             external_ref=stock_ref(asset_id),
             name=stock.name or stock.symbol or "Acciones",
-            attributes=InvestmentAttributes(ticker=stock.symbol) if stock.symbol else None,
-            metrics=InvestmentMetrics(
+            attributes=StockAttributes(ticker=stock.symbol) if stock.symbol else None,
+            metrics=StockMetrics(
                 nav=0.0,
                 units=0.0,
                 deposited=float(stock.buys - stock.sells),
                 profit=float(stock.sells - stock.buys),
-                dividends=float(stock.dividends),
+                realized_profit=float(stock.sells - stock.buys) or None,
+                dividends=float(stock.dividends) or None,
             ),
         )
         for asset_id, stock in _stock_totals(entries).items()

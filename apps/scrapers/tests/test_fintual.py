@@ -1081,6 +1081,16 @@ class TestStockMetrics:
         assert metrics.unrealized_profit_pct == 0.0
         assert (metrics.unit_price, metrics.unit_price_as_of) == (None, None)
 
+    def test_zero_realized_and_dividends_are_left_out(self):
+        """Never sold, never paid: no Realizada or Dividendos to show."""
+        performance = _performance(realized=0.0, dividends=0.0)
+
+        metrics = stock_metrics(
+            Decimal("2.5"), StockPrice(Decimal("100.0"), _QUOTED_AT), performance
+        )
+
+        assert (metrics.realized_profit, metrics.dividends) == (None, None)
+
     def test_figures_round_half_up_to_cents(self):
         """0.25 x 12.34 = 3.085 rounds to 3.09; a float would give 3.08."""
         performance = _performance(subscriptions=3.0, redemptions=0.0, realized=0.0)
@@ -1187,7 +1197,7 @@ class TestStockParsers:
 
 class TestStocksLeg:
     def test_goals_positions_and_wallet_become_products(self, monkeypatch, session_file):
-        """One CLP product per goal, one USD investment per position keyed by
+        """One CLP product per goal, one USD stock per position keyed by
         asset id, and the USD cash wallet; no warnings."""
         server = _FintualStocks(_portfolio(_ACME, _GLBX))
 
@@ -1197,11 +1207,11 @@ class TestStocksLeg:
         products = _by_ref(result.products)
         assert set(products) == {
             ("investment", "CLP", "34567"),
-            ("investment", "USD", "stock:000101"),
-            ("investment", "USD", "stock:000102"),
+            ("stock", "USD", "stock:000101"),
+            ("stock", "USD", "stock:000102"),
             ("wallet", "USD", None),
         }
-        acme = products[("investment", "USD", "stock:000101")]
+        acme = products[("stock", "USD", "stock:000101")]
         assert acme.institution == "fintual"
         assert acme.name == "Acme Corp"
         assert (acme.metrics.nav, acme.metrics.deposited, acme.metrics.profit) == (
@@ -1214,7 +1224,7 @@ class TestStocksLeg:
         assert acme.attributes.ticker == "ACME"
         assert acme.attributes.description == "Acme Corp es una empresa sintetica de prueba."
         assert acme.attributes.tags == ["💻 Tecnología", "Sintetica"]
-        glbx = products[("investment", "USD", "stock:000102")]
+        glbx = products[("stock", "USD", "stock:000102")]
         assert (glbx.name, glbx.metrics.nav, glbx.metrics.profit) == (
             "Globex Corporation",
             1002.0,
@@ -1268,7 +1278,7 @@ class TestStocksLeg:
 
         assert result.warnings == []
         assert "/auth/jwt" not in server.paths()
-        assert ("investment", "USD", "stock:000101") in _by_ref(result.products)
+        assert ("stock", "USD", "stock:000101") in _by_ref(result.products)
 
     def test_a_refused_pricing_token_keeps_the_goals(self, monkeypatch, session_file):
         """A second 401 fails the positions only: the goals and the wallet
@@ -1441,7 +1451,7 @@ class TestStocksLeg:
                     "data": {**_portfolio(_ACME)["data"], "stocksWallet": None},
                     "errors": [{"message": "synthetic error"}],
                 },
-                {("investment", "USD", "stock:000101")},
+                {("stock", "USD", "stock:000101")},
                 ["Fintual: skipped the stocks wallet (GraphQL error)"],
                 id="wallet-failed",
             ),
@@ -1474,7 +1484,7 @@ class TestStocksLeg:
         result = _run_stocks(monkeypatch, session_file, server)
 
         assert result.warnings == []
-        initk = _by_ref(result.products)[("investment", "USD", "stock:000103")]
+        initk = _by_ref(result.products)[("stock", "USD", "stock:000103")]
         assert (initk.metrics.nav, initk.metrics.units, initk.metrics.unit_price) == (
             0.0,
             0.0,
@@ -1491,8 +1501,8 @@ class TestStocksLeg:
 
         result = _run_stocks(monkeypatch, session_file, server)
 
-        assert ("investment", "USD", "stock:000102") not in _by_ref(result.products)
-        assert ("investment", "USD", "stock:000101") in _by_ref(result.products)
+        assert ("stock", "USD", "stock:000102") not in _by_ref(result.products)
+        assert ("stock", "USD", "stock:000101") in _by_ref(result.products)
         assert result.warnings == [
             "Fintual: skipped 1 stock position(s) without a current price"
         ]
@@ -1506,8 +1516,8 @@ class TestStocksLeg:
 
         result = _run_stocks(monkeypatch, session_file, server)
 
-        assert ("investment", "USD", "stock:000101") in _by_ref(result.products)
-        assert ("investment", "USD", "stock:000102") not in _by_ref(result.products)
+        assert ("stock", "USD", "stock:000101") in _by_ref(result.products)
+        assert ("stock", "USD", "stock:000102") not in _by_ref(result.products)
         assert result.warnings == ["Fintual: skipped 1 stock position(s) without totals"]
 
     def test_the_wallet_keeps_its_cents(self, monkeypatch, session_file):
@@ -1531,7 +1541,7 @@ class TestStocksLeg:
         result = _run_stocks(monkeypatch, session_file, server)
 
         assert ("wallet", "USD", None) not in _by_ref(result.products)
-        assert ("investment", "USD", "stock:000101") in _by_ref(result.products)
+        assert ("stock", "USD", "stock:000101") in _by_ref(result.products)
         assert result.warnings == [
             "Fintual: skipped the stocks wallet (no readable USD balance)"
         ]
@@ -1549,7 +1559,7 @@ class TestStocksLeg:
         login.assert_not_awaited()
         assert result.warnings == []
         assert server.paths().count("/app/goals") == 1
-        assert ("investment", "USD", "stock:000101") in _by_ref(result.products)
+        assert ("stock", "USD", "stock:000101") in _by_ref(result.products)
         assert json.loads(session_file.read_text())["auth_refresh_token"] == (
             "synthetic-refresh-2"
         )
@@ -1750,8 +1760,8 @@ class TestPriceHistoryLeg:
         assert [h.product.external_ref for h in result.price_histories] == ["stock:000101"]
         assert set(_by_ref(result.products)) == {
             ("investment", "CLP", "34567"),
-            ("investment", "USD", "stock:000101"),
-            ("investment", "USD", "stock:000102"),
+            ("stock", "USD", "stock:000101"),
+            ("stock", "USD", "stock:000102"),
             ("wallet", "USD", None),
         }
         assert result.warnings == [
@@ -1851,7 +1861,7 @@ class TestPriceHistoryLeg:
         assert result.warnings == [
             f"Fintual: stock price history failed for 2 of 2 stock(s) ({reason})"
         ]
-        assert ("investment", "USD", "stock:000102") in _by_ref(result.products)
+        assert ("stock", "USD", "stock:000102") in _by_ref(result.products)
 
     def test_the_step_has_a_time_budget(self, monkeypatch, session_file):
         """A hanging service costs the price history only, read after the
@@ -1880,7 +1890,7 @@ class TestPriceHistoryLeg:
         ]
         assert set(_by_ref(result.products)) == {
             ("investment", "CLP", "34567"),
-            ("investment", "USD", "stock:1001"),
+            ("stock", "USD", "stock:1001"),
             ("wallet", "USD", None),
         }
         assert len(transactions) == 5
@@ -1929,7 +1939,7 @@ class TestPriceHistoryLeg:
         assert result.warnings == ["Fintual: stock price history failed (RuntimeError)"]
         assert set(_by_ref(result.products)) == {
             ("investment", "CLP", "34567"),
-            ("investment", "USD", "stock:1001"),
+            ("stock", "USD", "stock:1001"),
             ("wallet", "USD", None),
         }
         assert len(transactions) == 5
@@ -1962,7 +1972,7 @@ class TestPriceHistoryLeg:
 
         result = _run_stocks(monkeypatch, session_file, server)
 
-        assert ("investment", "USD", "stock:000103") in _by_ref(result.products)
+        assert ("stock", "USD", "stock:000103") in _by_ref(result.products)
         assert [r.url.params["symbol"] for r in server.history_requests()] == [
             "ACME",
             "GLBX",
@@ -2039,7 +2049,7 @@ class TestSessionCycle:
         assert [t.external_id for t in transactions] == ["fintual_wallet_dep_2001"]
         assert server.paths().count("/api/goals") == 1
         assert server.operations.count("StocksPortfolio") == 1
-        assert ("investment", "USD", "stock:000101") in _by_ref(result.products)
+        assert ("stock", "USD", "stock:000101") in _by_ref(result.products)
 
     def test_an_expired_session_is_refreshed_once_per_run(self, monkeypatch, session_file):
         server = _FintualStocks(
@@ -2080,7 +2090,7 @@ class TestSessionCycle:
 
         assert all(isinstance(outcome, httpx.HTTPStatusError) for outcome in first)
         assert [t.external_id for t in second[0]] == ["fintual_wallet_dep_2001"]
-        assert ("investment", "USD", "stock:000101") in _by_ref(second[1].products)
+        assert ("stock", "USD", "stock:000101") in _by_ref(second[1].products)
         assert server.paths().count("/api/goals") == 2
 
     def test_the_products_leg_alone_drives_the_session(self, monkeypatch, session_file):
@@ -2092,7 +2102,7 @@ class TestSessionCycle:
         first = asyncio.run(scraper.scrape_products())
         second = asyncio.run(scraper.scrape_products())
 
-        assert ("investment", "USD", "stock:000101") in _by_ref(first.products)
+        assert ("stock", "USD", "stock:000101") in _by_ref(first.products)
         assert _by_ref(second.products) == _by_ref(first.products)
         assert server.paths().count("/api/goals") == 2
 
@@ -2288,7 +2298,7 @@ class TestMovementsLeg:
         assert transactions == []
         assert set(_by_ref(result.products)) == {
             ("investment", "CLP", "34567"),
-            ("investment", "USD", "stock:1001"),
+            ("stock", "USD", "stock:1001"),
             ("wallet", "USD", None),
         }
         assert result.warnings == [f"Fintual: stock movements failed ({reason})"]
@@ -2477,13 +2487,13 @@ class TestSoldOutStocks:
 
         transactions, result = _run_cycle(monkeypatch, session_file, server)
 
-        glbx = _by_ref(result.products)[("investment", "USD", "stock:1002")]
+        glbx = _by_ref(result.products)[("stock", "USD", "stock:1002")]
         assert glbx.name == "Globex Corporation"
         assert glbx.attributes.ticker == "GLBX"
         assert (glbx.metrics.nav, glbx.metrics.units) == (0.0, 0.0)
         assert (glbx.metrics.deposited, glbx.metrics.profit) == (-234.57, 234.57)
         assert glbx.metrics.dividends == 12.34
-        assert ("investment", "USD", "stock:1001") in _by_ref(result.products)
+        assert ("stock", "USD", "stock:1001") in _by_ref(result.products)
         assert "fintual_stock_sell_5012" in _ids(transactions)
         assert result.warnings == []
 
@@ -2499,7 +2509,7 @@ class TestSoldOutStocks:
 
         _, result = _run_cycle(monkeypatch, session_file, server)
 
-        assert ("investment", "USD", "stock:1002") not in _by_ref(result.products)
+        assert ("stock", "USD", "stock:1002") not in _by_ref(result.products)
         assert result.warnings == [
             "Fintual: skipped 1 stock position(s) without a current price"
         ]
@@ -2540,7 +2550,7 @@ class TestSoldOutStocks:
 
         _, result = _run_cycle(monkeypatch, session_file, server)
 
-        assert ("investment", "USD", "stock:1002") not in _by_ref(result.products)
+        assert ("stock", "USD", "stock:1002") not in _by_ref(result.products)
         assert result.warnings == []
 
     def test_an_empty_list_after_selling_everything_zeroes_what_was_sold(
@@ -2550,7 +2560,7 @@ class TestSoldOutStocks:
 
         _, result = _run_cycle(monkeypatch, session_file, server)
 
-        assert ("investment", "USD", "stock:1002") in _by_ref(result.products)
+        assert ("stock", "USD", "stock:1002") in _by_ref(result.products)
         assert result.warnings == []
 
     def test_an_empty_list_next_to_unsold_stocks_zeroes_nothing(
@@ -2601,7 +2611,7 @@ class TestSoldOutStocks:
 
         _, result = _run_cycle(monkeypatch, session_file, server)
 
-        assert ("investment", "USD", "stock:1002") not in _by_ref(result.products)
+        assert ("stock", "USD", "stock:1002") not in _by_ref(result.products)
 
     def test_no_zero_valued_products_from_an_incomplete_ledger(
         self, monkeypatch, session_file
@@ -2613,4 +2623,4 @@ class TestSoldOutStocks:
 
         _, result = _run_cycle(monkeypatch, session_file, server)
 
-        assert ("investment", "USD", "stock:1002") not in _by_ref(result.products)
+        assert ("stock", "USD", "stock:1002") not in _by_ref(result.products)

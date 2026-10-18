@@ -75,8 +75,10 @@ export function showKindColumn(products: { kind: ProductKind }[]): boolean {
   return new Set(products.map((product) => product.kind)).size > 1;
 }
 
+// Whole counts (installments) print as integers; fractional shares keep up
+// to six decimals.
 const COUNT_FORMAT = new Intl.NumberFormat("es-CL", {
-  maximumFractionDigits: 0,
+  maximumFractionDigits: 6,
 });
 
 /** `payload[field]` when it is a finite number; null for legacy `{}` / null

@@ -222,10 +222,7 @@ class InvestmentMetrics(BaseMetrics):
     )
     deposited: float | None = Field(
         None,
-        description=(
-            "Net amount invested to date: deposits minus withdrawals and sales "
-            "(negative once more came out than went in)."
-        ),
+        description="Total amount deposited to date.",
         json_schema_extra={"denomination": "currency"},
     )
     profit: float | None = Field(
@@ -247,6 +244,34 @@ class InvestmentMetrics(BaseMetrics):
         None,
         description="Year-to-date variation as a percent number (Var. año).",
         json_schema_extra={"denomination": "percent"},
+    )
+
+    def headline(self) -> float | None:
+        return self.nav
+
+
+class StockMetrics(BaseMetrics):
+    """Observation for a stock position; headline is `nav`."""
+
+    kind: Literal["stock"] = Field(
+        "stock", description='Payload discriminator; always "stock".'
+    )
+    nav: float = Field(
+        description="Current market value of the position (net asset value).",
+        json_schema_extra={"denomination": "currency"},
+    )
+    deposited: float | None = Field(
+        None,
+        description=(
+            "Net amount invested to date: deposits minus withdrawals and sales "
+            "(negative once more came out than went in)."
+        ),
+        json_schema_extra={"denomination": "currency"},
+    )
+    profit: float | None = Field(
+        None,
+        description="Cumulative profit as reported (nav minus deposited).",
+        json_schema_extra={"denomination": "currency"},
     )
     units: float | None = Field(
         None,

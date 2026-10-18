@@ -202,6 +202,60 @@ _FAMILY_SPECS: tuple[FamilySpec, ...] = (
         ),
     ),
     FamilySpec(
+        family="stock",
+        label_es="Acciones",
+        columns=(
+            ColumnSpec(key="valor", label_es="Valor", source=ColumnSource.HEADLINE),
+            ColumnSpec(
+                key="unidades",
+                label_es="Unidades",
+                source=ColumnSource.METRIC,
+                field="units",
+            ),
+            ColumnSpec(
+                key="precio",
+                label_es="Precio",
+                source=ColumnSource.METRIC,
+                field="unit_price",
+            ),
+            ColumnSpec(
+                key="costo_prom",
+                label_es="Costo prom.",
+                source=ColumnSource.METRIC,
+                field="average_cost",
+            ),
+            ColumnSpec(
+                key="ganancia",
+                label_es="Ganancia",
+                source=ColumnSource.METRIC,
+                field="unrealized_profit",
+                signed=True,
+            ),
+            ColumnSpec(
+                key="rentabilidad",
+                label_es="Rentab.",
+                source=ColumnSource.METRIC,
+                field="unrealized_profit_pct",
+                signed=True,
+            ),
+            ColumnSpec(
+                key="realizada",
+                label_es="Realizada",
+                source=ColumnSource.METRIC,
+                field="realized_profit",
+                optional=True,
+                signed=True,
+            ),
+            ColumnSpec(
+                key="dividendos",
+                label_es="Dividendos",
+                source=ColumnSource.METRIC,
+                field="dividends",
+                optional=True,
+            ),
+        ),
+    ),
+    FamilySpec(
         family="crypto",
         label_es="Cripto",
         columns=(
