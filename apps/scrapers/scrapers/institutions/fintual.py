@@ -47,7 +47,6 @@ import asyncio
 import inspect
 import json
 import logging
-import math
 import os
 import tempfile
 from collections.abc import Awaitable
@@ -62,6 +61,13 @@ import httpx
 from product_model import InvestmentAttributes, InvestmentMetrics, WalletMetrics
 
 from scrapers.backends.email import fetch_latest_code
+from scrapers.backends.fintual_stocks import (
+    STOCKS_CURRENCY,
+    cents,
+    number,
+    stock_ref,
+    text,
+)
 from scrapers.base import (
     BaseScraper,
     ProductScrapeResult,
@@ -106,12 +112,7 @@ _CODE_CLOCK_SKEW = timedelta(seconds=30)
 
 _RELOGIN_HINT = "Run `make fintual-login` to sign in again."
 
-# The brokerage holds US stocks; positions and the cash wallet are in USD.
-STOCKS_CURRENCY = "USD"
 STOCKS_WALLET_NAME = "Acciones: saldo disponible"
-# Goal refs are bare digits, so the prefix keeps stock refs apart.
-_STOCK_REF_PREFIX = "stock:"
-_CENT = Decimal("0.01")
 # Per-share costs keep more places: a quote can be under a dollar.
 _AVERAGE_COST_STEP = Decimal("0.0001")
 
@@ -161,27 +162,8 @@ class StockPrice:
     as_of: datetime | None
 
 
-def _number(value: Any) -> Decimal | None:
-    """A JSON number as an exact Decimal of its repr; None if it isn't one."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    if not math.isfinite(value):
-        return None
-    return Decimal(str(value))
-
-
-def _text(value: Any) -> str | None:
-    if not isinstance(value, str) or not value.strip():
-        return None
-    return value.strip()
-
-
-def _cents(value: Decimal) -> Decimal:
-    return value.quantize(_CENT, rounding=ROUND_HALF_UP)
-
-
 def _usd(value: Decimal) -> float:
-    return float(_cents(value))
+    return float(cents(value))
 
 
 def _parse_datetime(value: Any) -> datetime | None:
@@ -204,8 +186,8 @@ def parse_positions(portfolio: dict) -> tuple[list[StockPosition], int]:
     for row in container.get("positions") or []:
         row = row or {}
         asset = row.get("asset") or {}
-        symbol = _text(asset.get("symbol"))
-        shares = _number(row.get("shares"))
+        symbol = text(asset.get("symbol"))
+        shares = number(row.get("shares"))
         if asset.get("id") is None or symbol is None or shares is None or shares < 0:
             unreadable += 1
             continue
@@ -213,7 +195,7 @@ def parse_positions(portfolio: dict) -> tuple[list[StockPosition], int]:
             StockPosition(
                 asset_id=str(asset["id"]),
                 symbol=symbol,
-                name=_text(asset.get("name")) or symbol,
+                name=text(asset.get("name")) or symbol,
                 shares=shares,
             )
         )
@@ -229,7 +211,7 @@ def parse_prices(payload: Any) -> dict[str, StockPrice]:
         if not isinstance(row, dict):
             continue
         symbol = row.get("symbol")
-        price = _number(row.get("price"))
+        price = number(row.get("price"))
         if not isinstance(symbol, str) or price is None or price <= 0:
             continue
         prices[symbol] = StockPrice(price, _parse_datetime(row.get("price_datetime")))
@@ -267,19 +249,19 @@ def stock_metrics(
     worth 0. Raises ValueError when a performance total is missing, or a held
     position has no price.
     """
-    subscriptions = _number(performance.get("totalCompletedSubscriptions"))
-    redemptions = _number(performance.get("totalCompletedRedemptions"))
-    realized = _number(performance.get("realizedPl"))
+    subscriptions = number(performance.get("totalCompletedSubscriptions"))
+    redemptions = number(performance.get("totalCompletedRedemptions"))
+    realized = number(performance.get("realizedPl"))
     if subscriptions is None or redemptions is None or realized is None:
         raise ValueError("stock position performance totals are missing")
     if price is None and shares:
         raise ValueError("a held stock position needs a price")
-    dividends = _number(performance.get("totalReceivedDividends"))
+    dividends = number(performance.get("totalReceivedDividends"))
 
-    value = _cents(shares * price.price) if price else Decimal(0)
-    net_invested = _cents(subscriptions - redemptions)
+    value = cents(shares * price.price) if price else Decimal(0)
+    net_invested = cents(subscriptions - redemptions)
     total_pl = value - net_invested
-    unrealized = total_pl - _cents(realized)
+    unrealized = total_pl - cents(realized)
     if shares:
         cost = value - unrealized
         average_cost = cost / shares
@@ -287,7 +269,7 @@ def stock_metrics(
     else:
         average_cost = unrealized_pct = Decimal(0)
     average_cost = average_cost.quantize(_AVERAGE_COST_STEP, rounding=ROUND_HALF_UP)
-    unrealized_pct = unrealized_pct.quantize(_CENT, rounding=ROUND_HALF_UP)
+    unrealized_pct = cents(unrealized_pct)
 
     return InvestmentMetrics(
         nav=float(value),
@@ -314,13 +296,13 @@ def stock_attributes(symbol: str, asset: Any) -> InvestmentAttributes:
     if isinstance(raw_tags, list):
         tags = []
         for tag in raw_tags:
-            label = _text(tag.get("displayName")) if isinstance(tag, dict) else None
+            label = text(tag.get("displayName")) if isinstance(tag, dict) else None
             if label is None:
                 continue
-            emoji = _text(tag.get("emoji"))
+            emoji = text(tag.get("emoji"))
             tags.append(f"{emoji} {label}" if emoji else label)
     return InvestmentAttributes(
-        ticker=symbol, description=_text(asset.get("overview")), tags=tags
+        ticker=symbol, description=text(asset.get("overview")), tags=tags
     )
 
 
@@ -330,7 +312,7 @@ def stock_wallet_product(wallet: Any) -> ScrapedProduct | None:
     if not isinstance(wallet, dict):
         return None
     balance = wallet.get("balance") or {}
-    amount = _number(balance.get("amount"))
+    amount = number(balance.get("amount"))
     if amount is None or balance.get("currency") != STOCKS_CURRENCY:
         return None
     return ScrapedProduct(
@@ -712,7 +694,7 @@ class FintualScraper(BaseScraper):
                     institution="fintual",
                     kind="investment",
                     currency=STOCKS_CURRENCY,
-                    external_ref=f"{_STOCK_REF_PREFIX}{position.asset_id}",
+                    external_ref=stock_ref(position.asset_id),
                     name=position.name,
                     attributes=stock_attributes(position.symbol, details.get(f"a{i}")),
                     metrics=metrics,
