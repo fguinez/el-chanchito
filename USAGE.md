@@ -607,7 +607,7 @@ All API routes are under `/api/`:
 | GET | `/api/scrapers` | Latest run per scraper |
 | GET | `/api/scrapers/available` | Enabled scraper slugs, from the scraper service |
 | GET/POST | `/api/transactions` | Transactions (list, create; create takes an optional `location`) |
-| GET/PATCH | `/api/transactions/[id]` | One transaction with product, institution, category and location; PATCH sets or clears only `{ location }` |
+| GET/PATCH/DELETE | `/api/transactions/[id]` | One transaction with product, institution, category, location and notes; PATCH edits `description`/`customDescription`, `amount`, `transactionDate`, `scheduledMonth`, `categoryId`, `isInternalTransfer`, `productId`, `location` and `notes` (trimmed, max 2000 chars, blank or `null` clears); DELETE soft-deletes imported (scraped or CSV) rows and hard-deletes manual ones |
 | POST | `/api/import` | CSV import |
 | GET/POST/PUT | `/api/categories` | Categories with their rules and transaction counts; create a category; apply the rules to uncategorized transactions (PUT) |
 | PATCH/DELETE | `/api/categories/[id]` | Update or delete a category (its transactions become uncategorized, its rules are deleted) |
