@@ -32,11 +32,16 @@ Gotchas handled here:
     expirara" modal with a "Continuar" button and, if ignored, logs out.
     `_keep_alive` dismisses it (light and shadow DOM) before each surface read
     and before closing any other overlay.
-  * Flaky movements BFF: the `/movements` call often returns 500 and the UI
-    shows a "Reintentar" button. Each surface is read with `_SURFACE_ATTEMPTS`
-    tries and escalating render budgets, clicking Reintentar and keeping the
-    session alive between tries; a surface that never loads becomes a warning
-    (partial coverage), not a failed run.
+  * Flaky movements BFF: the `/movement-cc/*` calls often return 500 and the
+    UI shows a "Reintentar" button. A failed load is retried through it at
+    once, a hung one after an escalating render budget, keeping the session
+    alive between tries; a surface that never loads becomes a warning (partial
+    coverage), not a failed run.
+  * A failed or in-flight load looks empty: the component draws the same
+    header-only table (with its "sin movimientos" art while reloading) as a
+    tab that truly has no movements. `_MovementsFeed` watches those calls on
+    the wire, and an empty read only counts after a `/movements` call answered
+    2xx.
 
 Every message raised from here is safe for `scraper_runs.error_message`: no
 RUT, clave, cookies, URLs with ids, or figures.
@@ -54,6 +59,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -359,14 +365,27 @@ _TABLE_POLL_MS = 500
 # The masked clave input drops characters typed faster than this.
 _TYPE_DELAY_MS = 120
 
-# Flaky movements BFF (see module docstring): tries per surface, escalating budgets.
-_SURFACE_ATTEMPTS = 3
+# Flaky movements BFF (see module docstring). A load the feed sees fail is
+# retried at once and cheaply (about half of them fail live), so those retries
+# are counted apart from the escalating budgets, which run out only when a load
+# neither shows rows nor answers (hung, or failing outside `/movement-cc/`).
 _RENDER_TIMEOUTS_MS = (12_000, 20_000, 30_000)
-# An empty read must hold this many polls before a tab counts as empty.
+_FAILED_LOAD_RETRIES = 10
+# Polls spent looking for the "Reintentar" button after a load stopped.
+_RETRY_CLICK_POLLS = 4
+# Hard cap on one surface, whatever mix of failed and hung loads it meets.
+_SURFACE_TIMEOUT_MS = 120_000
+# An empty read must hold this many polls, after its load answered, before a
+# tab counts as empty (the table renders a beat after the response lands).
 _EMPTY_CONFIRM_POLLS = 3
-# When the other tab was empty too, its stale empty table looks exactly like
-# this one's, so the empty read must hold through most of the first budget.
-_STALE_EMPTY_CONFIRM_POLLS = 20
+
+# The movements BFF calls (see `_MovementsFeed`): each tab load is a chain of
+# `/movement-cc/*` calls that ends in `.../credit-card/movements`.
+_MOVEMENT_CC_PATH = "/movement-cc/"
+_MOVEMENTS_PATH_SUFFIX = "/movements"
+_LOAD_STEP = "step"
+_LOAD_DONE = "done"
+_LOAD_FAILED = "failed"
 
 # Tab labels (rendered as <label> elements inside the web component).
 _UNBILLED_TAB = "Ultimos movimientos"
@@ -535,9 +554,10 @@ _CARD_DETAIL_READY_JS = """
 }
 """
 
-# Whether the movements component shows a visible "no movements" message (a
-# legitimately empty tab, as opposed to one that never loaded). Scoped to the
-# component and to short, visible elements, so page copy cannot match.
+# Whether the movements component shows a visible "no movements" message. It
+# also shows while a load is running, so it only means empty once the load
+# answered (see `_read_surface`). Scoped to the component and to short, visible
+# elements, so page copy cannot match.
 _EMPTY_STATE_JS = (
     "() => {"
     + _MOVEMENTS_NODES_JS
@@ -548,6 +568,21 @@ _EMPTY_STATE_JS = (
   return movementsNodes().some((el) => (el.textContent || '').length < 200 && isVisible(el)
     && needles.some((n) => strip(el.textContent).includes(n)));
 }"""
+)
+
+# The movements component's visible "Reintentar" control (its load-error
+# view): whether one shows, and clicking it. Never a hidden one in an inactive
+# tab panel, nor one elsewhere on the page, whose reload would not be this tab's.
+_RETRY_CONTROL_JS = (
+    _MOVEMENTS_NODES_JS
+    + """
+  const retry = movementsNodes().find((el) => el.matches('button, [role=button], a, label')
+    && isVisible(el) && (el.textContent || '').trim().toLowerCase() === 'reintentar');
+"""
+)
+_RETRY_SHOWN_JS = "() => {" + _RETRY_CONTROL_JS + "  return Boolean(retry);\n}"
+_CLICK_RETRY_JS = (
+    "() => {" + _RETRY_CONTROL_JS + "  if (!retry) return false;\n  retry.click();\n  return true;\n}"
 )
 
 
@@ -790,47 +825,171 @@ def _shows_empty_state(page) -> bool:
         return False
 
 
+def _shows_retry(page) -> bool:
+    try:
+        return bool(page.evaluate(_RETRY_SHOWN_JS))
+    except Exception:
+        return False
+
+
+class _MovementsFeed:
+    """The movements component's BFF calls, as seen on the wire.
+
+    A call settles when it finishes, not at its status line (a body can still
+    fail after a 2xx). `state(since)` reads the calls started after a `mark()`:
+    `_LOAD_DONE` when the last one settled was a 2xx `/movements` call,
+    `_LOAD_FAILED` when it failed, and None while one is still pending or only
+    an earlier step of the chain has settled. "Started" is the order the events
+    reach Python, which is why every mark is taken before the click that starts
+    a load.
+    """
+
+    def __init__(self) -> None:
+        self._started = 0
+        # request -> [start sequence, response status once known]
+        self._pending: dict[Any, list] = {}
+        self._settled: list[tuple[int, str]] = []
+
+    def attach(self, page) -> None:
+        page.on("request", self.on_request)
+        page.on("response", self.on_response)
+        page.on("requestfinished", self.on_request_finished)
+        page.on("requestfailed", self.on_request_failed)
+
+    def on_request(self, request) -> None:
+        if request.method == "OPTIONS" or _MOVEMENT_CC_PATH not in urlsplit(request.url).path:
+            return
+        self._pending[request] = [self._started, None]
+        self._started += 1
+
+    def on_response(self, response) -> None:
+        entry = self._pending.get(response.request)
+        if entry is not None:
+            entry[1] = response.status
+
+    def on_request_finished(self, request) -> None:
+        entry = self._pending.pop(request, None)
+        if entry is None:
+            return
+        sequence, status = entry
+        if status is None or status >= 400:
+            outcome = _LOAD_FAILED
+        elif 200 <= status < 300 and urlsplit(request.url).path.rstrip("/").endswith(
+            _MOVEMENTS_PATH_SUFFIX
+        ):
+            outcome = _LOAD_DONE
+        else:
+            outcome = _LOAD_STEP
+        self._settled.append((sequence, outcome))
+
+    def on_request_failed(self, request) -> None:
+        entry = self._pending.pop(request, None)
+        if entry is not None:
+            self._settled.append((entry[0], _LOAD_FAILED))
+
+    def mark(self) -> int:
+        """A point for `state`: only calls started after it count."""
+        return self._started
+
+    def state(self, since: int) -> Optional[str]:
+        if any(sequence >= since for sequence, _ in self._pending.values()):
+            return None
+        settled = [outcome for sequence, outcome in self._settled if sequence >= since]
+        if not settled or settled[-1] == _LOAD_STEP:
+            return None
+        return settled[-1]
+
+
+def _click_retry(page) -> bool:
+    """Click the component's "Reintentar", giving the error view a few polls to render."""
+    for _ in range(_RETRY_CLICK_POLLS):
+        try:
+            clicked = bool(page.evaluate(_CLICK_RETRY_JS))
+        except Exception:
+            clicked = False
+        if clicked:
+            _keep_alive(page)
+            return True
+        page.wait_for_timeout(_TABLE_POLL_MS)
+    logger.debug("Banco Falabella: no Reintentar control to click")
+    return False
+
+
 def _read_surface(
-    page, label: str, previous: Optional[list[list[str]]] = None
+    page,
+    label: str,
+    feed: _MovementsFeed,
+    previous: Optional[list[list[str]]] = None,
+    since: Optional[int] = None,
 ) -> Optional[list[list[str]]]:
-    """Open a movements tab and read its rows with escalating-budget retries.
+    """Open a movements tab and read its rows, retrying failed or hung loads.
 
     Returns the body rows, `[]` for a confirmed-empty tab, or None when the
-    surface never rendered after `_SURFACE_ATTEMPTS` tries (the caller turns a
-    None into a partial-coverage warning). An empty read (a header-only table or
-    the component's "no movements" message) only counts once it holds for
-    `_EMPTY_CONFIRM_POLLS` polls (`_STALE_EMPTY_CONFIRM_POLLS` when `previous`
-    was empty too), and rows equal to `previous` (the other tab's, still on
+    surface never loaded (the caller turns a None into a partial-coverage
+    warning). An empty read (a header-only table or the component's "no
+    movements" message) only counts once the tab's load answered (`feed`, from
+    the caller's `since` mark, else from the tab click), no "Reintentar" shows,
+    and the read holds for `_EMPTY_CONFIRM_POLLS` polls. A load that failed and
+    shows the error view is retried through its "Reintentar" at once, up to
+    `_FAILED_LOAD_RETRIES` times; a load that shows nothing within its budget is
+    retried with the next, longer one; the whole surface gives up after
+    `_SURFACE_TIMEOUT_MS`. Rows equal to `previous` (the other tab's, still on
     screen right after the switch) are ignored, so a slow surface is filed
     neither as empty nor as the wrong tab.
     """
-    confirm_polls = _STALE_EMPTY_CONFIRM_POLLS if previous == [] else _EMPTY_CONFIRM_POLLS
+    if since is None:
+        since = feed.mark()
     _click_text(page, label)
-    for attempt in range(_SURFACE_ATTEMPTS):
+    surface_deadline = time.monotonic() + _SURFACE_TIMEOUT_MS / 1000
+    budget = 0
+    failures = 0
+    while True:
         _keep_alive(page)
-        deadline = time.monotonic() + _RENDER_TIMEOUTS_MS[attempt] / 1000
+        deadline = min(time.monotonic() + _RENDER_TIMEOUTS_MS[budget] / 1000, surface_deadline)
         empty_polls = 0
+        failed = False
         while time.monotonic() < deadline:
             rows = _read_table_rows(page)
             if rows and rows != previous:
                 logger.info("Banco Falabella: %s surface read, %d rows", label, len(rows))
                 return rows
-            if rows == [] or (rows is None and _shows_empty_state(page)):
-                empty_polls += 1
-                if empty_polls >= confirm_polls:
-                    logger.info("Banco Falabella: %s surface is empty", label)
-                    return []
-            else:
-                empty_polls = 0
+            state = feed.state(since)
+            looks_empty = state == _LOAD_DONE and (
+                rows == [] or (rows is None and _shows_empty_state(page))
+            )
+            # A failure (or an error view behind a 2xx) counts once the error
+            # view shows: the component rides out some failed steps (a failed
+            # projected-billing call) and goes on to call `/movements`.
+            if (state == _LOAD_FAILED or looks_empty) and _shows_retry(page):
+                failed = True
+                break
+            empty_polls = empty_polls + 1 if looks_empty else 0
+            if empty_polls >= _EMPTY_CONFIRM_POLLS:
+                logger.info("Banco Falabella: %s surface is empty", label)
+                return []
             page.wait_for_timeout(_TABLE_POLL_MS)
-        if attempt < _SURFACE_ATTEMPTS - 1:
-            _click_text(page, "Reintentar")
-            _keep_alive(page)
-    return None
+        if time.monotonic() >= surface_deadline:
+            return None
+        if failed:
+            failures += 1
+            if failures > _FAILED_LOAD_RETRIES:
+                return None
+            logger.debug("Banco Falabella: %s load failed; retrying", label)
+        else:
+            budget += 1
+            if budget >= len(_RENDER_TIMEOUTS_MS):
+                return None
+        retry_since = feed.mark()
+        # Without a click no new load starts, so the current one still counts.
+        if _click_retry(page):
+            since = retry_since
 
 
 def _read_billed(
-    page, warnings: list[str], previous: Optional[list[list[str]]] = None
+    page,
+    feed: _MovementsFeed,
+    warnings: list[str],
+    previous: Optional[list[list[str]]] = None,
 ) -> list[RawMovement]:
     """Read the current billed statement (the "Movimientos facturados" tab).
 
@@ -842,11 +1001,9 @@ def _read_billed(
     and again while it is the current statement. `previous` is the unbilled
     tab's rows, ignored if still on screen right after the switch.
     """
-    rows = _read_surface(page, _BILLED_TAB, previous)
+    rows = _read_surface(page, _BILLED_TAB, feed, previous)
     if rows is None:
-        warnings.append(
-            f"Banco Falabella: billed movements surface failed after {_SURFACE_ATTEMPTS} attempts"
-        )
+        warnings.append("Banco Falabella: billed movements surface never loaded")
         return []
     return movements_from_rows(rows, "billed")
 
@@ -854,6 +1011,8 @@ def _read_billed(
 def read_session(page) -> FalabellaSession:
     """Everything one authenticated page yields: the card and its movements."""
     warnings: list[str] = []
+    feed = _MovementsFeed()
+    feed.attach(page)
     _keep_alive(page)
     _dismiss_overlays(page)
 
@@ -863,20 +1022,20 @@ def read_session(page) -> FalabellaSession:
         warnings.append("Banco Falabella: the card available cupo did not parse")
         balance = None
 
+    # The unbilled tab loads as the card detail opens, before it is clicked.
+    since = feed.mark()
     if not _open_card_detail(page):
         warnings.append("Banco Falabella: could not open the card detail")
         return FalabellaSession(balance=balance, movements=[], warnings=warnings)
 
     movements: list[RawMovement] = []
-    unbilled = _read_surface(page, _UNBILLED_TAB)
+    unbilled = _read_surface(page, _UNBILLED_TAB, feed, since=since)
     if unbilled is None:
-        warnings.append(
-            f"Banco Falabella: unbilled movements surface failed after {_SURFACE_ATTEMPTS} attempts"
-        )
+        warnings.append("Banco Falabella: unbilled movements surface never loaded")
     else:
         movements.extend(movements_from_rows(unbilled, "unbilled"))
 
-    movements.extend(_read_billed(page, warnings, previous=unbilled))
+    movements.extend(_read_billed(page, feed, warnings, previous=unbilled))
     return FalabellaSession(balance=balance, movements=movements, warnings=warnings)
 
 
