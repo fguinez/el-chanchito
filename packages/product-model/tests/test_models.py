@@ -306,6 +306,46 @@ def test_scraped_transaction_mirrors_the_scraper_dataclass():
     assert txn.scheduled_month is None
     # Most sources report a single date; a NULL posting date is unremarkable.
     assert txn.accounting_date is None
+    # Without a ref it lands on the singleton product, as it always has.
+    assert txn.product_external_ref is None
+    assert txn.internal_transfer is False
+
+
+def _stock_txn(**fields) -> ScrapedTransaction:
+    """A synthetic stock purchase on a per-holding product; `fields` override."""
+    values = {
+        "institution": "fintual",
+        "product_kind": "investment",
+        "description": "Compra ACME",
+        "amount": "1234.56",
+        "transaction_date": date(2026, 1, 2),
+        "external_id": "fintual_stock_buy_1001",
+        "currency": "USD",
+    }
+    values.update(fields)
+    return ScrapedTransaction(**values)
+
+
+class TestTransactionProductRef:
+    """A transaction may name its product by external_ref (lookup only)."""
+
+    def test_a_ref_and_the_internal_flag_are_carried(self):
+        txn = _stock_txn(product_external_ref="stock:1001", internal_transfer=True)
+
+        assert txn.product_external_ref == "stock:1001"
+        assert txn.internal_transfer is True
+
+    def test_an_empty_ref_is_rejected(self):
+        """An empty string is not None: it would name a product that can't exist."""
+        with pytest.raises(ValidationError):
+            _stock_txn(product_external_ref="")
+
+    def test_the_json_schema_describes_both_fields(self):
+        props = ScrapedTransaction.model_json_schema()["properties"]
+
+        assert {"type": "string", "minLength": 1} in props["product_external_ref"]["anyOf"]
+        assert props["internal_transfer"]["type"] == "boolean"
+        assert props["internal_transfer"]["default"] is False
 
 
 def test_transaction_keeps_a_separate_posting_date():

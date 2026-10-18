@@ -208,6 +208,18 @@ class ScrapedTransaction(BaseModel):
     product_kind: str = Field(
         description="Kind of the product the transaction belongs to, e.g. 'checking'."
     )
+    product_external_ref: str | None = Field(
+        None,
+        min_length=1,
+        description=(
+            "external_ref of the product of this institution, product_kind and "
+            "currency the transaction belongs to, for kinds with one product per "
+            "holding (e.g. a stock position). Such a product is never created "
+            "for a transaction: until a product leg has stored it, the "
+            "transaction is left for a later run. None files it on the product "
+            "with no external_ref, created if missing."
+        ),
+    )
     description: str = Field(description="Human-readable transaction description.")
     amount: TransactionAmount = Field(
         description=(
@@ -232,6 +244,16 @@ class ScrapedTransaction(BaseModel):
     currency: str = Field("CLP", description="ISO currency code (default 'CLP').")
     category_hint: str | None = Field(
         None, description="Scraper's best-guess category."
+    )
+    internal_transfer: bool = Field(
+        False,
+        description=(
+            "True when the movement only moves the user's money between their "
+            "own products (e.g. a stock purchase paid from a cash wallet), so "
+            "it is neither spending nor income. Stored as is_internal_transfer "
+            "when the row is first written, and never rewritten by a re-scrape, "
+            "so a user's change wins."
+        ),
     )
     scheduled_month: datetime.date | None = Field(
         None,

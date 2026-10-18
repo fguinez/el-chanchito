@@ -1629,6 +1629,12 @@
           "title": "Institution",
           "type": "string"
         },
+        "internal_transfer": {
+          "default": false,
+          "description": "True when the movement only moves the user's money between their own products (e.g. a stock purchase paid from a cash wallet), so it is neither spending nor income. Stored as is_internal_transfer when the row is first written, and never rewritten by a re-scrape, so a user's change wins.",
+          "title": "Internal Transfer",
+          "type": "boolean"
+        },
         "location": {
           "anyOf": [
             {
@@ -1640,6 +1646,20 @@
           ],
           "default": null,
           "description": "Where the transaction happened, when the source reports it. Written only into location columns that are still NULL, and never onto a row whose location the user edited."
+        },
+        "product_external_ref": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "external_ref of the product of this institution, product_kind and currency the transaction belongs to, for kinds with one product per holding (e.g. a stock position). Such a product is never created for a transaction: until a product leg has stored it, the transaction is left for a later run. None files it on the product with no external_ref, created if missing.",
+          "title": "Product External Ref"
         },
         "product_kind": {
           "description": "Kind of the product the transaction belongs to, e.g. 'checking'.",
