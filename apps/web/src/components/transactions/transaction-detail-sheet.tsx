@@ -31,6 +31,7 @@ import type { TransactionDetail } from "@/app/api/transactions/[id]/route";
 import type { TransactionLocation } from "@/lib/transaction-location";
 import { TransactionLocationField } from "@/components/transactions/transaction-location-field";
 import { TransactionEditForm } from "@/components/transactions/transaction-edit-form";
+import { TransactionNotesField } from "@/components/transactions/transaction-notes-field";
 import { SUGGESTIONS_ANCHOR } from "@/lib/transfer-suggestions";
 
 type LoadResult =
@@ -40,12 +41,13 @@ type LoadResult =
 
 /**
  * Side panel with everything stored for one transaction, editable in place
- * (description, amount, dates, category, product, internal-transfer flag and
- * location) and deletable. Open while `transactionId` is set; `onClose` should
- * clear it (the caller owns the id, e.g. in the URL). `onChanged` tells the
- * caller the row changed under the panel (an edit, a delete, or a transfer link
- * made or undone), so it can reload its list; `onTransferChanged` is kept as an
- * alias for callers that only cared about transfer links.
+ * (description, amount, dates, category, product, internal-transfer flag,
+ * location and notes) and deletable. Open while `transactionId` is set;
+ * `onClose` should clear it (the caller owns the id, e.g. in the URL).
+ * `onChanged` tells the caller the row changed under the panel (an edit, a
+ * delete, or a transfer link made or undone), so it can reload its list;
+ * `onTransferChanged` is kept as an alias for callers that only cared about
+ * transfer links.
  */
 export function TransactionDetailSheet({
   transactionId,
@@ -388,15 +390,17 @@ function TransactionDetailBody({
 
         <Separator />
 
-        <Section title="Notas">
-          {txn.notes ? (
-            <p className="text-sm break-words whitespace-pre-wrap">
-              {txn.notes}
-            </p>
-          ) : (
-            <p className="text-sm text-muted-foreground">Sin notas</p>
+        <TransactionNotesField
+          key={txn.id}
+          transactionId={txn.id}
+          notes={txn.notes}
+          onSaved={onChanged}
+          renderSection={(action, children) => (
+            <Section title="Notas" action={action}>
+              {children}
+            </Section>
           )}
-        </Section>
+        />
 
         <Separator />
 

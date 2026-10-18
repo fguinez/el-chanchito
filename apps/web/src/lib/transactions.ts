@@ -1,3 +1,8 @@
+/** Longest note a transaction may carry (POST /api/transactions and PATCH
+ *  /api/transactions/[id]); the detail panel's notes box caps its input at the
+ *  same length. */
+export const TRANSACTION_NOTES_MAX_LENGTH = 2000;
+
 /** What a CLP total needs from a transaction row. */
 export interface CurrencyAmount {
   /** Signed, in `currency`: negative = expense, positive = income. */

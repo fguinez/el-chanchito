@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
+import { TRANSACTION_NOTES_MAX_LENGTH } from "@/lib/transactions";
 
 // Where conditions recorded off the select chain, newest query first unused:
 // index 0 is the first `.where()` of the request (the detail/lookup query).
@@ -332,6 +333,7 @@ describe("PATCH /api/transactions/[id]", () => {
     ["a non-string customDescription", { customDescription: 123 }, "customDescription"],
     ["a malformed categoryId", { categoryId: "nope" }, "categoryId"],
     ["a malformed productId", { productId: "nope" }, "productId"],
+    ["a non-string note", { notes: 7 }, "notes"],
     ["a non-object location", { location: "Ciudad Ficticia" }, "location"],
     ["an unknown location key", { location: { street: "x" } }, "location.street"],
     ["a non-string city", { location: { city: 7 } }, "location.city"],
@@ -577,6 +579,126 @@ describe("PATCH /api/transactions/[id] field edits", () => {
     queuedRows.push([]); // update touches no row
     const res = await patch(TXN_ID, { description: "X" });
     expect(res.status).toBe(404);
+  });
+});
+
+describe("PATCH /api/transactions/[id] notes", () => {
+  it("stores a trimmed note and returns the full detail", async () => {
+    // No preload: update.returning, then the detail + link reads.
+    queuedRows.push(
+      [{ id: TXN_ID }],
+      [joinedRow({ notes: "Nota de prueba\nSegunda línea" })],
+      []
+    );
+    const res = await patch(TXN_ID, {
+      notes: "  Nota de prueba\nSegunda línea \n",
+    });
+    expect(res.status).toBe(200);
+    expect(setMock).toHaveBeenCalledWith({
+      notes: "Nota de prueba\nSegunda línea",
+      updatedAt: expect.any(Date),
+    });
+    expect(selectMock).toHaveBeenCalledTimes(2);
+    const body = await res.json();
+    expect(body.id).toBe(TXN_ID);
+    expect(body.notes).toBe("Nota de prueba\nSegunda línea");
+    expect(body.product).toEqual(expect.objectContaining({ id: PRODUCT_ID }));
+  });
+
+  it.each([
+    ["an empty string", ""],
+    ["a whitespace-only string", "  \n\t "],
+    ["null", null],
+  ])("clears the note with %s", async (_name, notes) => {
+    queuedRows.push([{ id: TXN_ID }], [joinedRow({ notes: null })], []);
+    const res = await patch(TXN_ID, { notes });
+    expect(res.status).toBe(200);
+    expect(setMock).toHaveBeenCalledWith({
+      notes: null,
+      updatedAt: expect.any(Date),
+    });
+    expect((await res.json()).notes).toBeNull();
+  });
+
+  it("accepts a note at the length limit once trimmed", async () => {
+    const note = "x".repeat(TRANSACTION_NOTES_MAX_LENGTH);
+    queuedRows.push([{ id: TXN_ID }], [joinedRow({ notes: note })], []);
+    const res = await patch(TXN_ID, { notes: `  ${note}  ` });
+    expect(res.status).toBe(200);
+    expect(setMock).toHaveBeenCalledWith({
+      notes: note,
+      updatedAt: expect.any(Date),
+    });
+  });
+
+  it("rejects an overlong note with 400 on the notes field", async () => {
+    const res = await patch(TXN_ID, {
+      notes: "x".repeat(TRANSACTION_NOTES_MAX_LENGTH + 1),
+    });
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.field).toBe("notes");
+    expect(json.error).toContain(String(TRANSACTION_NOTES_MAX_LENGTH));
+    expect(setMock).not.toHaveBeenCalled();
+  });
+
+  it("writes the note alongside other fields", async () => {
+    queuedRows.push([{ id: TXN_ID }], [joinedRow()], []);
+    const res = await patch(TXN_ID, {
+      notes: "Nota de prueba",
+      amount: 1000000,
+    });
+    expect(res.status).toBe(200);
+    expect(setMock).toHaveBeenCalledWith({
+      amount: 1000000,
+      notes: "Nota de prueba",
+      updatedAt: expect.any(Date),
+    });
+  });
+
+  it("returns the full detail when notes come with a location", async () => {
+    queuedRows.push(
+      [{ id: TXN_ID }],
+      [
+        joinedRow({
+          locationCity: "Ciudad Ficticia",
+          locationIsManual: true,
+        }),
+      ],
+      []
+    );
+    const res = await patch(TXN_ID, {
+      notes: "Nota de prueba",
+      location: { city: "Ciudad Ficticia" },
+    });
+    expect(res.status).toBe(200);
+    expect(setMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        notes: "Nota de prueba",
+        locationCity: "Ciudad Ficticia",
+        locationIsManual: true,
+      })
+    );
+    expect(selectMock).toHaveBeenCalledTimes(2);
+    const body = await res.json();
+    expect(body.id).toBe(TXN_ID);
+    expect(body.notes).toBe("Nota de prueba");
+    expect(body.location).toEqual(
+      expect.objectContaining({ city: "Ciudad Ficticia" })
+    );
+    expect(body.locationIsManual).toBe(true);
+    expect(body.product).toEqual(expect.objectContaining({ id: PRODUCT_ID }));
+  });
+
+  it("returns 404 for a notes-only edit of a missing or deleted row", async () => {
+    queuedRows.push([]); // update touches no row
+    const res = await patch(TXN_ID, { notes: "Nota de prueba" });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "Transaction not found" });
+    // The update itself is guarded against editing a soft-deleted row.
+    const sql = updateWhereSql(0).toLowerCase();
+    expect(sql).toContain("deleted_at");
+    expect(sql).toContain("is null");
   });
 });
 

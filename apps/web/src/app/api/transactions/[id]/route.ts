@@ -236,6 +236,7 @@ type TransactionUpdate = Partial<{
   scheduledMonth: string | null;
   isInternalTransfer: boolean;
   productId: string;
+  notes: string | null;
   locationName: string | null;
   locationCity: string | null;
   locationCountry: string | null;
@@ -249,7 +250,12 @@ type TransactionUpdate = Partial<{
  * PATCH /api/transactions/[id]: edit a transaction. The body is a non-empty
  * subset of `description`, `customDescription`, `amount` (signed CLP; negative =
  * expense), `transactionDate`, `scheduledMonth` (null unassigns it), `categoryId`
- * (null clears the category), `isInternalTransfer`, `productId` and `location`.
+ * (null clears the category), `isInternalTransfer`, `productId`, `notes` and
+ * `location`.
+ *
+ * `notes` is the user's free-text note, on manual and scraped rows alike (the
+ * scrapers never write it, so it survives re-scrapes): it is trimmed, and a
+ * blank string or null clears it.
  *
  * Description redirect (V034): a scraped row (one with an `external_id`) keeps
  * its `description` as the immutable bank text, so an edit to `description`
@@ -336,6 +342,7 @@ export async function PATCH(request: NextRequest, { params }: Context) {
     if (body.isInternalTransfer !== undefined)
       update.isInternalTransfer = body.isInternalTransfer;
     if (body.productId !== undefined) update.productId = body.productId;
+    if ("notes" in body) update.notes = body.notes ?? null;
     if ("categoryId" in body) {
       update.categoryId = body.categoryId ?? null;
       // A deliberate category choice is manual, so the backfill leaves it
