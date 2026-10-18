@@ -13,6 +13,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { formatCLP, formatPlainDateEs } from "@/lib/utils";
+import { InstitutionLogo } from "@/components/institutions/institution-logo";
 import {
   CANDIDATE_WINDOW_DAYS,
   LINK_FIELD,
@@ -214,7 +215,12 @@ function SidePicker({
         {SIDE_LABEL[side]}
         {product && (
           <span className="ml-1 font-normal text-muted-foreground">
-            · {product.institutionName} · {product.name}
+            ·{" "}
+            <span className="inline-flex items-center gap-1 align-bottom">
+              <InstitutionLogo slug={product.institutionSlug} size="sm" />
+              {product.institutionName}
+            </span>{" "}
+            · {product.name}
           </span>
         )}
       </legend>

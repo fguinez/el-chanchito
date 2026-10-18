@@ -46,6 +46,8 @@ import {
   type MonitorReference,
 } from "@/components/monitors/shared";
 import { AdjustmentsCard } from "@/components/monitors/AdjustmentsCard";
+import { InstitutionLogo } from "@/components/institutions/institution-logo";
+import { institutionLabel } from "@/lib/institution-labels";
 import {
   InteractiveChart,
   useTimeSeriesChart,
@@ -509,8 +511,14 @@ export default function MonitorDetailPage() {
                         ref.productSlug != null ? (
                         <Link
                           href={`/institutions/${ref.institutionSlug}/${ref.productSlug}`}
-                          className="font-medium hover:text-primary after:absolute after:inset-0 after:content-['']"
+                          className="inline-flex items-center gap-1.5 font-medium hover:text-primary after:absolute after:inset-0 after:content-['']"
                         >
+                          {/* The cell names the product, not the institution. */}
+                          <InstitutionLogo
+                            slug={ref.institutionSlug}
+                            name={institutionLabel(ref.institutionSlug)}
+                            size="sm"
+                          />
                           {ref.name}
                         </Link>
                       ) : (

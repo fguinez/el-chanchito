@@ -1259,7 +1259,7 @@ el-chanchito/
 │   │   │   ├── components/
 │   │   │   │   ├── charts/           # Interactive chart + axis ranges
 │   │   │   │   ├── dashboard/        # ScraperStatus, CsvImport
-│   │   │   │   ├── institutions/     # Per-family product tables, refresh
+│   │   │   │   ├── institutions/     # Per-family product tables, refresh, logo tile
 │   │   │   │   ├── monitors/         # MonitorCard, MonitorForm
 │   │   │   │   ├── layout/           # Sidebar
 │   │   │   │   └── ui/               # shadcn components
@@ -1268,11 +1268,15 @@ el-chanchito/
 │   │   │   │   ├── monitors/         # Expression language, evaluation, history + variaciones
 │   │   │   │   ├── auth/             # Session, throttle, CSRF, config
 │   │   │   │   ├── db/               # Drizzle schema + connection + resolver
+│   │   │   │   ├── institution-logos.ts
+│   │   │   │   │                     # Slug -> logo file in public/logos/
 │   │   │   │   ├── networth.ts       # Asset/debt derivation per kind
 │   │   │   │   ├── rates.ts          # CLP conversion (Buda public tickers)
 │   │   │   │   ├── budget-engine.ts  # Wealth + fixed-expense helpers
 │   │   │   │   └── utils.ts          # cn(), formatCLP()
 │   │   │   └── proxy.ts              # Auth enforcement (Next 16 proxy)
+│   │   ├── public/
+│   │   │   └── logos/institutions/   # One logo per institution slug
 │   │   └── Dockerfile
 │   │
 │   └── scrapers/                     # Python scraper service

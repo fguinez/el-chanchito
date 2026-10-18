@@ -32,6 +32,7 @@ import {
 import { hrefWithSearchParam, TXN_PARAM } from "@/lib/transaction-selection";
 import { TransferLinksDialog } from "@/components/transfers/transfer-links-dialog";
 import { TransferSuggestionsCard } from "@/components/transfers/transfer-suggestions-card";
+import { InstitutionLogo } from "@/components/institutions/institution-logo";
 import { Trash2, Check, Link2, Undo2 } from "lucide-react";
 
 interface InternalTransfer {
@@ -101,7 +102,8 @@ function ProductCell({
   return (
     <>
       <Link href={productHref} className="hover:underline">
-        <span className="block text-xs text-muted-foreground">
+        <span className="flex items-center gap-1 text-xs text-muted-foreground">
+          <InstitutionLogo slug={product.institutionSlug} size="sm" />
           {product.institutionName}
         </span>
         {product.name}

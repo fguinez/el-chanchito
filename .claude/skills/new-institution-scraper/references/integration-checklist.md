@@ -13,7 +13,7 @@ commit `6bd9cc3` is the most complete precedent of a whole new scraper: run
 - [4. Session state and login targets](#4-session-state-and-login-targets)
 - [5. Product model (only if a kind is missing)](#5-product-model-only-if-a-kind-is-missing)
 - [6. Database (usually only the institution seed)](#6-database-usually-only-the-institution-seed)
-- [7. Web app (usually nothing)](#7-web-app-usually-nothing)
+- [7. Web app (usually only the logo)](#7-web-app-usually-only-the-logo)
 - [8. Tests](#8-tests)
 - [9. Documentation](#9-documentation)
 - [10. Final gates](#10-final-gates)
@@ -157,13 +157,27 @@ consider landing the kind first.
       like V018, which today only handles BanChile ids). A new scraper avoids
       this by getting ids right first (see `architecture.md`).
 
-## 7. Web app (usually nothing)
+## 7. Web app (usually only the logo)
 
 The dashboard is generic over institutions. The status card, refresh button
 and scraper list come from `GET /scrapers` and the `institutions` table.
-There are no logos. The only hardcoded institutions are legacy wealth
-columns (`api/wealth/route.ts`, `history/page.tsx`, `lib/db/schema.ts`
-naming fintual, mercadopago and banchile), which new institutions don't join.
+The one per-institution asset is the logo:
+- [ ] Add the institution's logo as
+      `apps/web/public/logos/institutions/<slug>.<svg|png|webp>` and map the
+      slug in `apps/web/src/lib/institution-logos.ts`, with a comment naming
+      its source. Prefer the institution's own square icon (PWA manifest,
+      `apple-touch-icon`, an SVG isotype on its site), then its App Store
+      icon; set `bleed: true` when the image brings its own background. SVG
+      preferred, raster at least 128px, under 30 KB, and SVGs must be static
+      (no scripts, event handlers or external references). Commit the file:
+      never hotlink it or use a favicon service, which would tell a third
+      party which banks the user has. Without an entry the dashboard shows a
+      generic building icon, and `institution-logos.test.ts` fails on a file
+      that is missing or unmapped.
+
+The only hardcoded institutions are legacy wealth columns
+(`api/wealth/route.ts`, `history/page.tsx`, `lib/db/schema.ts` naming
+fintual, mercadopago and banchile), which new institutions don't join.
 Check anyway:
 - [ ] `grep -rn "fintual" apps/web/src`. If a hardcoded list of institutions
       shows up beyond those legacy spots, extend it and mention it in the PR.
@@ -205,8 +219,8 @@ See `testing.md` for the content. Files:
 
 - [ ] `make test-py` passes. Run `make test-db` too if you touched the writer
       or a migration. CI runs both suites against a real Postgres.
-- [ ] If you touched the web or the product model's TS output, also run
-      `make typecheck`, `make lint` and `make test-ts`.
+- [ ] If you touched the web (the logo included) or the product model's TS
+      output, also run `make typecheck`, `make lint` and `make test-ts`.
 - [ ] `python3 .claude/skills/new-institution-scraper/scripts/scan_personal_data.py`
       on the staged diff, plus `--range main...HEAD`, `--log main..HEAD`
       (commit messages) and `--paths` on the drafted PR body before opening
