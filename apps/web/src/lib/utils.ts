@@ -131,6 +131,13 @@ export function formatDateTickMs(ms: number): string {
   return date.toLocaleDateString("es-CL", options);
 }
 
+/** Epoch ms of a plain YYYY-MM-DD's local midnight; local parsing keeps the
+ *  point on its calendar day across timezones. */
+export function dayStartMs(day: string): number {
+  const [year, month, date] = day.split("-").map(Number);
+  return new Date(year, month - 1, date).getTime();
+}
+
 /** Full es-CL date for tooltips and badges over a numeric time axis. */
 export function formatDateMs(ms: number): string {
   return new Date(ms).toLocaleDateString("es-CL");

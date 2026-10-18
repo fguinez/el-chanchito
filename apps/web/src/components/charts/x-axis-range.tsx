@@ -9,7 +9,10 @@
 
 import { useCallback, useRef, useState } from "react";
 import type { NumberDomain, XAxisProps } from "recharts";
-import { formatDateTickMs } from "@/lib/utils";
+import { dayStartMs, formatDateTickMs } from "@/lib/utils";
+
+// Lives in lib/utils so server code can use it too; re-exported for the charts.
+export { dayStartMs };
 
 /** How the time axis picks its window. */
 export type XAxisRange =
@@ -19,13 +22,6 @@ export type XAxisRange =
   | { kind: "custom"; min: number; max: number };
 
 export const DAY_MS = 24 * 60 * 60 * 1000;
-
-/** Epoch ms of a plain YYYY-MM-DD's local midnight; local parsing keeps the
- *  point on its calendar day across timezones. */
-export function dayStartMs(day: string): number {
-  const [year, month, date] = day.split("-").map(Number);
-  return new Date(year, month - 1, date).getTime();
-}
 
 /** Epoch ms of the last instant of a plain YYYY-MM-DD, local time. */
 export function dayEndMs(day: string): number {
@@ -87,7 +83,7 @@ export function timeTicks(min: number, max: number, plotWidth: number): number[]
 }
 
 /** The rendered [min, max] window in ms; null for "all" (data-driven). */
-function fixedWindowMs(range: XAxisRange): [number, number] | null {
+export function fixedWindowMs(range: XAxisRange): [number, number] | null {
   switch (range.kind) {
     case "all":
       return null;

@@ -269,6 +269,9 @@ transactions:
   other, so a rule matching "Compra ACME" or "Intereses saldo USD" files them
   under its category; USD rows and internal transfers still stay out of the
   CLP totals.
+- Each stock you hold gets its daily closing prices for the last year, kept
+  from then on: its product page charts them in "Historial de precio", with
+  your average cost as a dashed line.
 
 The "Transferencia interna" flag is set once, when a movement is first
 imported: untick it in the transaction panel and later scrapes leave it
