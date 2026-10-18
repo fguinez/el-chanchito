@@ -696,20 +696,24 @@ class FintualScraper(BaseScraper):
                 f"the stocks pricing token request answered HTTP {resp.status_code}"
             )
 
-    async def _stock_prices(
-        self, client: httpx.AsyncClient, symbols: list[str]
-    ) -> dict[str, StockPrice]:
-        """Latest price per symbol. On a 401 the service JWT is minted once
-        and the request retried once; a second 401 fails the stocks leg."""
+    async def _pricing_get(
+        self, client: httpx.AsyncClient, url: str, params: dict[str, str], label: str
+    ) -> httpx.Response:
+        """GET from the stocks pricing service, retrying transient failures.
+
+        On a 401 the service JWT is minted once and the request retried once,
+        as the web app does (the cookie lives minutes, so a long run may need
+        a new one); a second 401, or any other failure, raises.
+        """
 
         async def get() -> httpx.Response:
             return await send_with_retry(
                 lambda: client.get(
-                    STOCK_PRICES_URL,
-                    params={"symbols": ",".join(symbols)},
+                    url,
+                    params=params,
                     headers={"Accept": "application/json", "Referer": _STOCKS_REFERER},
                 ),
-                label="Fintual GET current-prices",
+                label=label,
             )
 
         resp = await get()
@@ -724,6 +728,18 @@ class FintualScraper(BaseScraper):
             raise FintualStocksError(
                 f"the stocks pricing service answered HTTP {resp.status_code}"
             )
+        return resp
+
+    async def _stock_prices(
+        self, client: httpx.AsyncClient, symbols: list[str]
+    ) -> dict[str, StockPrice]:
+        """Latest price per symbol; a refused token fails the stocks leg."""
+        resp = await self._pricing_get(
+            client,
+            STOCK_PRICES_URL,
+            {"symbols": ",".join(symbols)},
+            "Fintual GET current-prices",
+        )
         return parse_prices(resp.json())
 
     async def _position_products(
