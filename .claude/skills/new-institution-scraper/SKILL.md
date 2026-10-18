@@ -149,6 +149,8 @@ Walk `references/integration-checklist.md` top to bottom:
 - `.gitignore` for session files and profiles;
 - the login target;
 - the institution seed migration;
+- the logo (`apps/web/public/logos/institutions/` plus its entry in
+  `apps/web/src/lib/institution-logos.ts`);
 - `test_build_scrapers.py` rows;
 - the `scrapers-test` import list;
 - docs.
