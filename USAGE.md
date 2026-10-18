@@ -70,6 +70,7 @@ BANCHILE_RUT=12345678-9          # Banco de Chile (via Playwright)
 LIDER_BCI_RUT=12345678-9         # Tarjeta Lider Bci (real Chrome over CDP)
 # LIDER_BCI_CDP_URL=http://localhost:9222  # optional: reuse the make bci-lider-login Chrome
 SANTANDER_RUT=00.000.000-0       # Banco Santander (headless Playwright login)
+BANCO_FALABELLA_RUT=00.000.000-0 # Banco Falabella CMR (headless Playwright login)
 FINTUAL_EMAIL=your@email.com     # Fintual (web session; run `make fintual-login` once)
 EMAIL_IMAP_HOST=imap.gmail.com   # Email parser (MercadoPago, MACH, Tenpo)
 EMAIL_IMAP_USER=your@gmail.com
@@ -79,8 +80,9 @@ EMAIL_IMAP_USER=your@gmail.com
 host port (`POSTGRES_PORT`), the e-mail tuning (`EMAIL_LOOKBACK_DAYS`,
 `EMAIL_MAX_MESSAGES`, `EMAIL_IMAP_MAILBOX`), the Fintual session cache
 (`FINTUAL_SESSION_FILE`), the Tarjeta Lider Bci Chrome
-(`LIDER_BCI_CDP_PORT`, `LIDER_BCI_CHROME_PATH`), the visible-browser debug switch
-for Santander (`SANTANDER_HEADLESS=0`), the scraper service mode
+(`LIDER_BCI_CDP_PORT`, `LIDER_BCI_CHROME_PATH`), the visible-browser debug switches
+for Santander (`SANTANDER_HEADLESS=0`) and Banco Falabella
+(`BANCO_FALABELLA_HEADLESS=0`), the scraper service mode
 (`SCRAPER_MODE`), the on-demand refresh wiring and the dashboard login.
 
 Optional email parser tuning (defaults in parentheses):
@@ -107,6 +109,7 @@ Secrets and their meaning:
 | `chanchito.BANCHILE_PASSWORD` | Banco de Chile web password |
 | `chanchito.LIDER_BCI_PASSWORD` | Tarjeta Lider Bci clave (autofills the login; without it someone has to type it into the Chrome window) |
 | `chanchito.SANTANDER_PASSWORD` | Banco Santander web clave |
+| `chanchito.BANCO_FALABELLA_PASSWORD` | Banco Falabella internet clave (six digits) |
 | `chanchito.FINTUAL_PASSWORD` | Fintual account password (used by `make fintual-login` to open a web session) |
 | `chanchito.BUDA_API_KEY` | Buda.com API key |
 | `chanchito.BUDA_API_SECRET` | Buda.com API secret |
@@ -124,6 +127,7 @@ A scraper is enabled only when its credentials are present:
 | Banco de Chile | `BANCHILE_RUT` + `BANCHILE_PASSWORD` |
 | Tarjeta Lider Bci | `LIDER_BCI_RUT` |
 | Banco Santander | `SANTANDER_RUT` + `SANTANDER_PASSWORD` |
+| Banco Falabella | `BANCO_FALABELLA_RUT` + `BANCO_FALABELLA_PASSWORD` |
 | MACH, MercadoPago, Tenpo | `EMAIL_IMAP_HOST` + `EMAIL_IMAP_USER` + `EMAIL_IMAP_PASSWORD` |
 
 On non-macOS hosts (e.g. Docker-only deploys), export the secret env vars
@@ -289,6 +293,23 @@ saying which, and the next scheduled run tries again. To watch the browser
 while debugging, set `SANTANDER_HEADLESS=0` (needs a display, so not in the
 container).
 
+### Banco Falabella
+
+The Banco Falabella scraper logs in with a headless Chromium once per run (RUT +
+six-digit internet clave, no session kept between runs and no second factor). It
+reads one product, a CMR Mastercard credit card in CLP: its cupo figures from
+the dashboard product card and its movements from the card-detail table (the
+unbilled tab and the current billed statement; older statements are not read
+yet). It runs on the host and in the Docker container alike.
+
+The movements page is intermittently slow and can return an error with a
+"Reintentar" button; the scraper retries each surface a few times and records
+partial coverage (a warning) instead of failing the run when one never loads. An
+idle session shows a "Tu sesion expirara" modal and logs out if it is not
+answered; the scraper clicks "Continuar" to stay signed in. To watch the browser
+while debugging, set `BANCO_FALABELLA_HEADLESS=0` (needs a display, so not in the
+container).
+
 ### Running scrapers once
 
 ```bash
@@ -308,6 +329,7 @@ Schedule per scraper:
 - **BanChile**: every 24 hours
 - **BCI Lider**: every 24 hours
 - **Santander**: every 24 hours
+- **Banco Falabella**: every 24 hours
 - **MACH, MercadoPago, Tenpo** (e-mail): every 30 minutes
 
 `make scrapers-start` (like `make dev` and the Compose service) also runs every

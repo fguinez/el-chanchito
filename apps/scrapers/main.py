@@ -35,6 +35,7 @@ from scrapers.backends.email import get_session as get_email_session
 from scrapers.base import BaseScraper, ScrapedExchangeRate
 from scrapers.institutions import (
     BanChileScraper,
+    BancoFalabellaScraper,
     BciLiderScraper,
     BudaScraper,
     FintualScraper,
@@ -237,6 +238,10 @@ def build_scrapers() -> dict[str, BaseScraper]:
         scrapers["santander"] = SantanderScraper()
         logger.info("Santander scraper enabled")
 
+    if os.environ.get("BANCO_FALABELLA_RUT") and os.environ.get("BANCO_FALABELLA_PASSWORD"):
+        scrapers["banco_falabella"] = BancoFalabellaScraper()
+        logger.info("Banco Falabella scraper enabled")
+
     if all(
         os.environ.get(k)
         for k in ("EMAIL_IMAP_HOST", "EMAIL_IMAP_USER", "EMAIL_IMAP_PASSWORD")
@@ -269,6 +274,7 @@ _SCHEDULES: dict[str, dict] = {
     "banchile":     {"hours": 24, "label": "BanChile (daily)"},
     "bci_lider":    {"hours": 24, "label": "BCI Lider (daily)"},
     "santander":    {"hours": 24, "label": "Santander (daily)"},
+    "banco_falabella": {"hours": 24, "label": "Banco Falabella (daily)"},
     "mach":         {"minutes": _EMAIL_INTERVAL_MINUTES, "label": "MACH email (every 30m)"},
     "mercadopago":  {"minutes": _EMAIL_INTERVAL_MINUTES, "label": "MercadoPago email (every 30m)"},
     "tenpo":        {"minutes": _EMAIL_INTERVAL_MINUTES, "label": "Tenpo email (every 30m)"},
