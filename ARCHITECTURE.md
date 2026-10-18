@@ -271,7 +271,7 @@ products ──────────────┘      product_snapshots (h
     credit_card|debit_card|
     prepaid_card|line_of_credit|
     loan|mortgage|investment|
-    crypto|other)
+    stock|crypto|other)
   name, currency, external_ref
   default_name                -- scrapers' name; name follows it until renamed (V027)
   slug                        -- create-only, unique per institution (V014)
@@ -437,6 +437,7 @@ the same function over the rows that are still uncategorized.
 | `V033__transactions_soft_delete.sql` | transactions gain `deleted_at`: a deleted row with an `external_id` is soft-deleted (keeps its key, so a scrape cannot re-import it), manual rows are hard-deleted (see "Deleting a transaction") |
 | `V037__seed_banco_falabella_institution.sql` | seeds the Banco Falabella institution row (upsert, so it also fixes a row the writer auto-created) |
 | `V038__product_prices.sql` | product_prices: one daily closing price per product and trading day (the bar's UTC date), upserted by the scrapers and never pruned |
+| `V039__stock_product_kind.sql` | admits the `stock` kind in products_kind_check and re-kinds Fintual's stock positions (`external_ref` `stock:%`) from `investment` to `stock`, rewriting the `kind` key of their attributes, metrics and snapshot metrics; goals stay `investment`; `products_stock_ref_kind_check` then rejects any `investment` row with a `stock:` ref, so a scraper still on the old code fails its writes instead of adding twins (stop the scrapers, migrate, restart scrapers and web) |
 
 ## Scraper Architecture
 
@@ -741,10 +742,11 @@ and one `StocksDetails` query batches every position's totals and profile under
 index aliases. Prices come from `GET /stocks-pricing-cl/current-prices`, which
 checks a per-service JWT cookie: on a 401 the scraper mints it with
 `POST /auth/jwt` and retries once, as the web app does. Each position becomes a
-USD `investment` product (`external_ref` `stock:<asset id>`; ticker, description
+USD `stock` product (`external_ref` `stock:<asset id>`; ticker, description
 and tags as attributes; nav, net invested, profit, units, price, average cost,
 unrealized and realized profit and dividends as metrics, by the web app's
-formulas), and the cash a USD `wallet`. A sold-out position drops to nav 0 and
+formulas), shown in the institution's own "Acciones" table, and the cash a USD
+`wallet`. A sold-out position drops to nav 0 and
 stops counting, for as long as Fintual keeps listing zero-share positions; a
 held one without a price or totals is skipped with a counted warning. The
 stocks are an isolated part of the same run: a failure there keeps the goals
@@ -760,7 +762,7 @@ the pure parsers), paged 50 at a time until a page where every list is empty
 (the offset moves by the longest list returned, never more than the page size;
 40 pages at most, then a warning). Every movement is a row on the USD `wallet`;
 buys, sells, dividends and cash mergers also get a mirror row on the stock's
-`investment` product, named by `product_external_ref` `stock:<asset id>`. A buy
+`stock` product, named by `product_external_ref` `stock:<asset id>`. A buy
 is money out of the wallet and into the stock, and both rows are flagged
 internal transfers, as are deposits from a bank; a dividend is income once, on
 the stock; cash interest and compensations are income and fees expenses. Dates
@@ -778,7 +780,7 @@ only. When the ledger is complete and nothing was pending or skipped, it must
 add up to the wallet's balance to the cent, or the run warns (no amounts). A
 stock the positions list no longer has gets a zero-valued product when the
 ledger shows it left through a sale or a cash merger (deposited = buys - sells,
-profit = sells - buys). One that left through a non-cash event (a share-only
+profit and realized profit = sells - buys). One that left through a non-cash event (a share-only
 merger, a spinoff, shares moved out by ACAT) has no cash leg, so it is skipped
 rather than booked as a loss, and its product keeps its last values; an empty
 positions list next to stocks bought and never sold zeroes nothing that run and

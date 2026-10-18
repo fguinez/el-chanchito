@@ -273,6 +273,11 @@ transactions:
   from then on: its product page charts them in "Historial de precio", with
   your average cost as a dashed line.
 
+The positions get their own **Acciones** table on Fintual's institution card,
+apart from the goals' **Inversiones** one: value, shares, price, average cost,
+and the gain and return on the shares still held, plus the realized result of
+sales and the dividends once a position has any.
+
 The "Transferencia interna" flag is set once, when a movement is first
 imported: untick it in the transaction panel and later scrapes leave it
 unticked.
