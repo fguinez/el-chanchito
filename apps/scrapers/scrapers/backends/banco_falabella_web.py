@@ -1,8 +1,10 @@
-"""Banco Falabella (CMR Mastercard): one headless login, data read from the DOM.
+"""Banco Falabella: one headless login, data read from the DOM.
 
 Banco Falabella's private site (`web2.bancofalabella.cl`) is a single-page app
-whose balances show on the post-login dashboard product card and whose card
+whose balances show on the post-login dashboard product cards and whose card
 movements render inside a `<credit-card-movements>` web component (shadow DOM).
+The checking account and línea de crédito details are legacy server-rendered
+views injected into the light DOM.
 This module only drives the browser and hands the rendered text and table rows
 to the pure parsers below, which are unit-tested with synthetic strings and
 never touch a browser. `fetch_session` is the single mockable seam.
@@ -25,6 +27,12 @@ The browser half, in order:
      unbilled "Ultimos movimientos" tab and the current billed "Movimientos
      facturados" statement. Iterating the month select for older statements is a
      deliberate follow-up (see `_read_billed`).
+  4. The Cuenta Corriente and Línea de Crédito cards on the same dashboard give
+     their balances (`checking_from_text` / `line_from_text`). Then, one
+     dashboard reload each, the checking detail's movements table
+     (`checking_movements_from_rows`) and the línea detail's "Tasa diaria"
+     (`daily_rate_from_text`) are read. These run after the card so a failure
+     there can never cost the card's surfaces.
 
 Gotchas handled here:
 
@@ -55,7 +63,7 @@ import re
 import sys
 import time
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Optional
@@ -124,24 +132,76 @@ class RawMovement:
 
 
 @dataclass(frozen=True)
+class RawCheckingBalance:
+    """The Cuenta Corriente figures read off its dashboard product card.
+
+    `available` is the "Saldo disponible" (the headline) and `accounting` the
+    "Saldo contable"; `account_number` is the number printed under the product
+    name, kept for display only. Any field is None when it was not found.
+    """
+
+    account_number: Optional[str] = None
+    available: Optional[Decimal] = None
+    accounting: Optional[Decimal] = None
+
+
+@dataclass(frozen=True)
+class RawLineBalance:
+    """The Línea de Crédito figures: its dashboard card plus its detail rate.
+
+    `limit` is the "Cupo autorizado", `owed` the "Saldo utilizado" and
+    `available` the "Saldo disponible" (the headline). `daily_rate_pct` is the
+    detail page's "Tasa diaria" as a percent number (1.23 for "1.23 %"), None
+    when the detail was not read.
+    """
+
+    limit: Optional[Decimal] = None
+    owed: Optional[Decimal] = None
+    available: Optional[Decimal] = None
+    daily_rate_pct: Optional[Decimal] = None
+
+
+@dataclass(frozen=True)
+class RawCheckingMovement:
+    """One Cuenta Corriente movement, normalised from a rendered table row.
+
+    `amount` is signed: the "Abono" column is money in (positive), the "Cargo"
+    column money out (negative). `balance` is the running "Saldo" after the
+    movement, None when the cell was blank.
+    """
+
+    transaction_date: date
+    description: str
+    amount: Decimal
+    currency: str
+    balance: Optional[Decimal] = None
+
+
+@dataclass(frozen=True)
 class FalabellaSession:
     """What one Banco Falabella login produced.
 
     `balance` is the CMR Mastercard card (None when its available cupo did not
-    parse), `movements` its parsed movements across the unbilled and billed
-    tabs, and `warnings` the partial-coverage notes the scraper hands to
+    parse) and `movements` its parsed movements across the unbilled and billed
+    tabs. `checking` and `line` are the Cuenta Corriente and Línea de Crédito
+    (None when the dashboard shows no such product or its available balance did
+    not parse), and `checking_movements` the checking account's movements.
+    `warnings` are the partial-coverage notes the scraper hands to
     `ProductScrapeResult.warnings`.
     """
 
     balance: Optional[RawBalance] = None
     movements: list[RawMovement] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    checking: Optional[RawCheckingBalance] = None
+    line: Optional[RawLineBalance] = None
+    checking_movements: list[RawCheckingMovement] = field(default_factory=list)
 
 
 # --- Pure helpers (unit-tested; no browser) -----------------------------------
 
 _CLP_SHAPE_RE = re.compile(r"^\d+(?:\.\d+)?$")
-_DMY_RE = re.compile(r"(\d{1,2})/(\d{1,2})/(\d{4})")
+_DMY_RE = re.compile(r"(\d{1,2})([/-])(\d{1,2})\2(\d{4})")
 _CUOTAS_RE = re.compile(r"^\s*(\d{1,3})\s*/\s*(\d{1,3})\s*$")
 _SPACES_RE = re.compile(r"\s+")
 _WHOLE = Decimal(1)
@@ -165,6 +225,21 @@ _PAYMENT_RE = re.compile(r"\b(?:pagos?|abonos?|devoluc\w*|revers\w*|anula\w*)\b"
 _LABEL_LIMIT = "cupo de compras"
 _LABEL_OWED = "cupo utilizado"
 _LABEL_AVAILABLE = "cupo disponible"
+
+# The Cuenta Corriente and Línea de Crédito dashboard cards follow the same
+# amount-then-label layout. Their product names pick the right card among the
+# accounts (`app-accounts`) and agreements (`app-agreements`) the page lists.
+_CHECKING_NAME = "cuenta corriente"
+_LINE_NAME = "linea de credito"
+_LABEL_SALDO_DISPONIBLE = "saldo disponible"
+_LABEL_SALDO_CONTABLE = "saldo contable"
+_LABEL_CUPO_AUTORIZADO = "cupo autorizado"
+_LABEL_SALDO_UTILIZADO = "saldo utilizado"
+
+# The línea detail's "Tasa diaria" field, read off the accent-free, lower-cased
+# page text (label and value render with no space between them).
+_DAILY_RATE_RE = re.compile(r"tasa diaria\s*:?\s*(\d+(?:[.,]\d+)?)\s*%")
+_PERCENT_RE = re.compile(r"^\s*(\d+(?:[.,]\d+)?)\s*%?\s*$")
 
 
 def _normalize(text: str) -> str:
@@ -200,13 +275,17 @@ def parse_clp(raw: Any) -> Optional[Decimal]:
 
 
 def parse_dmy(raw: Any) -> Optional[date]:
-    """Parse a "DD/MM/YYYY" date ("15/03/2025" -> 2025-03-15); None otherwise."""
+    """Parse a "DD/MM/YYYY" or "DD-MM-YYYY" date ("15/03/2025" -> 2025-03-15).
+
+    The card tables print slashes and the checking table dashes; a mix of the
+    two in one date is rejected. None otherwise.
+    """
     if not isinstance(raw, str):
         return None
     match = _DMY_RE.search(raw)
     if match is None:
         return None
-    day, month, year = (int(part) for part in match.groups())
+    day, month, year = (int(match.group(index)) for index in (1, 3, 4))
     try:
         return date(year, month, day)
     except ValueError:
@@ -334,6 +413,105 @@ def movements_from_rows(
         )
     if skipped:
         logger.warning("Banco Falabella: skipped %d unusable %s rows", skipped, section or "movement")
+    return movements
+
+
+def checking_from_text(text: Optional[str]) -> RawCheckingBalance:
+    """Shape the Cuenta Corriente dashboard card's innerText.
+
+    The card renders the product name, the account number, then amount/label
+    pairs ("Saldo contable", "Saldo disponible"); each figure is the line
+    BEFORE its label. The account number is the line after the name, kept
+    only when it carries digits and is not an amount.
+    """
+    lines = _lines(text)
+    account_number: Optional[str] = None
+    for index, line in enumerate(lines[:-1]):
+        if _normalize(line) == _CHECKING_NAME:
+            candidate = lines[index + 1]
+            if re.search(r"\d", candidate) and "$" not in candidate:
+                account_number = _SPACES_RE.sub(" ", candidate)
+            break
+    return RawCheckingBalance(
+        account_number=account_number,
+        available=_amount_before(lines, _LABEL_SALDO_DISPONIBLE),
+        accounting=_amount_before(lines, _LABEL_SALDO_CONTABLE),
+    )
+
+
+def line_from_text(text: Optional[str]) -> RawLineBalance:
+    """Shape the Línea de Crédito dashboard card's innerText.
+
+    Same amount-then-label layout as the other cards: "Cupo autorizado" is the
+    limit, "Saldo utilizado" the amount owed and "Saldo disponible" the
+    headline. The rate is not on the card (see `daily_rate_from_text`).
+    """
+    lines = _lines(text)
+    return RawLineBalance(
+        limit=_amount_before(lines, _LABEL_CUPO_AUTORIZADO),
+        owed=_amount_before(lines, _LABEL_SALDO_UTILIZADO),
+        available=_amount_before(lines, _LABEL_SALDO_DISPONIBLE),
+    )
+
+
+def parse_percent(raw: Any) -> Optional[Decimal]:
+    """Parse a percent figure ("1.23 %", "1,23 %", "1.23") into a Decimal."""
+    if not isinstance(raw, str):
+        return None
+    match = _PERCENT_RE.match(raw)
+    if match is None:
+        return None
+    return Decimal(match.group(1).replace(",", "."))
+
+
+def daily_rate_from_text(text: Optional[str]) -> Optional[Decimal]:
+    """The "Tasa diaria" percent in the línea detail's text, or None.
+
+    Only a figure followed by "%" right after the label counts, so the
+    movements table's "Tasa diaria" column header is never read as the rate.
+    """
+    match = _DAILY_RATE_RE.search(_normalize(text or ""))
+    if match is None:
+        return None
+    return Decimal(match.group(1).replace(",", "."))
+
+
+def checking_movements_from_rows(rows: list[list[str]]) -> list[RawCheckingMovement]:
+    """Turn the checking table's body rows into `RawCheckingMovement`s.
+
+    Each row is the cells Fecha, Descripcion, Cargo, Abono, Saldo. Exactly one
+    of Cargo (money out, made negative) and Abono (money in, positive) carries
+    the amount; the other is blank or "$ 0". A single-cell row is the table's "no
+    records" or filler row and is dropped silently. A row without a usable
+    date, or with no amount or an amount in both columns, is logged once (no
+    figures) and dropped; the rest of the leg continues.
+    """
+    movements: list[RawCheckingMovement] = []
+    skipped = 0
+    for row in rows:
+        if len(row) < 4:
+            if any(cell.strip() for cell in row) and len(row) > 1:
+                skipped += 1
+            continue
+        transaction_date = parse_dmy(row[0])
+        # A "$ 0" in the unused column means no amount there, like a blank.
+        cargo = parse_clp(row[2]) or None
+        abono = parse_clp(row[3]) or None
+        if transaction_date is None or (cargo is None) == (abono is None):
+            skipped += 1
+            continue
+        amount = abs(abono) if abono is not None else -abs(cargo)
+        movements.append(
+            RawCheckingMovement(
+                transaction_date=transaction_date,
+                description=_SPACES_RE.sub(" ", row[1].strip()),
+                amount=amount,
+                currency="CLP",
+                balance=parse_clp(row[4]) if len(row) > 4 else None,
+            )
+        )
+    if skipped:
+        logger.warning("Banco Falabella: skipped %d unusable checking rows", skipped)
     return movements
 
 
@@ -585,6 +763,77 @@ _RETRY_SHOWN_JS = "() => {" + _RETRY_CONTROL_JS + "  return Boolean(retry);\n}"
 _CLICK_RETRY_JS = (
     "() => {" + _RETRY_CONTROL_JS + "  if (!retry) return false;\n  retry.click();\n  return true;\n}"
 )
+
+
+# The Cuenta Corriente and Línea de Crédito dashboard cards (light DOM): the
+# innerText of each product grid inside the accounts and agreements components.
+# The name in each text picks the product (see `_pick_grid`).
+_PRODUCT_GRIDS_JS = """
+() => {
+  const texts = (selector) => Array.from(document.querySelectorAll(selector))
+    .map((grid) => grid.innerText || '');
+  return {
+    accounts: texts('app-accounts div.grid-container'),
+    agreements: texts('app-agreements div.grid-container'),
+    hasAccounts: Boolean(document.querySelector('app-accounts')),
+    hasAgreements: Boolean(document.querySelector('app-agreements')),
+  };
+}
+"""
+
+# The checking and línea details are legacy server-rendered views
+# (`viewIntegration/getViewContent/...`) injected into the light DOM: no shadow
+# DOM, and their responses are HTML, so the decrypted-JSON hook sees nothing.
+# Their load-failure view prints this message.
+_LEGACY_ERROR_MARKER = "en estos momentos no lo podemos atender"
+
+# The checking movements table (`ctbListMovbfch`), else the table whose OWN
+# header row reads Fecha / Cargo / Abono / Saldo (the page nests its layout in
+# outer tables, so a descendant header must not count). Each body row as an
+# array of cell strings; `failed` when the legacy error view shows.
+_CHECKING_TABLE_JS = """
+(errorMarker) => {
+  const strip = (s) => (s || '').normalize('NFKD').replace(/[\\u0300-\\u036f]/g, '').toLowerCase();
+  const failed = strip(document.body ? document.body.innerText : '').includes(errorMarker);
+  const ownHeader = (t) => (t.tHead ? strip(t.tHead.innerText) : '');
+  const table = document.querySelector('table#ctbListMovbfch')
+    || Array.from(document.querySelectorAll('table')).find((t) => {
+      const h = ownHeader(t);
+      return h.includes('fecha') && h.includes('cargo') && h.includes('abono') && h.includes('saldo');
+    });
+  if (!table) return {found: false, failed, rows: []};
+  const rows = [];
+  Array.from(table.tBodies).forEach((body) => Array.from(body.rows).forEach((tr) => {
+    const cells = Array.from(tr.cells).filter((td) => td.tagName === 'TD').map((td) => (td.innerText || '').trim());
+    if (cells.length) rows.push(cells);
+  }));
+  return {found: true, failed, rows};
+}
+"""
+
+# The línea detail's "Tasa diaria" field (`textFieldTasaDiariaLinea`), plus the
+# page text to fall back on when the field id drifts.
+_LINE_RATE_JS = """
+() => {
+  const field = document.querySelector('#textFieldTasaDiariaLinea');
+  return {
+    rate: field ? (field.innerText || field.textContent || '').trim() : null,
+    text: document.body ? document.body.innerText : '',
+  };
+}
+"""
+
+# How long a legacy detail view gets to render before it counts as not loaded.
+_LEGACY_VIEW_TIMEOUT_MS = 30_000
+# How long the dashboard gets to render the checking and línea cards once the
+# credit card's figures are in (they come from an earlier call, so this is a
+# backstop, spent in full only by a client without those products).
+_OTHER_PRODUCTS_TIMEOUT_MS = 10_000
+# Once one of the two cards is complete, how long the other gets to turn up.
+_OTHER_PRODUCTS_SETTLE_MS = 2_000
+# The dashboard links' product names (accents optional).
+_CHECKING_LINK_RE = r"cuenta\s+corriente"
+_LINE_LINK_RE = r"l[ií]nea\s+de\s+cr[eé]dito"
 
 
 def _find_marker(text: str, markers: tuple[str, ...]) -> Optional[str]:
@@ -1010,8 +1259,17 @@ def _read_billed(
 
 
 def read_session(page) -> FalabellaSession:
-    """Everything one authenticated page yields: the card and its movements."""
+    """Everything one authenticated page yields: every product and its movements.
+
+    The CMR card is read first, exactly as when it was the only product: its
+    dashboard figures, then its detail's movements. Only then does the session
+    reload the dashboard for the checking and línea cards and open their
+    details. Each of those reads is guarded: any error there (Playwright's
+    included) becomes a figure-free warning, so it can cost those surfaces but
+    never the card's.
+    """
     warnings: list[str] = []
+    home_url = page.url
     feed = _MovementsFeed()
     feed.attach(page)
     _keep_alive(page)
@@ -1022,12 +1280,78 @@ def read_session(page) -> FalabellaSession:
         logger.warning("Banco Falabella: the card available cupo did not parse")
         warnings.append("Banco Falabella: the card available cupo did not parse")
         balance = None
+    movements = _read_card_movements(page, feed, warnings)
 
+    checking, line = _guarded(
+        lambda: _read_dashboard_products(page, home_url, warnings),
+        warnings,
+        "the checking and line of credit cards",
+        (None, None),
+    )
+    checking_movements: list[RawCheckingMovement] = []
+    if checking is not None:
+        # The dashboard is still showing: the checking detail needs no reload.
+        checking_movements = _guarded(
+            lambda: _read_checking(page, warnings),
+            warnings,
+            "the checking account detail",
+            [],
+        )
+    if line is not None:
+        line = _guarded(
+            lambda: _read_line(page, home_url, line, warnings),
+            warnings,
+            "the line of credit detail",
+            line,
+        )
+    return FalabellaSession(
+        balance=balance,
+        movements=movements,
+        warnings=warnings,
+        checking=checking,
+        line=line,
+        checking_movements=checking_movements,
+    )
+
+
+def _guarded(read, warnings: list[str], what: str, fallback):
+    """Run one non-card read; any error becomes a warning and `fallback`.
+
+    The error itself (which can carry URLs or page text) goes to the debug log
+    only; the warning names the surface and the error type.
+    """
+    try:
+        return read()
+    except Exception as exc:
+        logger.debug("Banco Falabella: reading %s failed", what, exc_info=True)
+        warnings.append(f"Banco Falabella: reading {what} failed ({type(exc).__name__})")
+        return fallback
+
+
+def _read_dashboard_products(
+    page, home_url: str, warnings: list[str]
+) -> tuple[Optional[RawCheckingBalance], Optional[RawLineBalance]]:
+    """Reload the dashboard and read the checking and línea cards off it."""
+    if not _return_home(page, home_url):
+        warnings.append("Banco Falabella: the dashboard did not come back for the other products")
+        return None, None
+    checking, line = _read_other_products(page, warnings)
+    if checking is not None and checking.available is None:
+        warnings.append("Banco Falabella: the checking available balance did not parse")
+        checking = None
+    if line is not None and line.available is None:
+        warnings.append("Banco Falabella: the line of credit available balance did not parse")
+        line = None
+    return checking, line
+
+
+def _read_card_movements(page, feed: _MovementsFeed, warnings: list[str]) -> list[RawMovement]:
+    """The CMR card detail's unbilled and current billed movements."""
     # The unbilled tab loads as the card detail opens, before it is clicked.
     since = feed.mark()
     if not _open_card_detail(page):
         warnings.append("Banco Falabella: could not open the card detail")
-        return FalabellaSession(balance=balance, movements=[], warnings=warnings)
+        return []
 
     movements: list[RawMovement] = []
     unbilled = _read_surface(page, _UNBILLED_TAB, feed, since=since)
@@ -1037,7 +1361,186 @@ def read_session(page) -> FalabellaSession:
         movements.extend(movements_from_rows(unbilled, "unbilled"))
 
     movements.extend(_read_billed(page, feed, warnings, previous=unbilled))
-    return FalabellaSession(balance=balance, movements=movements, warnings=warnings)
+    return movements
+
+
+def _pick_grid(texts: Any, name: str) -> Optional[str]:
+    """The first product-grid text whose product name is `name`, else None."""
+    if not isinstance(texts, list):
+        return None
+    for text in texts:
+        if isinstance(text, str) and any(_normalize(line) == name for line in _lines(text)):
+            return text
+    return None
+
+
+def _read_other_products(
+    page, warnings: list[str]
+) -> tuple[Optional[RawCheckingBalance], Optional[RawLineBalance]]:
+    """The Cuenta Corriente and Línea de Crédito dashboard cards, when listed.
+
+    Polls until both cards have their available balance, or, when only one
+    does, until it has held for `_OTHER_PRODUCTS_SETTLE_MS` with no second card
+    turning up (the two components render independently, so the first one
+    complete is no sign the other is absent). Gives up at the backstop. A
+    product the page never lists is None; when its component is on the page but
+    never rendered a card, that is a warning, not a silent absence.
+    """
+    deadline = time.monotonic() + _OTHER_PRODUCTS_TIMEOUT_MS / 1000
+    settle_until: Optional[float] = None
+    while True:
+        try:
+            grids = page.evaluate(_PRODUCT_GRIDS_JS)
+        except Exception:
+            grids = {}
+        if not isinstance(grids, dict):
+            grids = {}
+        checking_text = _pick_grid(grids.get("accounts"), _CHECKING_NAME)
+        line_text = _pick_grid(grids.get("agreements"), _LINE_NAME)
+        checking = checking_from_text(checking_text) if checking_text else None
+        line = line_from_text(line_text) if line_text else None
+        listed = [product for product in (checking, line) if product is not None]
+        complete = bool(listed) and all(product.available is not None for product in listed)
+        now = time.monotonic()
+        if complete and len(listed) == 2:
+            return checking, line
+        if complete:
+            settle_until = settle_until or now + _OTHER_PRODUCTS_SETTLE_MS / 1000
+            if now >= settle_until:
+                break
+        else:
+            settle_until = None
+        if now >= deadline:
+            break
+        page.wait_for_timeout(_TABLE_POLL_MS)
+    for product, present, cards, label in (
+        (checking, "hasAccounts", "accounts", "checking account"),
+        (line, "hasAgreements", "agreements", "line of credit"),
+    ):
+        if product is None and grids.get(present) and not grids.get(cards):
+            warnings.append(f"Banco Falabella: the {label} card never rendered")
+    return checking, line
+
+
+def _return_home(page, home_url: str) -> bool:
+    """Reload the private dashboard (the SPA keeps one URL for every view)."""
+    try:
+        page.goto(home_url, wait_until="domcontentloaded", timeout=_GOTO_TIMEOUT_MS)
+        page.wait_for_function(
+            "() => /%s/i.test(document.body ? document.body.innerText : '')" % _PRODUCTS_MARKER,
+            timeout=_LOGIN_RESULT_TIMEOUT_MS,
+        )
+    except Exception:
+        logger.debug("Banco Falabella: the dashboard did not come back", exc_info=True)
+        return False
+    _keep_alive(page)
+    _dismiss_overlays(page)
+    return True
+
+
+def _open_product(page, component: str, name: str) -> bool:
+    """Click the dashboard product link named `name` inside `component`."""
+    _dismiss_overlays(page)
+    try:
+        link = (
+            page.locator(f"{component} a.div-product")
+            .filter(has_text=re.compile(name, re.I))
+            .first
+        )
+        link.wait_for(state="visible", timeout=_CARD_TIMEOUT_MS)
+    except Exception:
+        logger.debug("Banco Falabella: the %s link never became visible", component, exc_info=True)
+        return False
+    for _attempt in range(2):
+        try:
+            link.click(timeout=_CLICK_TIMEOUT_MS)
+            return True
+        except Exception:
+            logger.debug("Banco Falabella: the %s click was blocked; dismissing overlays", component, exc_info=True)
+            _dismiss_overlays(page)
+    return False
+
+
+def _read_checking_rows(page) -> Optional[list[list[str]]]:
+    """Wait for the checking detail's movements table; None if it never loads.
+
+    The legacy view arrives as one server-rendered response, so the table has
+    its rows as soon as it exists. `[]` is a table without movement rows. The
+    page can show the error view next to a table: with movement rows the rows
+    win, without them the load counts as failed (None), so a broken load is
+    never filed as an empty account.
+    """
+    deadline = time.monotonic() + _LEGACY_VIEW_TIMEOUT_MS / 1000
+    while time.monotonic() < deadline:
+        _keep_alive(page)
+        try:
+            result = page.evaluate(_CHECKING_TABLE_JS, _LEGACY_ERROR_MARKER)
+        except Exception:
+            result = None
+        if isinstance(result, dict):
+            rows = result.get("rows")
+            has_data = isinstance(rows, list) and any(len(row) >= 4 for row in rows)
+            if result.get("found") and isinstance(rows, list) and (has_data or not result.get("failed")):
+                logger.info("Banco Falabella: checking surface read, %d rows", len(rows))
+                return rows
+            if result.get("failed"):
+                logger.info("Banco Falabella: the checking view answered with its error page")
+                return None
+        page.wait_for_timeout(_TABLE_POLL_MS)
+    return None
+
+
+def _read_line_rate(page) -> Optional[Decimal]:
+    """Wait for the línea detail's "Tasa diaria"; None if it never shows."""
+    deadline = time.monotonic() + _LEGACY_VIEW_TIMEOUT_MS / 1000
+    while time.monotonic() < deadline:
+        _keep_alive(page)
+        try:
+            result = page.evaluate(_LINE_RATE_JS)
+        except Exception:
+            result = None
+        if isinstance(result, dict):
+            rate = parse_percent(result.get("rate"))
+            if rate is None:
+                rate = daily_rate_from_text(result.get("text"))
+            if rate is not None:
+                return rate
+        page.wait_for_timeout(_TABLE_POLL_MS)
+    return None
+
+
+def _read_checking(page, warnings: list[str]) -> list[RawCheckingMovement]:
+    """The checking account's latest movements (the detail's default view).
+
+    Only the default "Últimos movimientos" view is read; the month select for
+    older periods is not iterated (a daily run sees each movement there).
+    Expects the dashboard to be showing.
+    """
+    if not _open_product(page, "app-accounts", _CHECKING_LINK_RE):
+        warnings.append("Banco Falabella: could not open the checking account detail")
+        return []
+    rows = _read_checking_rows(page)
+    if rows is None:
+        warnings.append("Banco Falabella: checking movements surface never loaded")
+        return []
+    return checking_movements_from_rows(rows)
+
+
+def _read_line(page, home_url: str, line: RawLineBalance, warnings: list[str]) -> RawLineBalance:
+    """The línea card enriched with its detail's daily rate, when it loads.
+
+    The línea movements table is not read: its view errored live and it lists
+    draws and repayments that also show on the checking account (a draw is a
+    "traspaso" into it), so the checking leg already carries that money.
+    """
+    if not (_return_home(page, home_url) and _open_product(page, "app-agreements", _LINE_LINK_RE)):
+        warnings.append("Banco Falabella: could not open the line of credit detail")
+        return line
+    rate = _read_line_rate(page)
+    if rate is None:
+        warnings.append("Banco Falabella: the line of credit daily rate did not parse")
+        return line
+    return replace(line, daily_rate_pct=rate)
 
 
 def _logout(page) -> None:

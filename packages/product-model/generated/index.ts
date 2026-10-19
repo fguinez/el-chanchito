@@ -203,6 +203,8 @@ export interface LineOfCreditAttributes {
   kind: "line_of_credit";
   /** Annual interest rate as a percent number. */
   interest_rate_pct?: number | null;
+  /** Daily interest rate as a percent number, as quoted (Tasa diaria). */
+  daily_interest_rate_pct?: number | null;
 }
 
 /** Observation for a line of credit; headline is `available`. */
@@ -571,6 +573,7 @@ export const FAMILY_INFO: Record<
       { key: "disponible", labelEs: "Disponible", source: "headline", field: null, format: "currency", align: "right", optional: false, signed: false },
       { key: "cupo", labelEs: "Cupo", source: "metric", field: "limit", format: "currency", align: "right", optional: false, signed: false },
       { key: "utilizado", labelEs: "Utilizado", source: "metric", field: "owed", format: "currency", align: "right", optional: false, signed: false },
+      { key: "tasa_diaria", labelEs: "Tasa diaria", source: "attribute", field: "daily_interest_rate_pct", format: "percent", align: "right", optional: true, signed: false },
     ],
   },
   installment_loan: {

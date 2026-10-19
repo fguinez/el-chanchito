@@ -158,6 +158,10 @@ class LineOfCreditAttributes(RevolvingCreditAttributes):
     interest_rate_pct: float | None = Field(
         None, description="Annual interest rate as a percent number."
     )
+    daily_interest_rate_pct: float | None = Field(
+        None,
+        description="Daily interest rate as a percent number, as quoted (Tasa diaria).",
+    )
 
 
 class LoanAttributes(InstallmentLoanAttributes):

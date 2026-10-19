@@ -70,7 +70,7 @@ BANCHILE_RUT=12345678-9          # Banco de Chile (via Playwright)
 LIDER_BCI_RUT=12345678-9         # Tarjeta Lider Bci (real Chrome over CDP)
 # LIDER_BCI_CDP_URL=http://localhost:9222  # optional: reuse the make bci-lider-login Chrome
 SANTANDER_RUT=00.000.000-0       # Banco Santander (headless Playwright login)
-BANCO_FALABELLA_RUT=00.000.000-0 # Banco Falabella CMR (headless Playwright login)
+BANCO_FALABELLA_RUT=00.000.000-0 # Banco Falabella (headless Playwright login)
 FINTUAL_EMAIL=your@email.com     # Fintual (web session; run `make fintual-login` once)
 EMAIL_IMAP_HOST=imap.gmail.com   # Email parser (MercadoPago, MACH, Tenpo)
 EMAIL_IMAP_USER=your@gmail.com
@@ -360,10 +360,19 @@ container).
 
 The Banco Falabella scraper logs in with a headless Chromium once per run (RUT +
 six-digit internet clave, no session kept between runs and no second factor). It
-reads one product, a CMR Mastercard credit card in CLP: its cupo figures from
-the dashboard product card and its movements from the card-detail table (the
-unbilled tab and the current billed statement; older statements are not read
-yet). It runs on the host and in the Docker container alike.
+reads three CLP products:
+
+- **CMR Mastercard** credit card: its cupo figures from the dashboard product
+  card and its movements from the card-detail table (the unbilled tab and the
+  current billed statement; older statements are not read yet).
+- **Cuenta corriente**: its available and accounting balances from the
+  dashboard and its latest movements from the account detail (older months are
+  not read yet).
+- **Línea de crédito**: its authorized, used and available amounts from the
+  dashboard, plus the daily interest rate ("Tasa diaria") from its detail. Its
+  movements are not read; draws show up on the cuenta corriente.
+
+It runs on the host and in the Docker container alike.
 
 The movements page is intermittently slow and can return an error with a
 "Reintentar" button; the scraper retries each surface a few times and records

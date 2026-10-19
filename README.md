@@ -55,7 +55,7 @@ A scraper is enabled only when its credentials are present. See [USAGE.md](USAGE
 | `DATABASE_URL` | yes | PostgreSQL connection string; the `.env.example` default works with `make db-up` |
 | `BANCHILE_RUT` | no | Banco de Chile RUT; enables the BanChile scraper (Playwright) |
 | `SANTANDER_RUT` | no | Banco Santander RUT; with `SANTANDER_PASSWORD`, enables the Santander scraper (headless Playwright, CLP cuenta vista) |
-| `BANCO_FALABELLA_RUT` | no | Banco Falabella RUT; with `BANCO_FALABELLA_PASSWORD`, enables the Banco Falabella scraper (headless Playwright, CMR Mastercard credit card) |
+| `BANCO_FALABELLA_RUT` | no | Banco Falabella RUT; with `BANCO_FALABELLA_PASSWORD`, enables the Banco Falabella scraper (headless Playwright: CMR Mastercard credit card, cuenta corriente and línea de crédito) |
 | `LIDER_BCI_RUT` | no | Tarjeta Lider Bci RUT; enables its scraper (drives a real Chrome, so it needs a machine with a display) |
 | `FINTUAL_EMAIL` | no | Fintual account e-mail; enables the Fintual scraper (run `make fintual-login` once) |
 | `EMAIL_IMAP_HOST` / `EMAIL_IMAP_USER` | no | Gmail IMAP identifiers; enable the e-mail parsers (MACH, MercadoPago, Tenpo) |

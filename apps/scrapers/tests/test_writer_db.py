@@ -5,8 +5,8 @@ run the SQL that carries them out: the institution -> account -> product
 resolution chain, transaction dedup and issue #57's in-place re-key,
 transactions that name an existing product by its ref, snapshot
 history only on change, the roll-up guards, the exchange-rate upsert (V024),
-the price-history upsert (V038), the stock re-kind (V039) and the scraper run
-log. Each test gets its own freshly migrated database (see conftest.py) and is
+the price-history upsert (V038), the stock re-kind (V039), Banco Falabella's
+three singleton products and the scraper run log. Each test gets its own freshly migrated database (see conftest.py) and is
 skipped unless TEST_DATABASE_URL is set. Every figure and identifier is
 synthetic.
 """
@@ -37,12 +37,15 @@ from db.writer import (
     write_transactions,
 )
 from product_model import (
+    CheckingAttributes,
     CheckingMetrics,
     CreditCardAttributes,
     CreditCardMetrics,
     DailyPrice,
     DebitCardMetrics,
     InvestmentMetrics,
+    LineOfCreditAttributes,
+    LineOfCreditMetrics,
     ProductRef,
     ScrapedExchangeRate,
     ScrapedPriceHistory,
@@ -2003,3 +2006,79 @@ class TestPriceHistory:
                 "VALUES (%s, '2026-01-02', 0, 'USD')",
                 (product_id,),
             )
+
+
+class TestBancoFalabellaProducts:
+    """Banco Falabella's checking account and línea join a CMR card the writer
+    stored back when the card was the institution's only product: all three
+    are singletons of distinct kinds, so the card keeps its row and its
+    transactions, and each leg's rows land on their own kind's singleton.
+    """
+
+    def _card(self):
+        return ScrapedProduct(
+            institution="banco_falabella",
+            kind="credit_card",
+            name="CMR Mastercard",
+            attributes=CreditCardAttributes(last4="1234", brand="Mastercard"),
+            metrics=CreditCardMetrics(available=999999, limit=2500000, owed=1000000),
+        )
+
+    def _new_products(self, rate=1.23):
+        return [
+            ScrapedProduct(
+                institution="banco_falabella",
+                kind="checking",
+                name="Cuenta Corriente",
+                attributes=CheckingAttributes(account_number="00-000-00000-01"),
+                metrics=CheckingMetrics(balance=999999, accounting_balance=1000000),
+            ),
+            ScrapedProduct(
+                institution="banco_falabella",
+                kind="line_of_credit",
+                name="Línea de Crédito",
+                attributes=LineOfCreditAttributes(daily_interest_rate_pct=rate),
+                metrics=LineOfCreditMetrics(available=999999, limit=2500000, owed=1000000),
+            ),
+        ]
+
+    def _by_kind(self, conn):
+        return {row["kind"]: row for row in _products(conn, "banco_falabella")}
+
+    def test_the_card_keeps_its_row_and_transactions(self, db_conn):
+        upsert_product(self._card())
+        write_transactions([_txn("bfal_0000000000000001", "banco_falabella", "credit_card")])
+        card_id = _only_product(db_conn, "banco_falabella")["id"]
+
+        upsert_product(self._card())
+        for product in self._new_products():
+            upsert_product(product)
+        result = write_transactions(
+            [
+                _txn("bfal_0000000000000002", "banco_falabella", "credit_card"),
+                _txn("bfal_cc_0000000000000001", "banco_falabella", "checking", amount=1000000),
+            ]
+        )
+
+        products = self._by_kind(db_conn)
+        assert sorted(products) == ["checking", "credit_card", "line_of_credit"]
+        assert all(row["external_ref"] is None for row in products.values())
+        assert products["credit_card"]["id"] == card_id
+        assert (result.inserted, result.unresolved) == (2, 0)
+        rows = db_conn.execute(
+            "SELECT external_id, product_id FROM transactions ORDER BY external_id"
+        ).fetchall()
+        assert [(r["external_id"], r["product_id"]) for r in rows] == [
+            ("bfal_0000000000000001", card_id),
+            ("bfal_0000000000000002", card_id),
+            ("bfal_cc_0000000000000001", products["checking"]["id"]),
+        ]
+
+    def test_a_line_read_without_its_rate_keeps_the_stored_rate(self, db_conn):
+        for product in self._new_products():
+            upsert_product(product)
+        for product in self._new_products(rate=None):
+            upsert_product(product)
+
+        line = self._by_kind(db_conn)["line_of_credit"]
+        assert line["attributes"]["daily_interest_rate_pct"] == 1.23

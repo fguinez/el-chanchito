@@ -83,6 +83,7 @@ Kinds: `credit_card`, `line_of_credit`
 | `disponible` | Disponible | headline |  | currency |  |
 | `cupo` | Cupo | metric | `limit` | currency |  |
 | `utilizado` | Utilizado | metric | `owed` | currency |  |
+| `tasa_diaria` | Tasa diaria | attribute | `daily_interest_rate_pct` | percent | optional |
 
 ### Deuda en cuotas (`installment_loan`)
 
@@ -312,6 +313,7 @@ Net-worth role: **liability** · balance convention: **available** · family: **
 | --- | --- | --- |
 | `kind` | `"line_of_credit"` | Payload discriminator; always "line_of_credit". |
 | `interest_rate_pct` | `float?` | Annual interest rate as a percent number. |
+| `daily_interest_rate_pct` | `float?` | Daily interest rate as a percent number, as quoted (Tasa diaria). |
 
 ### Metrics
 
