@@ -120,6 +120,28 @@ describe("visibleColumns", () => {
     ]);
   });
 
+  it("shows Tasa diaria on the cards and lines table once a línea has it", () => {
+    const card = product("credit_card", {
+      metrics: { kind: "credit_card", available: 1_000_000 },
+    });
+    const linea = product("line_of_credit", {
+      metrics: { kind: "line_of_credit", available: 999_999 },
+      attributes: { kind: "line_of_credit", daily_interest_rate_pct: 1.23 },
+    });
+    expect(visibleColumns("revolving_credit", [card]).map((c) => c.key)).not.toContain(
+      "tasa_diaria"
+    );
+    expect(visibleColumns("revolving_credit", [card, linea]).map((c) => c.key)).toEqual([
+      "disponible",
+      "cupo",
+      "utilizado",
+      "tasa_diaria",
+    ]);
+    const tasa = column("revolving_credit", "tasa_diaria");
+    expect(resolveColumnCell(linea, tasa).text).toBe(formatPercent(1.23));
+    expect(resolveColumnCell(card, tasa).text).toBeNull();
+  });
+
   it("shows Dividendos on the stock table only once a row has them", () => {
     const held = product("stock", {
       metrics: { kind: "stock", nav: 1234.56, units: 2.5 },

@@ -83,6 +83,7 @@ Kinds: `credit_card`, `line_of_credit`
 | `disponible` | Disponible | headline |  | currency |  |
 | `cupo` | Cupo | metric | `limit` | currency |  |
 | `utilizado` | Utilizado | metric | `owed` | currency |  |
+| `tasa_diaria` | Tasa diaria | attribute | `daily_interest_rate_pct` | percent | optional |
 
 ### Deuda en cuotas (`installment_loan`)
 

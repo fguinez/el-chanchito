@@ -182,9 +182,19 @@ def test_revolving_credit_columns_are_right_aligned_currency():
     columns = resolve_columns("revolving_credit")
     keys = tuple(column.key for column in columns)
 
-    assert keys == ("disponible", "cupo", "utilizado")
-    assert {column.format for column in columns} == {ColumnFormat.CURRENCY}
+    assert keys == ("disponible", "cupo", "utilizado", "tasa_diaria")
+    assert {column.format for column in columns[:3]} == {ColumnFormat.CURRENCY}
     assert {column.align for column in columns} == {"right"}
+
+
+def test_revolving_credit_daily_rate_is_an_optional_percent_attribute():
+    """A línea's quoted daily rate shows as a percent, only where a row has it."""
+    tasa = {column.key: column for column in resolve_columns("revolving_credit")}["tasa_diaria"]
+
+    assert tasa.source is ColumnSource.ATTRIBUTE
+    assert tasa.field == "daily_interest_rate_pct"
+    assert tasa.format is ColumnFormat.PERCENT
+    assert tasa.optional
 
 
 def test_term_deposit_maturity_is_a_left_aligned_date():

@@ -573,6 +573,7 @@ export const FAMILY_INFO: Record<
       { key: "disponible", labelEs: "Disponible", source: "headline", field: null, format: "currency", align: "right", optional: false, signed: false },
       { key: "cupo", labelEs: "Cupo", source: "metric", field: "limit", format: "currency", align: "right", optional: false, signed: false },
       { key: "utilizado", labelEs: "Utilizado", source: "metric", field: "owed", format: "currency", align: "right", optional: false, signed: false },
+      { key: "tasa_diaria", labelEs: "Tasa diaria", source: "attribute", field: "daily_interest_rate_pct", format: "percent", align: "right", optional: true, signed: false },
     ],
   },
   installment_loan: {

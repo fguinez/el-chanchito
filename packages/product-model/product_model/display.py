@@ -136,6 +136,14 @@ _FAMILY_SPECS: tuple[FamilySpec, ...] = (
                 source=ColumnSource.METRIC,
                 field="owed",
             ),
+            ColumnSpec(
+                key="tasa_diaria",
+                label_es="Tasa diaria",
+                source=ColumnSource.ATTRIBUTE,
+                field="daily_interest_rate_pct",
+                format=ColumnFormat.PERCENT,
+                optional=True,
+            ),
         ),
     ),
     FamilySpec(
