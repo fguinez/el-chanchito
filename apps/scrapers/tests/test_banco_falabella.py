@@ -500,6 +500,19 @@ class TestCheckingMovementsFromRows:
 
         assert movement.amount == Decimal(-999_999)
 
+    @pytest.mark.parametrize(
+        ("cargo", "abono", "expected"),
+        [
+            pytest.param("$ 0", "$ 1.000.000", Decimal(1_000_000), id="zero-cargo"),
+            pytest.param("$ 999.999", "$ 0", Decimal(-999_999), id="zero-abono"),
+        ],
+    )
+    def test_zero_in_the_unused_column_is_absent(self, cargo, abono, expected):
+        """A printed "$ 0" in the other column does not make the row ambiguous."""
+        (movement,) = web.checking_movements_from_rows([_cc_row(cargo=cargo, abono=abono)])
+
+        assert movement.amount == expected
+
     def test_blank_saldo_is_none(self):
         """A missing running balance does not drop the movement."""
         (movement,) = web.checking_movements_from_rows([_cc_row(saldo="")])
@@ -519,6 +532,7 @@ class TestCheckingMovementsFromRows:
         "row",
         [
             pytest.param(_cc_row(cargo="", abono=""), id="no-amount"),
+            pytest.param(_cc_row(cargo="$ 0", abono="$ 0"), id="zero-both"),
             pytest.param(_cc_row(cargo="$ 999.999", abono="$ 1.000.000"), id="both-amounts"),
             pytest.param(_cc_row(fecha="sin fecha"), id="bad-date"),
         ],

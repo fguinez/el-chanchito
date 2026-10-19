@@ -481,7 +481,7 @@ def checking_movements_from_rows(rows: list[list[str]]) -> list[RawCheckingMovem
 
     Each row is the cells Fecha, Descripcion, Cargo, Abono, Saldo. Exactly one
     of Cargo (money out, made negative) and Abono (money in, positive) carries
-    the amount; the other is blank. A single-cell row is the table's "no
+    the amount; the other is blank or "$ 0". A single-cell row is the table's "no
     records" or filler row and is dropped silently. A row without a usable
     date, or with no amount or an amount in both columns, is logged once (no
     figures) and dropped; the rest of the leg continues.
@@ -494,8 +494,9 @@ def checking_movements_from_rows(rows: list[list[str]]) -> list[RawCheckingMovem
                 skipped += 1
             continue
         transaction_date = parse_dmy(row[0])
-        cargo = parse_clp(row[2])
-        abono = parse_clp(row[3])
+        # A "$ 0" in the unused column means no amount there, like a blank.
+        cargo = parse_clp(row[2]) or None
+        abono = parse_clp(row[3]) or None
         if transaction_date is None or (cargo is None) == (abono is None):
             skipped += 1
             continue
