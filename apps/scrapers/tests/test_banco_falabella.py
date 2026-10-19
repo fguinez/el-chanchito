@@ -609,8 +609,14 @@ class _GridsPage:
         self.waits += 1
 
 
+def _ticking_clock(monkeypatch, step=0.5):
+    """`time.monotonic` advancing `step` seconds per call."""
+    clock = iter(x * step for x in range(100_000))
+    monkeypatch.setattr(web.time, "monotonic", lambda: next(clock))
+
+
 class TestReadOtherProducts:
-    def test_waits_for_the_figures(self, monkeypatch):
+    def test_waits_for_the_figures(self):
         """A card listed without its figures yet is polled until they land."""
         page = _GridsPage(
             [
@@ -618,20 +624,62 @@ class TestReadOtherProducts:
                 {"accounts": [_CHECKING_CARD_TEXT], "agreements": [_LINE_CARD_TEXT]},
             ]
         )
+        warnings = []
 
-        checking, line = web._read_other_products(page)
+        checking, line = web._read_other_products(page, warnings)
 
         assert checking.available == Decimal(999_999)
         assert line.available == Decimal(999_999)
         assert page.waits == 1
+        assert warnings == []
+
+    def test_a_late_second_card_is_waited_for(self, monkeypatch):
+        """The línea rendering after the checking card is complete still lands."""
+        _ticking_clock(monkeypatch)
+        checking_only = {"accounts": [_CHECKING_CARD_TEXT], "agreements": [], "hasAgreements": True}
+        page = _GridsPage(
+            [checking_only, checking_only, {"accounts": [_CHECKING_CARD_TEXT], "agreements": [_LINE_CARD_TEXT]}]
+        )
+        warnings = []
+
+        checking, line = web._read_other_products(page, warnings)
+
+        assert checking is not None and line is not None
+        assert warnings == []
+
+    def test_one_card_settles_without_waiting_out_the_backstop(self, monkeypatch):
+        """A client with only a checking account is done after the settle window."""
+        _ticking_clock(monkeypatch)
+        page = _GridsPage([{"accounts": [_CHECKING_CARD_TEXT], "agreements": []}])
+        warnings = []
+
+        checking, line = web._read_other_products(page, warnings)
+
+        assert checking is not None and line is None
+        assert page.waits < web._OTHER_PRODUCTS_TIMEOUT_MS / web._TABLE_POLL_MS
+        assert warnings == []
+
+    def test_component_that_never_renders_a_card_warns(self, monkeypatch):
+        """An agreements component left without a card is a warning, not silence."""
+        _ticking_clock(monkeypatch)
+        page = _GridsPage(
+            [{"accounts": [_CHECKING_CARD_TEXT], "agreements": [], "hasAccounts": True, "hasAgreements": True}]
+        )
+        warnings = []
+
+        checking, line = web._read_other_products(page, warnings)
+
+        assert checking is not None and line is None
+        assert warnings == ["Banco Falabella: the line of credit card never rendered"]
 
     def test_client_without_those_products_gets_none(self, monkeypatch):
-        """Nothing listed is None for both, after the bounded backstop."""
-        clock = iter(range(0, 1000, 5))
-        monkeypatch.setattr(web.time, "monotonic", lambda: next(clock))
+        """Nothing listed (and no component) is None for both, after the backstop."""
+        _ticking_clock(monkeypatch, step=5)
         page = _GridsPage([{"accounts": [], "agreements": []}])
+        warnings = []
 
-        assert web._read_other_products(page) == (None, None)
+        assert web._read_other_products(page, warnings) == (None, None)
+        assert warnings == []
 
 
 class _LegacyViewPage:
@@ -699,6 +747,76 @@ class TestReadLineRate:
         page = _LegacyViewPage([{"rate": "0,00 %", "text": ""}])
 
         assert web._read_line_rate(page) == Decimal("0")
+
+
+class _SessionPage:
+    """An authenticated page whose browser dies once the checking table is polled.
+
+    Answers "no" to every overlay probe, the línea rate on its detail, and an
+    empty checking view; its `wait_for_timeout` raises (as Playwright does when
+    the page or browser closes) after the checking table has been asked for.
+    """
+
+    url = "https://example.invalid/home"
+
+    def __init__(self):
+        self.checking_polled = False
+
+    def on(self, event, handler):
+        pass
+
+    def evaluate(self, script, *args):
+        if script == web._CHECKING_TABLE_JS:
+            self.checking_polled = True
+            return {"found": False, "failed": False, "rows": []}
+        if script == web._LINE_RATE_JS:
+            return {"rate": "1,23 %", "text": ""}
+        return False
+
+    def wait_for_timeout(self, ms):
+        if self.checking_polled:
+            raise RuntimeError("Target page, context or browser has been closed")
+
+
+class TestReadSession:
+    def test_checking_failure_never_costs_the_card(self, monkeypatch):
+        """A browser error in the checking read is a warning; card and línea land."""
+        card_movements = web.movements_from_rows([_row()], "unbilled")
+        monkeypatch.setattr(web, "_wait_for_card_text", lambda page: _DASHBOARD_CARD_TEXT)
+        monkeypatch.setattr(web, "_read_card_movements", lambda page, feed, warnings: card_movements)
+        monkeypatch.setattr(web, "_return_home", lambda page, home_url: True)
+        monkeypatch.setattr(web, "_read_other_products", lambda page, warnings: (_checking(), _line(daily_rate_pct=None)))
+        monkeypatch.setattr(web, "_open_product", lambda page, component, name: True)
+
+        session = web.read_session(_SessionPage())
+
+        assert session.balance.available == Decimal(1_500_001)
+        assert session.movements == card_movements
+        assert session.checking == _checking()
+        assert session.checking_movements == []
+        assert session.line.daily_rate_pct == Decimal("1.23")
+        assert session.warnings == [
+            "Banco Falabella: reading the checking account detail failed (RuntimeError)"
+        ]
+
+    def test_dashboard_reread_failure_keeps_the_card(self, monkeypatch):
+        """An error reading the other cards drops only them, with a warning."""
+        monkeypatch.setattr(web, "_wait_for_card_text", lambda page: _DASHBOARD_CARD_TEXT)
+        monkeypatch.setattr(web, "_read_card_movements", lambda page, feed, warnings: [])
+        monkeypatch.setattr(web, "_return_home", lambda page, home_url: True)
+
+        def boom(page, warnings):
+            raise RuntimeError("page closed")
+
+        monkeypatch.setattr(web, "_read_other_products", boom)
+
+        session = web.read_session(_SessionPage())
+
+        assert session.balance is not None
+        assert (session.checking, session.line) == (None, None)
+        assert session.warnings == [
+            "Banco Falabella: reading the checking and line of credit cards failed (RuntimeError)"
+        ]
 
 
 class TestScraperLegs:

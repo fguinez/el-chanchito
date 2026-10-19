@@ -774,6 +774,8 @@ _PRODUCT_GRIDS_JS = """
   return {
     accounts: texts('app-accounts div.grid-container'),
     agreements: texts('app-agreements div.grid-container'),
+    hasAccounts: Boolean(document.querySelector('app-accounts')),
+    hasAgreements: Boolean(document.querySelector('app-agreements')),
   };
 }
 """
@@ -826,6 +828,8 @@ _LEGACY_VIEW_TIMEOUT_MS = 30_000
 # credit card's figures are in (they come from an earlier call, so this is a
 # backstop, spent in full only by a client without those products).
 _OTHER_PRODUCTS_TIMEOUT_MS = 10_000
+# Once one of the two cards is complete, how long the other gets to turn up.
+_OTHER_PRODUCTS_SETTLE_MS = 2_000
 # The dashboard links' product names (accents optional).
 _CHECKING_LINK_RE = r"cuenta\s+corriente"
 _LINE_LINK_RE = r"l[ií]nea\s+de\s+cr[eé]dito"
@@ -1256,11 +1260,12 @@ def _read_billed(
 def read_session(page) -> FalabellaSession:
     """Everything one authenticated page yields: every product and its movements.
 
-    The dashboard gives all three products' balances in one read. The CMR card
-    detail is read next, exactly as when it was the only product; only then
-    does the session leave for the checking and línea details (a dashboard
-    reload each), so a failure there can cost those surfaces but never the
-    card's.
+    The CMR card is read first, exactly as when it was the only product: its
+    dashboard figures, then its detail's movements. Only then does the session
+    reload the dashboard for the checking and línea cards and open their
+    details. Each of those reads is guarded: any error there (Playwright's
+    included) becomes a figure-free warning, so it can cost those surfaces but
+    never the card's.
     """
     warnings: list[str] = []
     home_url = page.url
@@ -1274,18 +1279,30 @@ def read_session(page) -> FalabellaSession:
         logger.warning("Banco Falabella: the card available cupo did not parse")
         warnings.append("Banco Falabella: the card available cupo did not parse")
         balance = None
-    checking, line = _read_other_products(page)
-    if checking is not None and checking.available is None:
-        warnings.append("Banco Falabella: the checking available balance did not parse")
-        checking = None
-    if line is not None and line.available is None:
-        warnings.append("Banco Falabella: the line of credit available balance did not parse")
-        line = None
-
     movements = _read_card_movements(page, feed, warnings)
-    checking_movements = _read_checking(page, home_url, warnings) if checking is not None else []
+
+    checking, line = _guarded(
+        lambda: _read_dashboard_products(page, home_url, warnings),
+        warnings,
+        "the checking and line of credit cards",
+        (None, None),
+    )
+    checking_movements: list[RawCheckingMovement] = []
+    if checking is not None:
+        # The dashboard is still showing: the checking detail needs no reload.
+        checking_movements = _guarded(
+            lambda: _read_checking(page, warnings),
+            warnings,
+            "the checking account detail",
+            [],
+        )
     if line is not None:
-        line = _read_line(page, home_url, line, warnings)
+        line = _guarded(
+            lambda: _read_line(page, home_url, line, warnings),
+            warnings,
+            "the line of credit detail",
+            line,
+        )
     return FalabellaSession(
         balance=balance,
         movements=movements,
@@ -1294,6 +1311,37 @@ def read_session(page) -> FalabellaSession:
         line=line,
         checking_movements=checking_movements,
     )
+
+
+def _guarded(read, warnings: list[str], what: str, fallback):
+    """Run one non-card read; any error becomes a warning and `fallback`.
+
+    The error itself (which can carry URLs or page text) goes to the debug log
+    only; the warning names the surface and the error type.
+    """
+    try:
+        return read()
+    except Exception as exc:
+        logger.debug("Banco Falabella: reading %s failed", what, exc_info=True)
+        warnings.append(f"Banco Falabella: reading {what} failed ({type(exc).__name__})")
+        return fallback
+
+
+def _read_dashboard_products(
+    page, home_url: str, warnings: list[str]
+) -> tuple[Optional[RawCheckingBalance], Optional[RawLineBalance]]:
+    """Reload the dashboard and read the checking and línea cards off it."""
+    if not _return_home(page, home_url):
+        warnings.append("Banco Falabella: the dashboard did not come back for the other products")
+        return None, None
+    checking, line = _read_other_products(page, warnings)
+    if checking is not None and checking.available is None:
+        warnings.append("Banco Falabella: the checking available balance did not parse")
+        checking = None
+    if line is not None and line.available is None:
+        warnings.append("Banco Falabella: the line of credit available balance did not parse")
+        line = None
+    return checking, line
 
 
 def _read_card_movements(page, feed: _MovementsFeed, warnings: list[str]) -> list[RawMovement]:
@@ -1325,15 +1373,20 @@ def _pick_grid(texts: Any, name: str) -> Optional[str]:
     return None
 
 
-def _read_other_products(page) -> tuple[Optional[RawCheckingBalance], Optional[RawLineBalance]]:
+def _read_other_products(
+    page, warnings: list[str]
+) -> tuple[Optional[RawCheckingBalance], Optional[RawLineBalance]]:
     """The Cuenta Corriente and Línea de Crédito dashboard cards, when listed.
 
-    Polls until every card the page lists has its available balance, or the
-    backstop runs out; a product the page never lists is None.
+    Polls until both cards have their available balance, or, when only one
+    does, until it has held for `_OTHER_PRODUCTS_SETTLE_MS` with no second card
+    turning up (the two components render independently, so the first one
+    complete is no sign the other is absent). Gives up at the backstop. A
+    product the page never lists is None; when its component is on the page but
+    never rendered a card, that is a warning, not a silent absence.
     """
     deadline = time.monotonic() + _OTHER_PRODUCTS_TIMEOUT_MS / 1000
-    checking: Optional[RawCheckingBalance] = None
-    line: Optional[RawLineBalance] = None
+    settle_until: Optional[float] = None
     while True:
         try:
             grids = page.evaluate(_PRODUCT_GRIDS_JS)
@@ -1346,11 +1399,26 @@ def _read_other_products(page) -> tuple[Optional[RawCheckingBalance], Optional[R
         checking = checking_from_text(checking_text) if checking_text else None
         line = line_from_text(line_text) if line_text else None
         listed = [product for product in (checking, line) if product is not None]
-        if listed and all(product.available is not None for product in listed):
+        complete = bool(listed) and all(product.available is not None for product in listed)
+        now = time.monotonic()
+        if complete and len(listed) == 2:
             return checking, line
-        if time.monotonic() >= deadline:
-            return checking, line
+        if complete:
+            settle_until = settle_until or now + _OTHER_PRODUCTS_SETTLE_MS / 1000
+            if now >= settle_until:
+                break
+        else:
+            settle_until = None
+        if now >= deadline:
+            break
         page.wait_for_timeout(_TABLE_POLL_MS)
+    for product, present, cards, label in (
+        (checking, "hasAccounts", "accounts", "checking account"),
+        (line, "hasAgreements", "agreements", "line of credit"),
+    ):
+        if product is None and grids.get(present) and not grids.get(cards):
+            warnings.append(f"Banco Falabella: the {label} card never rendered")
+    return checking, line
 
 
 def _return_home(page, home_url: str) -> bool:
@@ -1437,13 +1505,14 @@ def _read_line_rate(page) -> Optional[Decimal]:
     return None
 
 
-def _read_checking(page, home_url: str, warnings: list[str]) -> list[RawCheckingMovement]:
+def _read_checking(page, warnings: list[str]) -> list[RawCheckingMovement]:
     """The checking account's latest movements (the detail's default view).
 
     Only the default "Últimos movimientos" view is read; the month select for
     older periods is not iterated (a daily run sees each movement there).
+    Expects the dashboard to be showing.
     """
-    if not (_return_home(page, home_url) and _open_product(page, "app-accounts", _CHECKING_LINK_RE)):
+    if not _open_product(page, "app-accounts", _CHECKING_LINK_RE):
         warnings.append("Banco Falabella: could not open the checking account detail")
         return []
     rows = _read_checking_rows(page)
