@@ -674,9 +674,9 @@ factor), and reads the figures from the rendered DOM. Three CLP products are
 modelled, each a singleton (no `external_ref`) of its own kind, so the writer
 never confuses them and the card keeps the row it had when it was the only
 one: a CMR Mastercard `credit_card`, a cuenta corriente `checking` and a línea
-de crédito `line_of_credit`. Card balances (`available`/`limit`/`owed`, plus the masked `last4`
-and brand) come from the dashboard product card, anchored on the "Cupo de
-compras / utilizado / disponible" labels so the Avance cash-advance line is
+de crédito `line_of_credit`. Card balances (`available`/`limit`/`owed`, plus
+the masked `last4` and brand) come from the dashboard product card, anchored on
+the "Cupo de compras / utilizado / disponible" labels so the Avance cash-advance line is
 never read as a balance. Movements come from the card-detail `<credit-card-movements>`
 web component (shadow DOM): the unbilled "Ultimos movimientos" tab and the
 current billed "Movimientos facturados" statement. Older statements (the tab's
@@ -1113,10 +1113,13 @@ Transactions are deduplicated via `UNIQUE(product_id, external_id)`:
   multi-installment purchase (repeated across months) and a movement seen in both
   the unbilled and billed tabs dedup to one row. Two distinct charges on one day
   for the same amount and persona collapse (the scheme's collision limit). Its
-  checking movements use `bfal_cc_{sha1(date|amount|CLP|saldo)[:16]}`, adding the
-  running balance after the movement (the table has no id and no time of day),
-  which tells apart same-day twins unless the balance returns to the same figure
-  between them
+  checking movements use `bfal_cc_{sha1(date|amount|CLP|saldo)[:16]}`, adding
+  the running balance after the movement (the table has no id and no time of
+  day), which tells apart same-day twins unless the balance returns to the same
+  figure between them. The balance is also the scheme's re-key risk: if the
+  bank re-sorts same-day rows (an earlier-booked movement listed later) or a
+  hold or reversal changes a row's printed Saldo, that movement gets a new key
+  and is stored a second time
 - Email: `email_{institution}_{sha1(Message-ID)[:8]}` (`hashlib`, not Python's
   per-process salted `hash()`); an email without a Message-ID hashes
   `Date|From|Subject|body` instead

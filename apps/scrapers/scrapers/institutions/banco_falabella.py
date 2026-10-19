@@ -142,9 +142,15 @@ def checking_external_id_for(movement: RawCheckingMovement) -> str:
     amount and direction, since the ledger moves between them. Collision limit:
     such a pair only collapses when the balance returns to the same figure in
     between (for example, an incoming transfer, an equal charge, then a second
-    equal transfer, all on one day). UNVERIFIED: whether a movement booked
-    after the cut-off hour is first listed under one date and later re-dated to
-    the next business day; that would re-key it.
+    equal transfer, all on one day).
+
+    Re-key risk: the key is only as stable as the printed running balance. If
+    the bank re-sorts same-day rows (a movement booked earlier listed after a
+    later one), or a hold or reversal changes the Saldo printed on an existing
+    row, that movement hashes to a new key and is stored a second time.
+    UNVERIFIED as well: whether a movement booked after the cut-off hour is
+    first listed under one date and later re-dated to the next business day,
+    which would re-key it the same way.
     """
     amount_int = int(movement.amount)
     balance = "" if movement.balance is None else str(int(movement.balance))
