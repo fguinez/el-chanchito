@@ -1,8 +1,9 @@
 """Tests for the Banco Falabella scraper: parsers, ids, and the two legs.
 
 The page text and table rows are written from scratch to mirror the shape of the
-dashboard product card and the card-detail movements table; every identifier,
-figure, merchant and person is synthetic. No test launches a browser: the
+dashboard product cards, the card-detail movements table, and the checking and
+línea detail views; every identifier, figure, rate, merchant and person is
+synthetic. No test launches a browser: the
 scraper legs run against a faked `fetch_session`.
 """
 
@@ -22,9 +23,16 @@ from scrapers.backends.banco_falabella_web import (
     BancoFalabellaLoginError,
     FalabellaSession,
     RawBalance,
+    RawCheckingBalance,
+    RawCheckingMovement,
+    RawLineBalance,
 )
 from scrapers.institutions import banco_falabella as mod
-from scrapers.institutions.banco_falabella import BancoFalabellaScraper, external_id_for
+from scrapers.institutions.banco_falabella import (
+    BancoFalabellaScraper,
+    checking_external_id_for,
+    external_id_for,
+)
 
 # The dashboard product card innerText (synthetic). Each cupo amount is the line
 # BEFORE its label; the Avance "Monto disponible" line is a cash-advance figure
@@ -43,6 +51,75 @@ Monto disponible
 Estado de cuenta
 Pagar
 Simular / Transferir"""
+
+
+# The Cuenta Corriente and Línea de Crédito dashboard cards (synthetic), in the
+# same amount-then-label layout as the credit card. Every figure is a
+# placeholder from the canonical fake set: the línea's three are distinct so a
+# swapped label shows, and deliberately do not add up (nothing cross-checks
+# them).
+_CHECKING_CARD_TEXT = """Cuenta Corriente
+00-000-00000-01
+$ 1.000.000
+Saldo contable
+$ 999.999
+Saldo disponible
+Transf. entre cuentas
+Transferir a terceros"""
+
+_LINE_CARD_TEXT = """Línea de Crédito
+00-000-00000-02
+$ 2.500.000
+Cupo autorizado
+$ 1.000.000
+Saldo utilizado
+$ 999.999
+Saldo disponible
+Aumentar mi línea
+Pagar / Configurar"""
+
+# The línea detail's "Detalle" block as innerText renders it: label and value
+# with no space between them, then the movements table whose header repeats
+# "Tasa diaria" as a column name.
+_LINE_DETAIL_TEXT = """Detalle
+Titular(es)NOMBRE SINTETICO
+Fecha de activación01-01-2025
+Tasa diaria1,23 %
+Selecciona período
+Detalle de movimientos
+Fecha\tDescripción\tCargos\tAbonos\tMonto utilizado\tTasa diaria\tIntereses
+No existen registros"""
+
+
+def _cc_row(
+    fecha="15-03-2025",
+    descripcion="TRANSFERENCIA SINTETICA",
+    cargo="",
+    abono="$ 1.000.000",
+    saldo="$ 2.500.000",
+) -> list[str]:
+    return [fecha, descripcion, cargo, abono, saldo]
+
+
+def _checking(**overrides) -> RawCheckingBalance:
+    values = dict(
+        account_number="00-000-00000-01",
+        available=Decimal(999_999),
+        accounting=Decimal(1_000_000),
+    )
+    values.update(overrides)
+    return RawCheckingBalance(**values)
+
+
+def _line(**overrides) -> RawLineBalance:
+    values = dict(
+        limit=Decimal(2_500_000),
+        owed=Decimal(1_000_000),
+        available=Decimal(999_999),
+        daily_rate_pct=Decimal("1.23"),
+    )
+    values.update(overrides)
+    return RawLineBalance(**values)
 
 
 def _row(
@@ -131,13 +208,14 @@ class TestParseDmy:
         [
             pytest.param("15/03/2025", date(2025, 3, 15), id="day"),
             pytest.param("08/03/2025", date(2025, 3, 8), id="other-day"),
+            pytest.param("15-03-2025", date(2025, 3, 15), id="dashed"),
         ],
     )
     def test_parses(self, raw, expected):
         """A DD/MM/YYYY date parses to the calendar date."""
         assert web.parse_dmy(raw) == expected
 
-    @pytest.mark.parametrize("raw", ["", None, "2026-09-24", "32/01/2026"])
+    @pytest.mark.parametrize("raw", ["", None, "2026-09-24", "32/01/2026", "15-03/2025"])
     def test_rejects_other_shapes(self, raw):
         """Other formats and impossible dates are None."""
         assert web.parse_dmy(raw) is None
@@ -335,6 +413,294 @@ class TestExternalId:
         assert external_id_for(unbilled) == external_id_for(billed)
 
 
+class TestCheckingFromText:
+    def test_reads_the_card(self):
+        """Saldo disponible is the balance, Saldo contable the accounting one."""
+        checking = web.checking_from_text(_CHECKING_CARD_TEXT)
+
+        assert checking.available == Decimal(999_999)
+        assert checking.accounting == Decimal(1_000_000)
+        assert checking.account_number == "00-000-00000-01"
+
+    def test_missing_figure_is_tolerated(self):
+        """A card without its contable line still yields the available balance."""
+        text = _CHECKING_CARD_TEXT.replace("$ 1.000.000\nSaldo contable\n", "")
+
+        checking = web.checking_from_text(text)
+
+        assert checking.available == Decimal(999_999)
+        assert checking.accounting is None
+
+    def test_amount_after_the_name_is_not_an_account_number(self):
+        """Only a digit line that is not an amount is taken as the number."""
+        checking = web.checking_from_text("Cuenta Corriente\n$ 999.999\nSaldo disponible")
+
+        assert checking.account_number is None
+        assert checking.available == Decimal(999_999)
+
+
+class TestLineFromText:
+    def test_reads_the_card(self):
+        """Cupo autorizado, Saldo utilizado and Saldo disponible map to the line."""
+        line = web.line_from_text(_LINE_CARD_TEXT)
+
+        assert (line.limit, line.owed, line.available) == (
+            Decimal(2_500_000),
+            Decimal(1_000_000),
+            Decimal(999_999),
+        )
+        assert line.daily_rate_pct is None
+
+
+class TestDailyRate:
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            pytest.param("1.23 %", Decimal("1.23"), id="dot"),
+            pytest.param("1,23 %", Decimal("1.23"), id="comma"),
+            pytest.param("1.23", Decimal("1.23"), id="bare"),
+        ],
+    )
+    def test_parse_percent(self, raw, expected):
+        """The rate field's text parses with either decimal separator."""
+        assert web.parse_percent(raw) == expected
+
+    @pytest.mark.parametrize("raw", [None, "", "abc %", "1,23 % diario"])
+    def test_parse_percent_rejects_junk(self, raw):
+        """Anything but a lone percent figure is None."""
+        assert web.parse_percent(raw) is None
+
+    def test_from_the_detail_text(self):
+        """The label's figure is read, not the movements column header."""
+        assert web.daily_rate_from_text(_LINE_DETAIL_TEXT) == Decimal("1.23")
+
+    def test_column_header_alone_is_no_rate(self):
+        """A page with only the column header yields None."""
+        text = "Fecha\tDescripción\tCargos\tAbonos\tMonto utilizado\tTasa diaria\tIntereses"
+
+        assert web.daily_rate_from_text(text) is None
+
+
+class TestCheckingMovementsFromRows:
+    def test_abono_is_money_in(self):
+        """An Abono row is a positive amount with its running balance."""
+        (movement,) = web.checking_movements_from_rows([_cc_row()])
+
+        assert movement.transaction_date == date(2025, 3, 15)
+        assert movement.description == "TRANSFERENCIA SINTETICA"
+        assert movement.amount == Decimal(1_000_000)
+        assert movement.balance == Decimal(2_500_000)
+        assert movement.currency == "CLP"
+
+    def test_cargo_is_money_out(self):
+        """A Cargo row is a negative amount."""
+        (movement,) = web.checking_movements_from_rows(
+            [_cc_row(cargo="$ 999.999", abono="", saldo="$ 1.000.000")]
+        )
+
+        assert movement.amount == Decimal(-999_999)
+
+    def test_blank_saldo_is_none(self):
+        """A missing running balance does not drop the movement."""
+        (movement,) = web.checking_movements_from_rows([_cc_row(saldo="")])
+
+        assert movement.balance is None
+
+    def test_filler_and_no_records_rows_are_dropped_silently(self, caplog):
+        """The table's single-cell rows are not movements and not warnings."""
+        rows = [[""], ["No existen registros"], _cc_row()]
+
+        movements = web.checking_movements_from_rows(rows)
+
+        assert len(movements) == 1
+        assert "skipped" not in caplog.text
+
+    @pytest.mark.parametrize(
+        "row",
+        [
+            pytest.param(_cc_row(cargo="", abono=""), id="no-amount"),
+            pytest.param(_cc_row(cargo="$ 999.999", abono="$ 1.000.000"), id="both-amounts"),
+            pytest.param(_cc_row(fecha="sin fecha"), id="bad-date"),
+        ],
+    )
+    def test_unusable_row_is_skipped_with_a_warning(self, row, caplog):
+        """An unusable row is dropped and logged without its figures."""
+        movements = web.checking_movements_from_rows([row, _cc_row()])
+
+        assert len(movements) == 1
+        assert "skipped 1 unusable checking rows" in caplog.text
+        assert "999.999" not in caplog.text and "1.000.000" not in caplog.text
+
+
+def _cc_movement(**overrides) -> RawCheckingMovement:
+    values = dict(
+        transaction_date=date(2025, 3, 15),
+        description="TRANSFERENCIA SINTETICA",
+        amount=Decimal(1_000_000),
+        currency="CLP",
+        balance=Decimal(2_500_000),
+    )
+    values.update(overrides)
+    return RawCheckingMovement(**values)
+
+
+class TestCheckingExternalId:
+    def test_prefix_and_length(self):
+        """bfal_cc_ plus 16 hex characters."""
+        external_id = checking_external_id_for(_cc_movement())
+
+        assert external_id.startswith("bfal_cc_")
+        assert len(external_id) == len("bfal_cc_") + 16
+
+    def test_stable_and_description_free(self):
+        """The same movement keys the same, whatever its description says."""
+        assert checking_external_id_for(_cc_movement()) == checking_external_id_for(
+            _cc_movement(description="TRANSF. SINTETICA ABREVIADA")
+        )
+
+    def test_running_balance_tells_same_day_twins_apart(self):
+        """Two equal same-day transfers differ by the balance after each."""
+        first = _cc_movement(balance=Decimal(1_000_000))
+        second = _cc_movement(balance=Decimal(2_500_000))
+
+        assert checking_external_id_for(first) != checking_external_id_for(second)
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            pytest.param({"amount": Decimal(-1_000_000)}, id="direction"),
+            pytest.param({"transaction_date": date(2025, 3, 16)}, id="date"),
+            pytest.param({"balance": None}, id="blank-balance"),
+        ],
+    )
+    def test_identity_fields_change_the_id(self, change):
+        """Date, signed amount and balance are all part of the key."""
+        assert checking_external_id_for(_cc_movement()) != checking_external_id_for(
+            _cc_movement(**change)
+        )
+
+
+class TestPickGrid:
+    def test_picks_by_product_name(self):
+        """The grid whose name line matches is chosen, accents ignored."""
+        texts = ["Cuenta Vista\n$ 999.999\nSaldo disponible", _CHECKING_CARD_TEXT]
+
+        assert web._pick_grid(texts, web._CHECKING_NAME) == _CHECKING_CARD_TEXT
+        assert web._pick_grid([_LINE_CARD_TEXT], web._LINE_NAME) == _LINE_CARD_TEXT
+
+    @pytest.mark.parametrize("texts", [None, [], ["Cuenta Vista"], "Cuenta Corriente"])
+    def test_none_when_absent(self, texts):
+        """No listed product of that name (or a malformed read) is None."""
+        assert web._pick_grid(texts, web._CHECKING_NAME) is None
+
+
+class _GridsPage:
+    """A dashboard whose product grids render after a few polls."""
+
+    def __init__(self, reads):
+        self.reads = list(reads)
+        self.waits = 0
+
+    def evaluate(self, script, *args):
+        assert script == web._PRODUCT_GRIDS_JS
+        return self.reads.pop(0) if len(self.reads) > 1 else self.reads[0]
+
+    def wait_for_timeout(self, ms):
+        self.waits += 1
+
+
+class TestReadOtherProducts:
+    def test_waits_for_the_figures(self, monkeypatch):
+        """A card listed without its figures yet is polled until they land."""
+        page = _GridsPage(
+            [
+                {"accounts": ["Cuenta Corriente\n00-000-00000-01"], "agreements": []},
+                {"accounts": [_CHECKING_CARD_TEXT], "agreements": [_LINE_CARD_TEXT]},
+            ]
+        )
+
+        checking, line = web._read_other_products(page)
+
+        assert checking.available == Decimal(999_999)
+        assert line.available == Decimal(999_999)
+        assert page.waits == 1
+
+    def test_client_without_those_products_gets_none(self, monkeypatch):
+        """Nothing listed is None for both, after the bounded backstop."""
+        clock = iter(range(0, 1000, 5))
+        monkeypatch.setattr(web.time, "monotonic", lambda: next(clock))
+        page = _GridsPage([{"accounts": [], "agreements": []}])
+
+        assert web._read_other_products(page) == (None, None)
+
+
+class _LegacyViewPage:
+    """A checking or línea detail answering scripted reads."""
+
+    def __init__(self, reads):
+        self.reads = list(reads)
+        self.calls = []
+
+    def evaluate(self, script, *args):
+        self.calls.append(script)
+        if script in (web._IDLE_MODAL_JS,):
+            return False
+        return self.reads.pop(0) if len(self.reads) > 1 else self.reads[0]
+
+    def wait_for_timeout(self, ms):
+        pass
+
+
+class TestReadCheckingRows:
+    def test_rows_once_the_table_renders(self):
+        """The table's body rows come back as soon as it exists."""
+        page = _LegacyViewPage(
+            [{"found": False, "failed": False, "rows": []}, {"found": True, "failed": False, "rows": [_cc_row()]}]
+        )
+
+        assert web._read_checking_rows(page) == [_cc_row()]
+
+    def test_table_beats_the_error_banner(self):
+        """A rendered table counts even when the page also shows the error view."""
+        page = _LegacyViewPage([{"found": True, "failed": True, "rows": [["No existen registros"]]}])
+
+        assert web._read_checking_rows(page) == [["No existen registros"]]
+
+    def test_error_view_without_a_table_is_none(self):
+        """The legacy error view with no table is a failed surface."""
+        page = _LegacyViewPage([{"found": False, "failed": True, "rows": []}])
+
+        assert web._read_checking_rows(page) is None
+
+    def test_never_rendered_is_none(self, monkeypatch):
+        """A view that never renders runs out its bounded wait."""
+        clock = iter(range(0, 1000, 5))
+        monkeypatch.setattr(web.time, "monotonic", lambda: next(clock))
+        page = _LegacyViewPage([{"found": False, "failed": False, "rows": []}])
+
+        assert web._read_checking_rows(page) is None
+
+
+class TestReadLineRate:
+    def test_field_text_is_read(self):
+        """The rate field's own text is parsed first."""
+        page = _LegacyViewPage([{"rate": "1,23 %", "text": ""}])
+
+        assert web._read_line_rate(page) == Decimal("1.23")
+
+    def test_falls_back_to_the_page_text(self):
+        """Without the field id the labelled figure in the page text is used."""
+        page = _LegacyViewPage([{"rate": None, "text": _LINE_DETAIL_TEXT}])
+
+        assert web._read_line_rate(page) == Decimal("1.23")
+
+    def test_zero_rate_is_a_rate(self):
+        """A "0,00 %" field is a zero rate, not a miss that falls through."""
+        page = _LegacyViewPage([{"rate": "0,00 %", "text": ""}])
+
+        assert web._read_line_rate(page) == Decimal("0")
+
+
 class TestScraperLegs:
     def setup_method(self):
         self.scraper = BancoFalabellaScraper()
@@ -458,6 +824,98 @@ class TestScraperLegs:
         assert transactions == []
         assert len(products.products) == 1
         assert products.warnings == [warning]
+
+    def test_three_products_each_a_singleton_of_its_kind(self, monkeypatch):
+        """Card, checking and línea are CLP singletons of three distinct kinds."""
+        self._install(monkeypatch, result=_session(checking=_checking(), line=_line()))
+
+        asyncio.run(self.scraper.scrape_transactions())
+        products = asyncio.run(self.scraper.scrape_products()).products
+
+        assert [(p.kind, p.currency, p.external_ref) for p in products] == [
+            ("credit_card", "CLP", None),
+            ("checking", "CLP", None),
+            ("line_of_credit", "CLP", None),
+        ]
+
+    def test_card_product_unchanged_by_the_new_products(self, monkeypatch):
+        """The CMR card emits exactly as before, so it keeps matching its stored row."""
+        self._install(monkeypatch, result=_session())
+        alone = asyncio.run(self.scraper.scrape_products()).products
+        self._install(monkeypatch, result=_session(checking=_checking(), line=_line()))
+        together = asyncio.run(self.scraper.scrape_products()).products
+
+        assert alone == [together[0]]
+
+    def test_checking_product(self, monkeypatch):
+        """The checking balance, accounting balance and account number map through."""
+        self._install(monkeypatch, result=_session(checking=_checking()))
+
+        product = asyncio.run(self.scraper.scrape_products()).products[1]
+
+        assert product.kind == "checking"
+        assert product.name == "Cuenta Corriente"
+        assert product.metrics.balance == 999_999
+        assert product.metrics.accounting_balance == 1_000_000
+        assert product.attributes.account_number == "00-000-00000-01"
+
+    def test_line_product(self, monkeypatch):
+        """The línea cupos map through and the daily rate stays as quoted."""
+        self._install(monkeypatch, result=_session(line=_line()))
+
+        product = asyncio.run(self.scraper.scrape_products()).products[1]
+
+        assert product.kind == "line_of_credit"
+        assert product.name == "Línea de Crédito"
+        assert (product.metrics.available, product.metrics.limit, product.metrics.owed) == (
+            999_999,
+            2_500_000,
+            1_000_000,
+        )
+        assert product.attributes.daily_interest_rate_pct == 1.23
+        assert product.attributes.interest_rate_pct is None
+
+    def test_line_without_its_rate_still_emits(self, monkeypatch):
+        """A línea whose detail was not read keeps its balances; the rate is None."""
+        self._install(monkeypatch, result=_session(line=_line(daily_rate_pct=None)))
+
+        product = asyncio.run(self.scraper.scrape_products()).products[1]
+
+        assert product.metrics.available == 999_999
+        assert product.attributes.daily_interest_rate_pct is None
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            pytest.param({"checking": _checking(available=None)}, id="checking"),
+            pytest.param({"line": _line(available=None)}, id="line"),
+        ],
+    )
+    def test_product_without_available_is_not_emitted(self, monkeypatch, overrides):
+        """A checking or línea card without its headline figure emits nothing."""
+        self._install(monkeypatch, result=_session(**overrides))
+
+        products = asyncio.run(self.scraper.scrape_products()).products
+
+        assert [p.kind for p in products] == ["credit_card"]
+
+    def test_checking_transactions_land_on_the_checking_product(self, monkeypatch):
+        """Checking movements are signed checking transactions; card ones stay on the card."""
+        checking_movements = web.checking_movements_from_rows(
+            [_cc_row(), _cc_row(cargo="$ 999.999", abono="", saldo="$ 1.234.567")]
+        )
+        self._install(monkeypatch, result=_session(checking_movements=checking_movements))
+
+        transactions = asyncio.run(self.scraper.scrape_transactions())
+
+        kinds = [t.product_kind for t in transactions]
+        assert kinds == ["credit_card", "credit_card", "checking", "checking"]
+        abono, cargo = transactions[2:]
+        assert (abono.currency, abono.amount, abono.product_external_ref) == ("CLP", Decimal(1_000_000), None)
+        assert cargo.amount == Decimal(-999_999)
+        assert abono.external_id.startswith("bfal_cc_")
+        assert abono.scheduled_month == date(2025, 3, 1)
+        assert abono.accounting_date is None
 
     def test_no_balance_emits_no_product(self, monkeypatch):
         """Without a parseable available cupo the products leg is empty, with a warning."""
