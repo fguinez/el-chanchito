@@ -722,9 +722,21 @@ class TestReadCheckingRows:
 
         assert web._read_checking_rows(page) == [_cc_row()]
 
-    def test_table_beats_the_error_banner(self):
-        """A rendered table counts even when the page also shows the error view."""
+    def test_movement_rows_beat_the_error_banner(self):
+        """A table with movement rows counts even next to the error view."""
+        page = _LegacyViewPage([{"found": True, "failed": True, "rows": [_cc_row()]}])
+
+        assert web._read_checking_rows(page) == [_cc_row()]
+
+    def test_error_banner_with_an_empty_table_is_not_loaded(self):
+        """An empty table next to the error view is a failed load, not an empty account."""
         page = _LegacyViewPage([{"found": True, "failed": True, "rows": [["No existen registros"]]}])
+
+        assert web._read_checking_rows(page) is None
+
+    def test_empty_table_without_the_error_view_is_empty(self):
+        """A clean "no records" table is a confirmed-empty account."""
+        page = _LegacyViewPage([{"found": True, "failed": False, "rows": [["No existen registros"]]}])
 
         assert web._read_checking_rows(page) == [["No existen registros"]]
 

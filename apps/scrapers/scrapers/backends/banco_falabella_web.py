@@ -1466,7 +1466,9 @@ def _read_checking_rows(page) -> Optional[list[list[str]]]:
 
     The legacy view arrives as one server-rendered response, so the table has
     its rows as soon as it exists. `[]` is a table without movement rows. The
-    error view counts only when no table rendered: the page can show both.
+    page can show the error view next to a table: with movement rows the rows
+    win, without them the load counts as failed (None), so a broken load is
+    never filed as an empty account.
     """
     deadline = time.monotonic() + _LEGACY_VIEW_TIMEOUT_MS / 1000
     while time.monotonic() < deadline:
@@ -1477,7 +1479,8 @@ def _read_checking_rows(page) -> Optional[list[list[str]]]:
             result = None
         if isinstance(result, dict):
             rows = result.get("rows")
-            if result.get("found") and isinstance(rows, list):
+            has_data = isinstance(rows, list) and any(len(row) >= 4 for row in rows)
+            if result.get("found") and isinstance(rows, list) and (has_data or not result.get("failed")):
                 logger.info("Banco Falabella: checking surface read, %d rows", len(rows))
                 return rows
             if result.get("failed"):
