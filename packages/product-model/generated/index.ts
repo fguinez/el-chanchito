@@ -203,6 +203,8 @@ export interface LineOfCreditAttributes {
   kind: "line_of_credit";
   /** Annual interest rate as a percent number. */
   interest_rate_pct?: number | null;
+  /** Daily interest rate as a percent number, as quoted (Tasa diaria). */
+  daily_interest_rate_pct?: number | null;
 }
 
 /** Observation for a line of credit; headline is `available`. */

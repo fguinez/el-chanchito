@@ -520,6 +520,19 @@
       "additionalProperties": false,
       "description": "Config fields for a line of credit (línea de crédito).",
       "properties": {
+        "daily_interest_rate_pct": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Daily interest rate as a percent number, as quoted (Tasa diaria).",
+          "title": "Daily Interest Rate Pct"
+        },
         "interest_rate_pct": {
           "anyOf": [
             {
