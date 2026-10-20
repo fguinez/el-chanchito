@@ -10,6 +10,7 @@ import {
   loadProductCatalog,
   loadSnapshotsForProducts,
 } from "@/lib/monitors/catalog";
+import { withEffects } from "@/lib/monitors/effects";
 import { UUID_RE, validateMonitorInput } from "@/lib/monitors/validate";
 import {
   buildReferences,
@@ -25,8 +26,9 @@ type Context = { params: Promise<{ id: string }> };
 /**
  * GET /api/monitors/[id]: one monitor with evaluation, snapshot-replayed
  * `history`, a `references` row per distinct product/field the expressions
- * mention, and every `adjustments` row (oldest day first), which the
- * evaluation and history thresholds already include. The history window
+ * mention, and every `adjustments` row (variaciones, oldest transaction day
+ * first, with their current effect as GET .../adjustments shapes them), which
+ * the evaluation and history thresholds already include. The history window
  * comes from `?days=N` (default 90, clamped to [1, 365]) or an explicit
  * `?from`/`?to` day range (inclusive, max 365 days, `to` defaults to today).
  */
@@ -84,7 +86,7 @@ export async function GET(request: NextRequest, { params }: Context) {
 
     return NextResponse.json({
       ...enrichMonitor(row, catalog, evaluation),
-      adjustments,
+      adjustments: withEffects(adjustments, row, ctx),
       history,
       references,
     });
@@ -145,7 +147,7 @@ export async function PUT(request: NextRequest, { params }: Context) {
   }
 }
 
-/** DELETE /api/monitors/[id]: hard delete (its adjustments cascade). */
+/** DELETE /api/monitors/[id]: hard delete (its variaciones cascade). */
 export async function DELETE(request: NextRequest, { params }: Context) {
   try {
     const { id } = await params;
