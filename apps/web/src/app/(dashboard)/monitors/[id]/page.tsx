@@ -274,10 +274,10 @@ export default function MonitorDetailPage() {
                   <span className="text-muted-foreground">sin dato</span>
                 )}
               </CardTitle>
-              {t.value != null && evaluation.adjustment !== 0 && (
+              {t.value != null && t.adjustment !== 0 && (
                 <p className="text-xs text-muted-foreground tabular-nums">
                   incluye variaciones{" "}
-                  {formatSignedAmount(monitor.currency, evaluation.adjustment)}
+                  {formatSignedAmount(monitor.currency, t.adjustment)}
                 </p>
               )}
             </CardHeader>
