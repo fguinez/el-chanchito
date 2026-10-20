@@ -162,7 +162,7 @@ For the email parser, you need a Gmail App Password (not your regular password):
 2. The **Inicio** page lists the monitors in warning or alert (or says all is in
    order) and the latest run of each scraper
 3. Add manual expenses in **Gastos** or let scrapers import them automatically
-4. When something one-off changes the month's plan (a reimbursement, an extra budget), add it as a variación on the monitor's page (see [Monitors and variaciones](#monitors-and-variaciones))
+4. When a one-off transaction should not count against a monitor this month (a reimbursed expense, a one-off purchase), add it as a variación on the monitor's page (see [Monitors and variaciones](#monitors-and-variaciones))
 5. Check **Monitores** for every monitor and its day-by-day history
 
 ## Monthly Workflow
@@ -186,21 +186,35 @@ optional warning one. Thresholds can ramp through the month; the "Rampa
 mensual" preset builds `base - descuento * (DAY_OF_MONTH() - 1)`. Create them
 from **Monitores > Nuevo monitor**.
 
-**Variaciones** are one-off adjustments to a monitor's plan for the month, like
-the "Variaciones" column of the old planning sheet: a reimbursement, a one-off
-gift budget. On the monitor's page, the **Variaciones** card adds one with a
-date, an amount in the monitor's currency and an optional description:
+**Variaciones** are transactions a monitor ignores for the month, like the
+"Variaciones" column of the old planning sheet: a reimbursed expense, a
+one-off purchase paid from savings. On the monitor's page, the
+**Variaciones** card's "Agregar variación" button searches the transactions
+of the products the monitor uses, in its equation or a threshold (by
+description or amount, month by month), and links the one you pick:
 
-- From that day to the end of its month, the amount is added to every
-  threshold of the monitor; a negative amount lowers them. The status, the
-  margin, the history chart and the Inicio card all shift from that day on.
-- Several variaciones on one day add up. The card shows each day's total and
-  the month-to-date sum, and every entry can still be edited or deleted.
+- From the transaction's date to the end of its month, every threshold
+  shifts so the comparison reads as if the transaction never happened: an
+  ignored expense on the checking account lowers a balance floor by its
+  amount, an ignored card purchase does the same through `- owed`, a
+  coefficient like `- owed * 0.7` scales it, and a threshold that reads the
+  same product moves with it. The monitor's value stays the real one; the
+  status, the margin, the history chart and the Inicio card all use the
+  shifted thresholds.
+- A transaction in a foreign currency (a USD card purchase) converts at the
+  same rate the monitor uses for that product, on every evaluation: its
+  effect follows the live rate, it is never frozen.
+- The card shows each transaction with its product and amount, its current
+  effect on the alert threshold in the monitor's currency, each day's total
+  and the month-to-date sum. A transaction whose product the monitor no
+  longer reads says "no afecta a la expresión actual"; a deleted transaction
+  stops applying and is flagged so you can remove it. Clicking a description
+  opens the transaction's detail panel.
 - A new month starts with none; the card's arrows browse other months.
 
 For example (synthetic figures), with a balance floor that ramps down through
-the month, a `-50000` gift budget on the 15th lowers the floor by $ 50.000 from
-the 15th on, so spending that money does not trip the alert.
+the month, ignoring a $ 1.000.000 purchase on the 15th lowers the floor by
+$ 1.000.000 from the 15th on, so that purchase does not trip the alert.
 
 ## Scrapers
 
@@ -669,8 +683,9 @@ All API routes are under `/api/`:
 | GET/POST | `/api/monitors` | Monitors with their current evaluation (line-chart monitors add a 30-day sparkline); create |
 | GET/PUT/DELETE | `/api/monitors/[id]` | One monitor with its history (`?days=N` or `?from=&to=`), referencias and variaciones; update; delete |
 | POST | `/api/monitors/preview` | Validate and evaluate an unsaved monitor (`monitorId` applies that monitor's variaciones) |
-| GET/POST | `/api/monitors/[id]/adjustments` | Variaciones (`?month=YYYY-MM`); create from `{ adjustmentDate, amount, description? }` |
-| PATCH/DELETE | `/api/monitors/[id]/adjustments/[adjustmentId]` | Edit or delete one variación |
+| GET/POST | `/api/monitors/[id]/adjustments` | Variaciones with their transaction and current effect (`?month=YYYY-MM`); link one from `{ transactionId }` (400 if the monitor does not reference its product, 409 if already linked) |
+| GET | `/api/monitors/[id]/adjustments/candidates` | Transactions of the monitor's products (equation or thresholds) that can become variaciones (`?q=`, `?month=YYYY-MM`, `?limit=`) |
+| DELETE | `/api/monitors/[id]/adjustments/[adjustmentId]` | Unlink one variación (the transaction stays) |
 | GET | `/api/institutions` | Institutions + nested products (balances included) + CLP subtotals |
 | GET/PATCH | `/api/institutions/[slug]` | One institution, same shape as a list item; edit `name`, `kind`, `country`, `url` |
 | GET/PATCH | `/api/institutions/[slug]/products/[product]` | One product (with its `defaultName`) plus its balance history, recent transactions and, for a stock, its daily closes (`prices`: `{date, price}` oldest first, empty without a ticker); edit `name` (`null` resets it to `defaultName`), `slug`, `parentProductId`, `isActive`, `displayOrder` |
