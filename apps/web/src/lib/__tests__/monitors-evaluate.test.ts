@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
   adjustmentOnDate,
+  adjustmentsInEffect,
+  thresholdShift,
   bindExpression,
   comparatorHolds,
   evaluateExpression,
@@ -8,6 +10,7 @@ import {
   parseExpression,
   serializeExpression,
   type EvalContext,
+  type MonitorAdjustment,
   type MonitorDefinition,
   type ProductCatalog,
   type ProductInfo,
@@ -387,7 +390,7 @@ describe("evaluateMonitor: issue #41 example", () => {
     expect(result.value).toBe(1970000);
     // Day 15: 1000000 - 30000 * 14 = 580000
     expect(result.thresholds).toEqual([
-      { severity: "alert", comparator: "<", value: 580000, margin: 1390000 },
+      { severity: "alert", comparator: "<", value: 580000, margin: 1390000, adjustment: 0 },
     ]);
     expect(result.margin).toBe(1390000);
     expect(result.status).toBe("ok");
@@ -536,52 +539,215 @@ describe("evaluateMonitor: status precedence and margins", () => {
   });
 });
 
-describe("adjustmentOnDate", () => {
-  // Synthetic amounts; dates are local calendar days like DAY_OF_MONTH().
-  const adjustments = [
-    { adjustmentDate: "2025-07-10", amount: 999999 },
-    { adjustmentDate: "2026-06-30", amount: 999999 },
-    { adjustmentDate: "2026-07-01", amount: 30000 },
-    { adjustmentDate: "2026-07-15", amount: -50000 },
-    { adjustmentDate: "2026-07-15", amount: 10000 },
-    { adjustmentDate: "2026-07-31", amount: 1000000 },
-  ];
+describe("variaciones: thresholdShift and adjustmentOnDate", () => {
+  // Synthetic transactions on the fixture products (see buildProducts):
+  // checking balance 2500000 CLP, CLP card owed 300000, USD card owed 100.
+  const CHECKING = `@{${CHECKING_ID}:balance}`;
+  const CARD_OWED = `@{${CARD_CLP_ID}:owed}`;
+  const USD_OWED = `@{${CARD_USD_ID}:owed}`;
 
-  it.each([
-    ["before any adjustment of the month", new Date(2026, 5, 29), 0],
-    ["on the last day of the previous month", new Date(2026, 5, 30), 999999],
-    ["from the first day, without the previous month", new Date(2026, 6, 1), 30000],
-    ["the day before a same-day pair", new Date(2026, 6, 14), 30000],
-    ["on the day of a same-day pair, summed", new Date(2026, 6, 15), -10000],
-    ["on the last day of the month", new Date(2026, 6, 31), 990000],
-    // Evenings whose UTC date is already the next month still count locally.
-    ["late on the month's last evening", new Date(2026, 6, 31, 23, 30), 990000],
-    ["late on the previous month's last evening", new Date(2026, 5, 30, 23, 30), 999999],
-    ["after the month ends", new Date(2026, 7, 1), 0],
-  ])("%s", (_label, date, expected) => {
-    expect(adjustmentOnDate(adjustments, date)).toBe(expected);
+  function txn(
+    productId: string,
+    transactionDate: string,
+    amount: number,
+    extra: Partial<MonitorAdjustment> = {}
+  ): MonitorAdjustment {
+    return {
+      transactionId: `${transactionDate}:${amount}`,
+      productId,
+      transactionDate,
+      amount,
+      ...extra,
+    };
+  }
+
+  /** The shift of a constant threshold, or null when it cannot be computed. */
+  const shift = (
+    expression: string,
+    adjustments: MonitorAdjustment[],
+    context: EvalContext = ctx()
+  ) => {
+    const result = thresholdShift(
+      parseExpression(expression),
+      null,
+      adjustments,
+      context
+    );
+    return result.ok ? result.value : null;
+  };
+
+  it("ignoring a checking expense lowers the thresholds by it", () => {
+    // Undo -1000000 on balance: f rises by 1000000, thresholds drop by it.
+    expect(shift(CHECKING, [txn(CHECKING_ID, "2026-07-10", -1000000)])).toBe(
+      -1000000
+    );
+    // An ignored income raises them instead.
+    expect(shift(CHECKING, [txn(CHECKING_ID, "2026-07-10", 999999)])).toBe(
+      999999
+    );
   });
 
-  it("rounds the sum to the stored 8 decimals", () => {
-    const fractional = [
-      { adjustmentDate: "2026-07-01", amount: 0.1 },
-      { adjustmentDate: "2026-07-01", amount: 0.2 },
+  it("ignoring a card purchase undoes it on owed, through the sign", () => {
+    // -owed: undoing a -1000000 purchase lowers owed, so -owed rises.
+    expect(
+      shift(`${CHECKING} - ${CARD_OWED}`, [
+        txn(CARD_CLP_ID, "2026-07-10", -1000000),
+      ])
+    ).toBe(-1000000);
+    // +owed reads the other way.
+    expect(
+      shift(CARD_OWED, [txn(CARD_CLP_ID, "2026-07-10", -1000000)])
+    ).toBe(1000000);
+  });
+
+  it("follows coefficients exactly", () => {
+    expect(
+      shift(`${CHECKING} - ${CARD_OWED} * 0.7`, [
+        txn(CARD_CLP_ID, "2026-07-10", -1000000),
+      ])
+    ).toBe(-700000);
+  });
+
+  it("converts a USD product's undo at the provider rate", () => {
+    // owed 100 USD at 900: a -1234.56 USD purchase undone moves -owed by
+    // 1234.56 * 900 CLP.
+    expect(
+      shift(`- ${USD_OWED}`, [txn(CARD_USD_ID, "2026-07-10", -1234.56)])
+    ).toBe(-1111104);
+  });
+
+  it("converts at the product's own override rate when it has one", () => {
+    const overridden: RateBook = {
+      ...rates,
+      overrides: [
+        {
+          institutionId: "00000000-0000-4000-8000-000000000000",
+          institutionSlug: "banchile",
+          productId: CARD_USD_ID,
+          currency: "USD",
+          rate: 1000,
+          source: "Tipo de cambio de prueba",
+          reportedAsOf: null,
+          observedAt: new Date("2026-07-15T12:00:00Z"),
+        },
+      ],
+    };
+    expect(
+      shift(
+        `- ${USD_OWED}`,
+        [txn(CARD_USD_ID, "2026-07-10", -1234.56)],
+        ctx({ rates: overridden })
+      )
+    ).toBe(-1234560);
+  });
+
+  it("is 0 for a product or field the expression does not read", () => {
+    expect(shift(CHECKING, [txn(CARD_CLP_ID, "2026-07-10", -1000000)])).toBe(0);
+    expect(
+      shift(`@{${LOAN_ID}:installments_paid}`, [txn(LOAN_ID, "2026-07-10", 999)])
+    ).toBe(0);
+  });
+
+  it("is null when the expression has no data, and never throws", () => {
+    expect(
+      shift(`${CHECKING} + @{${UNKNOWN_ID}:balance}`, [
+        txn(CHECKING_ID, "2026-07-10", -1000000),
+      ])
+    ).toBeNull();
+  });
+
+  it("skips deleted transactions", () => {
+    expect(
+      shift(CHECKING, [
+        txn(CHECKING_ID, "2026-07-10", -1000000, { deleted: true }),
+      ])
+    ).toBe(0);
+  });
+
+  it("undoes refs on the threshold side too", () => {
+    // balance < owed * 2: ignoring a -1000000 card purchase lowers owed by
+    // 1000000, so the threshold falls by 2000000 (shift = +dT - dL).
+    const result = thresholdShift(
+      parseExpression(CHECKING),
+      parseExpression(`${CARD_OWED} * 2`),
+      [txn(CARD_CLP_ID, "2026-07-10", -1000000)],
+      ctx()
+    );
+    expect(result).toEqual({ ok: true, value: -2000000 });
+    // The same product on both sides with the same weight cancels out.
+    expect(
+      thresholdShift(
+        parseExpression(`${CHECKING} - ${CARD_OWED}`),
+        parseExpression(`1000000 - ${CARD_OWED}`),
+        [txn(CARD_CLP_ID, "2026-07-10", -1000000)],
+        ctx()
+      )
+    ).toEqual({ ok: true, value: 0 });
+  });
+
+  it("gives a reason when only the undo breaks the expression", () => {
+    // owed is 300000: undoing a -300000 purchase leaves it at 0.
+    const result = thresholdShift(
+      parseExpression(`${CHECKING} / ${CARD_OWED}`),
+      null,
+      [txn(CARD_CLP_ID, "2026-07-10", -300000)],
+      ctx()
+    );
+    expect(result).toEqual({
+      ok: false,
+      reason: "No se pudieron aplicar las variaciones: División por cero",
+    });
+  });
+
+  describe("adjustmentOnDate", () => {
+    const adjustments = [
+      txn(CHECKING_ID, "2025-07-10", -999999),
+      txn(CHECKING_ID, "2026-06-30", -999999),
+      txn(CHECKING_ID, "2026-07-01", 30000),
+      txn(CHECKING_ID, "2026-07-15", -50000),
+      txn(CHECKING_ID, "2026-07-15", 10000),
+      txn(CHECKING_ID, "2026-07-31", 1000000),
+      txn(CHECKING_ID, "2026-07-20", -1000000, { deleted: true }),
     ];
-    expect(adjustmentOnDate(fractional, new Date(2026, 6, 1))).toBe(0.3);
-  });
+    const expr = parseExpression(CHECKING);
+    const on = (date: Date) =>
+      adjustmentOnDate(adjustments, expr, null, ctx({ date }));
 
-  it("is 0 without adjustments", () => {
-    expect(adjustmentOnDate(undefined, new Date(2026, 6, 15))).toBe(0);
-    expect(adjustmentOnDate([], new Date(2026, 6, 15))).toBe(0);
+    it.each([
+      ["before any variación of the month", new Date(2026, 5, 29), 0],
+      ["on the last day of the previous month", new Date(2026, 5, 30), -999999],
+      ["from the first day, without the previous month", new Date(2026, 6, 1), 30000],
+      ["the day before a same-day pair", new Date(2026, 6, 14), 30000],
+      ["on the day of a same-day pair, together", new Date(2026, 6, 15), -10000],
+      ["past a deleted one, which never applies", new Date(2026, 6, 25), -10000],
+      ["on the last day of the month", new Date(2026, 6, 31), 990000],
+      // Evenings whose UTC date is already the next month still count locally.
+      ["late on the month's last evening", new Date(2026, 6, 31, 23, 30), 990000],
+      ["after the month ends", new Date(2026, 7, 1), 0],
+    ])("%s", (_label, date, expected) => {
+      expect(on(date)).toEqual({ ok: true, value: expected });
+    });
+
+    it("is 0 without variaciones", () => {
+      const zero = { ok: true, value: 0 };
+      expect(adjustmentOnDate(undefined, expr, null, ctx())).toEqual(zero);
+      expect(adjustmentOnDate([], expr, null, ctx())).toEqual(zero);
+    });
+
+    it("lists only the ones in effect", () => {
+      expect(
+        adjustmentsInEffect(adjustments, new Date(2026, 6, 15)).map(
+          (a) => a.transactionDate
+        )
+      ).toEqual(["2026-07-01", "2026-07-15", "2026-07-15"]);
+    });
   });
 });
 
-describe("evaluateMonitor: adjustments (variaciones)", () => {
+describe("evaluateMonitor: variaciones", () => {
   const left = "banchile:cuenta_corriente:balance"; // 2500000
 
-  function def(
-    adjustments: MonitorDefinition["adjustments"]
-  ): MonitorDefinition {
+  function def(adjustments: MonitorAdjustment[]): MonitorDefinition {
     return {
       currency: "CLP",
       expression: serializeExpression(
@@ -596,59 +762,136 @@ describe("evaluateMonitor: adjustments (variaciones)", () => {
     };
   }
 
-  it("adds the adjustments in effect to every threshold and its margin", () => {
-    const result = evaluateMonitor(
-      def([{ adjustmentDate: "2026-07-10", amount: 50000 }]),
-      ctx()
-    );
-    expect(result.adjustment).toBe(50000);
-    expect(result.thresholds).toEqual([
-      { severity: "alert", comparator: "<", value: 2050000, margin: 450000 },
-      { severity: "warning", comparator: "<", value: 2450000, margin: 50000 },
-    ]);
-    expect(result.margin).toBe(50000);
-    expect(result.status).toBe("ok");
+  const expense = (transactionDate: string, amount: number) => ({
+    transactionId: transactionDate,
+    productId: CHECKING_ID,
+    transactionDate,
+    amount,
   });
 
-  it("flips the status once the shifted threshold is crossed", () => {
+  it("shifts every threshold and its margin; the value stays real", () => {
+    const result = evaluateMonitor(def([expense("2026-07-10", -50000)]), ctx());
+    expect(result.value).toBe(2500000);
+    expect(result.adjustment).toBe(-50000);
+    expect(result.thresholds).toEqual([
+      {
+        severity: "alert",
+        comparator: "<",
+        value: 1950000,
+        margin: 550000,
+        adjustment: -50000,
+      },
+      {
+        severity: "warning",
+        comparator: "<",
+        value: 2350000,
+        margin: 150000,
+        adjustment: -50000,
+      },
+    ]);
+    expect(result.margin).toBe(150000);
+  });
+
+  it("flips the status once an ignored income is taken out", () => {
     const result = evaluateMonitor(
-      def([
-        { adjustmentDate: "2026-07-15", amount: 100000 },
-        { adjustmentDate: "2026-07-15", amount: 50000 },
-      ]),
+      def([expense("2026-07-15", 100000), expense("2026-07-15", 50000)]),
       ctx()
     );
     expect(result.adjustment).toBe(150000);
     expect(result.status).toBe("warning"); // 2500000 < 2400000 + 150000
   });
 
-  it("ignores adjustments dated later in the month or in another month", () => {
+  it("ignores transactions dated later in the month or in another month", () => {
     const result = evaluateMonitor(
-      def([
-        { adjustmentDate: "2026-07-16", amount: 500000 },
-        { adjustmentDate: "2026-06-01", amount: 500000 },
-      ]),
+      def([expense("2026-07-16", -500000), expense("2026-06-01", -500000)]),
       ctx()
     );
     expect(result.adjustment).toBe(0);
     expect(result.thresholds.map((t) => t.value)).toEqual([2000000, 2400000]);
   });
 
-  it("keeps a no-data threshold null instead of shifting it", () => {
+  it("is re-evaluated against the expression it is given", () => {
     const result = evaluateMonitor(
       {
-        ...def([{ adjustmentDate: "2026-07-01", amount: 50000 }]),
+        ...def([expense("2026-07-10", -50000)]),
+        expression: `@{${CARD_CLP_ID}:owed}`,
+      },
+      ctx()
+    );
+    expect(result.adjustment).toBe(0);
+  });
+
+  it("shifts nothing when the value has no data", () => {
+    const result = evaluateMonitor(
+      {
+        ...def([expense("2026-07-01", -50000)]),
+        expression: `@{${CHECKING_ID}:balance} + @{${UNKNOWN_ID}:balance}`,
+      },
+      ctx()
+    );
+    expect(result.status).toBe("no_data");
+    expect(result.adjustment).toBe(0);
+    expect(result.thresholds[0].value).toBe(2000000);
+  });
+
+  it("shifts each threshold by its own refs", () => {
+    const result = evaluateMonitor(
+      {
+        ...def([
+          {
+            transactionId: "card",
+            productId: CARD_CLP_ID,
+            transactionDate: "2026-07-10",
+            amount: -100000,
+          },
+        ]),
+        thresholds: [
+          { severity: "warning", comparator: "<", expression: "2400000" },
+          {
+            severity: "alert",
+            comparator: "<",
+            expression: `@{${CARD_CLP_ID}:owed} * 8`,
+          },
+        ],
+      },
+      ctx()
+    );
+    // owed 300000 -> 200000 once undone: the alert threshold 2400000 falls
+    // by 800000; the constant warning one does not move.
+    expect(result.thresholds.map((t) => [t.value, t.adjustment])).toEqual([
+      [2400000, 0],
+      [1600000, -800000],
+    ]);
+    // The monitor-level shift reports the alert threshold.
+    expect(result.adjustment).toBe(-800000);
+    expect(result.status).toBe("ok");
+  });
+
+  it("is no_data with a reason when the undo breaks a threshold", () => {
+    const result = evaluateMonitor(
+      {
+        ...def([
+          {
+            transactionId: "card",
+            productId: CARD_CLP_ID,
+            transactionDate: "2026-07-10",
+            amount: -300000,
+          },
+        ]),
         thresholds: [
           {
             severity: "alert",
             comparator: "<",
-            expression: `@{${UNKNOWN_ID}:balance}`,
+            expression: `1000000000 / @{${CARD_CLP_ID}:owed}`,
           },
         ],
       },
       ctx()
     );
     expect(result.status).toBe("no_data");
+    expect(result.noDataReason).toBe(
+      "No se pudieron aplicar las variaciones: División por cero"
+    );
     expect(result.thresholds[0].value).toBeNull();
   });
 });

@@ -1,10 +1,10 @@
 // DB-aware loaders for the monitors API: the product catalog the expression
 // engine resolves references against, the snapshot rows history replay
-// consumes, and each monitor's adjustments. This is the only monitors module
-// that touches the database; the engine and the validators stay pure and
-// unit-testable.
+// consumes, and each monitor's variaciones (linked transactions). This is
+// the only monitors module that touches the database; the engine and the
+// validators stay pure and unit-testable.
 
-import { asc, eq, inArray } from "drizzle-orm";
+import { asc, eq, inArray, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   accounts,
@@ -12,9 +12,12 @@ import {
   monitorAdjustments,
   products,
   productSnapshots,
+  transactions,
   type ProductMetrics,
 } from "@/lib/db/schema";
-import { toApiAdjustment, type ApiMonitorAdjustment } from "./adjustments";
+import { displayDescription } from "@/lib/db/transactions";
+import { displayProductName } from "@/lib/product-names";
+import type { MonitorAdjustmentRow } from "./adjustments";
 import type { ProductInfo } from "./evaluate";
 import type { SnapshotRow } from "./history";
 
@@ -106,35 +109,62 @@ export async function loadSnapshotsForProducts(
 
 async function selectAdjustments(
   monitorId?: string
-): Promise<ApiMonitorAdjustment[]> {
+): Promise<MonitorAdjustmentRow[]> {
   const rows = await db
-    .select()
+    .select({
+      id: monitorAdjustments.id,
+      monitorId: monitorAdjustments.monitorId,
+      transactionId: monitorAdjustments.transactionId,
+      createdAt: monitorAdjustments.createdAt,
+      updatedAt: monitorAdjustments.updatedAt,
+      productId: transactions.productId,
+      transactionDate: transactions.transactionDate,
+      amount: transactions.amount,
+      // Resolved like every transaction list (custom > alias > scraped).
+      description: displayDescription,
+      deleted: sql<boolean>`${transactions.deletedAt} IS NOT NULL`,
+      productName: products.name,
+      productKind: products.kind,
+      productCurrency: products.currency,
+      institutionSlug: institutions.slug,
+      institutionName: institutions.name,
+    })
     .from(monitorAdjustments)
+    .innerJoin(transactions, eq(monitorAdjustments.transactionId, transactions.id))
+    .innerJoin(products, eq(transactions.productId, products.id))
+    .innerJoin(accounts, eq(products.accountId, accounts.id))
+    .innerJoin(institutions, eq(accounts.institutionId, institutions.id))
     .where(
       monitorId != null ? eq(monitorAdjustments.monitorId, monitorId) : undefined
     )
     .orderBy(
-      asc(monitorAdjustments.adjustmentDate),
+      asc(transactions.transactionDate),
       asc(monitorAdjustments.createdAt),
       asc(monitorAdjustments.id)
     );
-  return rows.map(toApiAdjustment);
+  return rows.map(({ productKind, ...row }) => ({
+    ...row,
+    productName: displayProductName(
+      { name: row.productName, kind: productKind, currency: row.productCurrency },
+      row.institutionName
+    ),
+  }));
 }
 
-/** One monitor's adjustments, oldest day first (creation order within a
- *  day). The table is small (a few manual rows per monitor and month), so
- *  callers filter in memory. */
+/** One monitor's variaciones, oldest transaction day first (link order
+ *  within a day), soft-deleted transactions included and flagged. The table
+ *  is small (a few rows per monitor and month), so callers filter in memory. */
 export async function loadMonitorAdjustments(
   monitorId: string
-): Promise<ApiMonitorAdjustment[]> {
+): Promise<MonitorAdjustmentRow[]> {
   return selectAdjustments(monitorId);
 }
 
-/** Every monitor's adjustments in one query, grouped by monitor id. */
+/** Every monitor's variaciones in one query, grouped by monitor id. */
 export async function loadAdjustmentsByMonitor(): Promise<
-  Map<string, ApiMonitorAdjustment[]>
+  Map<string, MonitorAdjustmentRow[]>
 > {
-  const byMonitor = new Map<string, ApiMonitorAdjustment[]>();
+  const byMonitor = new Map<string, MonitorAdjustmentRow[]>();
   for (const adjustment of await selectAdjustments()) {
     const list = byMonitor.get(adjustment.monitorId) ?? [];
     list.push(adjustment);

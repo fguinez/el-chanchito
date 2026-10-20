@@ -258,24 +258,37 @@ describe("replayHistory", () => {
   });
 });
 
-describe("replayHistory: adjustments", () => {
-  it("shifts thresholds from the adjustment day to month end, then resets", () => {
+describe("replayHistory: variaciones", () => {
+  it("shifts thresholds from the transaction day to month end, then resets", () => {
+    // The card's owed stays 700000 from 07-05 on; ignoring a -50000 purchase
+    // and a +20000 refund undoes a net -30000 on owed, so balance - owed
+    // would be 30000 higher and the thresholds come down by that much.
     const points = replayHistory(
       {
         ...def,
         adjustments: [
-          { adjustmentDate: "2026-07-30", amount: 50000 },
-          { adjustmentDate: "2026-07-30", amount: -20000 },
+          {
+            transactionId: "a",
+            productId: CARD_ID,
+            transactionDate: "2026-07-30",
+            amount: -50000,
+          },
+          {
+            transactionId: "b",
+            productId: CARD_ID,
+            transactionDate: "2026-07-30",
+            amount: 20000,
+          },
         ],
       },
       { snapshots, products, rates, from: "2026-07-29", to: "2026-08-02" }
     );
 
-    expect(points.map((p) => p.adjustment)).toEqual([0, 30000, 30000, 0, 0]);
-    // Ramp 1000000 - 30000 * (day - 1), plus the 30000 net adjustment on
-    // 07-30 and 07-31; August restarts the ramp with no adjustment.
+    expect(points.map((p) => p.adjustment)).toEqual([0, -30000, -30000, 0, 0]);
+    // Ramp 1000000 - 30000 * (day - 1), minus the 30000 shift on 07-30 and
+    // 07-31; August restarts the ramp with no shift.
     expect(points.map((p) => p.thresholds[0].value)).toEqual([
-      160000, 160000, 130000, 1000000, 970000,
+      160000, 100000, 70000, 1000000, 970000,
     ]);
   });
 });
