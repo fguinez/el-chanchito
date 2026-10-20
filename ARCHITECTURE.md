@@ -165,25 +165,47 @@ series (the list only replays a 30-day sparkline for line-chart monitors). A mon
 product rename never breaks them, and the API round-trips them to the display
 form (`institution:product:field`).
 
-The old sheet's "Variaciones" (a reimbursement, a one-off gift budget) live on
-as **monitor adjustments** (`monitor_adjustments`, V022). An adjustment dated
-day N adds its amount, in the monitor's currency, to every threshold of its
-monitor from day N to the end of that calendar month. Same-day adjustments add
-up, and each month starts with none:
+The old sheet's "Variaciones" live on as **monitor adjustments**
+(`monitor_adjustments`, V022; links to transactions since V040). A variación
+names one transaction its monitor ignores. The transaction's amount is signed
+in its product's currency, and `lib/monitors/undo.ts` maps each product kind
+to the metric fields a transaction moves and in which direction (asset-style
+fields such as `balance`, `available` or `nav` undo with `-amount`; debt-style
+`owed` undoes with `+amount`; limits, rates and counts do not move). On each
+day, the variaciones whose `transaction_date` falls in that day's month, on
+or before it, are undone on their products' raw values before the engine
+converts the references into the monitor currency (same rates as the product
+itself, so a USD purchase follows the live rate). The difference becomes a
+per-threshold shift, and the value itself stays real:
 
 ```
-threshold(day) =
-    threshold_expression(day)
-  + sum(adjustments dated in day's month, on or before day)
+L, T_i  = the left expression and threshold i; u = refs with the day's
+          variaciones undone
+shift_i = -[(L(u) - T_i(u)) - (L - T_i)]
+threshold_i(day) = T_i(day) + shift_i
 
 margin = value - threshold   (for < and <=; threshold - value for > and >=)
 ```
 
-`adjustmentOnDate` in `evaluate.ts` applies them inside `evaluateMonitor`, so
-the current evaluation, the history replay, the list sparklines and the edit
-preview all include them. Days are local calendar days, the same unit as
-`DAY_OF_MONTH()`. The monitor detail page manages them ("Variaciones" card)
-through `/api/monitors/[id]/adjustments`.
+Comparing the real value against the shifted threshold is the same as
+comparing everything on the undone values, so a threshold that reads an
+undone product moves too. The shift is an exact difference, so signs and
+coefficients (`- owed * 0.7`) come out right and same-day variaciones
+combine; a transaction of a product the monitor does not read shifts
+nothing, and a no-data side shifts nothing. If only the undo breaks an
+expression (a division by zero), the monitor is `no_data` with that reason.
+The evaluation's `adjustment` reports the alert threshold's shift; each
+threshold carries its own. A soft-deleted transaction (V033) keeps its link
+but never applies; a hard-deleted one takes its links with it. `adjustmentOnDate` in
+`evaluate.ts` applies them inside `evaluateMonitor`, so the current
+evaluation, the history replay, the list sparklines and the edit preview
+(against the draft expression) all include them. Days are local
+calendar days, the same unit as `DAY_OF_MONTH()`. The monitor detail page
+manages them ("Variaciones" card) through `/api/monitors/[id]/adjustments`,
+which reports each one's current effect on the alert threshold
+(`lib/monitors/effects.ts`), and picks transactions of the products the left
+expression or any threshold references from
+`/api/monitors/[id]/adjustments/candidates`.
 
 `lib/budget-engine.ts` survives only as two helpers: `calcWealthMetrics`
 (Historial) and `calcPersonalAmount` (Gastos Fijos).
@@ -309,11 +331,11 @@ transactions ──────────┐
 monitors                      monitor_adjustments
   id PK ──────────────────────< monitor_id FK (cascade)
   name, description             id PK
-  currency                      adjustment_date
-  expression (uuid refs)        amount NUMERIC(20,8), <> 0
-  thresholds JSONB              description
-    [{severity, comparator,     -- added to every threshold
-      expression}]              --   from its day to month end
+  currency                      transaction_id FK (cascade)
+  expression (uuid refs)          -> transactions.id
+  thresholds JSONB              unique (monitor_id, transaction_id)
+    [{severity, comparator,     -- the transaction, undone, shifts
+      expression}]              --   every threshold to month end
   display JSONB
   is_active
 
@@ -438,6 +460,7 @@ the same function over the rows that are still uncategorized.
 | `V037__seed_banco_falabella_institution.sql` | seeds the Banco Falabella institution row (upsert, so it also fixes a row the writer auto-created) |
 | `V038__product_prices.sql` | product_prices: one daily closing price per product and trading day (the bar's UTC date), upserted by the scrapers and never pruned |
 | `V039__stock_product_kind.sql` | admits the `stock` kind in products_kind_check and re-kinds Fintual's stock positions (`external_ref` `stock:%`) from `investment` to `stock`, rewriting the `kind` key of their attributes, metrics and snapshot metrics; goals stay `investment`; `products_stock_ref_kind_check` then rejects any `investment` row with a `stock:` ref, so a scraper still on the old code fails its writes instead of adding twins (stop the scrapers, migrate, restart scrapers and web) |
+| `V040__monitor_adjustments_transactions.sql` | monitor_adjustments become links to transactions: deletes the free-form rows, drops `adjustment_date`/`amount`/`description`, adds `transaction_id` (FK, ON DELETE CASCADE, unique per monitor) |
 
 ## Scraper Architecture
 

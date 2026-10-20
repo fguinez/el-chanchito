@@ -23,13 +23,19 @@ export type MonitorDisplay = {
 
 export type MonitorStatus = "ok" | "warning" | "breached" | "no_data";
 
-/** A dated one-off threshold shift ("variación"): from `adjustmentDate`
- *  (YYYY-MM-DD, a local day) to the end of that calendar month, `amount` (in
- *  the monitor currency) is added to every threshold. A new month starts
- *  with none, like DAY_OF_MONTH() ramps. */
+/** A variación (V040): one transaction to ignore for a monitor. From its
+ *  `transactionDate` (YYYY-MM-DD, a local day) to the end of that calendar
+ *  month, every threshold shifts by what undoing it on its product changes
+ *  in the comparison (see evaluate.ts adjustmentOnDate). A new month
+ *  starts with none, like DAY_OF_MONTH() ramps. */
 export type MonitorAdjustment = {
-  adjustmentDate: string;
+  transactionId: string;
+  productId: string;
+  transactionDate: string;
+  /** Signed, in the product's currency, as the transaction stores it. */
   amount: number;
+  /** The transaction was soft-deleted: the link stays but never applies. */
+  deleted?: boolean;
 };
 
 /** What the engine needs to evaluate a monitor (a projection of the DB row,
@@ -48,6 +54,8 @@ export type ThresholdEvaluation = {
   comparator: Comparator;
   value: number | null;
   margin: number | null;
+  /** This threshold's shift from the variaciones, included in `value`. */
+  adjustment: number;
 };
 
 export type MonitorEvaluation = {
@@ -56,7 +64,8 @@ export type MonitorEvaluation = {
   thresholds: ThresholdEvaluation[];
   /** Min across thresholds (nearest to crossing); null for =/!= or no_data. */
   margin: number | null;
-  /** Adjustments already added to every threshold value above (0 if none). */
+  /** The alert threshold's shift from the variaciones in effect (each
+   *  threshold's own is in `thresholds`, already in its value; 0 if none). */
   adjustment: number;
   /** Oldest balanceAsOf among referenced products, ISO string. */
   staleAsOf: string | null;

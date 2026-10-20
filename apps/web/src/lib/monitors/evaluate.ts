@@ -12,6 +12,7 @@ import {
 } from "@chanchito/product-model";
 import { ratesFor, type RateBook } from "@/lib/rates";
 import { formatLocalDate } from "./dates";
+import { undoDeltas, type UndoDeltas } from "./undo";
 import {
   ExprError,
   collectRefs,
@@ -49,6 +50,9 @@ export type EvalContext = {
   rates: RateBook;
   /** Monitor currency: currency-denominated refs convert into it. */
   currency: string;
+  /** Field deltas (product currency) added to refs before conversion, to
+   *  evaluate as if some transactions never happened (see undo.ts). */
+  undo?: UndoDeltas;
 };
 
 /** A value, or why it can't be computed (a Spanish, user-facing reason). */
@@ -66,24 +70,111 @@ function daysInMonth(date: Date): number {
   return new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
 }
 
-/** Sum of the adjustments in effect on `date`: those dated in the same local
- *  calendar month, on or before that day. Same-day adjustments add up. */
-export function adjustmentOnDate(
+/** The variaciones in effect on `date`: their transaction is dated in the
+ *  same local calendar month, on or before that day, and not deleted. */
+export function adjustmentsInEffect(
   adjustments: readonly MonitorAdjustment[] | undefined,
   date: Date
-): number {
-  if (adjustments == null || adjustments.length === 0) return 0;
+): MonitorAdjustment[] {
+  if (adjustments == null || adjustments.length === 0) return [];
   const day = formatLocalDate(date);
   const month = day.slice(0, 7);
-  let total = 0;
-  for (const adjustment of adjustments) {
-    const adjustmentDay = adjustment.adjustmentDate;
-    if (adjustmentDay.slice(0, 7) === month && adjustmentDay <= day) {
-      total += adjustment.amount;
-    }
+  return adjustments.filter(
+    (a) =>
+      !a.deleted &&
+      a.transactionDate.slice(0, 7) === month &&
+      a.transactionDate <= day
+  );
+}
+
+/** A threshold shift: its value, or why it cannot be computed. `reason` is
+ *  null when an expression already has no data without the undo (the
+ *  evaluation reports that itself), and a Spanish reason when only the undo
+ *  breaks it (e.g. a division by zero once a transaction is undone). */
+export type ShiftResult =
+  | { ok: true; value: number }
+  | { ok: false; reason: string | null };
+
+/** How much `expr` moves once `undo` applies: f(undone) - f(real). */
+function undoneDelta(
+  expr: Expr,
+  base: EvalResult,
+  undoCtx: EvalContext
+): ShiftResult {
+  if (!base.ok) return { ok: false, reason: null };
+  const after = evaluateExpression(expr, undoCtx);
+  if (!after.ok) {
+    return {
+      ok: false,
+      reason: `No se pudieron aplicar las variaciones: ${after.reason}`,
+    };
   }
-  // Back to the stored 8-decimal scale, so 0.1 + 0.2 sums to exactly 0.3.
-  return Number(total.toFixed(8));
+  return { ok: true, value: after.value - base.value };
+}
+
+/**
+ * The shift that ignoring `adjustments` means for one threshold, whatever
+ * their date: `-[(L(u) - T(u)) - (L - T)]` in the monitor currency, where L
+ * is the left expression, T the threshold (null: a constant one) and u the
+ * refs with the transactions undone. Comparing the real L against T + shift
+ * is then the same as comparing everything on the undone values. Exact for
+ * any expression (not a derivative), so signs and coefficients like
+ * `- owed * 0.7` come out right; 0 when nothing either side reads moves.
+ * `bases` are the plain results when the caller already has them.
+ */
+export function thresholdShift(
+  left: Expr,
+  threshold: Expr | null,
+  adjustments: readonly MonitorAdjustment[],
+  ctx: EvalContext,
+  bases: { left?: EvalResult; threshold?: EvalResult } = {}
+): ShiftResult {
+  const undo = undoDeltas(adjustments, (id) => ctx.products.get(id)?.kind);
+  if (undo.size === 0) return { ok: true, value: 0 };
+  const undoCtx = { ...ctx, undo };
+  const leftDelta = undoneDelta(
+    left,
+    bases.left ?? evaluateExpression(left, ctx),
+    undoCtx
+  );
+  if (!leftDelta.ok) return leftDelta;
+  let thresholdDelta = 0;
+  if (threshold != null) {
+    const delta = undoneDelta(
+      threshold,
+      bases.threshold ?? evaluateExpression(threshold, ctx),
+      undoCtx
+    );
+    if (!delta.ok) return delta;
+    thresholdDelta = delta.value;
+  }
+  // Back to an 8-decimal scale, so float noise from the conversion and the
+  // difference does not leak into thresholds (and -0 reads as 0).
+  const value = Number((thresholdDelta - leftDelta.value).toFixed(8)) || 0;
+  return { ok: true, value };
+}
+
+/** The shift on `ctx.date` for one threshold: the variaciones in effect that
+ *  day (same-day ones together), see thresholdShift. */
+export function adjustmentOnDate(
+  adjustments: readonly MonitorAdjustment[] | undefined,
+  left: Expr,
+  threshold: Expr | null,
+  ctx: EvalContext,
+  bases: { left?: EvalResult; threshold?: EvalResult } = {}
+): ShiftResult {
+  const inEffect = adjustmentsInEffect(adjustments, ctx.date);
+  if (inEffect.length === 0) return { ok: true, value: 0 };
+  return thresholdShift(left, threshold, inEffect, ctx, bases);
+}
+
+/** The threshold the monitor-level shift and the per-variación effects
+ *  report: the alert one, else the first. */
+export function primaryThresholdIndex(
+  thresholds: readonly { severity: string }[]
+): number {
+  const alert = thresholds.findIndex((t) => t.severity === "alert");
+  return alert >= 0 ? alert : 0;
 }
 
 /** Metrics are a discriminated-union JSONB payload with dynamic field names,
@@ -137,10 +228,12 @@ export function resolveRef(ref: RefExpr, ctx: EvalContext): EvalResult {
       reason: `Todavía no hay datos para ${label} (actualiza su institución)`,
     };
   }
-  const amount = readMetricField(product.metrics, ref.field);
-  if (amount == null) {
+  const observed = readMetricField(product.metrics, ref.field);
+  if (observed == null) {
     return { ok: false, reason: `Falta el campo '${ref.field}' en ${label}` };
   }
+  // Undone transactions move the raw value, before any conversion.
+  const amount = observed + (ctx.undo?.get(product.id)?.[ref.field] ?? 0);
 
   // Only currency-denominated values convert; percent/count pass raw.
   if (denomination !== "currency") return { ok: true, value: amount };
@@ -273,7 +366,9 @@ function parseSource(source: string): ParsedSource {
 
 /**
  * Evaluate a monitor (left expression + thresholds) at a point in time.
- * Every threshold value includes the adjustments in effect that day.
+ * Every threshold value includes its own shift from the variaciones in
+ * effect that day (see thresholdShift); the value itself stays the real one,
+ * and `adjustment` reports the alert threshold's shift.
  * Status precedence: no_data (anything unresolvable, on either side) beats
  * breached (an alert threshold's condition holds) beats warning beats ok.
  */
@@ -288,7 +383,6 @@ export function evaluateMonitor(
 
   let noDataReason = leftResult.ok ? null : leftResult.reason;
   const refs: RefExpr[] = leftParsed.expr ? collectRefs(leftParsed.expr) : [];
-  const adjustment = adjustmentOnDate(def.adjustments, ctx.date);
 
   let breached = false;
   let warned = false;
@@ -299,7 +393,28 @@ export function evaluateMonitor(
       ? evaluateExpression(parsed.expr, ctx)
       : { ok: false, reason: `Umbral inválido: ${parsed.error}` };
     if (!result.ok && noDataReason == null) noDataReason = result.reason;
-    const value = result.ok ? result.value + adjustment : null;
+
+    // Each threshold gets its own shift: it may read undone products too.
+    let adjustment = 0;
+    let value: number | null = null;
+    if (result.ok) {
+      const shift =
+        leftParsed.expr && parsed.expr
+          ? adjustmentOnDate(def.adjustments, leftParsed.expr, parsed.expr, ctx, {
+              left: leftResult,
+              threshold: result,
+            })
+          : ({ ok: true, value: 0 } as const);
+      if (shift.ok) {
+        adjustment = shift.value;
+        value = result.value + adjustment;
+      } else if (shift.reason == null) {
+        // The left side has no data: already the reason; keep T unshifted.
+        value = result.value;
+      } else if (noDataReason == null) {
+        noDataReason = shift.reason;
+      }
+    }
 
     let margin: number | null = null;
     if (leftResult.ok && value != null) {
@@ -314,8 +429,11 @@ export function evaluateMonitor(
       comparator: t.comparator,
       value,
       margin,
+      adjustment,
     };
   });
+  const adjustment =
+    thresholds[primaryThresholdIndex(thresholds)]?.adjustment ?? 0;
 
   const status: MonitorStatus =
     noDataReason != null

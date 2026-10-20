@@ -104,11 +104,11 @@ export function MonitorCard({ monitor }: { monitor: ApiMonitor }) {
                 <span className="tabular-nums">
                   {formatAmount(monitor.currency, nearest.value)}
                 </span>
-                {evaluation.adjustment !== 0 && (
+                {nearest.adjustment !== 0 && (
                   <span className="tabular-nums">
                     {" "}
                     (incluye variaciones{" "}
-                    {formatSignedAmount(monitor.currency, evaluation.adjustment)})
+                    {formatSignedAmount(monitor.currency, nearest.adjustment)})
                   </span>
                 )}
               </p>

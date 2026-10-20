@@ -345,3 +345,29 @@ export const deleteWealthSnapshotSchema = z.object({
     })
     .pipe(rowId),
 });
+
+/** POST /api/monitors/[id]/adjustments: the transaction to ignore,
+ *  lowercased as Postgres returns ids. */
+export const createMonitorAdjustmentSchema = z.object({
+  transactionId: rowId.transform((id) => id.toLowerCase()),
+});
+
+/** Largest page GET /api/monitors/[id]/adjustments/candidates returns. */
+export const MAX_ADJUSTMENT_CANDIDATES = 100;
+
+/** GET /api/monitors/[id]/adjustments/candidates query string: an optional
+ *  search text, a YYYY-MM month (the route defaults to the current one) and
+ *  a page size. */
+export const adjustmentCandidatesQuerySchema = z.object({
+  q: z.string().trim().max(200).optional(),
+  month: z
+    .string()
+    .regex(/^\d{4}-(0[1-9]|1[0-2])$/, { error: "Expected a YYYY-MM month" })
+    .optional(),
+  limit: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_ADJUSTMENT_CANDIDATES)
+    .default(50),
+});

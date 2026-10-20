@@ -22,6 +22,8 @@ export interface ThresholdEvaluation {
   comparator: Comparator;
   value: number | null;
   margin: number | null;
+  /** This threshold's shift from the variaciones, included in `value`. */
+  adjustment: number;
 }
 
 export interface MonitorEvaluation {
@@ -30,7 +32,8 @@ export interface MonitorEvaluation {
   thresholds: ThresholdEvaluation[];
   /** Min across thresholds (nearest to crossing); null for =/!= or no_data. */
   margin: number | null;
-  /** Adjustments already included in every threshold value (0 if none). */
+  /** The alert threshold's variaciones shift (each threshold carries its
+   *  own in `thresholds`; 0 if none). */
   adjustment: number;
   /** Oldest balanceAsOf among referenced products, ISO string. */
   staleAsOf: string | null;
@@ -78,16 +81,49 @@ export interface HistoryPoint {
   thresholds: ThresholdEvaluation[];
 }
 
-/** A variación: from `adjustmentDate` (YYYY-MM-DD) to the end of that month,
- *  `amount` is added to every threshold. */
+/** A variación: a transaction the monitor ignores. From its date to the end
+ *  of that month, every threshold shifts so the comparison reads as if it
+ *  never happened (see GET /api/monitors/[id]/adjustments). */
 export interface ApiAdjustment {
   id: string;
   monitorId: string;
-  adjustmentDate: string;
-  amount: number;
-  description: string | null;
+  transactionId: string;
   createdAt: string;
   updatedAt: string;
+  /** The transaction's display description, date and signed amount (in
+   *  productCurrency). */
+  description: string;
+  transactionDate: string;
+  amount: number;
+  productId: string;
+  productName: string;
+  productCurrency: string;
+  institutionSlug: string;
+  institutionName: string;
+  /** The transaction was deleted: the variación no longer applies. */
+  deleted: boolean;
+  /** Whether the monitor (equation or a threshold) reads a field the
+   *  transaction moves. */
+  affects: boolean;
+  /** Its own shift of the alert threshold right now, in the monitor
+   *  currency; null without data. */
+  effect: number | null;
+  /** The month's shift through its day; null without data. */
+  monthToDateEffect: number | null;
+}
+
+/** A transaction that can become a variación (GET .../candidates). */
+export interface AdjustmentCandidate {
+  id: string;
+  description: string;
+  transactionDate: string;
+  amount: number;
+  productId: string;
+  productName: string;
+  productCurrency: string;
+  institutionSlug: string;
+  institutionName: string;
+  linked: boolean;
 }
 
 export interface MonitorReference {

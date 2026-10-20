@@ -1024,7 +1024,7 @@ export function MonitorForm({ monitorId }: { monitorId?: string }) {
               </div>
               {preview.evaluation.adjustment !== 0 && (
                 <p className="text-xs text-muted-foreground tabular-nums">
-                  Los umbrales incluyen las variaciones vigentes hoy:{" "}
+                  El umbral de alerta incluye las variaciones vigentes hoy:{" "}
                   {formatSignedAmount(currency, preview.evaluation.adjustment)}
                 </p>
               )}
