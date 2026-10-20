@@ -600,9 +600,10 @@ export const monitors = pgTable("monitors", {
     .defaultNow(),
 });
 
-// Monitor adjustments ("variaciones"): from adjustment_date to the end of
-// that month, amount (monitor currency) is added to every threshold of the
-// monitor. Applied on read (see lib/monitors/evaluate adjustmentOnDate).
+// Monitor adjustments ("variaciones", V040): a transaction to ignore for one
+// monitor. From its transaction_date to the end of that month, every
+// threshold shifts so the comparison reads as if it never happened on its
+// product. Applied on read (see lib/monitors/evaluate thresholdShift).
 export const monitorAdjustments = pgTable(
   "monitor_adjustments",
   {
@@ -610,9 +611,11 @@ export const monitorAdjustments = pgTable(
     monitorId: uuid("monitor_id")
       .notNull()
       .references(() => monitors.id, { onDelete: "cascade" }),
-    adjustmentDate: date("adjustment_date").notNull(),
-    amount: numeric("amount", { precision: 20, scale: 8 }).notNull(),
-    description: text("description"),
+    // The transaction to ignore for this monitor (V040). Its product, date
+    // and amount drive the threshold shift; a soft-deleted one stops applying.
+    transactionId: uuid("transaction_id")
+      .notNull()
+      .references(() => transactions.id, { onDelete: "cascade" }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -621,10 +624,11 @@ export const monitorAdjustments = pgTable(
       .defaultNow(),
   },
   (table) => [
-    index("idx_monitor_adjustments_monitor").on(
+    unique("uq_monitor_adjustments_monitor_transaction").on(
       table.monitorId,
-      table.adjustmentDate
+      table.transactionId
     ),
+    index("idx_monitor_adjustments_transaction").on(table.transactionId),
   ]
 );
 
