@@ -417,7 +417,11 @@ INSERT` trigger on `transactions` fills a missing `category_id` from
 scrapers' DB writer, CSV import, manual entry) gets it without code of its own.
 Rows that arrive with a category, or flagged `is_manually_categorized`, are
 left alone. The dashboard's "Categorizar ahora" (`PUT /api/categories`) runs
-the same function over the rows that are still uncategorized.
+the same function over the rows that are still uncategorized. The transaction
+detail panel can also turn a row's category into a rule
+(`POST /api/transactions/[id]/category-rule`): one database transaction creates
+or reuses a priority-1000 rule keyed on the raw `description` and recategorizes
+the visible, non-manual rows with that exact description.
 
 `exchange_rates` semantics, resolution order and staleness: see
 [Exchange rates](#exchange-rates).

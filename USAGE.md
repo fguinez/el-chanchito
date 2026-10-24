@@ -554,6 +554,17 @@ Rules only fill in missing categories: they never overwrite a category that is
 already set (including one chosen by hand), and editing or deleting a rule does
 not undo the categories it already assigned.
 
+**From a transaction**: when you change a transaction's category in its detail
+panel, you can tick "Aplicar a todas las transacciones con esta descripción".
+That creates a rule whose keyword is the transaction's original (scraped)
+description at priority 1000, so it beats broader keywords (a rule with that
+keyword already there is reused and moved to the new category). The other
+transactions with exactly that description (ignoring case and surrounding
+spaces) take the category right away, except the ones you categorized by hand;
+this is the one case where a rule's category replaces one already set
+automatically. The rule shows up on `/categories` like any other. Without the
+tick, a recategorization only changes that transaction.
+
 ## Internal transfers
 
 A transfer on `/transfers` records money moving between two of your own CLP
@@ -695,6 +706,7 @@ All API routes are under `/api/`:
 | GET | `/api/scrapers/available` | Enabled scraper slugs, from the scraper service |
 | GET/POST | `/api/transactions` | Transactions (list, create; create takes an optional `location`) |
 | GET/PATCH/DELETE | `/api/transactions/[id]` | One transaction with product, institution, category, location and notes; PATCH edits `description`/`customDescription`, `amount`, `transactionDate`, `scheduledMonth`, `categoryId`, `isInternalTransfer`, `productId`, `location` and `notes` (trimmed, max 2000 chars, blank or `null` clears); DELETE soft-deletes imported (scraped or CSV) rows and hard-deletes manual ones |
+| POST | `/api/transactions/[id]/category-rule` | `{ categoryId }`: categorizes the row (manual), creates or reuses a priority-1000 rule keyed on its original description, and categorizes the other non-manual rows with that same description; returns `{ rule, ruleCreated, updatedCount }` |
 | POST | `/api/import` | CSV import |
 | GET/POST/PUT | `/api/categories` | Categories with their rules and transaction counts; create a category; apply the rules to uncategorized transactions (PUT) |
 | PATCH/DELETE | `/api/categories/[id]` | Update or delete a category (its transactions become uncategorized, its rules are deleted) |
