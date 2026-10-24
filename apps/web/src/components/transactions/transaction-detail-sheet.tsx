@@ -33,6 +33,7 @@ import type { TransactionLocation } from "@/lib/transaction-location";
 import { TransactionLocationField } from "@/components/transactions/transaction-location-field";
 import { TransactionEditForm } from "@/components/transactions/transaction-edit-form";
 import { TransactionNotesField } from "@/components/transactions/transaction-notes-field";
+import { CategorySuggestionHint } from "@/components/transactions/category-suggestion-hint";
 import { SUGGESTIONS_ANCHOR } from "@/lib/transfer-suggestions";
 
 type LoadResult =
@@ -317,6 +318,17 @@ function TransactionDetailBody({
                 <Badge variant="secondary">manual</Badge>
               )}
             </span>
+            {!txn.categoryId && !txn.isManuallyCategorized && (
+              <CategorySuggestionHint
+                key={txn.id}
+                transactionId={txn.id}
+                description={txn.description}
+                onApplied={(text) => {
+                  setNotice({ id: txn.id, text });
+                  onChanged();
+                }}
+              />
+            )}
           </Field>
           <Field label="Transferencia interna">
             {txn.transfer ? (
