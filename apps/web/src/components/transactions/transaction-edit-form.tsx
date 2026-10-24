@@ -42,9 +42,10 @@ export function TransactionEditForm({
   // A scraped row (it has an external id) keeps the bank's `description`
   // immutable; the box edits the one-time custom override instead (V034).
   const scraped = txn.externalId !== null && txn.externalId !== "";
-  const [description, setDescription] = useState(
-    scraped ? (txn.customDescription ?? "") : txn.description
-  );
+  const initialDescription = scraped
+    ? (txn.customDescription ?? "")
+    : txn.description;
+  const [description, setDescription] = useState(initialDescription);
   const [amount, setAmount] = useState(String(Math.abs(txn.amount)));
   const [isExpense, setIsExpense] = useState(txn.amount < 0);
   const [transactionDate, setTransactionDate] = useState(txn.transactionDate);
@@ -58,7 +59,13 @@ export function TransactionEditForm({
   const [productId, setProductId] = useState(txn.productId);
   const [applyToSame, setApplyToSame] = useState(false);
   // The rule keys on the raw scraped description, which must fit a keyword.
-  const ruleAllowed = txn.description.trim().length <= RULE_KEYWORD_MAX_LENGTH;
+  const ruleKeyword = txn.description.trim();
+  const keywordFits =
+    ruleKeyword.length > 0 && ruleKeyword.length <= RULE_KEYWORD_MAX_LENGTH;
+  // Not while the description is being edited: the rule would key on the
+  // text from before this save.
+  const descriptionEdited = description !== initialDescription;
+  const ruleAllowed = keywordFits && !descriptionEdited;
   const withRule = applyToSame && ruleAllowed && categoryId !== "";
 
   const [saving, setSaving] = useState(false);
@@ -112,7 +119,8 @@ export function TransactionEditForm({
     setError(null);
     try {
       const base = `/api/transactions/${encodeURIComponent(txn.id)}`;
-      if (Object.keys(body).length > 0) {
+      const patched = Object.keys(body).length > 0;
+      if (patched) {
         const res = await fetch(base, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
@@ -135,7 +143,13 @@ export function TransactionEditForm({
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) {
-        setError(data?.error ?? "No se pudo crear la regla");
+        const reason = data?.error ?? "error del servidor";
+        // The PATCH already landed: close and reload, and say what failed.
+        if (patched) {
+          onSaved(`Cambios guardados; no se pudo crear la regla: ${reason}`);
+        } else {
+          setError(`No se pudo crear la regla: ${reason}`);
+        }
         return;
       }
       onSaved(ruleNotice(data.ruleCreated, data.updatedCount));
@@ -246,9 +260,13 @@ export function TransactionEditForm({
             <span>
               Aplicar a todas las transacciones con esta descripción
               <span className="block text-xs text-muted-foreground">
-                {ruleAllowed
-                  ? `Crea una regla para "${txn.description.trim()}" y la aplica a las existentes y futuras (no cambia las categorizadas a mano).`
-                  : `La descripción supera ${RULE_KEYWORD_MAX_LENGTH} caracteres; crea la regla en Categorías.`}
+                {!keywordFits
+                  ? ruleKeyword.length === 0
+                    ? "La descripción original está vacía; no se puede crear una regla."
+                    : `La descripción supera ${RULE_KEYWORD_MAX_LENGTH} caracteres; crea la regla en Categorías.`
+                  : descriptionEdited
+                    ? "Guarda primero el cambio de descripción para crear la regla."
+                    : `Crea una regla exacta para "${ruleKeyword}" y la aplica a las existentes y futuras (no cambia las categorizadas a mano).`}
               </span>
             </span>
           </label>
@@ -297,7 +315,9 @@ export function TransactionEditForm({
 
 /** "Regla creada; 2 transacciones similares actualizadas." */
 function ruleNotice(created: boolean, updated: number): string {
-  const rule = created ? "Regla creada" : "Regla actualizada";
+  const rule = created
+    ? "Regla exacta creada"
+    : "Se reutilizó la regla exacta existente con esta descripción (ahora apunta a esta categoría)";
   const rows =
     updated === 1
       ? "1 transacción similar actualizada"
