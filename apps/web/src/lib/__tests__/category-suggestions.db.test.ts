@@ -144,6 +144,7 @@ describe.skipIf(!ADMIN_URL)("category suggestions (real PostgreSQL)", () => {
   it("applies once to the uncategorized rows with the same description only", async () => {
     const a = await txn("COMERCIO EJEMPLO SPA");
     const b = await txn(" comercio ejemplo spa ");
+    const tabbed = await txn("COMERCIO EJEMPLO SPA\t");
     const categorized = await txn("COMERCIO EJEMPLO SPA", { categoryId: other });
     const cleared = await txn("COMERCIO EJEMPLO SPA", { manual: true });
     const deleted = await txn("COMERCIO EJEMPLO SPA", { deleted: true });
@@ -160,6 +161,7 @@ describe.skipIf(!ADMIN_URL)("category suggestions (real PostgreSQL)", () => {
     expect(await categoryOf(cleared)).toEqual({ categoryId: null, manual: true });
     expect(await categoryOf(deleted)).toEqual({ categoryId: null, manual: false });
     expect(await categoryOf(longer)).toEqual({ categoryId: null, manual: false });
+    expect(await categoryOf(tabbed)).toEqual({ categoryId: null, manual: false });
     // No rule was created.
     const [{ n }] = await sql`SELECT count(*)::int AS n FROM category_rules`;
     expect(n).toBe(0);

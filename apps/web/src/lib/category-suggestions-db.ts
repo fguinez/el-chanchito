@@ -31,6 +31,8 @@ export const HISTORY_GROUP_LIMIT = 5000;
  *  first. */
 export const TARGET_GROUP_LIMIT = 500;
 
+/** Spaces-only `btrim`, the key the exact-rule trigger (V041) and the rule
+ *  route's backfill match on, so every path groups the same rows. */
 const descriptionKey = sql<string>`lower(btrim(${transactions.description}))`;
 
 const isTarget = and(
@@ -124,7 +126,7 @@ export async function listCategorySuggestions(): Promise<CategorySuggestionGroup
         sampleTransactionId: sql<string>`(array_agg(${transactions.id} ORDER BY ${transactions.transactionDate} DESC, ${transactions.id}))[1]::text`,
       })
       .from(transactions)
-      .where(and(isTarget, sql`btrim(${transactions.description}) <> ''`))
+      .where(and(isTarget, sql`${descriptionKey} <> ''`))
       .groupBy(descriptionKey)
       .orderBy(
         desc(sql`count(*)`),
