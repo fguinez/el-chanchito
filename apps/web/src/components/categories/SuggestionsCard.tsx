@@ -83,7 +83,12 @@ export function SuggestionsCard({
             {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ categoryId: group.categoryId }),
+              // The sample row may have been recategorized since the list
+              // loaded: leave it alone then, the rule is still saved.
+              body: JSON.stringify({
+                categoryId: group.categoryId,
+                onlyIfUncategorized: true,
+              }),
             }
           )
         : fetch(`/api/categories/suggestions/${action}`, {
@@ -110,9 +115,16 @@ export function SuggestionsCard({
         return;
       }
       const count =
-        action === "apply"
-          ? (data?.updatedCount ?? 0)
-          : 1 + (data?.updatedCount ?? 0);
+        (data?.updatedCount ?? 0) +
+        (action === "always" && data?.transactionUpdated ? 1 : 0);
+      if (action === "apply" && count === 0) {
+        setMessage({
+          text: "Ya no hay transacciones sin categoría con esta descripción",
+          error: false,
+        });
+        await load();
+        return;
+      }
       setMessage({
         text: `${plural(count, "transacción categorizada", "transacciones categorizadas")} en ${group.categoryName}${
           action === "always" ? "; regla exacta guardada" : ""
