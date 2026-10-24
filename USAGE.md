@@ -532,12 +532,17 @@ on the **Categorías** page (`/categories`).
   many transactions and rules it has. Its transactions become uncategorized
   and its rules are deleted; "Categorizar ahora" then runs the remaining rules
   over them (new transactions are categorized on insert, these are not).
-- **Rules**: a rule matches when the transaction description contains its
-  keyword, ignoring upper and lower case (a plain substring: `%` and `_` have no
-  special meaning). When several rules match, the highest priority wins; on
-  equal priority the older rule wins, so a more specific keyword added later
-  (say `uber eats` after `uber`) needs a higher priority.
-- **Probar** previews a keyword, before or after you save the rule: how many
+- **Rules**: a **Contiene** rule (the default) matches when the transaction
+  description contains its keyword, ignoring upper and lower case (a plain
+  substring: `%` and `_` have no special meaning). An **Exacta** rule matches
+  only when the whole description equals its keyword, ignoring case and
+  surrounding spaces; the rules table marks it with an "Exacta" badge. An exact
+  match always wins over a contains match. Among rules of the same kind the
+  highest priority wins; on equal priority the older rule wins, so a more
+  specific keyword added later (say `uber eats` after `uber`) needs a higher
+  priority. There can be only one exact rule per keyword. Matching folds case
+  with PostgreSQL's `lower()`, so it follows the database's locale.
+- **Probar** previews a keyword with its match type, before or after you save the rule: how many
   transactions contain it, how many are still waiting for a category, and the
   20 most recent matches with their current category.
 
@@ -556,9 +561,10 @@ not undo the categories it already assigned.
 
 **From a transaction**: when you change a transaction's category in its detail
 panel, you can tick "Aplicar a todas las transacciones con esta descripción".
-That creates a rule whose keyword is the transaction's original (scraped)
-description at priority 1000, so it beats broader keywords (a rule with that
-keyword already there is reused and moved to the new category). The other
+That creates an **Exacta** rule whose keyword is the transaction's original
+(scraped) description, at the default priority: it wins over any contains rule
+but never catches a longer description (an exact rule with that keyword already
+there is reused and moved to the new category, keeping its priority). The other
 transactions with exactly that description (ignoring case and surrounding
 spaces) take the category right away, except the ones you categorized by hand;
 this is the one case where a rule's category replaces one already set
@@ -706,13 +712,13 @@ All API routes are under `/api/`:
 | GET | `/api/scrapers/available` | Enabled scraper slugs, from the scraper service |
 | GET/POST | `/api/transactions` | Transactions (list, create; create takes an optional `location`) |
 | GET/PATCH/DELETE | `/api/transactions/[id]` | One transaction with product, institution, category, location and notes; PATCH edits `description`/`customDescription`, `amount`, `transactionDate`, `scheduledMonth`, `categoryId`, `isInternalTransfer`, `productId`, `location` and `notes` (trimmed, max 2000 chars, blank or `null` clears); DELETE soft-deletes imported (scraped or CSV) rows and hard-deletes manual ones |
-| POST | `/api/transactions/[id]/category-rule` | `{ categoryId }`: categorizes the row (manual), creates or reuses a priority-1000 rule keyed on its original description, and categorizes the other non-manual rows with that same description; returns `{ rule, ruleCreated, updatedCount }` |
+| POST | `/api/transactions/[id]/category-rule` | `{ categoryId }`: categorizes the row (manual), creates or reuses an exact rule keyed on its original description, and categorizes the other non-manual rows with that same description; returns `{ rule, ruleCreated, updatedCount }` |
 | POST | `/api/import` | CSV import |
 | GET/POST/PUT | `/api/categories` | Categories with their rules and transaction counts; create a category; apply the rules to uncategorized transactions (PUT) |
 | PATCH/DELETE | `/api/categories/[id]` | Update or delete a category (its transactions become uncategorized, its rules are deleted) |
-| POST | `/api/categories/rules` | Create a keyword rule |
+| POST | `/api/categories/rules` | Create a keyword rule (`matchType`: `contains`, the default, or `exact`) |
 | PATCH/DELETE | `/api/categories/rules/[id]` | Update or delete a rule |
-| GET | `/api/categories/rules/preview` | Transactions a keyword would match (`?keyword=`) |
+| GET | `/api/categories/rules/preview` | Transactions a keyword would match (`?keyword=`, optional `&matchType=exact`) |
 | GET/POST/PUT/DELETE | `/api/fixed-expenses` | Fixed expenses CRUD |
 | GET/POST/PUT/DELETE | `/api/transfers` | Internal transfers (POST needs distinct CLP `fromProductId` + `toProductId`); GET includes the linked `fromTransaction` / `toTransaction` |
 | PUT | `/api/transfers/[id]/links` | Set or clear the linked transactions: `{ fromTransactionId?, toTransactionId? }` (null clears, omitted keeps) |

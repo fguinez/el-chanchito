@@ -416,12 +416,16 @@ INSERT` trigger on `transactions` fills a missing `category_id` from
 `category_rules` through `category_for_description()`, so every writer (the
 scrapers' DB writer, CSV import, manual entry) gets it without code of its own.
 Rows that arrive with a category, or flagged `is_manually_categorized`, are
-left alone. The dashboard's "Categorizar ahora" (`PUT /api/categories`) runs
-the same function over the rows that are still uncategorized. The transaction
-detail panel can also turn a row's category into a rule
-(`POST /api/transactions/[id]/category-rule`): one database transaction creates
-or reuses a priority-1000 rule keyed on the raw `description` and recategorizes
-the visible, non-manual rows with that exact description.
+left alone. A rule's `match_type` (V041) is `contains` (case-insensitive literal
+substring, the default) or `exact` (trimmed, case-insensitive equality); an
+exact match wins over any contains match, then priority, then the oldest rule.
+The dashboard's "Categorizar ahora" (`PUT /api/categories`) runs the same
+function over the rows that are still uncategorized. The transaction detail
+panel can also turn a row's category into a rule
+(`POST /api/transactions/[id]/category-rule`): under an advisory lock on the
+keyword, one database transaction creates or reuses an exact rule keyed on the
+raw `description` and recategorizes the visible, non-manual rows with that
+exact description.
 
 `exchange_rates` semantics, resolution order and staleness: see
 [Exchange rates](#exchange-rates).
@@ -465,6 +469,7 @@ the visible, non-manual rows with that exact description.
 | `V038__product_prices.sql` | product_prices: one daily closing price per product and trading day (the bar's UTC date), upserted by the scrapers and never pruned |
 | `V039__stock_product_kind.sql` | admits the `stock` kind in products_kind_check and re-kinds Fintual's stock positions (`external_ref` `stock:%`) from `investment` to `stock`, rewriting the `kind` key of their attributes, metrics and snapshot metrics; goals stay `investment`; `products_stock_ref_kind_check` then rejects any `investment` row with a `stock:` ref, so a scraper still on the old code fails its writes instead of adding twins (stop the scrapers, migrate, restart scrapers and web) |
 | `V040__monitor_adjustments_transactions.sql` | monitor_adjustments become links to transactions: deletes the free-form rows, drops `adjustment_date`/`amount`/`description`, adds `transaction_id` (FK, ON DELETE CASCADE, unique per monitor) |
+| `V041__category_rule_match_type.sql` | `category_rules.match_type` (`contains` default, or `exact`); `category_for_description()` matches exact rules by trimmed equality and ranks them before contains rules |
 
 ## Scraper Architecture
 
