@@ -498,6 +498,29 @@ export const internalTransfers = pgTable("internal_transfers", {
     .defaultNow(),
 });
 
+// Category suggestions the user dismissed (V042): the normalised description
+// (lib/category-suggestions) and the category it suggested. One row per pair.
+export const dismissedCategorySuggestions = pgTable(
+  "dismissed_category_suggestions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    normalizedDescription: text("normalized_description").notNull(),
+    categoryId: uuid("category_id")
+      .notNull()
+      .references(() => categories.id, { onDelete: "cascade" }),
+    dismissedAt: timestamp("dismissed_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    unique("uq_dismissed_category_suggestions").on(
+      table.normalizedDescription,
+      table.categoryId
+    ),
+    index("idx_dismissed_category_suggestions_category").on(table.categoryId),
+  ]
+);
+
 // Transfer suggestions the user dismissed (V031): the outgoing row and the
 // incoming one of a pair, or a null target for a one-sided suggestion. One row
 // per (source, target), the null target included.
