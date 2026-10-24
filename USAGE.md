@@ -571,6 +571,26 @@ this is the one case where a rule's category replaces one already set
 automatically. The rule shows up on `/categories` like any other. Without the
 tick, a recategorization only changes that transaction.
 
+**Suggestions**: for transactions without a category, the dashboard suggests one
+learned from the transactions you already categorized (by hand or by a rule).
+Descriptions are compared without digits, accents, punctuation or filler words
+(company suffixes such as "SpA" or "Ltda", "compra", "pago"); the same
+description counts most, then descriptions sharing most of their words. A
+suggestion only shows when one category clearly wins, with a short reason such
+as "3 transacciones similares están en Supermercado". Nothing is applied on its
+own:
+
+- In the transaction detail panel, "Aplicar" categorizes that transaction (as a
+  manual recategorization), "Aplicar siempre" creates the exact rule described
+  above, and "Ignorar" hides the suggestion until the page reloads.
+- The **Sugerencias** card on `/categories` lists the uncategorized
+  transactions grouped by description. "Aplicar a estas N" categorizes those
+  rows once (marked manual, no rule), "Aplicar siempre" creates the exact rule,
+  and "Ignorar" stops suggesting that category for that description for good
+  (a different suggested category still shows).
+
+Transactions whose category you cleared by hand get no suggestions.
+
 ## Internal transfers
 
 A transfer on `/transfers` records money moving between two of your own CLP
@@ -714,10 +734,14 @@ All API routes are under `/api/`:
 | GET/PATCH/DELETE | `/api/transactions/[id]` | One transaction with product, institution, category, location and notes; PATCH edits `description`/`customDescription`, `amount`, `transactionDate`, `scheduledMonth`, `categoryId`, `isInternalTransfer`, `productId`, `location` and `notes` (trimmed, max 2000 chars, blank or `null` clears); DELETE soft-deletes imported (scraped or CSV) rows and hard-deletes manual ones |
 | POST | `/api/transactions/[id]/category-rule` | `{ categoryId }`: categorizes the row (manual), creates or reuses an exact rule keyed on its original description, and categorizes the other non-manual rows with that same description; returns `{ rule, ruleCreated, updatedCount }` |
 | POST | `/api/import` | CSV import |
+| GET | `/api/transactions/[id]/category-suggestion` | `{ suggestion }`: the suggested category (`categoryId`, `categoryName`, `confidence`, `matchCount`, `exact`, `reason`) of an uncategorized row, or `null` |
 | GET/POST/PUT | `/api/categories` | Categories with their rules and transaction counts; create a category; apply the rules to uncategorized transactions (PUT) |
 | PATCH/DELETE | `/api/categories/[id]` | Update or delete a category (its transactions become uncategorized, its rules are deleted) |
 | POST | `/api/categories/rules` | Create a keyword rule (`matchType`: `contains`, the default, or `exact`) |
 | PATCH/DELETE | `/api/categories/rules/[id]` | Update or delete a rule |
+| GET | `/api/categories/suggestions` | `{ suggestions }`: uncategorized rows grouped by description with their suggested category, count, latest date and a sample transaction id; dismissed ones left out |
+| POST | `/api/categories/suggestions/apply` | `{ description, categoryId }`: categorizes (manual) the uncategorized rows with that description once; returns `{ updatedCount }` |
+| POST | `/api/categories/suggestions/dismiss` | `{ description, categoryId }`: stops suggesting that category for that normalised description |
 | GET | `/api/categories/rules/preview` | Transactions a keyword would match (`?keyword=`, optional `&matchType=exact`) |
 | GET/POST/PUT/DELETE | `/api/fixed-expenses` | Fixed expenses CRUD |
 | GET/POST/PUT/DELETE | `/api/transfers` | Internal transfers (POST needs distinct CLP `fromProductId` + `toProductId`); GET includes the linked `fromTransaction` / `toTransaction` |
