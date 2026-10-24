@@ -4,16 +4,24 @@ import type { SQL } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { argOf, createFakeDb, type RecordedQuery } from "./fake-db";
 import { categories, categoryRules, transactions } from "@/lib/db/schema";
-import { DESCRIPTION_RULE_PRIORITY } from "@/lib/category-rules-db";
 
 // The wiring of POST /api/transactions/[id]/category-rule: validation before
-// any query, the rule created or reused, this row marked manual and the rows
+// any query, the keyword lock, the exact rule created or reused, this row
+// marked manual and the rows
 // with the same description updated, all on one transaction. The db is a
 // recording double (the SQL itself runs in category-rule.db.test.ts). Every id
 // and description is synthetic (see the repo's personal data policy).
 
 const fake = createFakeDb();
-vi.mock("@/lib/db", () => ({ db: fake.db }));
+// The fake transaction also needs `execute`, for the advisory lock.
+const execute = vi.fn<(query: unknown) => Promise<unknown[]>>(async () => []);
+vi.mock("@/lib/db", () => ({
+  db: {
+    ...fake.db,
+    transaction: <T>(fn: (tx: unknown) => Promise<T>) =>
+      fn({ ...fake.db, execute }),
+  },
+}));
 
 const { POST } = await import("@/app/api/transactions/[id]/category-rule/route");
 
@@ -38,7 +46,10 @@ function table(query: RecordedQuery) {
 function respond(query: RecordedQuery): unknown {
   const target = table(query);
   if (query.op === "select" && target === transactions) {
-    return world.txn ? [world.txn] : [];
+    // The keyword column is PostgreSQL's lower(btrim(description)).
+    return world.txn
+      ? [{ ...world.txn, keyword: world.txn.description.replace(/^ +| +$/g, "").toLowerCase() }]
+      : [];
   }
   if (query.op === "select" && target === categories) {
     return world.category ? [{ id: CATEGORY_ID }] : [];
@@ -62,6 +73,7 @@ function respond(query: RecordedQuery): unknown {
 
 beforeEach(() => {
   fake.reset();
+  execute.mockClear();
   fake.respondWith(respond);
   world = {
     txn: { description: DESCRIPTION },
@@ -99,6 +111,7 @@ describe("POST /api/transactions/[id]/category-rule", () => {
     expect(res.status).toBe(400);
     expect((await res.json()).field).toBe(field);
     expect(fake.queries).toHaveLength(0);
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it("creates a rule from the trimmed description and applies it", async () => {
@@ -110,17 +123,28 @@ describe("POST /api/transactions/[id]/category-rule", () => {
         id: RULE_ID,
         keyword: "comercio ejemplo spa",
         categoryId: CATEGORY_ID,
-        priority: DESCRIPTION_RULE_PRIORITY,
+        matchType: "exact",
       }),
       ruleCreated: true,
       updatedCount: 2,
     });
 
+    // The keyword is locked before the lookup, which only reuses exact rules.
+    const lock = new PgDialect().sqlToQuery(execute.mock.calls[0][0] as SQL);
+    expect(lock.sql).toContain("pg_advisory_xact_lock(hashtext(lower(");
+    expect(lock.params).toEqual(["comercio ejemplo spa"]);
+    const lookup = fake.queries.find(
+      (q) => q.op === "select" && table(q) === categoryRules
+    ) as RecordedQuery;
+    expect(
+      new PgDialect().sqlToQuery(argOf(lookup, "where") as SQL).sql
+    ).toContain("match_type");
+
     const [insert] = writes("insert", categoryRules);
     expect(argOf(insert, "values")).toEqual({
       keyword: "comercio ejemplo spa",
       categoryId: CATEGORY_ID,
-      priority: DESCRIPTION_RULE_PRIORITY,
+      matchType: "exact",
     });
 
     const [own, similar] = writes("update", transactions);
@@ -149,10 +173,8 @@ describe("POST /api/transactions/[id]/category-rule", () => {
     expect((await res.json()).ruleCreated).toBe(false);
     expect(writes("insert", categoryRules)).toHaveLength(0);
     const [update] = writes("update", categoryRules);
-    expect(argOf(update, "set")).toEqual({
-      categoryId: CATEGORY_ID,
-      priority: DESCRIPTION_RULE_PRIORITY,
-    });
+    // Only the category moves; the rule keeps its priority.
+    expect(argOf(update, "set")).toEqual({ categoryId: CATEGORY_ID });
   });
 
   it("returns 404 for an unknown or deleted transaction, writing nothing", async () => {
@@ -166,7 +188,10 @@ describe("POST /api/transactions/[id]/category-rule", () => {
     world.category = false;
     const res = await post(TXN_ID, { categoryId: CATEGORY_ID });
     expect(res.status).toBe(400);
-    expect((await res.json()).field).toBe("categoryId");
+    expect(await res.json()).toMatchObject({
+      error: "La categoría no existe",
+      field: "categoryId",
+    });
     expect(fake.queries.every((q) => q.op === "select")).toBe(true);
   });
 

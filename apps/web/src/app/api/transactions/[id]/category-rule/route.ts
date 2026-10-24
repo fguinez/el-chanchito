@@ -3,23 +3,20 @@ import { db } from "@/lib/db";
 import { rowId, transactionCategoryRuleSchema } from "@/lib/api/schemas";
 import { failureBody, parseJsonBody } from "@/lib/api/validation";
 import { applyCategoryRuleFromTransaction } from "@/lib/category-rules-db";
+import { EXACT_KEYWORD_CLASH, EXACT_KEYWORD_INDEX } from "@/lib/categories";
+import { isUniqueViolation } from "@/lib/management";
 
 // Next 16: dynamic segment params arrive as a Promise on the context arg.
 type Context = { params: Promise<{ id: string }> };
 
 /**
  * POST /api/transactions/[id]/category-rule: categorize this transaction and
- * every one with the same description, now and from now on. Body
- * `{ categoryId }`. In one database transaction: the row takes the category
- * (marked manual, as PATCH does); a category rule keyed on its trimmed raw
- * description is created at priority 1000 (or the existing rule with that
- * keyword is pointed at the category); and the other visible rows with the same
- * raw description (trimmed, case-insensitive) that were not categorized by hand
- * take the category too. Future rows get it from the insert trigger (V021).
+ * every one with the same description, now and from now on, in one database
+ * transaction (see applyCategoryRuleFromTransaction). Body `{ categoryId }`.
  *
  * 200 `{ rule, ruleCreated, updatedCount }` (`updatedCount`: rows besides this
  * one); 400 `{ error, field, issues }` on a malformed id or body, an unknown
- * category or a description too long for a rule; 404 for an unknown or deleted
+ * category or an empty or too long description; 404 for an unknown or deleted
  * transaction.
  */
 export async function POST(request: NextRequest, { params }: Context) {
@@ -54,6 +51,13 @@ export async function POST(request: NextRequest, { params }: Context) {
       updatedCount: outcome.updatedCount,
     });
   } catch (error) {
+    // Only a rules-API write racing this one (it does not take the keyword
+    // lock) can get here first; panel saves serialize on the lock.
+    if (isUniqueViolation(error, EXACT_KEYWORD_INDEX)) {
+      return NextResponse.json(failureBody(EXACT_KEYWORD_CLASH), {
+        status: 400,
+      });
+    }
     console.error("POST /api/transactions/[id]/category-rule failed:", error);
     return NextResponse.json({ error: "Internal error" }, { status: 500 });
   }

@@ -6,13 +6,9 @@ import { and, asc, eq, isNull, ne, not, or, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { categories, categoryRules, transactions } from "@/lib/db/schema";
 import { notDeleted } from "@/lib/db/transactions";
-import { RULE_PRIORITY_MAX, normalizeKeyword } from "@/lib/categories";
+import { RULE_KEYWORD_MAX_LENGTH } from "@/lib/categories";
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
-
-/** Rules made from a transaction's description take the top priority, so the
- *  exact description beats any broader keyword rule it also contains. */
-export const DESCRIPTION_RULE_PRIORITY = RULE_PRIORITY_MAX;
 
 export type CategoryRuleRow = typeof categoryRules.$inferSelect;
 
@@ -20,7 +16,7 @@ export type ApplyCategoryRuleOutcome =
   | {
       ok: true;
       rule: CategoryRuleRow;
-      /** False when a rule with the same keyword already existed. */
+      /** False when an exact rule with the same keyword already existed. */
       ruleCreated: boolean;
       /** Rows besides this one that took the category. */
       updatedCount: number;
@@ -29,31 +25,41 @@ export type ApplyCategoryRuleOutcome =
   | { ok: false; status: 400; error: string; field: string };
 
 /**
- * Give `transactionId` the category (marked manual, as PATCH does), keep a
- * rule whose keyword is its trimmed raw description, and give the category to
- * every other visible, not manually categorized row whose raw description is
- * the same (trimmed, case-insensitive). An existing rule with that keyword
- * (case-insensitive; the oldest if several) is reused and pointed at the
- * category; otherwise one is created. Run it inside `db.transaction`.
+ * Give `transactionId` the category (marked manual, as PATCH does), keep an
+ * exact-match rule (V041) whose keyword is its trimmed raw description, and give
+ * the category to every other visible, not manually categorized row whose raw
+ * description is the same (trimmed, case-insensitive). An existing exact rule
+ * with that keyword (case-insensitive; the oldest if several) is reused and
+ * pointed at the category, its priority untouched; otherwise one is created at
+ * the default priority. Exact rules already win over contains rules, so no
+ * priority bump is needed. Run it inside `db.transaction`.
  */
 export async function applyCategoryRuleFromTransaction(
   tx: Tx,
   transactionId: string,
   categoryId: string
 ): Promise<ApplyCategoryRuleOutcome> {
+  // The keyword is trimmed and lowercased by PostgreSQL, not JS: btrim() strips
+  // only spaces, and the trigger compares with it (V041), so a description
+  // ending in a tab or NBSP still matches its future rows.
   const [txn] = await tx
-    .select({ description: transactions.description })
+    .select({
+      description: transactions.description,
+      keyword: sql<string>`lower(btrim(${transactions.description}))`,
+    })
     .from(transactions)
     .where(and(eq(transactions.id, transactionId), notDeleted))
     .limit(1);
   if (!txn) return { ok: false, status: 404 };
 
-  const keyword = normalizeKeyword(txn.description);
-  if (!keyword.ok) {
+  if (txn.keyword === "" || txn.keyword.length > RULE_KEYWORD_MAX_LENGTH) {
     return {
       ok: false,
       status: 400,
-      error: "La descripción es demasiado larga para una regla",
+      error:
+        txn.keyword === ""
+          ? "La descripción original está vacía; no se puede crear una regla"
+          : "La descripción es demasiado larga para una regla",
       field: "description",
     };
   }
@@ -67,27 +73,36 @@ export async function applyCategoryRuleFromTransaction(
     return {
       ok: false,
       status: 400,
-      error: "Category not found",
+      error: "La categoría no existe",
       field: "categoryId",
     };
   }
 
+  // Serializes concurrent saves of the same keyword, so two of them cannot
+  // both miss the lookup and insert twice. Released at commit.
+  await tx.execute(
+    sql`SELECT pg_advisory_xact_lock(hashtext(lower(${txn.keyword})))`
+  );
   const [existing] = await tx
     .select({ id: categoryRules.id })
     .from(categoryRules)
-    .where(sql`lower(btrim(${categoryRules.keyword})) = lower(${keyword.value})`)
+    .where(
+      and(
+        eq(categoryRules.matchType, "exact"),
+        sql`lower(btrim(${categoryRules.keyword})) = lower(${txn.keyword})`
+      )
+    )
     .orderBy(asc(categoryRules.createdAt), asc(categoryRules.id))
     .limit(1);
-  const ruleValues = { categoryId, priority: DESCRIPTION_RULE_PRIORITY };
   const [rule] = existing
     ? await tx
         .update(categoryRules)
-        .set(ruleValues)
+        .set({ categoryId })
         .where(eq(categoryRules.id, existing.id))
         .returning()
     : await tx
         .insert(categoryRules)
-        .values({ keyword: keyword.value, ...ruleValues })
+        .values({ keyword: txn.keyword, categoryId, matchType: "exact" })
         .returning();
 
   const now = new Date();

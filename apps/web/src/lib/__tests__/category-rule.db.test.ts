@@ -3,10 +3,11 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { DESCRIPTION_RULE_PRIORITY } from "@/lib/category-rules-db";
+import { NextRequest } from "next/server";
 
-// applyCategoryRuleFromTransaction against a real PostgreSQL, the insert
-// trigger (V021) included. Runs only with TEST_DATABASE_URL naming a disposable
+// applyCategoryRuleFromTransaction and the exact/contains rule matching (V041)
+// against a real PostgreSQL: the insert trigger, the "Categorizar ahora"
+// backfill and the rule preview included. Runs only with TEST_DATABASE_URL naming a disposable
 // server (`make test-db-up` starts one): the suite creates its own
 // chanchito_test_* database, applies every migration with migrate.mjs, and
 // drops it at the end. Without the variable it is skipped.
@@ -19,6 +20,10 @@ const MIGRATE = path.resolve(__dirname, "../../../../../packages/db-schema/migra
 
 type Lib = typeof import("@/lib/category-rules-db");
 type Db = typeof import("@/lib/db");
+type CategoriesRoute = typeof import("@/app/api/categories/route");
+type PreviewRoute = typeof import("@/app/api/categories/rules/preview/route");
+type RulesRoute = typeof import("@/app/api/categories/rules/route");
+type RuleRoute = typeof import("@/app/api/categories/rules/[id]/route");
 
 describe.skipIf(!ADMIN_URL)("category rule from a transaction (real PostgreSQL)", () => {
   const dbName = `chanchito_test_${randomUUID().replace(/-/g, "")}`;
@@ -26,6 +31,10 @@ describe.skipIf(!ADMIN_URL)("category rule from a transaction (real PostgreSQL)"
   let sql: ReturnType<typeof postgres>;
   let lib: Lib;
   let dbModule: Db;
+  let categoriesRoute: CategoriesRoute;
+  let previewRoute: PreviewRoute;
+  let rulesRoute: RulesRoute;
+  let ruleRoute: RuleRoute;
   let productId: string;
   let food: string;
   let other: string;
@@ -69,6 +78,10 @@ describe.skipIf(!ADMIN_URL)("category rule from a transaction (real PostgreSQL)"
     sql = postgres(url.toString(), { max: 1, onnotice: () => {} });
     lib = await import("@/lib/category-rules-db");
     dbModule = await import("@/lib/db");
+    categoriesRoute = await import("@/app/api/categories/route");
+    previewRoute = await import("@/app/api/categories/rules/preview/route");
+    rulesRoute = await import("@/app/api/categories/rules/route");
+    ruleRoute = await import("@/app/api/categories/rules/[id]/route");
   });
 
   beforeEach(async () => {
@@ -124,7 +137,8 @@ describe.skipIf(!ADMIN_URL)("category rule from a transaction (real PostgreSQL)"
       rule: {
         keyword: "comercio ejemplo spa",
         categoryId: food,
-        priority: DESCRIPTION_RULE_PRIORITY,
+        priority: 0,
+        matchType: "exact",
       },
     });
 
@@ -137,15 +151,118 @@ describe.skipIf(!ADMIN_URL)("category rule from a transaction (real PostgreSQL)"
     // The backfill matches the whole description, not a substring.
     expect((await categoryOf(longer)).categoryId).toBe(other);
 
-    // Future rows: the exact-description rule outranks the broader keyword.
-    const future = await txn("COMERCIO EJEMPLO SPA");
+    // Future rows: the exact rule outranks the broader keyword, even at a
+    // lower priority, and only for the same whole description.
+    const future = await txn(" comercio ejemplo SPA");
+    expect((await categoryOf(future)).categoryId).toBe(food);
+    const futureLonger = await txn("COMERCIO EJEMPLO SPA SUCURSAL");
+    expect((await categoryOf(futureLonger)).categoryId).toBe(other);
+  });
+
+  it("an exact rule from a short description does not grab longer ones", async () => {
+    const target = await txn("UBER");
+    await apply(target, food);
+    const trip = await txn("UBER");
+    const eats = await txn("UBER EATS");
+    expect((await categoryOf(trip)).categoryId).toBe(food);
+    expect((await categoryOf(eats)).categoryId).toBeNull();
+  });
+
+  it("keys the rule on PostgreSQL's trim, so a trailing tab or NBSP still matches", async () => {
+    const target = await txn("COMERCIO EJEMPLO SPA\u00a0");
+
+    const outcome = await apply(target, food);
+
+    expect(outcome).toMatchObject({ ok: true, rule: { keyword: "comercio ejemplo spa\u00a0" } });
+    const future = await txn("COMERCIO EJEMPLO SPA\u00a0");
     expect((await categoryOf(future)).categoryId).toBe(food);
   });
 
-  it("reuses a rule with the same keyword and points it at the new category", async () => {
+  it("rejects a blank description as empty, not too long", async () => {
+    const target = await txn("   ");
+
+    const outcome = await apply(target, food);
+
+    expect(outcome).toMatchObject({
+      ok: false,
+      status: 400,
+      error: "La descripción original está vacía; no se puede crear una regla",
+    });
+  });
+
+  it("the backfill and the preview honor the match type", async () => {
+    const same = await txn("COMERCIO EJEMPLO SPA");
+    const longer = await txn("COMERCIO EJEMPLO SPA SUCURSAL");
+    await sql`
+      INSERT INTO category_rules (keyword, category_id, priority, match_type)
+      VALUES ('comercio ejemplo spa', ${food}, -5, 'exact'),
+             ('comercio', ${other}, 50, 'contains')`;
+
+    const res = await categoriesRoute.PUT();
+    expect(await res.json()).toEqual({ assigned: 2 });
+    expect((await categoryOf(same)).categoryId).toBe(food);
+    expect((await categoryOf(longer)).categoryId).toBe(other);
+
+    const preview = async (matchType: string) => {
+      const url = `http://localhost:3000/api/categories/rules/preview?keyword=${encodeURIComponent(
+        "Comercio Ejemplo SPA"
+      )}&matchType=${matchType}`;
+      return (await previewRoute.GET(new NextRequest(url))).json();
+    };
+    expect(await preview("exact")).toMatchObject({ matchType: "exact", total: 1 });
+    expect(await preview("contains")).toMatchObject({
+      matchType: "contains",
+      total: 2,
+    });
+  });
+
+  it("allows one exact rule per keyword through the rules API (400, not 500)", async () => {
+    const send = (method: string, url: string, body: unknown) =>
+      new NextRequest(`http://localhost:3000${url}`, {
+        method,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    const create = (keyword: string, matchType: string) =>
+      rulesRoute.POST(
+        send("POST", "/api/categories/rules", { keyword, categoryId: food, matchType })
+      );
+    const clash = {
+      error: "Ya existe una regla exacta para esa descripción",
+      field: "keyword",
+    };
+
+    expect((await create("Comercio Ejemplo SPA", "exact")).status).toBe(201);
+    const second = await create(" comercio ejemplo spa ", "exact");
+    expect(second.status).toBe(400);
+    expect(await second.json()).toMatchObject(clash);
+
+    // A contains rule with the same keyword is fine, but cannot become exact.
+    const contains = await create("comercio ejemplo spa", "contains");
+    expect(contains.status).toBe(201);
+    const { id } = await contains.json();
+    const patched = await ruleRoute.PATCH(
+      send("PATCH", `/api/categories/rules/${id}`, { matchType: "exact" }),
+      { params: Promise.resolve({ id }) }
+    );
+    expect(patched.status).toBe(400);
+    expect(await patched.json()).toMatchObject(clash);
+
+    // The panel reuses the one exact rule instead of clashing with it.
+    const target = await txn("COMERCIO EJEMPLO SPA");
+    expect(await apply(target, other)).toMatchObject({ ok: true, ruleCreated: false });
+  });
+
+  it("rejects a match type outside contains/exact", async () => {
+    await expect(sql`
+      INSERT INTO category_rules (keyword, category_id, match_type)
+      VALUES ('comercio', ${food}, 'substring')`).rejects.toThrow();
+  });
+
+  it("reuses an exact rule with the same keyword, keeping its priority", async () => {
     const [rule] = await sql`
-      INSERT INTO category_rules (keyword, category_id, priority)
-      VALUES ('Comercio Ejemplo SPA', ${other}, 0)
+      INSERT INTO category_rules (keyword, category_id, priority, match_type)
+      VALUES ('Comercio Ejemplo SPA', ${other}, 7, 'exact')
       RETURNING id`;
     const target = await txn("COMERCIO EJEMPLO SPA");
 
@@ -153,8 +270,31 @@ describe.skipIf(!ADMIN_URL)("category rule from a transaction (real PostgreSQL)"
     expect(outcome).toMatchObject({
       ok: true,
       ruleCreated: false,
-      rule: { id: rule.id, categoryId: food, priority: DESCRIPTION_RULE_PRIORITY },
+      rule: { id: rule.id, categoryId: food, priority: 7 },
     });
+    const [{ n }] = await sql`SELECT count(*)::int AS n FROM category_rules`;
+    expect(n).toBe(1);
+  });
+
+  it("does not reuse a contains rule with the same keyword", async () => {
+    await sql`
+      INSERT INTO category_rules (keyword, category_id)
+      VALUES ('comercio ejemplo spa', ${other})`;
+    const target = await txn("COMERCIO EJEMPLO SPA");
+    expect(await apply(target, food)).toMatchObject({ ok: true, ruleCreated: true });
+    const rows = await sql`
+      SELECT match_type, category_id FROM category_rules ORDER BY match_type`;
+    expect(rows.map((r) => [r.match_type, r.category_id])).toEqual([
+      ["contains", other],
+      ["exact", food],
+    ]);
+  });
+
+  it("serializes concurrent saves of the same keyword into one rule", async () => {
+    const a = await txn("COMERCIO EJEMPLO SPA");
+    const b = await txn("comercio ejemplo spa");
+    const outcomes = await Promise.all([apply(a, food), apply(b, food)]);
+    expect(outcomes.filter((o) => o.ok && o.ruleCreated)).toHaveLength(1);
     const [{ n }] = await sql`SELECT count(*)::int AS n FROM category_rules`;
     expect(n).toBe(1);
   });
