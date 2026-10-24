@@ -20,6 +20,7 @@ import type {
   ProductMetrics,
 } from "@chanchito/product-model";
 import type { MonitorDisplay, MonitorThreshold } from "@/lib/monitors/types";
+import type { RuleMatchType } from "@/lib/categories";
 
 // Kind vocabulary, roles, and labels are generated from the shared registry
 // (packages/product-model); re-exported here so callers keep one import path.
@@ -266,12 +267,16 @@ export const categories = pgTable("categories", {
     .defaultNow(),
 });
 
-// Category auto-assignment rules
+// Category auto-assignment rules. `matchType` (V041): see RULE_MATCH_TYPES.
 export const categoryRules = pgTable(
   "category_rules",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     keyword: text("keyword").notNull(),
+    matchType: text("match_type")
+      .$type<RuleMatchType>()
+      .notNull()
+      .default("contains"),
     categoryId: uuid("category_id")
       .notNull()
       .references(() => categories.id, { onDelete: "cascade" }),
