@@ -40,21 +40,21 @@ const STOPWORDS = new Set([
 
 /**
  * The description reduced to the words that identify a merchant: lowercase,
- * accents dropped, every token holding a digit removed (dates, amounts,
- * reference and card numbers), punctuation turned into spaces and whitespace
- * collapsed. "COMERCIO EJEMPLO SPA 1234" and "Comercio Ejemplo SpA #5678"
- * both become "comercio ejemplo spa".
+ * accents dropped, punctuation turned into token breaks, a number glued to the
+ * start or end of a word cut off ("comercio123" -> "comercio"), every token
+ * still holding a digit removed (dates, amounts, reference and card numbers),
+ * and whitespace collapsed. "COMERCIO EJEMPLO SPA 1234" and "Comercio Ejemplo
+ * SpA #5678" both become "comercio ejemplo spa".
  */
 export function normalizeDescription(text: string): string {
   return text
     .normalize("NFD")
     .replace(/\p{M}/gu, "")
     .toLowerCase()
-    .split(/\s+/)
-    .filter((token) => !/[0-9]/.test(token))
-    .join(" ")
-    .replace(/[^a-z]+/g, " ")
-    .trim();
+    .split(/[^a-z0-9]+/)
+    .map((token) => token.replace(/^[0-9]+(?=[a-z])|(?<=[a-z])[0-9]+$/g, ""))
+    .filter((token) => token !== "" && !/[0-9]/.test(token))
+    .join(" ");
 }
 
 /** The distinct meaningful tokens of a normalised description: at least

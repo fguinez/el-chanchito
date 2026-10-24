@@ -36,6 +36,9 @@ describe("normalizeDescription", () => {
     ["Compra 01/02 CAFÉ DE PRUEBA", "compra cafe de prueba"],
     ["PAGO REF TRX9F8A2 SERVICIO-FICTICIO", "pago ref servicio ficticio"],
     ["Ñandú Ficticio, S.A.", "nandu ficticio s a"],
+    ["PAGO*COMERCIO123", "pago comercio"],
+    ["COMERCIO/EJEMPLO#1234", "comercio ejemplo"],
+    ["7ELEVEN FICTICIO", "eleven ficticio"],
     ["12345 00-000-00000-01", ""],
     ["", ""],
   ])("%j -> %j", (input, expected) => {
