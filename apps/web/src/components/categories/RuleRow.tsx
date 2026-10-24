@@ -5,14 +5,18 @@ import { Check, FlaskConical, Pencil, Trash2, X } from "lucide-react";
 import { TableCell, TableRow } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
 import {
   RULE_KEYWORD_MAX_LENGTH,
+  RULE_MATCH_TYPES,
   RULE_PRIORITY_MAX,
   RULE_PRIORITY_MIN,
+  type RuleMatchType,
 } from "@/lib/categories";
 import { RulePreview } from "./RulePreview";
 import {
   CategoryLabel,
+  MATCH_TYPE_LABELS,
   PRIORITY_ERROR,
   SELECT_CLASS,
   parsePriority,
@@ -23,7 +27,12 @@ import {
 
 const RULE_GONE_MESSAGE = "La regla ya no existe";
 
-type RuleDraft = { keyword: string; categoryId: string; priority: string };
+type RuleDraft = {
+  keyword: string;
+  categoryId: string;
+  priority: string;
+  matchType: RuleMatchType;
+};
 
 export function RuleRow({
   rule,
@@ -43,8 +52,12 @@ export function RuleRow({
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // The keyword under test (the draft's while editing), or null when closed.
-  const [previewKeyword, setPreviewKeyword] = useState<string | null>(null);
+  // The keyword and match type under test (the draft's while editing), or
+  // null when closed.
+  const [preview, setPreview] = useState<{
+    keyword: string;
+    matchType: RuleMatchType;
+  } | null>(null);
 
   const category = categoriesById.get(rule.categoryId);
   // Falls back to the placeholder if the draft's category was deleted.
@@ -57,6 +70,7 @@ export function RuleRow({
       keyword: rule.keyword,
       categoryId: rule.categoryId,
       priority: String(rule.priority),
+      matchType: rule.matchType,
     });
   }
 
@@ -71,7 +85,7 @@ export function RuleRow({
       setError("Escribe una palabra clave para probarla");
       return;
     }
-    setPreviewKeyword(keyword);
+    setPreview({ keyword, matchType: draft?.matchType ?? rule.matchType });
   }
 
   async function handleSave() {
@@ -91,6 +105,7 @@ export function RuleRow({
       return;
     }
     const patch: Record<string, string | number> = {};
+    if (draft.matchType !== rule.matchType) patch.matchType = draft.matchType;
     if (keyword !== rule.keyword) patch.keyword = keyword;
     if (selectedCategoryId !== rule.categoryId) {
       patch.categoryId = selectedCategoryId;
@@ -177,7 +192,31 @@ export function RuleRow({
               autoFocus
             />
           ) : (
-            <span className="font-mono text-sm">{rule.keyword}</span>
+            <span className="inline-flex items-center gap-2">
+              <span className="font-mono text-sm">{rule.keyword}</span>
+              {rule.matchType === "exact" && (
+                <Badge variant="secondary">{MATCH_TYPE_LABELS.exact}</Badge>
+              )}
+            </span>
+          )}
+          {draft && (
+            <select
+              aria-label="Coincidencia de la regla"
+              value={draft.matchType}
+              onChange={(e) =>
+                setDraft({
+                  ...draft,
+                  matchType: e.target.value as RuleMatchType,
+                })
+              }
+              className={`${SELECT_CLASS} mt-1 max-w-56`}
+            >
+              {RULE_MATCH_TYPES.map((type) => (
+                <option key={type} value={type}>
+                  {MATCH_TYPE_LABELS[type]}
+                </option>
+              ))}
+            </select>
           )}
           {error && (
             <p className="mt-1 max-w-56 text-sm whitespace-normal text-destructive">
@@ -276,15 +315,16 @@ export function RuleRow({
           </div>
         </TableCell>
       </TableRow>
-      {previewKeyword !== null && (
+      {preview !== null && (
         <TableRow className="hover:bg-transparent">
           <TableCell colSpan={4} className="whitespace-normal">
             <RulePreview
-              key={previewKeyword}
-              keyword={previewKeyword}
+              key={`${preview.matchType}:${preview.keyword}`}
+              keyword={preview.keyword}
+              matchType={preview.matchType}
               categoriesById={categoriesById}
               version={version}
-              onClose={() => setPreviewKeyword(null)}
+              onClose={() => setPreview(null)}
             />
           </TableCell>
         </TableRow>

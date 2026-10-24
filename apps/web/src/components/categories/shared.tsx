@@ -2,7 +2,11 @@
 // response shapes plus the category label and small form helpers.
 
 import { cn } from "@/lib/utils";
-import { RULE_PRIORITY_MAX, RULE_PRIORITY_MIN } from "@/lib/categories";
+import {
+  RULE_PRIORITY_MAX,
+  RULE_PRIORITY_MIN,
+  type RuleMatchType,
+} from "@/lib/categories";
 import { CategoryIcon } from "./CategoryIcon";
 
 export interface ApiCategoryRule {
@@ -10,6 +14,7 @@ export interface ApiCategoryRule {
   keyword: string;
   categoryId: string;
   priority: number;
+  matchType: RuleMatchType;
   createdAt: string;
 }
 
@@ -36,6 +41,7 @@ export interface RulePreviewTransaction {
 
 export interface RulePreviewResult {
   keyword: string;
+  matchType: RuleMatchType;
   total: number;
   uncategorized: number;
   transactions: RulePreviewTransaction[];
@@ -51,6 +57,12 @@ export const COLOR_INPUT_CLASS =
 /** The color new categories start with (the seeded "Otros" color); also
  *  shown in the color input while a category has no color of its own. */
 export const DEFAULT_CATEGORY_COLOR = "#94a3b8";
+
+/** Spanish labels of the rule match types (V041). */
+export const MATCH_TYPE_LABELS: Record<RuleMatchType, string> = {
+  contains: "Contiene",
+  exact: "Exacta",
+};
 
 export const NAME_CLASH_MESSAGE = "Ya existe una categoría con ese nombre";
 
