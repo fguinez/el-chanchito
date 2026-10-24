@@ -316,4 +316,30 @@ describe.skipIf(!ADMIN_URL)("category rule from a transaction (real PostgreSQL)"
     const [{ n }] = await sql`SELECT count(*)::int AS n FROM category_rules`;
     expect(n).toBe(0);
   });
+
+  it("onlyIfUncategorized leaves a row recategorized meanwhile alone but still saves the rule", async () => {
+    const stale = await txn("COMERCIO EJEMPLO SPA", { categoryId: other, manual: true });
+    const fresh = await txn("COMERCIO EJEMPLO SPA");
+    const outcome = await dbModule.db.transaction((tx) =>
+      lib.applyCategoryRuleFromTransaction(tx, stale, food, { onlyIfUncategorized: true })
+    );
+    expect(outcome).toMatchObject({
+      ok: true,
+      ruleCreated: true,
+      updatedCount: 1,
+      transactionUpdated: false,
+    });
+    expect(await categoryOf(stale)).toEqual({ categoryId: other, manual: true });
+    expect(await categoryOf(fresh)).toEqual({ categoryId: food, manual: false });
+
+    // The insert trigger now categorizes it; clear that to leave it uncategorized.
+    const again = await txn("COMERCIO EJEMPLO SPA");
+    await sql`UPDATE transactions SET category_id = NULL WHERE id = ${again}`;
+    expect(
+      await dbModule.db.transaction((tx) =>
+        lib.applyCategoryRuleFromTransaction(tx, again, food, { onlyIfUncategorized: true })
+      )
+    ).toMatchObject({ ok: true, ruleCreated: false, transactionUpdated: true });
+    expect(await categoryOf(again)).toEqual({ categoryId: food, manual: true });
+  });
 });

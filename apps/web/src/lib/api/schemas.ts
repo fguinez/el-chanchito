@@ -186,6 +186,9 @@ export const updateTransactionSchema = z
  *  the rows with the same description and a rule for future ones. */
 export const transactionCategoryRuleSchema = z.object({
   categoryId: rowId,
+  /** Leave this row alone if it has a category or was cleared by hand (the
+   *  Categorías suggestions send it, as their row id may be stale). */
+  onlyIfUncategorized: z.boolean().optional(),
 });
 
 /** Longest description a category suggestion body accepts. */
