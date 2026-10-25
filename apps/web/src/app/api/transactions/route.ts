@@ -1,9 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { products, transactions } from "@/lib/db/schema";
+import {
+  accounts,
+  institutions,
+  products,
+  transactions,
+} from "@/lib/db/schema";
 import { resolveProductId } from "@/lib/db/resolve";
 import { displayDescription, notDeleted } from "@/lib/db/transactions";
-import { eq, desc, and } from "drizzle-orm";
+import { eq, desc, and, gte, isNull, lte } from "drizzle-orm";
+import { UNCATEGORIZED_PARAM } from "@/lib/category-spend";
 import { parseSearchParams, withJsonBody } from "@/lib/api/validation";
 import {
   createTransactionSchema,
@@ -15,14 +21,17 @@ import {
   validateLocationInput,
 } from "@/lib/transaction-location";
 
-/** GET /api/transactions — list transactions with optional filters */
+/** GET /api/transactions: list transactions, newest first. Optional filters,
+ *  all combined: `month` (budget month, scheduled_month), `from`/`to`
+ *  (inclusive transaction_date), `productId`, `institution` (slug) and
+ *  `categoryId` (a uuid, or `none` for uncategorized rows). */
 export async function GET(request: NextRequest) {
   const query = parseSearchParams(
     request.nextUrl.searchParams,
     listTransactionsQuerySchema
   );
   if (!query.ok) return query.response;
-  const { month, limit } = query.data;
+  const { month, from, to, institution, categoryId, limit } = query.data;
   const productId = query.data.productId ?? query.data.accountId;
 
   // Soft-deleted rows (V033) never appear in any dashboard list.
@@ -30,8 +39,16 @@ export async function GET(request: NextRequest) {
   if (month) {
     conditions.push(eq(transactions.scheduledMonth, month));
   }
+  if (from) conditions.push(gte(transactions.transactionDate, from));
+  if (to) conditions.push(lte(transactions.transactionDate, to));
   if (productId) {
     conditions.push(eq(transactions.productId, productId));
+  }
+  if (institution) conditions.push(eq(institutions.slug, institution));
+  if (categoryId === UNCATEGORIZED_PARAM) {
+    conditions.push(isNull(transactions.categoryId));
+  } else if (categoryId) {
+    conditions.push(eq(transactions.categoryId, categoryId));
   }
 
   const rows = await db
@@ -53,6 +70,9 @@ export async function GET(request: NextRequest) {
     })
     .from(transactions)
     .innerJoin(products, eq(transactions.productId, products.id))
+    // Both links are NOT NULL, so these joins drop no row.
+    .innerJoin(accounts, eq(products.accountId, accounts.id))
+    .innerJoin(institutions, eq(accounts.institutionId, institutions.id))
     .where(conditions.length > 0 ? and(...conditions) : undefined)
     .orderBy(desc(transactions.transactionDate))
     .limit(limit);

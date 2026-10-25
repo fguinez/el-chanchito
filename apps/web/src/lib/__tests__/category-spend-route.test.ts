@@ -90,7 +90,7 @@ beforeEach(() => {
 
 describe("GET /api/categories/spend validation", () => {
   it.each([
-    ["to=2026-01-31", "from"],
+    ["groupBy=month", "from"],
     ["from=2026-02-30&to=2026-03-01", "from"],
     ["from=2026-02-01&to=2026-01-01", "to"],
     ["from=2026-01-01&to=2026-01-31&groupBy=week", "groupBy"],
@@ -188,5 +188,15 @@ describe("GET /api/categories/spend", () => {
       ["2026-02", 1_000_000],
       ["2026-03", 0],
     ]);
+  });
+
+  it("filters a budget month without a window", async () => {
+    const res = await get("month=2026-01-15");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({ from: null, to: null, month: "2026-01-01" });
+    const sql = spendWhereSql();
+    expect(sql).toContain('"scheduled_month" =');
+    expect(sql).not.toContain('"transaction_date"');
   });
 });

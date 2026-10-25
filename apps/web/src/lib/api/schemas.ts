@@ -126,19 +126,45 @@ export const csvRowSchema = z.object({
 /** Largest page GET /api/transactions returns. */
 export const MAX_TRANSACTIONS_LIMIT = 500;
 
-/** GET /api/transactions query string. */
-export const listTransactionsQuerySchema = z.object({
-  month: month.optional(),
-  productId: rowId.optional(),
-  /** Legacy alias for `productId`. */
-  accountId: rowId.optional(),
-  limit: z.coerce
-    .number()
-    .int()
-    .min(1)
-    .max(MAX_TRANSACTIONS_LIMIT)
-    .default(50),
-});
+/** One category (lowercased uuid) or `none` for the uncategorized rows. */
+const categoryFilter = z.union([
+  z.literal(UNCATEGORIZED_PARAM),
+  rowId.transform((id) => id.toLowerCase()),
+]);
+
+/** An institution slug. */
+const institutionSlug = z.string().trim().min(1);
+
+/** `from` and `to`, when both given, must not run backwards. */
+function windowInOrder(query: { from?: string; to?: string }): boolean {
+  return !query.from || !query.to || query.from <= query.to;
+}
+const WINDOW_ORDER_ERROR = {
+  error: "The window must not end before it starts",
+  path: ["to"],
+};
+
+/** GET /api/transactions query string. Every filter is optional and they
+ *  combine: `month` is the budget month (scheduled_month), `from`/`to` an
+ *  inclusive transaction_date window (either side may be open). */
+export const listTransactionsQuerySchema = z
+  .object({
+    month: month.optional(),
+    from: isoDate.optional(),
+    to: isoDate.optional(),
+    productId: rowId.optional(),
+    /** Legacy alias for `productId`. */
+    accountId: rowId.optional(),
+    institution: institutionSlug.optional(),
+    categoryId: categoryFilter.optional(),
+    limit: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(MAX_TRANSACTIONS_LIMIT)
+      .default(50),
+  })
+  .refine(windowInOrder, WINDOW_ORDER_ERROR);
 
 /** POST /api/transactions */
 export const createTransactionSchema = z.object({
@@ -345,25 +371,27 @@ export const dismissSuggestionSchema = z
     return { sourceTransactionId: body.sourceTransactionId, targetTransactionId };
   });
 
-/** GET /api/categories/spend query string: an inclusive day window, the
- *  optional scope filters (a product, an institution slug, one category or
- *  `none` for the uncategorized rows) and how to split the result. Ids come
- *  out lowercased, as Postgres returns them. */
+/** GET /api/categories/spend query string: the rows' bounds (an inclusive
+ *  transaction_date window, either side open, and/or a budget `month`, as
+ *  GET /api/transactions takes them; at least one is required), the optional
+ *  scope filters (a product, an institution slug, one category or `none` for
+ *  the uncategorized rows) and how to split the result. Ids come out
+ *  lowercased, as Postgres returns them. */
 export const categorySpendQuerySchema = z
   .object({
-    from: isoDate,
-    to: isoDate,
+    from: isoDate.optional(),
+    to: isoDate.optional(),
+    month: month.optional(),
     productId: rowId.transform((id) => id.toLowerCase()).optional(),
-    institution: z.string().trim().min(1).optional(),
-    categoryId: z
-      .union([z.literal(UNCATEGORIZED_PARAM), rowId.transform((id) => id.toLowerCase())])
-      .optional(),
+    institution: institutionSlug.optional(),
+    categoryId: categoryFilter.optional(),
     groupBy: z.enum(SPEND_GROUP_BYS).default("none"),
   })
-  .refine((query) => query.from <= query.to, {
-    error: "The window must not end before it starts",
-    path: ["to"],
-  });
+  .refine((query) => query.from || query.to || query.month, {
+    error: "Expected from, to or month",
+    path: ["from"],
+  })
+  .refine(windowInOrder, WINDOW_ORDER_ERROR);
 
 /** A legacy total: patrimonio and deuda are sums, never negative. */
 const wealthTotal = clpAmount.pipe(z.number().nonnegative());

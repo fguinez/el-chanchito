@@ -22,11 +22,12 @@ import { getRateBook } from "@/lib/rate-book";
 import { ratesFor, toClp } from "@/lib/rates";
 import { displayProductName } from "@/lib/product-names";
 
-const month = sql<string>`to_char(${transactions.transactionDate}, 'YYYY-MM')`;
+const txnMonth = sql<string>`to_char(${transactions.transactionDate}, 'YYYY-MM')`;
 
 /**
  * GET /api/categories/spend?from=&to=: spending per category over an
- * inclusive day window (see lib/category-spend for what counts), with each
+ * inclusive transaction_date window, a budget `month` (scheduled_month), or
+ * both (see lib/category-spend for what counts), with each
  * category's id, name, color, amount and percent, ranked. Optional filters:
  * `productId` (amounts then stay in the product's currency), `institution`
  * (slug), `categoryId` (a uuid, or `none` for uncategorized rows); outside a
@@ -40,7 +41,10 @@ export async function GET(request: NextRequest) {
     categorySpendQuerySchema
   );
   if (!query.ok) return query.response;
-  const { from, to, productId, institution, categoryId, groupBy } = query.data;
+  const { productId, institution, categoryId, groupBy } = query.data;
+  const from = query.data.from ?? null;
+  const to = query.data.to ?? null;
+  const month = query.data.month ?? null;
 
   try {
     let currency = "CLP";
@@ -76,9 +80,10 @@ export async function GET(request: NextRequest) {
     const conditions: SQL[] = [
       notDeleted,
       eq(transactions.isInternalTransfer, false),
-      gte(transactions.transactionDate, from),
-      lte(transactions.transactionDate, to),
     ];
+    if (from) conditions.push(gte(transactions.transactionDate, from));
+    if (to) conditions.push(lte(transactions.transactionDate, to));
+    if (month) conditions.push(eq(transactions.scheduledMonth, month));
     if (productId) conditions.push(eq(transactions.productId, productId));
     if (institution) conditions.push(eq(institutions.slug, institution));
     if (categoryId === UNCATEGORIZED_PARAM) {
@@ -99,7 +104,7 @@ export async function GET(request: NextRequest) {
           currency: products.currency,
           institutionSlug: institutions.slug,
           institutionName: institutions.name,
-          month,
+          month: txnMonth,
           // Raw SUM/COUNT bypass the column's number mapping.
           amount: sql<string>`sum(${transactions.amount})`,
           rows: sql<string>`count(*)`,
@@ -113,7 +118,7 @@ export async function GET(request: NextRequest) {
           transactions.categoryId,
           products.id,
           institutions.id,
-          month,
+          txnMonth,
           sql`${transactions.amount} < 0`
         ),
       db
@@ -154,6 +159,7 @@ export async function GET(request: NextRequest) {
     const body: CategorySpendResponse = {
       from,
       to,
+      month,
       currency,
       groupBy,
       ...summarizeSpend(rows, categoryInfo),
@@ -178,7 +184,13 @@ export async function GET(request: NextRequest) {
           labels.set(sum.institutionSlug, sum.institutionName);
         }
       }
-      body.groups = groupSpend(rows, categoryInfo, groupBy, { from, to }).map(
+      body.groups = groupSpend(
+        rows,
+        categoryInfo,
+        groupBy,
+        // Empty months are filled in only over a closed window.
+        from && to ? { from, to } : undefined
+      ).map(
         (group) => ({ ...group, label: labels.get(group.key) ?? group.key })
       );
     }

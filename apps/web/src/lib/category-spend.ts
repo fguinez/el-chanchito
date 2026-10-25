@@ -63,8 +63,11 @@ export interface CategorySpendGroup extends CategorySpendSummary {
 
 /** GET /api/categories/spend. */
 export interface CategorySpendResponse extends CategorySpendSummary {
-  from: string;
-  to: string;
+  /** The query's bounds: an inclusive transaction_date window (null = open
+   *  side) and the budget month (YYYY-MM-01), as given. */
+  from: string | null;
+  to: string | null;
+  month: string | null;
   /** The product's own currency for a product scope, else CLP. */
   currency: string;
   groupBy: SpendGroupBy;
