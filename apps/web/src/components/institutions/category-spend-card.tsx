@@ -32,32 +32,36 @@ const INITIAL_RANGE: XAxisRange = { kind: "days", days: 90 };
 export function CategorySpendCard({ productId }: { productId: string }) {
   const [range, setRange] = useState<XAxisRange>(INITIAL_RANGE);
   const [view, setView] = useState<View>("total");
-  const [data, setData] = useState<CategorySpendResponse | null>(null);
-  const [error, setError] = useState(false);
+  // Each result remembers the query it answers, so a new window shows
+  // loading (or its own error) instead of the previous window's figures.
+  const [result, setResult] = useState<
+    { query: string; data: CategorySpendResponse | null; error: boolean } | null
+  >(null);
 
   // The control offers no "Todo", so every range it sets has a day window.
   const { from, to } = rangeDayWindow(range) ?? rangeDayWindow(INITIAL_RANGE)!;
+  const query = new URLSearchParams({ from, to, productId, groupBy: "month" }).toString();
+  const current = result?.query === query ? result : null;
+  const data = current?.data ?? null;
+  const error = current?.error ?? false;
 
   useEffect(() => {
     let cancelled = false;
-    const params = new URLSearchParams({ from, to, productId, groupBy: "month" });
-    fetch(`/api/categories/spend?${params}`)
+    fetch(`/api/categories/spend?${query}`)
       .then((res) => {
         if (!res.ok) throw new Error("failed");
         return res.json();
       })
       .then((body: CategorySpendResponse) => {
-        if (cancelled) return;
-        setData(body);
-        setError(false);
+        if (!cancelled) setResult({ query, data: body, error: false });
       })
       .catch(() => {
-        if (!cancelled) setError(true);
+        if (!cancelled) setResult({ query, data: null, error: true });
       });
     return () => {
       cancelled = true;
     };
-  }, [productId, from, to]);
+  }, [query]);
 
   const hrefFor = (categoryId: string | null) =>
     categoryExpensesHref({ categoryId, from, to });
@@ -99,7 +103,7 @@ export function CategorySpendCard({ productId }: { productId: string }) {
         </CardAction>
       </CardHeader>
       <CardContent>
-        {error && !data ? (
+        {error ? (
           <p className="text-sm text-muted-foreground">
             No se pudieron cargar los gastos por categoría.
           </p>

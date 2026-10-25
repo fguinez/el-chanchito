@@ -9,7 +9,7 @@ import {
   transactions,
 } from "@/lib/db/schema";
 import { notDeleted } from "@/lib/db/transactions";
-import { parseSearchParams } from "@/lib/api/validation";
+import { failureBody, parseSearchParams } from "@/lib/api/validation";
 import { categorySpendQuerySchema } from "@/lib/api/schemas";
 import {
   groupSpend,
@@ -51,7 +51,10 @@ export async function GET(request: NextRequest) {
         .where(eq(products.id, productId))
         .limit(1);
       if (!product) {
-        return NextResponse.json({ error: "Product not found" }, { status: 404 });
+        return NextResponse.json(
+          failureBody({ error: "Product not found", field: "productId" }),
+          { status: 404 }
+        );
       }
       currency = product.currency;
     }
@@ -62,7 +65,10 @@ export async function GET(request: NextRequest) {
         .where(eq(institutions.slug, institution))
         .limit(1);
       if (!known) {
-        return NextResponse.json({ error: "Institution not found" }, { status: 404 });
+        return NextResponse.json(
+          failureBody({ error: "Institution not found", field: "institution" }),
+          { status: 404 }
+        );
       }
     }
 
@@ -131,7 +137,8 @@ export async function GET(request: NextRequest) {
           )
         : native;
       if (amount == null) {
-        unconvertedCount += Number(sum.rows);
+        // Sums split by sign, so a negative one holds only expense rows.
+        if (native < 0) unconvertedCount += Number(sum.rows);
         continue;
       }
       rows.push({

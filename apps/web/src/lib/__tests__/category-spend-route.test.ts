@@ -107,12 +107,14 @@ describe("GET /api/categories/spend validation", () => {
     world.product = null;
     const res = await get(`from=2026-01-01&to=2026-01-31&productId=${CARD}`);
     expect(res.status).toBe(404);
+    expect((await res.json()).field).toBe("productId");
   });
 
   it("404s an unknown institution", async () => {
     world.institution = false;
     const res = await get("from=2026-01-01&to=2026-01-31&institution=banco-nada");
     expect(res.status).toBe(404);
+    expect((await res.json()).field).toBe("institution");
   });
 });
 
@@ -132,6 +134,8 @@ describe("GET /api/categories/spend", () => {
       sum({ categoryId: FOOD, amount: "-2500000.00" }),
       sum({ categoryId: FUN, productId: USD_CARD, currency: "USD", amount: "-1234.56" }),
       sum({ productId: CRYPTO, currency: "XYZ", amount: "-1.00", rows: "2" }),
+      // Unconvertible income is not spend, so it is not counted as missing.
+      sum({ productId: CRYPTO, currency: "XYZ", amount: "5.00", rows: "4" }),
     ];
     const res = await get("from=2026-01-01&to=2026-01-31");
     expect(res.status).toBe(200);

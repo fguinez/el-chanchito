@@ -71,7 +71,8 @@ export interface CategorySpendResponse extends CategorySpendSummary {
   /** Present unless `groupBy` is "none"; `label` is the YYYY-MM month, the
    *  product's display name or the institution's name. */
   groups?: (CategorySpendGroup & { label: string })[];
-  /** Rows left out because their currency has no CLP rate. */
+  /** Expense rows (amount < 0) left out because their currency has no CLP
+   *  rate; unconvertible income never counts as spend, so it is not here. */
   unconvertedCount: number;
 }
 
