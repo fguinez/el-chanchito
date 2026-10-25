@@ -136,14 +136,11 @@ function CategoriesView() {
             onChange={load}
           />
           <RulesCard categories={categories} version={version} onChange={load} />
-          {/* useSearchParams needs a Suspense boundary for the prerender. */}
-          <Suspense fallback={null}>
-            <CategoryDetailSheet
-              categories={categories}
-              refreshKey={version}
-              onChanged={load}
-            />
-          </Suspense>
+          <CategoryDetailSheet
+            categories={categories}
+            refreshKey={version}
+            onChanged={load}
+          />
         </>
       )}
       <TransactionDetailSheet
