@@ -25,6 +25,14 @@ import {
   type CategoryIconName,
 } from "@/lib/categories";
 import { CategoryRow } from "./CategoryRow";
+import {
+  CategoryTrendHeads,
+  TREND_MONTHS,
+  trendSortValue,
+  UncategorizedRow,
+  type TrendSortKey,
+} from "./CategoryTrends";
+import { useCategoryTrends } from "@/components/charts/use-category-trends";
 import { IconPicker } from "./IconPicker";
 import {
   COLOR_INPUT_CLASS,
@@ -35,7 +43,7 @@ import {
   type ApiCategory,
 } from "./shared";
 
-type CategorySortKey = "nombre" | "transacciones" | "reglas";
+type CategorySortKey = "nombre" | "transacciones" | "reglas" | TrendSortKey;
 
 function AddCategoryForm({ onCreated }: { onCreated: () => void }) {
   const [name, setName] = useState("");
@@ -133,10 +141,14 @@ function AddCategoryForm({ onCreated }: { onCreated: () => void }) {
 export function CategoriesCard({
   categories,
   onChange,
+  version = 0,
 }: {
   categories: ApiCategory[];
   onChange: () => void;
+  /** Bumped on every reload, so the spend columns refetch too. */
+  version?: number;
 }) {
+  const { trends, error: trendsError } = useCategoryTrends(TREND_MONTHS, version);
   const getValue = useCallback(
     (category: ApiCategory, key: CategorySortKey): string | number => {
       switch (key) {
@@ -146,9 +158,11 @@ export function CategoriesCard({
           return category.transactionCount;
         case "reglas":
           return category.rules.length;
+        default:
+          return trendSortValue(trends?.get(category.id), key);
       }
     },
-    []
+    [trends]
   );
   const { sorted, sort, toggleSort } = useSortableData(categories, getValue);
   // Bridge the generic header's string key to our typed key union.
@@ -165,7 +179,10 @@ export function CategoriesCard({
       <CardHeader>
         <CardTitle>Categorías</CardTitle>
         <CardDescription>
-          {plural(categories.length, "categoría", "categorías")}
+          {plural(categories.length, "categoría", "categorías")}. Gasto en
+          CLP sin transferencias internas; elige una categoría para ver su
+          detalle.
+          {trendsError && " No se pudieron cargar los gastos por categoría."}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
@@ -179,6 +196,7 @@ export function CategoriesCard({
             <TableHeader>
               <TableRow>
                 <SortableTableHead label="Categoría" {...sortProps("nombre")} />
+                <CategoryTrendHeads sortProps={sortProps} />
                 <SortableTableHead
                   label="Transacciones"
                   align="right"
@@ -200,8 +218,10 @@ export function CategoriesCard({
                   key={category.id}
                   category={category}
                   onChange={onChange}
+                  trends={trends}
                 />
               ))}
+              <UncategorizedRow trends={trends} trailingCells={3} />
             </TableBody>
           </Table>
         )}

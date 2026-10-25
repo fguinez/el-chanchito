@@ -110,7 +110,11 @@ export default function CategoriesPage() {
               desactualizado.
             </p>
           )}
-          <CategoriesCard categories={categories} onChange={load} />
+          <CategoriesCard
+            categories={categories}
+            version={version}
+            onChange={load}
+          />
           <SuggestionsCard
             categories={categories}
             version={version}

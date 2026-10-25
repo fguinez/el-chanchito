@@ -216,3 +216,15 @@ export function categoryExpensesHref({
   if (institution) params.set("institution", institution);
   return `/expenses?${params}`;
 }
+
+/** Query param holding the category open in the Categorías detail panel: a
+ *  category id, or UNCATEGORIZED_PARAM for "Sin categoría". */
+export const CATEGORY_PARAM = "category";
+
+/** The Categorías page with one category's detail panel open. */
+export function categoryDetailHref(categoryId: string | null): string {
+  const params = new URLSearchParams({
+    [CATEGORY_PARAM]: categoryId ?? UNCATEGORIZED_PARAM,
+  });
+  return `/categories?${params}`;
+}

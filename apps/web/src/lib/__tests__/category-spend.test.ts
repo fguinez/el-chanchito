@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  categoryDetailHref,
   categoryExpensesHref,
   groupSpend,
   monthWindow,
@@ -199,5 +200,12 @@ describe("categoryExpensesHref", () => {
     expect(
       categoryExpensesHref({ categoryId: null, from: "2026-01-01", to: "2026-01-31" })
     ).toBe("/expenses?category=none&from=2026-01-01&to=2026-01-31");
+  });
+});
+
+describe("categoryDetailHref", () => {
+  it("opens a category, or none for uncategorized", () => {
+    expect(categoryDetailHref(FOOD)).toBe(`/categories?category=${FOOD}`);
+    expect(categoryDetailHref(null)).toBe("/categories?category=none");
   });
 });
