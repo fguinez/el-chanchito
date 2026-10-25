@@ -159,7 +159,7 @@ export function CategoriesCard({
         case "reglas":
           return category.rules.length;
         default:
-          return trendSortValue(trends?.get(category.id), key);
+          return trendSortValue(trends, category.id, key);
       }
     },
     [trends]
@@ -187,45 +187,46 @@ export function CategoriesCard({
       </CardHeader>
       <CardContent className="space-y-6">
         <AddCategoryForm onCreated={onChange} />
-        {categories.length === 0 ? (
+        {categories.length === 0 && (
           <p className="text-muted-foreground">
             No hay categorías. Agrega una arriba.
           </p>
-        ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <SortableTableHead label="Categoría" {...sortProps("nombre")} />
-                <CategoryTrendHeads sortProps={sortProps} />
-                <SortableTableHead
-                  label="Transacciones"
-                  align="right"
-                  className="w-36"
-                  {...sortProps("transacciones")}
-                />
-                <SortableTableHead
-                  label="Reglas"
-                  align="right"
-                  className="w-28"
-                  {...sortProps("reglas")}
-                />
-                <TableHead className="w-56"></TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {sorted.map((category) => (
-                <CategoryRow
-                  key={category.id}
-                  category={category}
-                  onChange={onChange}
-                  trends={trends}
-                  trendsError={trendsError}
-                />
-              ))}
-              <UncategorizedRow trends={trends} trailingCells={3} />
-            </TableBody>
-          </Table>
         )}
+        {/* Rendered even with no categories: the Sin categoría row still
+            holds the spend and opens its detail panel. */}
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <SortableTableHead label="Categoría" {...sortProps("nombre")} />
+              <CategoryTrendHeads sortProps={sortProps} />
+              <SortableTableHead
+                label="Transacciones"
+                align="right"
+                className="w-36"
+                {...sortProps("transacciones")}
+              />
+              <SortableTableHead
+                label="Reglas"
+                align="right"
+                className="w-28"
+                {...sortProps("reglas")}
+              />
+              <TableHead className="w-56"></TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {sorted.map((category) => (
+              <CategoryRow
+                key={category.id}
+                category={category}
+                onChange={onChange}
+                trends={trends}
+                trendsError={trendsError}
+              />
+            ))}
+            <UncategorizedRow trends={trends} trailingCells={3} />
+          </TableBody>
+        </Table>
       </CardContent>
     </Card>
   );

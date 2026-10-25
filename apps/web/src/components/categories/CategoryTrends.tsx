@@ -28,13 +28,17 @@ export const TREND_MONTHS = 6;
 
 export type TrendSortKey = "este_mes" | "mes_anterior" | "promedio";
 
-/** The sort value of a trend column; null (sorted last) when the category
- *  has no trend: it spent nothing, or the figures are not loaded. */
+/** The sort value of a trend column: null (sorted last) while the figures
+ *  are not loaded, 0 for a category missing from them (it spent nothing, and
+ *  its cells show $0). */
 export function trendSortValue(
-  trend: CategoryTrend | undefined,
+  trends: Map<string, CategoryTrend> | null,
+  categoryId: string | null,
   key: TrendSortKey
 ): number | null {
-  if (!trend) return null;
+  if (!trends) return null;
+  const trend = trends.get(trendKey(categoryId));
+  if (!trend) return 0;
   if (key === "este_mes") return trend.thisMonth;
   if (key === "mes_anterior") return trend.lastMonth;
   return trend.average;
