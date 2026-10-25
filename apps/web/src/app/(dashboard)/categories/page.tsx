@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { WandSparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CategoriesCard } from "@/components/categories/CategoriesCard";
+import { CategoryDetailSheet } from "@/components/categories/CategoryDetailSheet";
 import { RulesCard } from "@/components/categories/RulesCard";
 import { SuggestionsCard } from "@/components/categories/SuggestionsCard";
 import { plural, type ApiCategory } from "@/components/categories/shared";
@@ -121,6 +122,14 @@ export default function CategoriesPage() {
             onChange={load}
           />
           <RulesCard categories={categories} version={version} onChange={load} />
+          {/* useSearchParams needs a Suspense boundary for the prerender. */}
+          <Suspense fallback={null}>
+            <CategoryDetailSheet
+              categories={categories}
+              refreshKey={version}
+              onChanged={load}
+            />
+          </Suspense>
         </>
       )}
     </div>
