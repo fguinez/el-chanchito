@@ -6,6 +6,7 @@
 import { z } from "zod";
 import { PRODUCT_KINDS, TRANSFER_STATUSES } from "@/lib/db/schema";
 import { TRANSACTION_NOTES_MAX_LENGTH } from "@/lib/transactions";
+import { SPEND_GROUP_BYS, UNCATEGORIZED_PARAM } from "@/lib/category-spend";
 
 // ---------------------------------------------------------------------------
 // Shared fields
@@ -342,6 +343,26 @@ export const dismissSuggestionSchema = z
       return z.NEVER;
     }
     return { sourceTransactionId: body.sourceTransactionId, targetTransactionId };
+  });
+
+/** GET /api/categories/spend query string: an inclusive day window, the
+ *  optional scope filters (a product, an institution slug, one category or
+ *  `none` for the uncategorized rows) and how to split the result. Ids come
+ *  out lowercased, as Postgres returns them. */
+export const categorySpendQuerySchema = z
+  .object({
+    from: isoDate,
+    to: isoDate,
+    productId: rowId.transform((id) => id.toLowerCase()).optional(),
+    institution: z.string().trim().min(1).optional(),
+    categoryId: z
+      .union([z.literal(UNCATEGORIZED_PARAM), rowId.transform((id) => id.toLowerCase())])
+      .optional(),
+    groupBy: z.enum(SPEND_GROUP_BYS).default("none"),
+  })
+  .refine((query) => query.from <= query.to, {
+    error: "The window must not end before it starts",
+    path: ["to"],
   });
 
 /** A legacy total: patrimonio and deuda are sums, never negative. */
