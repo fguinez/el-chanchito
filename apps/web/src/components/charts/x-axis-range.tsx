@@ -140,6 +140,14 @@ export function rangeQuery(range: XAxisRange): string | null {
   return null;
 }
 
+/** The inclusive YYYY-MM-DD days a range covers, for APIs that take a
+ *  from/to window; null for "all" (no fixed window). */
+export function rangeDayWindow(range: XAxisRange): { from: string; to: string } | null {
+  if (range.kind === "absolute") return { from: range.from, to: range.to };
+  const window = fixedWindowMs(range);
+  return window ? { from: msToDay(window[0]), to: msToDay(window[1]) } : null;
+}
+
 /** The rendered window plus the plot width, as measured by InteractiveChart. */
 export interface XAxisView {
   width: number;
