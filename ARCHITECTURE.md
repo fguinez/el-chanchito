@@ -40,6 +40,7 @@
 │  transactions | categories | category_rules | monitors          │
 │  monitor_adjustments | fixed_expenses | internal_transfers      │
 │  dismissed_transfer_suggestions | confirmed_transfer_patterns   │
+│  dismissed_category_suggestions                                 │
 │  scraper_runs | product_prices | wealth_snapshots (legacy)      │
 └────────────────────────────────▲────────────────────────────────┘
                                  │
@@ -427,6 +428,21 @@ keyword, one database transaction creates or reuses an exact rule keyed on the
 raw `description` and recategorizes the visible, non-manual rows with that
 exact description.
 
+Category suggestions are computed on demand, with no external service
+(`lib/category-suggestions` scores, `lib/category-suggestions-db` queries). The
+history is the visible categorized rows grouped by trimmed lowercase
+description and category (most recent 5000 groups); descriptions are
+normalised (accents, punctuation and every token holding a digit dropped) and
+compared on their meaningful tokens (3+ letters, no stopwords). The same
+normalised description has similarity 1; otherwise the mean of the Jaccard
+index and the overlap coefficient, counted only above 0.5. Each match votes for
+its category with similarity x rows; the winner's confidence is its vote share
+times its best similarity, shown only at 0.6 or more. Targets are visible rows
+with no category and no manual flag. Applying once updates only those rows;
+"always" reuses the exact-rule path above. Dismissals (V042,
+`dismissed_category_suggestions`) are keyed by normalised description and
+suggested category, cascading with the category.
+
 `exchange_rates` semantics, resolution order and staleness: see
 [Exchange rates](#exchange-rates).
 
@@ -470,6 +486,7 @@ exact description.
 | `V039__stock_product_kind.sql` | admits the `stock` kind in products_kind_check and re-kinds Fintual's stock positions (`external_ref` `stock:%`) from `investment` to `stock`, rewriting the `kind` key of their attributes, metrics and snapshot metrics; goals stay `investment`; `products_stock_ref_kind_check` then rejects any `investment` row with a `stock:` ref, so a scraper still on the old code fails its writes instead of adding twins (stop the scrapers, migrate, restart scrapers and web) |
 | `V040__monitor_adjustments_transactions.sql` | monitor_adjustments become links to transactions: deletes the free-form rows, drops `adjustment_date`/`amount`/`description`, adds `transaction_id` (FK, ON DELETE CASCADE, unique per monitor) |
 | `V041__category_rule_match_type.sql` | `category_rules.match_type` (`contains` default, or `exact`); `category_for_description()` matches exact rules by trimmed equality and ranks them before contains rules |
+| `V042__category_suggestion_dismissals.sql` | dismissed_category_suggestions (normalised description + suggested category, unique pair, cascades with the category); new table only |
 
 ## Scraper Architecture
 

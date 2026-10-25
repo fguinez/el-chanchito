@@ -186,6 +186,23 @@ export const updateTransactionSchema = z
  *  the rows with the same description and a rule for future ones. */
 export const transactionCategoryRuleSchema = z.object({
   categoryId: rowId,
+  /** Leave this row alone if it has a category or was cleared by hand (the
+   *  Categorías suggestions send it, as their row id may be stale). */
+  onlyIfUncategorized: z.boolean().optional(),
+});
+
+/** Longest description a category suggestion body accepts. */
+export const SUGGESTION_DESCRIPTION_MAX_LENGTH = 1000;
+
+/** POST /api/categories/suggestions/apply and .../dismiss: the raw
+ *  description of the suggested rows, untrimmed so it matches them as stored,
+ *  and the suggested category (lowercased, as Postgres returns ids). */
+export const categorySuggestionSchema = z.object({
+  description: z
+    .string()
+    .max(SUGGESTION_DESCRIPTION_MAX_LENGTH)
+    .refine((description) => description.trim() !== "", { error: "Description is blank" }),
+  categoryId: rowId.transform((id) => id.toLowerCase()),
 });
 
 /** POST /api/transfers: money between two distinct products, both required.

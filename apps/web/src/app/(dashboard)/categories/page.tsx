@@ -5,6 +5,7 @@ import { WandSparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CategoriesCard } from "@/components/categories/CategoriesCard";
 import { RulesCard } from "@/components/categories/RulesCard";
+import { SuggestionsCard } from "@/components/categories/SuggestionsCard";
 import { plural, type ApiCategory } from "@/components/categories/shared";
 
 export default function CategoriesPage() {
@@ -110,6 +111,11 @@ export default function CategoriesPage() {
             </p>
           )}
           <CategoriesCard categories={categories} onChange={load} />
+          <SuggestionsCard
+            categories={categories}
+            version={version}
+            onChange={load}
+          />
           <RulesCard categories={categories} version={version} onChange={load} />
         </>
       )}
