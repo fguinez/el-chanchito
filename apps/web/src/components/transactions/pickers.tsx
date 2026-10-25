@@ -31,6 +31,7 @@ export function useCategories(): CategoryOption[] {
 export interface PickerProduct {
   id: string;
   name: string;
+  currency: string;
 }
 export interface PickerInstitution {
   slug: string;
@@ -75,7 +76,7 @@ export function useActiveProducts(currency?: string): {
                 .filter(
                   (p) => p.isActive && (!currency || p.currency === currency)
                 )
-                .map((p) => ({ id: p.id, name: p.name })),
+                .map((p) => ({ id: p.id, name: p.name, currency: p.currency })),
             }))
             .filter((inst) => inst.products.length > 0)
         );
@@ -84,6 +85,19 @@ export function useActiveProducts(currency?: string): {
     return () => controller.abort();
   }, [currency]);
   return { institutions, error };
+}
+
+/** `institutions` narrowed to one currency's products, dropping emptied ones. */
+export function onlyCurrency(
+  institutions: PickerInstitution[],
+  currency: string
+): PickerInstitution[] {
+  return institutions
+    .map((inst) => ({
+      ...inst,
+      products: inst.products.filter((p) => p.currency === currency),
+    }))
+    .filter((inst) => inst.products.length > 0);
 }
 
 /** A native product <select>, styled like the Input primitive. */

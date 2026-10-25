@@ -33,6 +33,7 @@ import { CsvImport } from "@/components/dashboard/CsvImport";
 import { TransactionDetailSheet } from "@/components/transactions/transaction-detail-sheet";
 import { useSelectedTransaction } from "@/components/transactions/use-selected-transaction";
 import {
+  onlyCurrency,
   ProductSelect,
   useActiveProducts,
   useCategories,
@@ -137,7 +138,6 @@ function ExpensesView() {
 
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [month, setMonth] = useState(currentMonthInput());
-  const [limit, setLimit] = useState(PAGE_SIZE);
   // Bumped after an edit so the list and the donut refetch.
   const [refreshKey, setRefreshKey] = useState(0);
   const refresh = useCallback(() => setRefreshKey((n) => n + 1), []);
@@ -157,10 +157,13 @@ function ExpensesView() {
     (id: string | null) => categories.find((c) => c.id === id)?.name ?? null,
     [categories]
   );
-  // CLP-only products for the manual form, like the transfers picker.
-  const { institutions } = useActiveProducts(CLP);
-  // Every active product, to name the product and institution filters.
+  // Every active product, to name the product and institution filters; the
+  // manual form picks among the CLP ones, like the transfers picker.
   const { institutions: allInstitutions } = useActiveProducts();
+  const institutions = useMemo(
+    () => onlyCurrency(allInstitutions, CLP),
+    [allInstitutions]
+  );
 
   // The rows' bounds and scope, shared by the list and the donut so both
   // always cover the same transactions. Any day of the picked month works:
@@ -180,12 +183,16 @@ function ExpensesView() {
 
   // The list also narrows to the selected category; the donut does not, so
   // it keeps every slice and highlights the selected one.
-  const listQuery = useMemo(() => {
+  const filterQuery = useMemo(() => {
     const params = new URLSearchParams(scopeQuery);
     if (filters.category) params.set("categoryId", filters.category);
-    params.set("limit", String(limit));
     return params.toString();
-  }, [scopeQuery, filters.category, limit]);
+  }, [scopeQuery, filters.category]);
+  // "Cargar más" pages within one filter set; new filters start over on the
+  // first page in the same render, so the list fetches once.
+  const [paging, setPaging] = useState({ filterQuery, limit: PAGE_SIZE });
+  const limit = paging.filterQuery === filterQuery ? paging.limit : PAGE_SIZE;
+  const listQuery = `${filterQuery}${filterQuery ? "&" : ""}limit=${limit}`;
   const spend = useCategorySpend(scopeQuery.toString(), refreshKey);
 
   // The AbortSignal drops a slower older response (e.g. after a rapid filter
@@ -212,7 +219,7 @@ function ExpensesView() {
   }, [listQuery, limit, refreshKey]);
 
   /** Sets (or, with null, removes) URL filters, keeping every other param
-   *  (`?txn=` included); a new filter resets paging to the first page. */
+   *  (`?txn=` included). */
   const setFilters = useCallback(
     (updates: Partial<Record<keyof ExpensesFilters, string | null>>) => {
       const params = new URLSearchParams(search);
@@ -220,7 +227,6 @@ function ExpensesView() {
         if (value) params.set(key, value);
         else params.delete(key);
       }
-      setLimit(PAGE_SIZE);
       const query = params.toString();
       router.replace(query ? `${pathname}?${query}` : pathname, {
         scroll: false,
@@ -294,6 +300,12 @@ function ExpensesView() {
     });
   }
   const periodLabel = hasWindow ? "del período" : "del mes";
+  // The summary sums the rows loaded so far ("Cargar más" adds more), unlike
+  // the donut, which covers the whole scope.
+  const loadedLabel =
+    transactions.length === 1
+      ? "en la transacción cargada"
+      : `en las ${transactions.length} transacciones cargadas`;
 
   const handleAdd = async () => {
     const parsedAmount = parseNumberInput(amount);
@@ -378,7 +390,7 @@ function ExpensesView() {
       <div className="grid gap-4 md:grid-cols-3">
         <Card>
           <CardHeader className="pb-2">
-            <CardDescription>Gastos {periodLabel}</CardDescription>
+            <CardDescription>Gastos {loadedLabel}</CardDescription>
             <CardTitle className="text-xl text-red-600">
               {formatCLP(Math.abs(totalExpenses))}
             </CardTitle>
@@ -386,7 +398,7 @@ function ExpensesView() {
         </Card>
         <Card>
           <CardHeader className="pb-2">
-            <CardDescription>Ingresos {periodLabel}</CardDescription>
+            <CardDescription>Ingresos {loadedLabel}</CardDescription>
             <CardTitle className="text-xl text-green-600">
               {formatCLP(totalIncome)}
             </CardTitle>
@@ -394,7 +406,7 @@ function ExpensesView() {
         </Card>
         <Card>
           <CardHeader className="pb-2">
-            <CardDescription>Neto</CardDescription>
+            <CardDescription>Neto {loadedLabel}</CardDescription>
             <CardTitle className="text-xl">
               {formatCLP(totalIncome + totalExpenses)}
             </CardTitle>
@@ -554,8 +566,8 @@ function ExpensesView() {
         <CardHeader>
           <CardTitle>Gastos por categoría</CardTitle>
           <CardDescription>
-            Lo gastado {periodLabel} en cada categoría, en CLP y sin
-            transferencias internas. Elige una categoría para filtrar la
+            Lo gastado {periodLabel} en cada categoría, en{" "}
+            {spend.data?.currency ?? CLP} y sin transferencias internas. Elige una categoría para filtrar la
             lista.
           </CardDescription>
         </CardHeader>
@@ -606,9 +618,7 @@ function ExpensesView() {
                 className="w-44"
                 value={hasWindow ? "" : month}
                 onChange={(e) => {
-                  // A new month resets paging back to the first page and
-                  // replaces any from/to window.
-                  setLimit(PAGE_SIZE);
+                  // A new month replaces any from/to window.
                   setMonth(e.target.value || currentMonthInput());
                   if (hasWindow) setFilters({ from: null, to: null });
                 }}
@@ -731,7 +741,9 @@ function ExpensesView() {
             <div className="mt-4 flex justify-center">
               <Button
                 variant="outline"
-                onClick={() => setLimit((n) => n + PAGE_SIZE)}
+                onClick={() =>
+                  setPaging({ filterQuery, limit: limit + PAGE_SIZE })
+                }
               >
                 Cargar más
               </Button>

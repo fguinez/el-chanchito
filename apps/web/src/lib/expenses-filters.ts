@@ -26,7 +26,7 @@ export const EXPENSES_FILTER_KEYS = [
 
 const DAY = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const SLUG = /^[a-z0-9][a-z0-9-]*$/i;
+const SLUG = /^[a-z0-9][a-z0-9_-]*$/i;
 
 export function parseExpensesFilters(params: URLSearchParams): ExpensesFilters {
   const filters: ExpensesFilters = {};
