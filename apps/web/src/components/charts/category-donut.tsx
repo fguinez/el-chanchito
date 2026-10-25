@@ -46,8 +46,13 @@ export function CategoryDonut({
     if (onSelect) onSelect(categoryId);
     else if (hrefFor) router.push(hrefFor(categoryId));
   };
+  // A selection with no slice (e.g. a category whose refunds outweigh its
+  // spend) dims nothing rather than the whole donut.
+  const hasSelection =
+    selectedId !== undefined &&
+    categories.some((c) => c.categoryId === selectedId);
   const dimmed = (categoryId: string | null) =>
-    selectedId !== undefined && selectedId !== categoryId;
+    hasSelection && selectedId !== categoryId;
 
   return (
     <div
