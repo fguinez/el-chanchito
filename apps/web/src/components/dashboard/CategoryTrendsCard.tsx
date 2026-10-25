@@ -78,7 +78,7 @@ export function CategoryTrendsCard() {
               <span className="flex-1">Categoría</span>
               <span className="w-28 text-right">Este mes</span>
               <span className="hidden w-28 text-right sm:inline">
-                Mes anterior
+                Mismo período anterior
               </span>
               <span className="w-20 text-right">Cambio</span>
             </li>
