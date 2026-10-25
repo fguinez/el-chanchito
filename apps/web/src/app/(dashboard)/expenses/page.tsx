@@ -142,8 +142,11 @@ function ExpensesView() {
   const [refreshKey, setRefreshKey] = useState(0);
   const refresh = useCallback(() => setRefreshKey((n) => n + 1), []);
   const [hasMore, setHasMore] = useState(false);
-  // False until the first list response (or failure) arrives.
-  const [listLoaded, setListLoaded] = useState(false);
+  // The filter set the shown rows answer (null before the first response or
+  // failure): rows from another filter set are stale and read as loading.
+  const [loadedFilterQuery, setLoadedFilterQuery] = useState<string | null>(
+    null
+  );
   const [description, setDescription] = useState("");
   const [place, setPlace] = useState("");
   const [amount, setAmount] = useState("");
@@ -201,6 +204,8 @@ function ExpensesView() {
   const limit = paging.filterQuery === filterQuery ? paging.limit : PAGE_SIZE;
   const listQuery = `${filterQuery}${filterQuery ? "&" : ""}limit=${limit}`;
   const spend = useCategorySpend(scopeQuery.toString(), refreshKey);
+  // "Cargar más" and a refresh keep the current rows on screen meanwhile.
+  const listLoaded = loadedFilterQuery === filterQuery;
 
   // The AbortSignal drops a slower older response (e.g. after a rapid filter
   // switch) so it cannot overwrite a newer one.
@@ -218,15 +223,15 @@ function ExpensesView() {
         if (signal.aborted) return;
         setTransactions(rows);
         setHasMore(rows.length >= limit);
-        setListLoaded(true);
+        setLoadedFilterQuery(filterQuery);
       })
       .catch((error) => {
         if (signal.aborted) return;
         console.error(error);
-        setListLoaded(true);
+        setLoadedFilterQuery(filterQuery);
       });
     return () => controller.abort();
-  }, [listQuery, limit, refreshKey]);
+  }, [listQuery, filterQuery, limit, refreshKey]);
 
   /** Sets (or, with null, removes) URL filters, keeping every other param
    *  (`?txn=` included). */
