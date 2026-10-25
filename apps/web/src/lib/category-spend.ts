@@ -192,20 +192,27 @@ export function monthWindow(month: string): { from: string; to: string } {
 }
 
 /** The Gastos page filtered to one category (null = "Sin categoría") over a
- *  day window. */
+ *  day window, optionally within one product or institution (see
+ *  lib/expenses-filters for how the page reads it). */
 export function categoryExpensesHref({
   categoryId,
   from,
   to,
+  productId,
+  institution,
 }: {
   categoryId: string | null;
   from: string;
   to: string;
+  productId?: string;
+  institution?: string;
 }): string {
   const params = new URLSearchParams({
     category: categoryId ?? UNCATEGORIZED_PARAM,
     from,
     to,
   });
+  if (productId) params.set("product", productId);
+  if (institution) params.set("institution", institution);
   return `/expenses?${params}`;
 }
