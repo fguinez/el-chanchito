@@ -8,8 +8,22 @@ import { CategoryDetailSheet } from "@/components/categories/CategoryDetailSheet
 import { RulesCard } from "@/components/categories/RulesCard";
 import { SuggestionsCard } from "@/components/categories/SuggestionsCard";
 import { plural, type ApiCategory } from "@/components/categories/shared";
+import { TransactionDetailSheet } from "@/components/transactions/transaction-detail-sheet";
+import { useSelectedTransaction } from "@/components/transactions/use-selected-transaction";
 
+// useSearchParams needs a Suspense boundary for the static prerender.
 export default function CategoriesPage() {
+  return (
+    <Suspense
+      fallback={<p className="text-muted-foreground">Cargando...</p>}
+    >
+      <CategoriesView />
+    </Suspense>
+  );
+}
+
+function CategoriesView() {
+  const { selectedTxnId, selectTransaction } = useSelectedTransaction();
   const [categories, setCategories] = useState<ApiCategory[] | null>(null);
   const [loadError, setLoadError] = useState(false);
   // Bumped on every reload so open rule previews refetch.
@@ -132,6 +146,11 @@ export default function CategoriesPage() {
           </Suspense>
         </>
       )}
+      <TransactionDetailSheet
+        transactionId={selectedTxnId}
+        onClose={() => selectTransaction(null)}
+        onChanged={load}
+      />
     </div>
   );
 }
