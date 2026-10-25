@@ -181,3 +181,110 @@ export function compareSpend(
   for (const c of lastMonth) row(c).lastMonth += c.amount;
   return [...rows.values()];
 }
+
+/** One month of a category (or of the total) in the category x month table. */
+export interface SpendMatrixCell {
+  /** YYYY-MM. */
+  month: string;
+  amount: number;
+  /** Percent change from the month before; null when that month spent
+   *  nothing (or is unknown), or for the month in progress. */
+  change: number | null;
+}
+
+export interface SpendMatrixRow {
+  /** Null for "Sin categoría". */
+  categoryId: string | null;
+  name: string;
+  color: string;
+  /** One per shown month, oldest first. */
+  cells: SpendMatrixCell[];
+  /** Sum over the shown months. */
+  total: number;
+  /** Mean over the shown full months (the one in progress left out, empty
+   *  months counting as zero); null when no full month is shown. */
+  average: number | null;
+}
+
+export interface SpendMatrix {
+  months: string[];
+  /** Largest total first; "Sin categoría" always last. */
+  rows: SpendMatrixRow[];
+  /** Every category together, shaped like a row. */
+  totals: Omit<SpendMatrixRow, "categoryId" | "name" | "color">;
+}
+
+/**
+ * The category x month table of the Análisis page, from the month groups of
+ * GET /api/categories/spend?groupBy=month. `months` are the columns, oldest
+ * first; a group for the month before the first one, when present, gives the
+ * first column its change. `inProgress` (the current month) gets no change
+ * and stays out of the average, so a partial month never reads as a drop.
+ */
+export function categoryMonthMatrix(
+  groups: readonly CategorySpendGroup[],
+  months: readonly string[],
+  inProgress?: string
+): SpendMatrix {
+  const byMonth = new Map(groups.map((g) => [g.key, g]));
+  // `key` is a trendKey; without one, every category together.
+  const spendIn = (month: string, key?: string): number => {
+    const group = byMonth.get(month);
+    if (!group) return 0;
+    if (key === undefined) return group.total;
+    return group.categories
+      .filter((c) => trendKey(c.categoryId) === key)
+      .reduce((sum, c) => sum + c.amount, 0);
+  };
+  const fullMonths = months.filter((m) => m !== inProgress).length;
+  const line = (key?: string) => {
+    const cells = months.map((month) => {
+      const amount = spendIn(month, key);
+      return {
+        month,
+        amount,
+        change:
+          month === inProgress
+            ? null
+            : percentChange(amount, spendIn(shiftMonth(month, -1), key)),
+      };
+    });
+    const total = cells.reduce((sum, c) => sum + c.amount, 0);
+    const fullTotal = cells
+      .filter((c) => c.month !== inProgress)
+      .reduce((sum, c) => sum + c.amount, 0);
+    return {
+      cells,
+      total,
+      average: fullMonths > 0 ? fullTotal / fullMonths : null,
+    };
+  };
+
+  const shown = new Set(months);
+  const categories = new Map<
+    string,
+    { categoryId: string | null; name: string; color: string }
+  >();
+  for (const group of groups) {
+    if (!shown.has(group.key)) continue;
+    for (const c of group.categories) {
+      if (!categories.has(trendKey(c.categoryId))) {
+        categories.set(trendKey(c.categoryId), {
+          categoryId: c.categoryId,
+          name: c.name,
+          color: c.color,
+        });
+      }
+    }
+  }
+  const rows = [...categories.entries()]
+    .map(([key, info]) => ({ ...info, ...line(key) }))
+    .filter((row) => row.total > 0)
+    .sort((a, b) => {
+      if ((a.categoryId === null) !== (b.categoryId === null)) {
+        return a.categoryId === null ? 1 : -1;
+      }
+      return b.total - a.total || a.name.localeCompare(b.name, "es");
+    });
+  return { months: [...months], rows, totals: line() };
+}

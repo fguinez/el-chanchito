@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  categoryMonthMatrix,
   categoryTrends,
   compareSpend,
   monthOf,
@@ -167,5 +168,64 @@ describe("compareSpend", () => {
     expect(byId.get(FOOD)).toMatchObject({ thisMonth: 2_500_000, lastMonth: 1_000_000 });
     expect(byId.get(FUN)).toMatchObject({ thisMonth: 0, lastMonth: 1_000_000 });
     expect(byId.get(null)).toMatchObject({ thisMonth: 999_999, lastMonth: 0 });
+  });
+});
+
+describe("categoryMonthMatrix", () => {
+  // 2025-10 sits before the shown window and only feeds the first change.
+  const groups = [
+    group("2025-10", [spend(FOOD, 1_000_000)]),
+    group("2025-11", [spend(FOOD, 2_000_000), spend(null, 999_999)]),
+    group("2025-12", [spend(FUN, 2_500_000)]),
+    group("2026-01", [spend(FOOD, 1_000_000), spend(FUN, 1_000_000)]),
+  ];
+  const months = ["2025-11", "2025-12", "2026-01"];
+
+  it("orders rows by total, Sin categoría last", () => {
+    const matrix = categoryMonthMatrix(groups, months);
+    expect(matrix.months).toEqual(months);
+    expect(matrix.rows.map((r) => r.categoryId)).toEqual([FUN, FOOD, null]);
+  });
+
+  it("fills every month and changes against the month before", () => {
+    const food = categoryMonthMatrix(groups, months).rows.find(
+      (r) => r.categoryId === FOOD
+    )!;
+    expect(food.cells).toEqual([
+      { month: "2025-11", amount: 2_000_000, change: 100 },
+      { month: "2025-12", amount: 0, change: -100 },
+      // Nothing the month before: no change to show.
+      { month: "2026-01", amount: 1_000_000, change: null },
+    ]);
+    expect(food.total).toBe(3_000_000);
+    expect(food.average).toBe(1_000_000);
+  });
+
+  it("leaves the month in progress out of the change and the average", () => {
+    const fun = categoryMonthMatrix(groups, months, "2026-01").rows.find(
+      (r) => r.categoryId === FUN
+    )!;
+    expect(fun.cells[2]).toEqual({ month: "2026-01", amount: 1_000_000, change: null });
+    expect(fun.total).toBe(3_500_000);
+    // 2025-11 (zero) and 2025-12.
+    expect(fun.average).toBe(1_250_000);
+  });
+
+  it("totals every category per month", () => {
+    const { totals } = categoryMonthMatrix(groups, months);
+    expect(totals.cells.map((c) => c.amount)).toEqual([2_999_999, 2_500_000, 2_000_000]);
+    expect(totals.cells[0].change).toBeCloseTo(199.9999);
+    expect(totals.total).toBe(7_499_999);
+  });
+
+  it("has no average when only the month in progress is shown", () => {
+    const matrix = categoryMonthMatrix(groups, ["2026-01"], "2026-01");
+    expect(matrix.totals.average).toBeNull();
+  });
+
+  it("is empty without spend in the shown months", () => {
+    const matrix = categoryMonthMatrix([group("2025-10", [spend(FOOD, 1_000_000)])], months);
+    expect(matrix.rows).toEqual([]);
+    expect(matrix.totals.total).toBe(0);
   });
 });
