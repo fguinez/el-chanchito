@@ -189,6 +189,10 @@ describe("normalizeKeyword", () => {
     );
   });
 
+  it("trims only spaces, as PostgreSQL's btrim() does", () => {
+    expect(expectValue(normalizeKeyword(" EJEMPLO\u00a0\t "))).toBe("ejemplo\u00a0\t");
+  });
+
   it("does not escape % or _", () => {
     expect(expectValue(normalizeKeyword("50%_OFF"))).toBe("50%_off");
   });
@@ -207,7 +211,7 @@ describe("normalizeKeyword", () => {
 });
 
 describe("validateRuleInput (create)", () => {
-  it("normalizes the keyword and defaults priority to 0", () => {
+  it("normalizes the keyword and defaults priority to 0 and matchType to contains", () => {
     const value = expectValue(
       validateRuleInput({ keyword: " EJEMPLO ", categoryId: CATEGORY_ID })
     );
@@ -215,7 +219,31 @@ describe("validateRuleInput (create)", () => {
       keyword: "ejemplo",
       categoryId: CATEGORY_ID,
       priority: 0,
+      matchType: "contains",
     });
+  });
+
+  it("keeps an exact matchType and rejects an unknown one", () => {
+    const value = expectValue(
+      validateRuleInput({
+        keyword: "ejemplo",
+        categoryId: CATEGORY_ID,
+        matchType: "exact",
+      })
+    );
+    expect(value.matchType).toBe("exact");
+    const result = validateRuleInput({
+      keyword: "ejemplo",
+      categoryId: CATEGORY_ID,
+      matchType: "substring",
+    });
+    expect(result).toMatchObject({ ok: false, status: 400, field: "matchType" });
+  });
+
+  it("accepts a matchType-only partial update", () => {
+    expect(
+      expectValue(validateRuleInput({ matchType: "exact" }, { partial: true }))
+    ).toEqual({ matchType: "exact" });
   });
 
   it("keeps an explicit priority", () => {

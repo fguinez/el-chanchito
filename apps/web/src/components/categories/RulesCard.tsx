@@ -22,12 +22,16 @@ import { Input } from "@/components/ui/input";
 import { useSortableData } from "@/lib/use-sortable-data";
 import {
   RULE_KEYWORD_MAX_LENGTH,
+  RULE_MATCH_TYPES,
   RULE_PRIORITY_MAX,
   RULE_PRIORITY_MIN,
+  trimKeyword,
+  type RuleMatchType,
 } from "@/lib/categories";
 import { RulePreview } from "./RulePreview";
 import { RuleRow } from "./RuleRow";
 import {
+  MATCH_TYPE_LABELS,
   PRIORITY_ERROR,
   SELECT_CLASS,
   parsePriority,
@@ -39,8 +43,10 @@ import {
 
 type RuleSortKey = "palabra" | "categoria" | "prioridad";
 
-/** The order rules apply in: priority desc, then oldest first. */
+/** The order rules apply in: exact before contains (V041), then priority
+ *  desc, then oldest first. */
 function byApplicationOrder(a: ApiCategoryRule, b: ApiCategoryRule): number {
+  if (a.matchType !== b.matchType) return a.matchType === "exact" ? -1 : 1;
   if (a.priority !== b.priority) return b.priority - a.priority;
   if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? -1 : 1;
   return a.id < b.id ? -1 : 1;
@@ -60,6 +66,7 @@ function AddRuleForm({
   const [keyword, setKeyword] = useState("");
   const [categoryId, setCategoryId] = useState("");
   const [priority, setPriority] = useState("0");
+  const [matchType, setMatchType] = useState<RuleMatchType>("contains");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -68,18 +75,18 @@ function AddRuleForm({
   const selectedCategoryId = categoriesById.has(categoryId) ? categoryId : "";
 
   function handleTest() {
-    if (!keyword.trim()) {
+    if (!trimKeyword(keyword)) {
       setError("Escribe una palabra clave para probarla");
       return;
     }
     setError(null);
-    setPreviewKeyword(keyword.trim());
+    setPreviewKeyword(trimKeyword(keyword));
   }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     const parsedPriority = parsePriority(priority);
-    if (!keyword.trim()) {
+    if (!trimKeyword(keyword)) {
       setError("La palabra clave es obligatoria");
       return;
     }
@@ -102,6 +109,7 @@ function AddRuleForm({
           keyword,
           categoryId: selectedCategoryId,
           priority: parsedPriority,
+          matchType,
         }),
       });
       if (!res.ok) {
@@ -152,6 +160,29 @@ function AddRuleForm({
               }}
               placeholder="Ej: uber"
             />
+          </div>
+          <div className="w-32">
+            <label
+              htmlFor="new-rule-match-type"
+              className="mb-1 block text-sm text-muted-foreground"
+            >
+              Coincidencia
+            </label>
+            <select
+              id="new-rule-match-type"
+              value={matchType}
+              onChange={(e) => {
+                setMatchType(e.target.value as RuleMatchType);
+                setPreviewKeyword(null);
+              }}
+              className={SELECT_CLASS}
+            >
+              {RULE_MATCH_TYPES.map((type) => (
+                <option key={type} value={type}>
+                  {MATCH_TYPE_LABELS[type]}
+                </option>
+              ))}
+            </select>
           </div>
           <div className="w-56">
             <label
@@ -209,8 +240,9 @@ function AddRuleForm({
       </form>
       {previewKeyword !== null && (
         <RulePreview
-          key={previewKeyword}
+          key={`${matchType}:${previewKeyword}`}
           keyword={previewKeyword}
+          matchType={matchType}
           categoriesById={categoriesById}
           version={version}
           onClose={() => setPreviewKeyword(null)}
@@ -267,12 +299,14 @@ export function RulesCard({
         <CardTitle>Reglas</CardTitle>
         <CardDescription className="space-y-2">
           <p>
-            Una regla coincide cuando la descripción de la transacción contiene
-            su palabra clave, sin importar mayúsculas o minúsculas. Si
-            coinciden varias, gana la de mayor prioridad y, con igual
-            prioridad, la más antigua: una palabra más específica como
-            &quot;uber eats&quot;, agregada después de &quot;uber&quot;,
-            necesita una prioridad mayor.
+            Una regla &quot;Contiene&quot; coincide cuando la descripción de la
+            transacción contiene su palabra clave, y una &quot;Exacta&quot;
+            cuando la descripción completa es igual a ella, en ambos casos sin
+            importar mayúsculas o minúsculas. Una regla exacta gana sobre
+            cualquier regla que contiene. Entre las del mismo tipo gana la de
+            mayor prioridad y, con igual prioridad, la más antigua: una palabra
+            más específica como &quot;uber eats&quot;, agregada después de
+            &quot;uber&quot;, necesita una prioridad mayor.
           </p>
           <p>
             Las transacciones nuevas se categorizan automáticamente al
@@ -281,6 +315,11 @@ export function RulesCard({
             una regla no cambia lo que ya categorizó. &quot;Categorizar
             ahora&quot; aplica las reglas nuevas o modificadas a las
             transacciones que siguen sin categoría.
+          </p>
+          <p>
+            En el detalle de una transacción puedes crear una regla exacta con
+            su descripción: también recategoriza las transacciones con esa
+            misma descripción que no categorizaste a mano.
           </p>
         </CardDescription>
       </CardHeader>

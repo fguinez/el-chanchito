@@ -176,6 +176,7 @@ describe("POST /api/categories/rules", () => {
       keyword: "uber",
       categoryId: CATEGORY_ID,
       priority: 0,
+      matchType: "contains",
     });
   });
 

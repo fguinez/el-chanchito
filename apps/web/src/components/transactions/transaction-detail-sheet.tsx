@@ -213,6 +213,11 @@ function TransactionDetailBody({
   const productName = displayProductName(txn.product, txn.institution.name);
   const kindLabel = KIND_INFO[txn.product.kind]?.labelEs ?? txn.product.kind;
   const [editing, setEditing] = useState(false);
+  // What the last save did beyond this row (a category rule), shown until the
+  // next edit; tied to the row it was saved for.
+  const [notice, setNotice] = useState<{ id: string; text: string } | null>(
+    null
+  );
 
   return (
     <>
@@ -242,7 +247,10 @@ function TransactionDetailBody({
               <Button
                 variant="outline"
                 size="xs"
-                onClick={() => setEditing(true)}
+                onClick={() => {
+                  setEditing(true);
+                  setNotice(null);
+                }}
               >
                 Editar
               </Button>
@@ -252,8 +260,9 @@ function TransactionDetailBody({
           {editing && (
             <TransactionEditForm
               txn={txn}
-              onSaved={() => {
+              onSaved={(text) => {
                 setEditing(false);
+                setNotice(text ? { id: txn.id, text } : null);
                 onChanged();
               }}
               onCancel={() => setEditing(false)}
@@ -261,6 +270,11 @@ function TransactionDetailBody({
           )}
           {!editing && (
           <>
+          {notice?.id === txn.id && (
+            <p className="text-sm text-muted-foreground" role="status">
+              {notice.text}
+            </p>
+          )}
           {showOriginalDescription(txn) && (
             <Field label="Descripción original">
               <span className="inline-flex flex-wrap items-center gap-2">

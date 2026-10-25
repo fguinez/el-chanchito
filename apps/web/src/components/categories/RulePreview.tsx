@@ -13,6 +13,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatAmount, formatPlainDateEs } from "@/lib/utils";
+import { trimKeyword, type RuleMatchType } from "@/lib/categories";
 import {
   CategoryLabel,
   plural,
@@ -40,17 +41,20 @@ function summary({ total, uncategorized }: RulePreviewResult): string {
 }
 
 /**
- * What a rule with `keyword` would match: counts plus the most recent
- * matches with their current category. Refetches when `version` (bumped on
- * every data reload) changes; callers key it by keyword.
+ * What a rule with `keyword` and `matchType` would match: counts plus the
+ * most recent matches with their current category. Refetches when `version`
+ * (bumped on every data reload) changes; callers key it by keyword and match
+ * type.
  */
 export function RulePreview({
   keyword,
+  matchType,
   categoriesById,
   version,
   onClose,
 }: {
   keyword: string;
+  matchType: RuleMatchType;
   categoriesById: Map<string, ApiCategory>;
   version: number;
   onClose: () => void;
@@ -60,7 +64,9 @@ export function RulePreview({
   useEffect(() => {
     const controller = new AbortController();
     fetch(
-      `/api/categories/rules/preview?keyword=${encodeURIComponent(keyword)}`,
+      `/api/categories/rules/preview?keyword=${encodeURIComponent(
+        keyword
+      )}&matchType=${matchType}`,
       { signal: controller.signal }
     )
       .then(async (res) => {
@@ -77,14 +83,15 @@ export function RulePreview({
         }
       });
     return () => controller.abort();
-  }, [keyword, version]);
+  }, [keyword, matchType, version]);
 
   return (
     <div className="space-y-3 rounded-md border bg-muted/30 p-4">
       <div className="flex items-start justify-between gap-3">
         <div>
           <p className="text-sm font-medium">
-            Prueba de &quot;{keyword.trim().toLowerCase()}&quot;
+            Prueba de &quot;{trimKeyword(keyword).toLowerCase()}&quot;
+            {matchType === "exact" && " (exacta)"}
           </p>
           {state.status === "done" && state.result.total > 0 && (
             <p className="text-sm text-muted-foreground">

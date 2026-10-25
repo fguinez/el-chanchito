@@ -2,14 +2,22 @@ import { NextRequest, NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { categories, categoryRules } from "@/lib/db/schema";
-import { UUID_RE, failureBody, validateRuleInput } from "@/lib/categories";
+import {
+  EXACT_KEYWORD_CLASH,
+  EXACT_KEYWORD_INDEX,
+  UUID_RE,
+  failureBody,
+  validateRuleInput,
+} from "@/lib/categories";
+import { isUniqueViolation } from "@/lib/management";
 import { readJsonBody } from "@/lib/api/validation";
 
 // Next 16: dynamic segment params arrive as a Promise on the context arg.
 type Context = { params: Promise<{ id: string }> };
 
 /** PATCH /api/categories/rules/[id]: partial update `{ keyword?, categoryId?,
- *  priority? }`. Categories the rule already assigned are left as they are. */
+ *  priority?, matchType? }`. Categories the rule already assigned are left as
+ *  they are. A second exact rule for the same keyword is a 400 on `keyword`. */
 export async function PATCH(request: NextRequest, { params }: Context) {
   try {
     const { id } = await params;
@@ -41,7 +49,7 @@ export async function PATCH(request: NextRequest, { params }: Context) {
         .where(eq(categories.id, result.value.categoryId));
       if (!category) {
         return NextResponse.json(
-          failureBody({ error: "Category not found", field: "categoryId" }),
+          failureBody({ error: "La categoría no existe", field: "categoryId" }),
           { status: 400 }
         );
       }
@@ -57,6 +65,11 @@ export async function PATCH(request: NextRequest, { params }: Context) {
     }
     return NextResponse.json(updated);
   } catch (error) {
+    if (isUniqueViolation(error, EXACT_KEYWORD_INDEX)) {
+      return NextResponse.json(failureBody(EXACT_KEYWORD_CLASH), {
+        status: 400,
+      });
+    }
     console.error("PATCH /api/categories/rules/[id] failed:", error);
     return NextResponse.json({ error: "Internal error" }, { status: 500 });
   }

@@ -3,15 +3,21 @@ import { and, count, desc, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { products, transactions } from "@/lib/db/schema";
 import { notDeleted } from "@/lib/db/transactions";
-import { failureBody, normalizeKeyword } from "@/lib/categories";
+import {
+  RULE_MATCH_TYPES,
+  failureBody,
+  normalizeKeyword,
+  type RuleMatchType,
+} from "@/lib/categories";
 
 const PREVIEW_LIMIT = 20;
 
 /**
- * GET /api/categories/rules/preview?keyword=...: what a rule with this keyword
- * would match ("probar regla"), with the same normalization and literal
- * substring semantics as `category_for_description` (V021). Returns
- * `{ keyword, total, uncategorized, transactions }`: `total` counts every
+ * GET /api/categories/rules/preview?keyword=...&matchType=...: what a rule with
+ * this keyword would match ("probar regla"), with the same normalization and
+ * semantics as `category_for_description`: `matchType` "contains" (default) is
+ * the literal substring of V021, "exact" the trimmed, case-insensitive equality
+ * of V041. Returns `{ keyword, matchType, total, uncategorized, transactions }`: `total` counts every
  * matching transaction, `uncategorized` the matches a backfill could still
  * categorize (no category, not manual), and `transactions` lists up to 20
  * matches, newest first.
@@ -24,11 +30,25 @@ export async function GET(request: NextRequest) {
     if (!keyword.ok) {
       return NextResponse.json(failureBody(keyword), { status: keyword.status });
     }
+    const rawMatchType =
+      request.nextUrl.searchParams.get("matchType") ?? "contains";
+    if (!(RULE_MATCH_TYPES as readonly string[]).includes(rawMatchType)) {
+      return NextResponse.json(
+        failureBody({
+          error: `Field 'matchType' must be one of: ${RULE_MATCH_TYPES.join(", ")}`,
+          field: "matchType",
+        }),
+        { status: 400 }
+      );
+    }
+    const matchType = rawMatchType as RuleMatchType;
 
     // A soft-deleted row (V033) is not a match a rule could ever categorize.
     // The rule matches the raw scraped `description`, not the custom override.
     const matches = and(
-      sql`strpos(lower(${transactions.description}), lower(${keyword.value})) > 0`,
+      matchType === "exact"
+        ? sql`lower(btrim(${transactions.description})) = lower(${keyword.value})`
+        : sql`strpos(lower(${transactions.description}), lower(${keyword.value})) > 0`,
       notDeleted
     );
     const uncategorized = sql<number>`count(*) FILTER (
@@ -68,6 +88,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({
       keyword: keyword.value,
+      matchType,
       total: counts.total,
       uncategorized: counts.uncategorized,
       transactions: rows,

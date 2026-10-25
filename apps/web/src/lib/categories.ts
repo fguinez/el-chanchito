@@ -12,6 +12,20 @@ export const RULE_KEYWORD_MAX_LENGTH = 100;
 export const RULE_PRIORITY_MIN = -1000;
 export const RULE_PRIORITY_MAX = 1000;
 
+/** How a rule's keyword matches a description (V041): "contains" = the
+ *  case-insensitive literal substring of V021, "exact" = trimmed,
+ *  case-insensitive equality. An exact match wins over any contains match. */
+export const RULE_MATCH_TYPES = ["contains", "exact"] as const;
+export type RuleMatchType = (typeof RULE_MATCH_TYPES)[number];
+
+/** The partial unique index allowing one exact rule per keyword (V041), and
+ *  the 400 a write that would break it gets. */
+export const EXACT_KEYWORD_INDEX = "uq_category_rules_exact_keyword";
+export const EXACT_KEYWORD_CLASH = {
+  error: "Ya existe una regla exacta para esa descripción",
+  field: "keyword",
+};
+
 /** Icons a category may use: kebab-case lucide names, the first eight being
  *  the V007 seeds. The UI maps each name to its lucide component. */
 export const CATEGORY_ICON_NAMES = [
@@ -56,6 +70,7 @@ export type NormalizedRuleInput = {
   keyword: string;
   categoryId: string;
   priority: number;
+  matchType: RuleMatchType;
 };
 
 export type ValidationFailure = {
@@ -112,10 +127,17 @@ function normalizeIcon(raw: unknown): ValidationResult<CategoryIconName | null> 
   return { ok: true, value: raw as CategoryIconName };
 }
 
+/** Strip leading and trailing spaces only, as PostgreSQL's btrim() does: the
+ *  rule trigger compares with btrim(), so a JS trim() that also strips tabs or
+ *  NBSPs would store a keyword its own description no longer matches. */
+export function trimKeyword(raw: string): string {
+  return raw.replace(/^ +| +$/g, "");
+}
+
 /** Trim and lowercase a rule keyword; 1..100 characters after trimming. Used
  *  by rule writes and by the preview, so both match the same text. */
 export function normalizeKeyword(raw: unknown): ValidationResult<string> {
-  const keyword = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  const keyword = typeof raw === "string" ? trimKeyword(raw).toLowerCase() : "";
   if (keyword === "" || keyword.length > RULE_KEYWORD_MAX_LENGTH) {
     return fail(
       `Field 'keyword' must be a string of 1 to ${RULE_KEYWORD_MAX_LENGTH} characters`,
@@ -195,7 +217,8 @@ export function validateCategoryInput(
 
 /**
  * Validate and normalize a rule write. Create mode (default) requires
- * `keyword` and `categoryId` and defaults `priority` to 0. `{ partial: true }`
+ * `keyword` and `categoryId` and defaults `priority` to 0 and `matchType` to
+ * "contains". `{ partial: true }`
  * validates only the fields present, for PATCH, and rejects a body with none.
  * Whether the category exists is checked by the route.
  */
@@ -243,9 +266,21 @@ export function validateRuleInput(
     out.priority = 0;
   }
 
+  if (body.matchType !== undefined) {
+    if (!(RULE_MATCH_TYPES as readonly unknown[]).includes(body.matchType)) {
+      return fail(
+        `Field 'matchType' must be one of: ${RULE_MATCH_TYPES.join(", ")}`,
+        "matchType"
+      );
+    }
+    out.matchType = body.matchType as RuleMatchType;
+  } else if (!partial) {
+    out.matchType = "contains";
+  }
+
   if (partial && Object.keys(out).length === 0) {
     return fail(
-      "Request body must include at least one of: keyword, categoryId, priority"
+      "Request body must include at least one of: keyword, categoryId, priority, matchType"
     );
   }
   return { ok: true, value: out };

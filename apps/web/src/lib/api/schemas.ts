@@ -182,6 +182,12 @@ export const updateTransactionSchema = z
     error: "No updatable fields provided",
   });
 
+/** POST /api/transactions/[id]/category-rule: the category to give the row,
+ *  the rows with the same description and a rule for future ones. */
+export const transactionCategoryRuleSchema = z.object({
+  categoryId: rowId,
+});
+
 /** POST /api/transfers: money between two distinct products, both required.
  *  `from*`/`to*AccountId` are legacy aliases; ids come out lowercased, as
  *  Postgres returns them. */
