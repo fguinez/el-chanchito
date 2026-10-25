@@ -25,6 +25,7 @@ import {
   RULE_MATCH_TYPES,
   RULE_PRIORITY_MAX,
   RULE_PRIORITY_MIN,
+  trimKeyword,
   type RuleMatchType,
 } from "@/lib/categories";
 import { RulePreview } from "./RulePreview";
@@ -74,18 +75,18 @@ function AddRuleForm({
   const selectedCategoryId = categoriesById.has(categoryId) ? categoryId : "";
 
   function handleTest() {
-    if (!keyword.trim()) {
+    if (!trimKeyword(keyword)) {
       setError("Escribe una palabra clave para probarla");
       return;
     }
     setError(null);
-    setPreviewKeyword(keyword.trim());
+    setPreviewKeyword(trimKeyword(keyword));
   }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     const parsedPriority = parsePriority(priority);
-    if (!keyword.trim()) {
+    if (!trimKeyword(keyword)) {
       setError("La palabra clave es obligatoria");
       return;
     }

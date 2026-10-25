@@ -127,10 +127,17 @@ function normalizeIcon(raw: unknown): ValidationResult<CategoryIconName | null> 
   return { ok: true, value: raw as CategoryIconName };
 }
 
+/** Strip leading and trailing spaces only, as PostgreSQL's btrim() does: the
+ *  rule trigger compares with btrim(), so a JS trim() that also strips tabs or
+ *  NBSPs would store a keyword its own description no longer matches. */
+export function trimKeyword(raw: string): string {
+  return raw.replace(/^ +| +$/g, "");
+}
+
 /** Trim and lowercase a rule keyword; 1..100 characters after trimming. Used
  *  by rule writes and by the preview, so both match the same text. */
 export function normalizeKeyword(raw: unknown): ValidationResult<string> {
-  const keyword = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  const keyword = typeof raw === "string" ? trimKeyword(raw).toLowerCase() : "";
   if (keyword === "" || keyword.length > RULE_KEYWORD_MAX_LENGTH) {
     return fail(
       `Field 'keyword' must be a string of 1 to ${RULE_KEYWORD_MAX_LENGTH} characters`,

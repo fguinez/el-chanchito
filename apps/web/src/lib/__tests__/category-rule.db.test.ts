@@ -172,8 +172,19 @@ describe.skipIf(!ADMIN_URL)("category rule from a transaction (real PostgreSQL)"
     const target = await txn("COMERCIO EJEMPLO SPA\u00a0");
 
     const outcome = await apply(target, food);
+    // Saving it from the Categorías editor resends the keyword through the rules API.
+    const id = outcome.ok ? outcome.rule.id : "";
+    const patched = await ruleRoute.PATCH(
+      new NextRequest(`http://localhost:3000/api/categories/rules/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ keyword: "COMERCIO EJEMPLO SPA\u00a0 ", priority: 5 }),
+      }),
+      { params: Promise.resolve({ id }) }
+    );
 
     expect(outcome).toMatchObject({ ok: true, rule: { keyword: "comercio ejemplo spa\u00a0" } });
+    expect(await patched.json()).toMatchObject({ keyword: "comercio ejemplo spa\u00a0" });
     const future = await txn("COMERCIO EJEMPLO SPA\u00a0");
     expect((await categoryOf(future)).categoryId).toBe(food);
   });

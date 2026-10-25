@@ -13,7 +13,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatAmount, formatPlainDateEs } from "@/lib/utils";
-import type { RuleMatchType } from "@/lib/categories";
+import { trimKeyword, type RuleMatchType } from "@/lib/categories";
 import {
   CategoryLabel,
   plural,
@@ -90,7 +90,7 @@ export function RulePreview({
       <div className="flex items-start justify-between gap-3">
         <div>
           <p className="text-sm font-medium">
-            Prueba de &quot;{keyword.trim().toLowerCase()}&quot;
+            Prueba de &quot;{trimKeyword(keyword).toLowerCase()}&quot;
             {matchType === "exact" && " (exacta)"}
           </p>
           {state.status === "done" && state.result.total > 0 && (

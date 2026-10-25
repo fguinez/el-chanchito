@@ -11,6 +11,7 @@ import {
   RULE_MATCH_TYPES,
   RULE_PRIORITY_MAX,
   RULE_PRIORITY_MIN,
+  trimKeyword,
   type RuleMatchType,
 } from "@/lib/categories";
 import { RulePreview } from "./RulePreview";
@@ -80,7 +81,7 @@ export function RuleRow({
   }
 
   function handleTest() {
-    const keyword = (draft?.keyword ?? rule.keyword).trim();
+    const keyword = trimKeyword(draft?.keyword ?? rule.keyword);
     if (!keyword) {
       setError("Escribe una palabra clave para probarla");
       return;
@@ -90,7 +91,7 @@ export function RuleRow({
 
   async function handleSave() {
     if (!draft) return;
-    const keyword = draft.keyword.trim().toLowerCase();
+    const keyword = trimKeyword(draft.keyword).toLowerCase();
     const priority = parsePriority(draft.priority);
     if (!keyword) {
       setError("La palabra clave es obligatoria");

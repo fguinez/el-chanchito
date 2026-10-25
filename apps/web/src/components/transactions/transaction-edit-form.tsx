@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SELECT_CLASS } from "@/components/ui/native-select";
 import { parseNumberInput } from "@/lib/utils";
-import { RULE_KEYWORD_MAX_LENGTH } from "@/lib/categories";
+import { RULE_KEYWORD_MAX_LENGTH, trimKeyword } from "@/lib/categories";
 import type { TransactionDetail } from "@/app/api/transactions/[id]/route";
 import {
   ProductSelect,
@@ -59,7 +59,7 @@ export function TransactionEditForm({
   const [productId, setProductId] = useState(txn.productId);
   const [applyToSame, setApplyToSame] = useState(false);
   // The rule keys on the raw scraped description, which must fit a keyword.
-  const ruleKeyword = txn.description.trim();
+  const ruleKeyword = trimKeyword(txn.description);
   const keywordFits =
     ruleKeyword.length > 0 && ruleKeyword.length <= RULE_KEYWORD_MAX_LENGTH;
   // Not while the description is being edited: the rule would key on the

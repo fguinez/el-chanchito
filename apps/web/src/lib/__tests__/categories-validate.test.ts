@@ -189,6 +189,10 @@ describe("normalizeKeyword", () => {
     );
   });
 
+  it("trims only spaces, as PostgreSQL's btrim() does", () => {
+    expect(expectValue(normalizeKeyword(" EJEMPLO\u00a0\t "))).toBe("ejemplo\u00a0\t");
+  });
+
   it("does not escape % or _", () => {
     expect(expectValue(normalizeKeyword("50%_OFF"))).toBe("50%_off");
   });
