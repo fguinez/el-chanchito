@@ -314,7 +314,7 @@ export function TransactionEditForm({
 }
 
 /** "Regla creada; 2 transacciones similares actualizadas." */
-function ruleNotice(created: boolean, updated: number): string {
+export function ruleNotice(created: boolean, updated: number): string {
   const rule = created
     ? "Regla exacta creada"
     : "Se reutilizó la regla exacta existente con esta descripción (ahora apunta a esta categoría)";

@@ -127,6 +127,7 @@ describe("POST /api/transactions/[id]/category-rule", () => {
       }),
       ruleCreated: true,
       updatedCount: 2,
+      transactionUpdated: true,
     });
 
     // The keyword is locked before the lookup, which only reuses exact rules.

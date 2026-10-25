@@ -14,10 +14,14 @@ type Context = { params: Promise<{ id: string }> };
  * every one with the same description, now and from now on, in one database
  * transaction (see applyCategoryRuleFromTransaction). Body `{ categoryId }`.
  *
- * 200 `{ rule, ruleCreated, updatedCount }` (`updatedCount`: rows besides this
- * one); 400 `{ error, field, issues }` on a malformed id or body, an unknown
- * category or an empty or too long description; 404 for an unknown or deleted
- * transaction.
+ * With `onlyIfUncategorized: true` this row is only updated while it has no
+ * category and is not marked manual.
+ *
+ * 200 `{ rule, ruleCreated, updatedCount, transactionUpdated }`
+ * (`updatedCount`: rows besides this one; `transactionUpdated`: whether this
+ * one took the category); 400 `{ error, field, issues }` on a malformed id or
+ * body, an unknown category or an empty or too long description; 404 for an
+ * unknown or deleted transaction.
  */
 export async function POST(request: NextRequest, { params }: Context) {
   const { id: rawId } = await params;
@@ -34,7 +38,9 @@ export async function POST(request: NextRequest, { params }: Context) {
 
   try {
     const outcome = await db.transaction((tx) =>
-      applyCategoryRuleFromTransaction(tx, id, parsed.data.categoryId)
+      applyCategoryRuleFromTransaction(tx, id, parsed.data.categoryId, {
+        onlyIfUncategorized: parsed.data.onlyIfUncategorized,
+      })
     );
     if (!outcome.ok) {
       if (outcome.status === 404) {
@@ -49,6 +55,7 @@ export async function POST(request: NextRequest, { params }: Context) {
       rule: outcome.rule,
       ruleCreated: outcome.ruleCreated,
       updatedCount: outcome.updatedCount,
+      transactionUpdated: outcome.transactionUpdated,
     });
   } catch (error) {
     // Only a rules-API write racing this one (it does not take the keyword
