@@ -1,14 +1,28 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { WandSparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CategoriesCard } from "@/components/categories/CategoriesCard";
 import { RulesCard } from "@/components/categories/RulesCard";
 import { SuggestionsCard } from "@/components/categories/SuggestionsCard";
 import { plural, type ApiCategory } from "@/components/categories/shared";
+import { TransactionDetailSheet } from "@/components/transactions/transaction-detail-sheet";
+import { useSelectedTransaction } from "@/components/transactions/use-selected-transaction";
 
+// useSearchParams needs a Suspense boundary for the static prerender.
 export default function CategoriesPage() {
+  return (
+    <Suspense
+      fallback={<p className="text-muted-foreground">Cargando...</p>}
+    >
+      <CategoriesView />
+    </Suspense>
+  );
+}
+
+function CategoriesView() {
+  const { selectedTxnId, selectTransaction } = useSelectedTransaction();
   const [categories, setCategories] = useState<ApiCategory[] | null>(null);
   const [loadError, setLoadError] = useState(false);
   // Bumped on every reload so open rule previews refetch.
@@ -119,6 +133,11 @@ export default function CategoriesPage() {
           <RulesCard categories={categories} version={version} onChange={load} />
         </>
       )}
+      <TransactionDetailSheet
+        transactionId={selectedTxnId}
+        onClose={() => selectTransaction(null)}
+        onChanged={load}
+      />
     </div>
   );
 }
