@@ -37,6 +37,10 @@ describe("parseExpensesFilters", () => {
     expect(parse("institution=banco_uno")).toEqual({ institution: "banco_uno" });
   });
 
+  it("lowercases the institution slug", () => {
+    expect(parse("institution=Banco-Uno")).toEqual({ institution: "banco-uno" });
+  });
+
   it("drops an end before the start", () => {
     expect(parse("from=2026-02-01&to=2026-01-01")).toEqual({ from: "2026-02-01" });
   });

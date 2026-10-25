@@ -90,8 +90,15 @@ describe("GET /api/transactions filters", () => {
     expect(whereParams(select)).toContain("banco-uno");
   });
 
+  it("matches an institution slug case-insensitively", async () => {
+    await get("?institution=Banco-Uno");
+    const select = fake.queries.find((q) => q.op === "select")!;
+    expect(whereParams(select)).toContain("banco-uno");
+  });
+
   it.each([
     ["?from=2026-02-30", "from"],
+    ["?institution=a%20b", "institution"],
     ["?from=2026-02-01&to=2026-01-01", "to"],
     ["?categoryId=food", "categoryId"],
   ])("rejects %s on %s before querying", async (query, field) => {

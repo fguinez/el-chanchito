@@ -132,8 +132,13 @@ const categoryFilter = z.union([
   rowId.transform((id) => id.toLowerCase()),
 ]);
 
-/** An institution slug. */
-const institutionSlug = z.string().trim().min(1);
+/** An institution slug; slugs are lowercase, so any case matches. */
+const institutionSlug = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .regex(/^[a-z0-9][a-z0-9_-]*$/)
+  .max(64);
 
 /** `from` and `to`, when both given, must not run backwards. */
 function windowInOrder(query: { from?: string; to?: string }): boolean {

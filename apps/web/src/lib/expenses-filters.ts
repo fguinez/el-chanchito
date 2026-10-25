@@ -42,6 +42,9 @@ export function parseExpensesFilters(params: URLSearchParams): ExpensesFilters {
   const product = params.get("product");
   if (product && UUID.test(product)) filters.product = product.toLowerCase();
   const institution = params.get("institution");
-  if (institution && SLUG.test(institution)) filters.institution = institution;
+  // Slugs are lowercase; the API matches them exactly.
+  if (institution && SLUG.test(institution)) {
+    filters.institution = institution.toLowerCase();
+  }
   return filters;
 }
