@@ -1,9 +1,11 @@
 "use client";
 
 // Inicio's "Gastos por categoría": the five categories that spent the most
-// this month next to last month, with the change (red when spending went up).
-// Each row opens the category's detail panel on Categorías.
+// this month so far next to the same days of last month, with the change (red
+// when spending went up). Each row opens the category's detail panel on
+// Categorías.
 
+import { useState } from "react";
 import Link from "next/link";
 import { ArrowDown, ArrowUp } from "lucide-react";
 import {
@@ -15,29 +17,40 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { useCategoryTrends } from "@/components/charts/use-category-trends";
+import { useCategorySpend } from "@/components/charts/use-category-spend";
 import { categoryDetailHref } from "@/lib/category-spend";
 import {
+  compareSpend,
+  monthToDateWindows,
   percentChange,
   topThisMonth,
-  type CategoryTrend,
+  type MonthComparison,
 } from "@/lib/category-trends";
 import { cn, formatCLP, formatPercent } from "@/lib/utils";
 
 const TOP_COUNT = 5;
 
 export function CategoryTrendsCard() {
-  // This month and last month are all the card compares.
-  const { trends, error } = useCategoryTrends(2);
-  const top = trends ? topThisMonth(trends.values(), TOP_COUNT) : null;
+  // Fixed at mount, so a page left open past midnight keeps one window.
+  const [windows] = useState(() => monthToDateWindows(new Date()));
+  const current = useCategorySpend(new URLSearchParams(windows.current).toString());
+  const previous = useCategorySpend(new URLSearchParams(windows.previous).toString());
+  const error = current.error || previous.error;
+  const top =
+    current.data && previous.data
+      ? topThisMonth(
+          compareSpend(current.data.categories, previous.data.categories),
+          TOP_COUNT
+        )
+      : null;
 
   return (
     <Card>
       <CardHeader>
         <CardTitle className="text-base">Gastos por categoría</CardTitle>
         <CardDescription>
-          Las {TOP_COUNT} categorías con más gasto este mes, contra el mes
-          anterior completo (CLP, sin transferencias internas).
+          Las {TOP_COUNT} categorías con más gasto este mes, contra los
+          mismos días del mes anterior (CLP, sin transferencias internas).
         </CardDescription>
         <CardAction>
           <Button asChild variant="outline" size="sm">
@@ -99,7 +112,7 @@ export function CategoryTrendsCard() {
 }
 
 /** The change from last month; more spending reads red, less reads green. */
-function Change({ trend }: { trend: CategoryTrend }) {
+function Change({ trend }: { trend: MonthComparison }) {
   const change = percentChange(trend.thisMonth, trend.lastMonth);
   if (change === null) {
     return (
@@ -108,6 +121,7 @@ function Change({ trend }: { trend: CategoryTrend }) {
   }
   const up = change > 0;
   const Icon = up ? ArrowUp : ArrowDown;
+  const direction = change === 0 ? "Sin cambio" : up ? "Sube" : "Baja";
   return (
     <span
       className={cn(
@@ -118,9 +132,9 @@ function Change({ trend }: { trend: CategoryTrend }) {
             ? "text-red-600"
             : "text-green-600"
       )}
-      aria-label={`${up ? "Sube" : "Baja"} ${formatPercent(Math.abs(change))} respecto al mes anterior`}
     >
       {change !== 0 && <Icon className="size-3" aria-hidden />}
+      <span className="sr-only">{direction} </span>
       {formatPercent(Math.abs(change))}
     </span>
   );

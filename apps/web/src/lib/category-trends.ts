@@ -6,6 +6,7 @@
 import {
   UNCATEGORIZED_PARAM,
   monthWindow,
+  type CategorySpend,
   type CategorySpendGroup,
 } from "@/lib/category-spend";
 
@@ -40,15 +41,19 @@ export function trailingMonthsWindow(
 /** How many full months before the current one the average covers. */
 export const AVERAGE_MONTHS = 3;
 
-export interface CategoryTrend {
+/** One category's spend this month next to last month. */
+export interface MonthComparison {
   /** Null for "Sin categoría". */
   categoryId: string | null;
   name: string;
   color: string;
   thisMonth: number;
   lastMonth: number;
-  /** Mean of the AVERAGE_MONTHS full months before this one, empty months
-   *  counting as zero. */
+}
+
+export interface CategoryTrend extends MonthComparison {
+  /** Mean of the (up to) AVERAGE_MONTHS full months before this one within
+   *  the series, empty months counting as zero. */
   average: number;
   /** Spend per month of the requested series, oldest first, ending with
    *  this month. */
@@ -96,9 +101,11 @@ export function categoryTrends(
     const at = (monthsBack: number) => trend.series[months - 1 - monthsBack] ?? 0;
     trend.thisMonth = at(0);
     trend.lastMonth = at(1);
+    // A series shorter than AVERAGE_MONTHS + 1 averages the months it has.
+    const covered = Math.min(AVERAGE_MONTHS, months - 1);
     let sum = 0;
-    for (let back = 1; back <= AVERAGE_MONTHS; back++) sum += at(back);
-    trend.average = sum / AVERAGE_MONTHS;
+    for (let back = 1; back <= covered; back++) sum += at(back);
+    trend.average = covered > 0 ? sum / covered : 0;
   }
   return trends;
 }
@@ -111,12 +118,66 @@ export function percentChange(current: number, previous: number): number | null 
 }
 
 /** The `count` categories that spent the most this month, largest first. */
-export function topThisMonth(
-  trends: Iterable<CategoryTrend>,
+export function topThisMonth<T extends MonthComparison>(
+  trends: Iterable<T>,
   count: number
-): CategoryTrend[] {
+): T[] {
   return [...trends]
     .filter((t) => t.thisMonth > 0)
     .sort((a, b) => b.thisMonth - a.thisMonth || a.name.localeCompare(b.name, "es"))
     .slice(0, count);
+}
+
+/** YYYY-MM-DD of a date, in local time. */
+function dayOf(date: Date): string {
+  return `${monthOf(date)}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+/**
+ * Month to date: day 1 of `today`'s month through `today`, and the same span
+ * of the month before (through the same day, clamped to that month's
+ * length), so an early-month figure is compared like for like.
+ */
+export function monthToDateWindows(today: Date): {
+  current: { from: string; to: string };
+  previous: { from: string; to: string };
+} {
+  const month = monthOf(today);
+  const previous = monthWindow(shiftMonth(month, -1));
+  const previousLastDay = Number(previous.to.slice(8));
+  const day = Math.min(today.getDate(), previousLastDay);
+  return {
+    current: { from: `${month}-01`, to: dayOf(today) },
+    previous: {
+      from: previous.from,
+      to: `${previous.to.slice(0, 8)}${String(day).padStart(2, "0")}`,
+    },
+  };
+}
+
+/** Every category in either spend list, this month's figure next to last
+ *  month's; a category missing from one side spent nothing there. */
+export function compareSpend(
+  thisMonth: readonly CategorySpend[],
+  lastMonth: readonly CategorySpend[]
+): MonthComparison[] {
+  const rows = new Map<string, MonthComparison>();
+  const row = (c: CategorySpend) => {
+    const key = trendKey(c.categoryId);
+    let found = rows.get(key);
+    if (!found) {
+      found = {
+        categoryId: c.categoryId,
+        name: c.name,
+        color: c.color,
+        thisMonth: 0,
+        lastMonth: 0,
+      };
+      rows.set(key, found);
+    }
+    return found;
+  };
+  for (const c of thisMonth) row(c).thisMonth += c.amount;
+  for (const c of lastMonth) row(c).lastMonth += c.amount;
+  return [...rows.values()];
 }

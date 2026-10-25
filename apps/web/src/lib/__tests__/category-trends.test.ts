@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   categoryTrends,
+  compareSpend,
   monthOf,
+  monthToDateWindows,
   percentChange,
   shiftMonth,
   topThisMonth,
@@ -87,6 +89,10 @@ describe("categoryTrends", () => {
     expect(fun.average).toBeCloseTo(1_000_000 / 3);
   });
 
+  it("averages nothing with a one-month series", () => {
+    expect(categoryTrends(groups, "2026-01", 1).get(FOOD)!.average).toBe(0);
+  });
+
   it("keys uncategorized spend as none", () => {
     expect(categoryTrends(groups, "2026-01", 6).get("none")?.thisMonth).toBe(1_000_000);
   });
@@ -94,8 +100,8 @@ describe("categoryTrends", () => {
   it("ignores groups outside the window", () => {
     const trends = categoryTrends(groups, "2026-01", 2);
     expect(trends.get(FOOD)!.series).toEqual([2_000_000, 2_500_000]);
-    // The window is too short for the full average: missing months are zero.
-    expect(trends.get(FOOD)!.average).toBe(2_000_000 / 3);
+    // The window is too short for the full average: it averages what it has.
+    expect(trends.get(FOOD)!.average).toBe(2_000_000);
   });
 });
 
@@ -125,5 +131,41 @@ describe("topThisMonth", () => {
       FOOD,
     ]);
     expect(topThisMonth(trends.values(), 1)).toHaveLength(1);
+  });
+});
+
+describe("monthToDateWindows", () => {
+  it("compares the same span of last month", () => {
+    expect(monthToDateWindows(new Date(2026, 1, 5))).toEqual({
+      current: { from: "2026-02-01", to: "2026-02-05" },
+      previous: { from: "2026-01-01", to: "2026-01-05" },
+    });
+  });
+
+  it("clamps to a shorter last month", () => {
+    expect(monthToDateWindows(new Date(2026, 2, 31)).previous).toEqual({
+      from: "2026-02-01",
+      to: "2026-02-28",
+    });
+  });
+
+  it("crosses the year boundary", () => {
+    expect(monthToDateWindows(new Date(2026, 0, 10)).previous).toEqual({
+      from: "2025-12-01",
+      to: "2025-12-10",
+    });
+  });
+});
+
+describe("compareSpend", () => {
+  it("pairs each category's two months, zero where it is missing", () => {
+    const rows = compareSpend(
+      [spend(FOOD, 2_500_000), spend(null, 999_999)],
+      [spend(FOOD, 1_000_000), spend(FUN, 1_000_000)]
+    );
+    const byId = new Map(rows.map((r) => [r.categoryId, r]));
+    expect(byId.get(FOOD)).toMatchObject({ thisMonth: 2_500_000, lastMonth: 1_000_000 });
+    expect(byId.get(FUN)).toMatchObject({ thisMonth: 0, lastMonth: 1_000_000 });
+    expect(byId.get(null)).toMatchObject({ thisMonth: 999_999, lastMonth: 0 });
   });
 });
