@@ -339,7 +339,7 @@ export default function ProductDetailPage() {
         <MonthlyFlowCard product={product} transactions={transactions} />
       )}
       {TRANSACTION_KINDS.has(product.kind) && (
-        <CategorySpendCard key={product.id} productId={product.id} />
+        <CategorySpendCard key={product.id} scope={{ productId: product.id }} />
       )}
 
       {/* Balance history */}
