@@ -139,7 +139,6 @@ function CategoriesView() {
           <CategoryDetailSheet
             categories={categories}
             refreshKey={version}
-            onChanged={load}
           />
         </>
       )}

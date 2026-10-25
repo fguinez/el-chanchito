@@ -21,7 +21,6 @@ import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableRow } from "@/components/ui/table";
 import { CategoryStackedBars } from "@/components/charts/category-stacked-bars";
 import { useCategorySpend } from "@/components/charts/use-category-spend";
-import { TransactionDetailSheet } from "@/components/transactions/transaction-detail-sheet";
 import { useSelectedTransaction } from "@/components/transactions/use-selected-transaction";
 import { hrefWithSearchParam } from "@/lib/transaction-selection";
 import {
@@ -60,20 +59,19 @@ interface ListedTransaction {
 export function CategoryDetailSheet({
   categories,
   refreshKey,
-  onChanged,
 }: {
   categories: ApiCategory[];
-  /** Bumped when the page reloads (after `onChanged` too), so the panel's
-   *  figures refetch. */
+  /** Bumped when the page reloads (after a transaction edit too), so the
+   *  panel's figures refetch. */
   refreshKey: number;
-  /** A transaction changed from the panel (recategorized, edited, deleted). */
-  onChanged: () => void;
 }) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const param = searchParams.get(CATEGORY_PARAM);
-  const { selectedTxnId, selectTransaction, rowProps } = useSelectedTransaction();
+  // The page's own TransactionDetailSheet handles `?txn=`; one here too would
+  // open a second, stacked sheet for the same transaction.
+  const { rowProps } = useSelectedTransaction();
 
   // While closing, keep the last category so the exit animation does not
   // flash an empty panel.
@@ -87,31 +85,24 @@ export function CategoryDetailSheet({
     );
 
   return (
-    <>
-      <Sheet
-        open={param !== null}
-        onOpenChange={(open) => {
-          if (!open) close();
-        }}
-      >
-        <SheetContent className="gap-0 sm:max-w-xl">
-          {shown !== null && (
-            <CategoryDetailBody
-              key={shown}
-              param={shown}
-              categories={categories}
-              refreshKey={refreshKey}
-              rowProps={rowProps}
-            />
-          )}
-        </SheetContent>
-      </Sheet>
-      <TransactionDetailSheet
-        transactionId={selectedTxnId}
-        onClose={() => selectTransaction(null)}
-        onChanged={onChanged}
-      />
-    </>
+    <Sheet
+      open={param !== null}
+      onOpenChange={(open) => {
+        if (!open) close();
+      }}
+    >
+      <SheetContent className="gap-0 sm:max-w-xl">
+        {shown !== null && (
+          <CategoryDetailBody
+            key={shown}
+            param={shown}
+            categories={categories}
+            refreshKey={refreshKey}
+            rowProps={rowProps}
+          />
+        )}
+      </SheetContent>
+    </Sheet>
   );
 }
 
