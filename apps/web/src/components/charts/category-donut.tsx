@@ -9,11 +9,11 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
 import { cn, formatAmount, formatPercent } from "@/lib/utils";
-import type { CategorySpend } from "@/lib/category-spend";
+import { UNCATEGORIZED_PARAM, type CategorySpend } from "@/lib/category-spend";
 
-/** Stable key of a category, "none" for "Sin categoría". */
+/** Stable key of a category, UNCATEGORIZED_PARAM for "Sin categoría". */
 export function categoryKey(categoryId: string | null): string {
-  return categoryId ?? "none";
+  return categoryId ?? UNCATEGORIZED_PARAM;
 }
 
 export function CategoryDonut({

@@ -24,6 +24,7 @@ import {
   monthToDateWindows,
   percentChange,
   topThisMonth,
+  trendKey,
   type MonthComparison,
 } from "@/lib/category-trends";
 import { cn, formatCLP, formatPercent } from "@/lib/utils";
@@ -83,7 +84,7 @@ export function CategoryTrendsCard() {
               <span className="w-20 text-right">Cambio</span>
             </li>
             {top.map((trend) => (
-              <li key={trend.categoryId ?? "none"}>
+              <li key={trendKey(trend.categoryId)}>
                 <Link
                   href={categoryDetailHref(trend.categoryId)}
                   className="flex items-center gap-2 rounded-md px-2 py-1 hover:bg-muted"
