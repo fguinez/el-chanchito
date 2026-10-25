@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useSelectedTransaction } from "@/components/transactions/use-selected-transaction";
 import { formatAmount, formatPlainDateEs } from "@/lib/utils";
 import { trimKeyword, type RuleMatchType } from "@/lib/categories";
 import {
@@ -60,6 +61,7 @@ export function RulePreview({
   onClose: () => void;
 }) {
   const [state, setState] = useState<PreviewState>({ status: "loading" });
+  const { rowProps } = useSelectedTransaction();
 
   useEffect(() => {
     const controller = new AbortController();
@@ -138,7 +140,7 @@ export function RulePreview({
                   ? categoriesById.get(txn.categoryId)
                   : undefined;
                 return (
-                  <TableRow key={txn.id}>
+                  <TableRow key={txn.id} {...rowProps(txn.id)}>
                     <TableCell className="text-muted-foreground">
                       {formatPlainDateEs(txn.transactionDate)}
                     </TableCell>
