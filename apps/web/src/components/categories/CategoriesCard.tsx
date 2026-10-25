@@ -150,7 +150,7 @@ export function CategoriesCard({
 }) {
   const { trends, error: trendsError } = useCategoryTrends(TREND_MONTHS, version);
   const getValue = useCallback(
-    (category: ApiCategory, key: CategorySortKey): string | number => {
+    (category: ApiCategory, key: CategorySortKey): string | number | null => {
       switch (key) {
         case "nombre":
           return category.name;
@@ -219,6 +219,7 @@ export function CategoriesCard({
                   category={category}
                   onChange={onChange}
                   trends={trends}
+                  trendsError={trendsError}
                 />
               ))}
               <UncategorizedRow trends={trends} trailingCells={3} />

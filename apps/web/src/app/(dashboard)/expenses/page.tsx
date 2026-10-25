@@ -142,6 +142,8 @@ function ExpensesView() {
   const [refreshKey, setRefreshKey] = useState(0);
   const refresh = useCallback(() => setRefreshKey((n) => n + 1), []);
   const [hasMore, setHasMore] = useState(false);
+  // False until the first list response (or failure) arrives.
+  const [listLoaded, setListLoaded] = useState(false);
   const [description, setDescription] = useState("");
   const [place, setPlace] = useState("");
   const [amount, setAmount] = useState("");
@@ -189,8 +191,13 @@ function ExpensesView() {
     return params.toString();
   }, [scopeQuery, filters.category]);
   // "Cargar más" pages within one filter set; new filters start over on the
-  // first page in the same render, so the list fetches once.
+  // first page in the same render, so the list fetches once. Resetting the
+  // stored paging (not only reading past it) keeps a filter set seen before
+  // from coming back with its old, expanded limit.
   const [paging, setPaging] = useState({ filterQuery, limit: PAGE_SIZE });
+  if (paging.filterQuery !== filterQuery) {
+    setPaging({ filterQuery, limit: PAGE_SIZE });
+  }
   const limit = paging.filterQuery === filterQuery ? paging.limit : PAGE_SIZE;
   const listQuery = `${filterQuery}${filterQuery ? "&" : ""}limit=${limit}`;
   const spend = useCategorySpend(scopeQuery.toString(), refreshKey);
@@ -211,9 +218,12 @@ function ExpensesView() {
         if (signal.aborted) return;
         setTransactions(rows);
         setHasMore(rows.length >= limit);
+        setListLoaded(true);
       })
       .catch((error) => {
-        if (!signal.aborted) console.error(error);
+        if (signal.aborted) return;
+        console.error(error);
+        setListLoaded(true);
       });
     return () => controller.abort();
   }, [listQuery, limit, refreshKey]);
@@ -303,9 +313,14 @@ function ExpensesView() {
   // The summary sums the rows loaded so far ("Cargar más" adds more), unlike
   // the donut, which covers the whole scope.
   const loadedLabel =
-    transactions.length === 1
-      ? "en la transacción cargada"
-      : `en las ${transactions.length} transacciones cargadas`;
+    transactions.length === 0
+      ? periodLabel
+      : transactions.length === 1
+        ? "en la transacción cargada"
+        : `en las ${transactions.length} transacciones cargadas`;
+  /** A summary figure, or a placeholder until the first page arrives. */
+  const summaryValue = (value: number) =>
+    listLoaded ? formatCLP(value) : "...";
 
   const handleAdd = async () => {
     const parsedAmount = parseNumberInput(amount);
@@ -392,7 +407,7 @@ function ExpensesView() {
           <CardHeader className="pb-2">
             <CardDescription>Gastos {loadedLabel}</CardDescription>
             <CardTitle className="text-xl text-red-600">
-              {formatCLP(Math.abs(totalExpenses))}
+              {summaryValue(Math.abs(totalExpenses))}
             </CardTitle>
           </CardHeader>
         </Card>
@@ -400,7 +415,7 @@ function ExpensesView() {
           <CardHeader className="pb-2">
             <CardDescription>Ingresos {loadedLabel}</CardDescription>
             <CardTitle className="text-xl text-green-600">
-              {formatCLP(totalIncome)}
+              {summaryValue(totalIncome)}
             </CardTitle>
           </CardHeader>
         </Card>
@@ -408,7 +423,7 @@ function ExpensesView() {
           <CardHeader className="pb-2">
             <CardDescription>Neto {loadedLabel}</CardDescription>
             <CardTitle className="text-xl">
-              {formatCLP(totalIncome + totalExpenses)}
+              {summaryValue(totalIncome + totalExpenses)}
             </CardTitle>
           </CardHeader>
         </Card>
@@ -567,8 +582,8 @@ function ExpensesView() {
           <CardTitle>Gastos por categoría</CardTitle>
           <CardDescription>
             Lo gastado {periodLabel} en cada categoría, en{" "}
-            {spend.data?.currency ?? CLP} y sin transferencias internas. Elige una categoría para filtrar la
-            lista.
+            {spend.data?.currency ?? CLP} y sin transferencias internas. Elige
+            una categoría para filtrar la lista.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -606,7 +621,9 @@ function ExpensesView() {
             <div>
               <CardTitle>Transacciones {periodLabel}</CardTitle>
               <CardDescription>
-                {transactions.length} transacciones
+                {listLoaded
+                  ? `${transactions.length} transacciones`
+                  : "Cargando..."}
               </CardDescription>
             </div>
             <div>
@@ -627,7 +644,9 @@ function ExpensesView() {
           </div>
         </CardHeader>
         <CardContent>
-          {transactions.length === 0 ? (
+          {!listLoaded ? (
+            <p className="text-muted-foreground">Cargando...</p>
+          ) : transactions.length === 0 ? (
             <p className="text-muted-foreground">
               {filterChips.length > 0
                 ? "No hay transacciones con estos filtros."

@@ -61,11 +61,14 @@ export function CategoryRow({
   category,
   onChange,
   trends,
+  trendsError = false,
 }: {
   category: ApiCategory;
   onChange: () => void;
   /** Spend per category (see CategoryTrends); null while loading. */
   trends: Map<string, CategoryTrend> | null;
+  /** The spend fetch failed: `trends` stays null for good. */
+  trendsError?: boolean;
 }) {
   const openRow = useOpenCategoryRow();
   // null while viewing; the fields being edited otherwise.
@@ -203,6 +206,7 @@ export function CategoryRow({
       </TableCell>
       <CategoryTrendCells
         trends={trends}
+        error={trendsError}
         categoryId={category.id}
         color={category.color}
       />

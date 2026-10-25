@@ -51,9 +51,9 @@ interface InstitutionsResponse {
   }[];
 }
 
-/** Active products grouped by institution, optionally only one currency
- *  (the Gastos form is CLP-only). `error` is true when the fetch failed. */
-export function useActiveProducts(currency?: string): {
+/** Active products grouped by institution (narrow them with onlyCurrency).
+ *  `error` is true when the fetch failed. */
+export function useActiveProducts(): {
   institutions: PickerInstitution[];
   error: boolean;
 } {
@@ -73,9 +73,7 @@ export function useActiveProducts(currency?: string): {
               slug: inst.slug,
               name: inst.name,
               products: inst.products
-                .filter(
-                  (p) => p.isActive && (!currency || p.currency === currency)
-                )
+                .filter((p) => p.isActive)
                 .map((p) => ({ id: p.id, name: p.name, currency: p.currency })),
             }))
             .filter((inst) => inst.products.length > 0)
@@ -83,7 +81,7 @@ export function useActiveProducts(currency?: string): {
       })
       .catch(() => setError(true));
     return () => controller.abort();
-  }, [currency]);
+  }, []);
   return { institutions, error };
 }
 

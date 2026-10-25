@@ -28,12 +28,13 @@ export const TREND_MONTHS = 6;
 
 export type TrendSortKey = "este_mes" | "mes_anterior" | "promedio";
 
-/** The sort value of a trend column; zero when the category spent nothing. */
+/** The sort value of a trend column; null (sorted last) when the category
+ *  has no trend: it spent nothing, or the figures are not loaded. */
 export function trendSortValue(
   trend: CategoryTrend | undefined,
   key: TrendSortKey
-): number {
-  if (!trend) return 0;
+): number | null {
+  if (!trend) return null;
   if (key === "este_mes") return trend.thisMonth;
   if (key === "mes_anterior") return trend.lastMonth;
   return trend.average;
@@ -68,13 +69,16 @@ export function CategoryTrendHeads({
 }
 
 /** The four spend cells of one category; `trends` is null while loading (or
- *  after an error), and a category missing from it spent nothing. */
+ *  after an error, which `error` tells apart), and a category missing from it
+ *  spent nothing. */
 export function CategoryTrendCells({
   trends,
+  error = false,
   categoryId,
   color,
 }: {
   trends: Map<string, CategoryTrend> | null;
+  error?: boolean;
   categoryId: string | null;
   color: string | null;
 }) {
@@ -83,7 +87,14 @@ export function CategoryTrendCells({
       <>
         {[0, 1, 2, 3].map((i) => (
           <TableCell key={i} className="text-right text-muted-foreground">
-            ...
+            {error ? (
+              <>
+                <span aria-hidden>-</span>
+                <span className="sr-only">Sin datos</span>
+              </>
+            ) : (
+              "..."
+            )}
           </TableCell>
         ))}
       </>
@@ -127,6 +138,15 @@ export function useOpenCategoryRow() {
         className: "cursor-pointer",
         onClick: (e: MouseEvent<HTMLTableRowElement>) => {
           if ((e.target as HTMLElement).closest("button, input, a, select")) return;
+          // Let users select and copy cell text without opening.
+          const selection = window.getSelection();
+          if (
+            selection?.toString() &&
+            selection.anchorNode &&
+            e.currentTarget.contains(selection.anchorNode)
+          ) {
+            return;
+          }
           router.replace(categoryDetailHref(categoryId), { scroll: false });
         },
       };
