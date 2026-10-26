@@ -4,6 +4,7 @@ import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { WandSparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CategoriesCard } from "@/components/categories/CategoriesCard";
+import { CategoryDetailSheet } from "@/components/categories/CategoryDetailSheet";
 import { RulesCard } from "@/components/categories/RulesCard";
 import { SuggestionsCard } from "@/components/categories/SuggestionsCard";
 import { plural, type ApiCategory } from "@/components/categories/shared";
@@ -124,13 +125,21 @@ function CategoriesView() {
               desactualizado.
             </p>
           )}
-          <CategoriesCard categories={categories} onChange={load} />
+          <CategoriesCard
+            categories={categories}
+            version={version}
+            onChange={load}
+          />
           <SuggestionsCard
             categories={categories}
             version={version}
             onChange={load}
           />
           <RulesCard categories={categories} version={version} onChange={load} />
+          <CategoryDetailSheet
+            categories={categories}
+            refreshKey={version}
+          />
         </>
       )}
       <TransactionDetailSheet

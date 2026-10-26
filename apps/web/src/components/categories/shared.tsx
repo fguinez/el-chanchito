@@ -54,9 +54,7 @@ export const SELECT_CLASS =
 export const COLOR_INPUT_CLASS =
   "h-9 w-12 shrink-0 cursor-pointer rounded-md border border-input bg-transparent p-1 shadow-xs disabled:cursor-not-allowed disabled:opacity-50";
 
-/** The color new categories start with (the seeded "Otros" color); also
- *  shown in the color input while a category has no color of its own. */
-export const DEFAULT_CATEGORY_COLOR = "#94a3b8";
+export { DEFAULT_CATEGORY_COLOR } from "@/lib/categories";
 
 /** Spanish labels of the rule match types (V041). */
 export const MATCH_TYPE_LABELS: Record<RuleMatchType, string> = {

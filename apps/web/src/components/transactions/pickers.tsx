@@ -31,6 +31,7 @@ export function useCategories(): CategoryOption[] {
 export interface PickerProduct {
   id: string;
   name: string;
+  currency: string;
 }
 export interface PickerInstitution {
   slug: string;
@@ -50,9 +51,9 @@ interface InstitutionsResponse {
   }[];
 }
 
-/** Active products grouped by institution, optionally only one currency
- *  (the Gastos form is CLP-only). `error` is true when the fetch failed. */
-export function useActiveProducts(currency?: string): {
+/** Active products grouped by institution (narrow them with onlyCurrency).
+ *  `error` is true when the fetch failed. */
+export function useActiveProducts(): {
   institutions: PickerInstitution[];
   error: boolean;
 } {
@@ -72,18 +73,29 @@ export function useActiveProducts(currency?: string): {
               slug: inst.slug,
               name: inst.name,
               products: inst.products
-                .filter(
-                  (p) => p.isActive && (!currency || p.currency === currency)
-                )
-                .map((p) => ({ id: p.id, name: p.name })),
+                .filter((p) => p.isActive)
+                .map((p) => ({ id: p.id, name: p.name, currency: p.currency })),
             }))
             .filter((inst) => inst.products.length > 0)
         );
       })
       .catch(() => setError(true));
     return () => controller.abort();
-  }, [currency]);
+  }, []);
   return { institutions, error };
+}
+
+/** `institutions` narrowed to one currency's products, dropping emptied ones. */
+export function onlyCurrency(
+  institutions: PickerInstitution[],
+  currency: string
+): PickerInstitution[] {
+  return institutions
+    .map((inst) => ({
+      ...inst,
+      products: inst.products.filter((p) => p.currency === currency),
+    }))
+    .filter((inst) => inst.products.length > 0);
 }
 
 /** A native product <select>, styled like the Input primitive. */

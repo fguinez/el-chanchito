@@ -26,6 +26,8 @@ import {
 import { useInstitutionRefresh } from "@/components/institutions/use-institution-refresh";
 import { InstitutionEditDialog } from "@/components/institutions/institution-edit-dialog";
 import { InstitutionLogo } from "@/components/institutions/institution-logo";
+import { CategorySpendCard } from "@/components/institutions/category-spend-card";
+import { TRANSACTION_KINDS } from "@/components/institutions/product-graphs";
 
 export default function InstitutionDetailPage() {
   const { institution: slug } = useParams<{ institution: string }>();
@@ -213,6 +215,13 @@ export default function InstitutionDetailPage() {
           )}
         </CardContent>
       </Card>
+
+      {institution.products.some((p) => TRANSACTION_KINDS.has(p.kind)) && (
+        <CategorySpendCard
+          key={institution.slug}
+          scope={{ institution: institution.slug }}
+        />
+      )}
     </div>
   );
 }

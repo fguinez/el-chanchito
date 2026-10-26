@@ -1,6 +1,8 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { X } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -31,12 +33,23 @@ import { CsvImport } from "@/components/dashboard/CsvImport";
 import { TransactionDetailSheet } from "@/components/transactions/transaction-detail-sheet";
 import { useSelectedTransaction } from "@/components/transactions/use-selected-transaction";
 import {
+  onlyCurrency,
   ProductSelect,
   useActiveProducts,
   useCategories,
 } from "@/components/transactions/pickers";
 import { SELECT_CLASS } from "@/components/ui/native-select";
 import { LOCATION_TEXT_MAX_LENGTH } from "@/lib/transaction-location";
+import { CategoryDonut, categoryKey } from "@/components/charts/category-donut";
+import { useCategorySpend } from "@/components/charts/use-category-spend";
+import {
+  UNCATEGORIZED_NAME,
+  UNCATEGORIZED_PARAM,
+} from "@/lib/category-spend";
+import {
+  parseExpensesFilters,
+  type ExpensesFilters,
+} from "@/lib/expenses-filters";
 
 /** The currency the CLP-only manual form and totals work in. */
 const CLP = "CLP";
@@ -86,7 +99,6 @@ export default function ExpensesPage() {
 function ExpensesSkeleton() {
   return (
     <div className="space-y-6" aria-busy="true">
-      <h2 className="text-2xl font-bold">Gastos y Transacciones</h2>
       <div className="grid gap-4 md:grid-cols-3">
         {[0, 1, 2].map((i) => (
           <Card key={i}>
@@ -111,11 +123,29 @@ function ExpensesSkeleton() {
 function ExpensesView() {
   const { selectedTxnId, selectTransaction, rowProps } =
     useSelectedTransaction();
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const search = searchParams.toString();
+  // A from/to day window (transaction date) replaces the month picker's
+  // budget month while either side is set; picking a month clears it.
+  const filters = useMemo(
+    () => parseExpensesFilters(new URLSearchParams(search)),
+    [search]
+  );
+  const hasWindow = filters.from != null || filters.to != null;
 
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [month, setMonth] = useState(currentMonthInput());
-  const [limit, setLimit] = useState(PAGE_SIZE);
+  // Bumped after an edit so the list and the donut refetch.
+  const [refreshKey, setRefreshKey] = useState(0);
+  const refresh = useCallback(() => setRefreshKey((n) => n + 1), []);
   const [hasMore, setHasMore] = useState(false);
+  // The filter set the shown rows answer (null before the first response or
+  // failure): rows from another filter set are stale and read as loading.
+  const [loadedFilterQuery, setLoadedFilterQuery] = useState<string | null>(
+    null
+  );
   const [description, setDescription] = useState("");
   const [place, setPlace] = useState("");
   const [amount, setAmount] = useState("");
@@ -131,38 +161,170 @@ function ExpensesView() {
     (id: string | null) => categories.find((c) => c.id === id)?.name ?? null,
     [categories]
   );
-  // CLP-only products for the manual form, like the transfers picker.
-  const { institutions } = useActiveProducts(CLP);
-
-  // Any day of the picked month: the API reads the month off the string. The
-  // optional AbortSignal drops a slower older response (e.g. after a rapid
-  // month switch) so it cannot overwrite a newer one.
-  const loadTransactions = useCallback(
-    (signal?: AbortSignal) => {
-      fetch(`/api/transactions?month=${month}-01&limit=${limit}`, { signal })
-        .then((res) => {
-          // A 4xx/5xx body is { error, ... }, not an array: throw so it never
-          // reaches the list state, which would otherwise break the page.
-          if (!res.ok) throw new Error(`GET /api/transactions ${res.status}`);
-          return res.json();
-        })
-        .then((rows: Transaction[]) => {
-          if (signal?.aborted) return;
-          setTransactions(rows);
-          setHasMore(rows.length >= limit);
-        })
-        .catch((error) => {
-          if (!signal?.aborted) console.error(error);
-        });
-    },
-    [month, limit]
+  // Every active product, to name the product and institution filters; the
+  // manual form picks among the CLP ones, like the transfers picker.
+  const { institutions: allInstitutions } = useActiveProducts();
+  const institutions = useMemo(
+    () => onlyCurrency(allInstitutions, CLP),
+    [allInstitutions]
   );
 
+  // The rows' bounds and scope, shared by the list and the donut so both
+  // always cover the same transactions. Any day of the picked month works:
+  // the API reads the month off the string.
+  const scopeQuery = useMemo(() => {
+    const params = new URLSearchParams();
+    if (hasWindow) {
+      if (filters.from) params.set("from", filters.from);
+      if (filters.to) params.set("to", filters.to);
+    } else {
+      params.set("month", `${month}-01`);
+    }
+    if (filters.product) params.set("productId", filters.product);
+    if (filters.institution) params.set("institution", filters.institution);
+    return params;
+  }, [hasWindow, filters, month]);
+
+  // The list also narrows to the selected category; the donut does not, so
+  // it keeps every slice and highlights the selected one.
+  const filterQuery = useMemo(() => {
+    const params = new URLSearchParams(scopeQuery);
+    if (filters.category) params.set("categoryId", filters.category);
+    return params.toString();
+  }, [scopeQuery, filters.category]);
+  // "Cargar más" pages within one filter set; new filters start over on the
+  // first page in the same render, so the list fetches once. Resetting the
+  // stored paging (not only reading past it) keeps a filter set seen before
+  // from coming back with its old, expanded limit.
+  const [paging, setPaging] = useState({ filterQuery, limit: PAGE_SIZE });
+  if (paging.filterQuery !== filterQuery) {
+    setPaging({ filterQuery, limit: PAGE_SIZE });
+  }
+  const limit = paging.filterQuery === filterQuery ? paging.limit : PAGE_SIZE;
+  const listQuery = `${filterQuery}${filterQuery ? "&" : ""}limit=${limit}`;
+  const spend = useCategorySpend(scopeQuery.toString(), refreshKey);
+  // "Cargar más" and a refresh keep the current rows on screen meanwhile.
+  const listLoaded = loadedFilterQuery === filterQuery;
+
+  // The AbortSignal drops a slower older response (e.g. after a rapid filter
+  // switch) so it cannot overwrite a newer one.
   useEffect(() => {
     const controller = new AbortController();
-    loadTransactions(controller.signal);
+    const { signal } = controller;
+    fetch(`/api/transactions?${listQuery}`, { signal })
+      .then((res) => {
+        // A 4xx/5xx body is { error, ... }, not an array: throw so it never
+        // reaches the list state, which would otherwise break the page.
+        if (!res.ok) throw new Error(`GET /api/transactions ${res.status}`);
+        return res.json();
+      })
+      .then((rows: Transaction[]) => {
+        if (signal.aborted) return;
+        setTransactions(rows);
+        setHasMore(rows.length >= limit);
+        setLoadedFilterQuery(filterQuery);
+      })
+      .catch((error) => {
+        if (signal.aborted) return;
+        console.error(error);
+        setLoadedFilterQuery(filterQuery);
+      });
     return () => controller.abort();
-  }, [loadTransactions]);
+  }, [listQuery, filterQuery, limit, refreshKey]);
+
+  /** Sets (or, with null, removes) URL filters, keeping every other param
+   *  (`?txn=` included). */
+  const setFilters = useCallback(
+    (updates: Partial<Record<keyof ExpensesFilters, string | null>>) => {
+      const params = new URLSearchParams(search);
+      for (const [key, value] of Object.entries(updates)) {
+        if (value) params.set(key, value);
+        else params.delete(key);
+      }
+      const query = params.toString();
+      router.replace(query ? `${pathname}?${query}` : pathname, {
+        scroll: false,
+      });
+    },
+    [router, pathname, search]
+  );
+
+  /** null = "Sin categoría"; undefined = no category filter. */
+  const selectedCategoryId =
+    filters.category === undefined
+      ? undefined
+      : filters.category === UNCATEGORIZED_PARAM
+        ? null
+        : filters.category;
+  // A slice click filters to its category, or clears the filter when it is
+  // the one already selected.
+  const toggleCategory = (categoryId: string | null) =>
+    setFilters({
+      category:
+        selectedCategoryId === categoryId ? null : categoryKey(categoryId),
+    });
+
+  const productName = (id: string) =>
+    allInstitutions
+      .flatMap((inst) => inst.products.map((p) => ({ p, inst })))
+      .find(({ p }) => p.id === id);
+  const filterChips: { key: string; label: string; clear: () => void }[] = [];
+  if (filters.category) {
+    filterChips.push({
+      key: "category",
+      label: `Categoría: ${
+        selectedCategoryId === null
+          ? UNCATEGORIZED_NAME
+          : (categoryName(filters.category) ?? "Categoría")
+      }`,
+      clear: () => setFilters({ category: null }),
+    });
+  }
+  if (hasWindow) {
+    const label =
+      filters.from && filters.to
+        ? `${formatPlainDateEs(filters.from)} al ${formatPlainDateEs(filters.to)}`
+        : filters.from
+          ? `Desde ${formatPlainDateEs(filters.from)}`
+          : `Hasta ${formatPlainDateEs(filters.to!)}`;
+    filterChips.push({
+      key: "window",
+      label: `Fechas: ${label}`,
+      clear: () => setFilters({ from: null, to: null }),
+    });
+  }
+  if (filters.product) {
+    const found = productName(filters.product);
+    filterChips.push({
+      key: "product",
+      label: `Producto: ${
+        found ? `${found.inst.name} · ${found.p.name}` : "Producto"
+      }`,
+      clear: () => setFilters({ product: null }),
+    });
+  }
+  if (filters.institution) {
+    const name = allInstitutions.find(
+      (inst) => inst.slug === filters.institution
+    )?.name;
+    filterChips.push({
+      key: "institution",
+      label: `Institución: ${name ?? filters.institution}`,
+      clear: () => setFilters({ institution: null }),
+    });
+  }
+  const periodLabel = hasWindow ? "del período" : "del mes";
+  // The summary sums the rows loaded so far ("Cargar más" adds more), unlike
+  // the donut, which covers the whole scope.
+  const loadedLabel =
+    transactions.length === 0
+      ? periodLabel
+      : transactions.length === 1
+        ? "en la transacción cargada"
+        : `en las ${transactions.length} transacciones cargadas`;
+  /** A summary figure, or a placeholder until the first page arrives. */
+  const summaryValue = (value: number) =>
+    listLoaded ? formatCLP(value) : "...";
 
   const handleAdd = async () => {
     const parsedAmount = parseNumberInput(amount);
@@ -192,7 +354,7 @@ function ExpensesView() {
         setPlace("");
         setAmount("");
         setProductId("");
-        loadTransactions();
+        refresh();
       }
     } finally {
       setSaving(false);
@@ -205,7 +367,7 @@ function ExpensesView() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ categoryId: categoryId || null }),
     });
-    if (res.ok) loadTransactions();
+    if (res.ok) refresh();
   };
 
   // Peso totals over CLP rows only: a USD amount is not pesos. Rows an
@@ -241,31 +403,29 @@ function ExpensesView() {
 
   return (
     <div className="space-y-6">
-      <h2 className="text-2xl font-bold">Gastos y Transacciones</h2>
-
       {/* Summary */}
       <div className="grid gap-4 md:grid-cols-3">
         <Card>
           <CardHeader className="pb-2">
-            <CardDescription>Gastos del mes</CardDescription>
+            <CardDescription>Gastos {loadedLabel}</CardDescription>
             <CardTitle className="text-xl text-red-600">
-              {formatCLP(Math.abs(totalExpenses))}
+              {summaryValue(Math.abs(totalExpenses))}
             </CardTitle>
           </CardHeader>
         </Card>
         <Card>
           <CardHeader className="pb-2">
-            <CardDescription>Ingresos del mes</CardDescription>
+            <CardDescription>Ingresos {loadedLabel}</CardDescription>
             <CardTitle className="text-xl text-green-600">
-              {formatCLP(totalIncome)}
+              {summaryValue(totalIncome)}
             </CardTitle>
           </CardHeader>
         </Card>
         <Card>
           <CardHeader className="pb-2">
-            <CardDescription>Neto</CardDescription>
+            <CardDescription>Neto {loadedLabel}</CardDescription>
             <CardTitle className="text-xl">
-              {formatCLP(totalIncome + totalExpenses)}
+              {summaryValue(totalIncome + totalExpenses)}
             </CardTitle>
           </CardHeader>
         </Card>
@@ -378,16 +538,94 @@ function ExpensesView() {
       </Card>
 
       {/* CSV Import */}
-      <CsvImport onImported={loadTransactions} />
+      <CsvImport onImported={refresh} />
+
+      {filterChips.length > 0 && (
+        <div
+          className="flex flex-wrap items-center gap-2"
+          aria-label="Filtros activos"
+        >
+          {filterChips.map((chip) => (
+            <Badge key={chip.key} variant="secondary" className="gap-1 pr-1">
+              {chip.label}
+              <button
+                type="button"
+                onClick={chip.clear}
+                className="rounded-sm p-0.5 hover:bg-muted-foreground/20"
+                aria-label={`Quitar filtro ${chip.label}`}
+              >
+                <X className="size-3" />
+              </button>
+            </Badge>
+          ))}
+          {filterChips.length > 1 && (
+            <Button
+              variant="ghost"
+              size="xs"
+              onClick={() =>
+                setFilters({
+                  category: null,
+                  from: null,
+                  to: null,
+                  product: null,
+                  institution: null,
+                })
+              }
+            >
+              Limpiar filtros
+            </Button>
+          )}
+        </div>
+      )}
+
+      {/* Spending per category over the list's scope (category aside) */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Gastos por categoría</CardTitle>
+          <CardDescription>
+            Lo gastado {periodLabel} en cada categoría, en{" "}
+            {spend.data?.currency ?? CLP} y sin transferencias internas. Elige
+            una categoría para filtrar la lista.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {spend.error ? (
+            <p className="text-sm text-muted-foreground">
+              No se pudieron cargar los gastos por categoría.
+            </p>
+          ) : !spend.data ? (
+            <p className="text-sm text-muted-foreground">Cargando...</p>
+          ) : (
+            <>
+              <CategoryDonut
+                categories={spend.data.categories}
+                total={spend.data.total}
+                currency={spend.data.currency}
+                onSelect={toggleCategory}
+                selectedId={selectedCategoryId}
+              />
+              {spend.data.unconvertedCount > 0 && (
+                <p className="mt-3 text-xs text-muted-foreground">
+                  {spend.data.unconvertedCount === 1
+                    ? "1 gasto en una moneda sin tipo de cambio no se incluye."
+                    : `${spend.data.unconvertedCount} gastos en monedas sin tipo de cambio no se incluyen.`}
+                </p>
+              )}
+            </>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Transaction list */}
       <Card>
         <CardHeader>
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <CardTitle>Transacciones del mes</CardTitle>
+              <CardTitle>Transacciones {periodLabel}</CardTitle>
               <CardDescription>
-                {transactions.length} transacciones
+                {listLoaded
+                  ? `${transactions.length} transacciones`
+                  : "Cargando..."}
               </CardDescription>
             </div>
             <div>
@@ -397,21 +635,24 @@ function ExpensesView() {
               <Input
                 type="month"
                 className="w-44"
-                value={month}
+                value={hasWindow ? "" : month}
                 onChange={(e) => {
-                  // A new month resets paging back to the first page.
-                  setLimit(PAGE_SIZE);
+                  // A new month replaces any from/to window.
                   setMonth(e.target.value || currentMonthInput());
+                  if (hasWindow) setFilters({ from: null, to: null });
                 }}
               />
             </div>
           </div>
         </CardHeader>
         <CardContent>
-          {transactions.length === 0 ? (
+          {!listLoaded ? (
+            <p className="text-muted-foreground">Cargando...</p>
+          ) : transactions.length === 0 ? (
             <p className="text-muted-foreground">
-              No hay transacciones este mes. Agrega una arriba o espera a que
-              los scrapers importen datos.
+              {filterChips.length > 0
+                ? "No hay transacciones con estos filtros."
+                : "No hay transacciones este mes. Agrega una arriba o espera a que los scrapers importen datos."}
             </p>
           ) : (
             <Table>
@@ -521,7 +762,9 @@ function ExpensesView() {
             <div className="mt-4 flex justify-center">
               <Button
                 variant="outline"
-                onClick={() => setLimit((n) => n + PAGE_SIZE)}
+                onClick={() =>
+                  setPaging({ filterQuery, limit: limit + PAGE_SIZE })
+                }
               >
                 Cargar más
               </Button>
@@ -533,7 +776,7 @@ function ExpensesView() {
       <TransactionDetailSheet
         transactionId={selectedTxnId}
         onClose={() => selectTransaction(null)}
-        onChanged={loadTransactions}
+        onChanged={refresh}
       />
     </div>
   );

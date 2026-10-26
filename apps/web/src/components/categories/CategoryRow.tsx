@@ -10,6 +10,12 @@ import {
   type CategoryIconName,
 } from "@/lib/categories";
 import { IconPicker } from "./IconPicker";
+import {
+  CategoryDetailLink,
+  CategoryTrendCells,
+  useOpenCategoryRow,
+} from "./CategoryTrends";
+import type { CategoryTrend } from "@/lib/category-trends";
 import { toIconName } from "./CategoryIcon";
 import {
   COLOR_INPUT_CLASS,
@@ -54,10 +60,17 @@ function deleteMessage({ name, transactionCount, rules }: ApiCategory): string {
 export function CategoryRow({
   category,
   onChange,
+  trends,
+  trendsError = false,
 }: {
   category: ApiCategory;
   onChange: () => void;
+  /** Spend per category (see CategoryTrends); null while loading. */
+  trends: Map<string, CategoryTrend> | null;
+  /** The spend fetch failed: `trends` stays null for good. */
+  trendsError?: boolean;
 }) {
+  const openRow = useOpenCategoryRow();
   // null while viewing; the fields being edited otherwise.
   const [draft, setDraft] = useState<CategoryDraft | null>(null);
   const [saving, setSaving] = useState(false);
@@ -152,7 +165,7 @@ export function CategoryRow({
   );
 
   return (
-    <TableRow>
+    <TableRow {...(draft ? {} : openRow(category.id))}>
       <TableCell className="font-medium">
         {draft ? (
           <div className="flex items-center gap-2">
@@ -185,10 +198,18 @@ export function CategoryRow({
             />
           </div>
         ) : (
-          <CategoryLabel category={category} />
+          <CategoryDetailLink categoryId={category.id}>
+            <CategoryLabel category={category} />
+          </CategoryDetailLink>
         )}
         {errorNote}
       </TableCell>
+      <CategoryTrendCells
+        trends={trends}
+        error={trendsError}
+        categoryId={category.id}
+        color={category.color}
+      />
       <TableCell className="text-right tabular-nums">
         {category.transactionCount.toLocaleString("es-CL")}
       </TableCell>

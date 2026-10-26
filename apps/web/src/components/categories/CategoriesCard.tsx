@@ -25,6 +25,14 @@ import {
   type CategoryIconName,
 } from "@/lib/categories";
 import { CategoryRow } from "./CategoryRow";
+import {
+  CategoryTrendHeads,
+  TREND_MONTHS,
+  trendSortValue,
+  UncategorizedRow,
+  type TrendSortKey,
+} from "./CategoryTrends";
+import { useCategoryTrends } from "@/components/charts/use-category-trends";
 import { IconPicker } from "./IconPicker";
 import {
   COLOR_INPUT_CLASS,
@@ -35,7 +43,7 @@ import {
   type ApiCategory,
 } from "./shared";
 
-type CategorySortKey = "nombre" | "transacciones" | "reglas";
+type CategorySortKey = "nombre" | "transacciones" | "reglas" | TrendSortKey;
 
 function AddCategoryForm({ onCreated }: { onCreated: () => void }) {
   const [name, setName] = useState("");
@@ -133,12 +141,16 @@ function AddCategoryForm({ onCreated }: { onCreated: () => void }) {
 export function CategoriesCard({
   categories,
   onChange,
+  version = 0,
 }: {
   categories: ApiCategory[];
   onChange: () => void;
+  /** Bumped on every reload, so the spend columns refetch too. */
+  version?: number;
 }) {
+  const { trends, error: trendsError } = useCategoryTrends(TREND_MONTHS, version);
   const getValue = useCallback(
-    (category: ApiCategory, key: CategorySortKey): string | number => {
+    (category: ApiCategory, key: CategorySortKey): string | number | null => {
       switch (key) {
         case "nombre":
           return category.name;
@@ -146,9 +158,11 @@ export function CategoriesCard({
           return category.transactionCount;
         case "reglas":
           return category.rules.length;
+        default:
+          return trendSortValue(trends, category.id, key);
       }
     },
-    []
+    [trends]
   );
   const { sorted, sort, toggleSort } = useSortableData(categories, getValue);
   // Bridge the generic header's string key to our typed key union.
@@ -165,46 +179,54 @@ export function CategoriesCard({
       <CardHeader>
         <CardTitle>Categorías</CardTitle>
         <CardDescription>
-          {plural(categories.length, "categoría", "categorías")}
+          {plural(categories.length, "categoría", "categorías")}. Gasto en
+          CLP sin transferencias internas; elige una categoría para ver su
+          detalle.
+          {trendsError && " No se pudieron cargar los gastos por categoría."}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
         <AddCategoryForm onCreated={onChange} />
-        {categories.length === 0 ? (
+        {categories.length === 0 && (
           <p className="text-muted-foreground">
             No hay categorías. Agrega una arriba.
           </p>
-        ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <SortableTableHead label="Categoría" {...sortProps("nombre")} />
-                <SortableTableHead
-                  label="Transacciones"
-                  align="right"
-                  className="w-36"
-                  {...sortProps("transacciones")}
-                />
-                <SortableTableHead
-                  label="Reglas"
-                  align="right"
-                  className="w-28"
-                  {...sortProps("reglas")}
-                />
-                <TableHead className="w-56"></TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {sorted.map((category) => (
-                <CategoryRow
-                  key={category.id}
-                  category={category}
-                  onChange={onChange}
-                />
-              ))}
-            </TableBody>
-          </Table>
         )}
+        {/* Rendered even with no categories: the Sin categoría row still
+            holds the spend and opens its detail panel. */}
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <SortableTableHead label="Categoría" {...sortProps("nombre")} />
+              <CategoryTrendHeads sortProps={sortProps} />
+              <SortableTableHead
+                label="Transacciones"
+                align="right"
+                className="w-36"
+                {...sortProps("transacciones")}
+              />
+              <SortableTableHead
+                label="Reglas"
+                align="right"
+                className="w-28"
+                {...sortProps("reglas")}
+              />
+              <TableHead className="w-56"></TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {sorted.map((category) => (
+              <CategoryRow
+                key={category.id}
+                category={category}
+                onChange={onChange}
+                trends={trends}
+                trendsError={trendsError}
+              />
+            ))}
+            <UncategorizedRow trends={trends} trailingCells={3} />
+          </TableBody>
+        </Table>
       </CardContent>
     </Card>
   );

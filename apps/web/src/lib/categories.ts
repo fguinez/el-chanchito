@@ -12,6 +12,10 @@ export const RULE_KEYWORD_MAX_LENGTH = 100;
 export const RULE_PRIORITY_MIN = -1000;
 export const RULE_PRIORITY_MAX = 1000;
 
+/** The color new categories start with (the seeded "Otros" color); also what
+ *  a category without a color of its own shows. */
+export const DEFAULT_CATEGORY_COLOR = "#94a3b8";
+
 /** How a rule's keyword matches a description (V041): "contains" = the
  *  case-insensitive literal substring of V021, "exact" = trimmed,
  *  case-insensitive equality. An exact match wins over any contains match. */

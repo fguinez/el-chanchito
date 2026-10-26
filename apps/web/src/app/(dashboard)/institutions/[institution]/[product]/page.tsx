@@ -52,6 +52,7 @@ import {
 import { BalanceHistorySheet } from "@/components/institutions/balance-history-sheet";
 import { ExchangeRateCard } from "@/components/institutions/exchange-rate-card";
 import { ProductTransactionsCard } from "@/components/institutions/product-transactions";
+import { CategorySpendCard } from "@/components/institutions/category-spend-card";
 import {
   productTicker,
   showsPriceHistory,
@@ -336,6 +337,9 @@ export default function ProductDetailPage() {
       )}
       {TRANSACTION_KINDS.has(product.kind) && transactions.length >= 2 && (
         <MonthlyFlowCard product={product} transactions={transactions} />
+      )}
+      {TRANSACTION_KINDS.has(product.kind) && (
+        <CategorySpendCard key={`category-spend-${product.id}`} scope={{ productId: product.id }} />
       )}
 
       {/* Balance history */}

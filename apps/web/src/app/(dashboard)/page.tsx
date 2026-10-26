@@ -10,6 +10,7 @@ import {
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ScraperStatus } from "@/components/dashboard/ScraperStatus";
+import { CategoryTrendsCard } from "@/components/dashboard/CategoryTrendsCard";
 import { MonitorCard } from "@/components/monitors/MonitorCard";
 import { type ApiMonitor } from "@/components/monitors/shared";
 import { STALE_AFTER_HOURS, groupForInicio } from "@/lib/monitors/overview";
@@ -117,6 +118,9 @@ export default function HomePage() {
           </div>
         )}
       </div>
+
+      {/* This month's top categories */}
+      <CategoryTrendsCard />
 
       {/* Scraper status */}
       <ScraperStatus />
