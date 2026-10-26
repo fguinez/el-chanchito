@@ -215,11 +215,12 @@ export interface SpendMatrix {
 }
 
 /**
- * The category x month table of the Análisis page, from the month groups of
- * GET /api/categories/spend?groupBy=month. `months` are the columns, oldest
- * first; a group for the month before the first one, when present, gives the
- * first column its change. `inProgress` (the current month) gets no change
- * and stays out of the average, so a partial month never reads as a drop.
+ * The category x month table of the Gastos > Categorías tab, from the month
+ * groups of GET /api/categories/spend?groupBy=month. `months` are the
+ * columns, oldest first; a group for the month before the first one, when
+ * present, gives the first column its change. `inProgress` (the current
+ * month) gets no change and stays out of the average, so a partial month
+ * never reads as a drop.
  */
 export function categoryMonthMatrix(
   groups: readonly CategorySpendGroup[],

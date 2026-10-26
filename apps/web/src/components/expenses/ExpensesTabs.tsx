@@ -6,7 +6,7 @@ import { cn } from "@/lib/utils";
 
 const TABS = [
   { href: "/expenses", label: "Transacciones" },
-  { href: "/expenses/analysis", label: "Análisis" },
+  { href: "/expenses/categories", label: "Categorías" },
 ];
 
 /** Gastos' sections; the sidebar keeps Gastos active on every one. */

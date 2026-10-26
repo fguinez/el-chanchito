@@ -8,7 +8,7 @@ export default function ExpensesLayout({
   return (
     <div className="space-y-6">
       <div className="space-y-4">
-        <h2 className="text-2xl font-bold">Gastos y Transacciones</h2>
+        <h2 className="text-2xl font-bold">Gastos</h2>
         <ExpensesTabs />
       </div>
       {children}

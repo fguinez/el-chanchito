@@ -1,7 +1,8 @@
 "use client";
 
-// Análisis: monthly spending by category over a trailing window, as stacked
-// bars and as a category x month table with the month-over-month change.
+// Gastos > Categorías: monthly spending by category over a trailing window,
+// as stacked bars and as a category x month table with the month-over-month
+// change.
 // One GET /api/categories/spend?groupBy=month feeds both.
 
 import { useMemo, useState } from "react";
@@ -49,7 +50,7 @@ import { cn, formatCLP, formatPercent } from "@/lib/utils";
 const RANGE_OPTIONS = [6, 12, 24] as const;
 type RangeMonths = (typeof RANGE_OPTIONS)[number];
 
-export default function AnalysisPage() {
+export default function ExpenseCategoriesPage() {
   // Fixed at mount, so a page left open past midnight keeps one window.
   const [currentMonth] = useState(() => monthOf(new Date()));
   const [range, setRange] = useState<RangeMonths>(12);
