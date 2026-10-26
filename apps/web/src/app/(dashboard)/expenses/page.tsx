@@ -23,6 +23,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useSortableData } from "@/lib/use-sortable-data";
 import {
+  cn,
   formatAmount,
   formatCLP,
   formatPlainDateEs,
@@ -202,7 +203,9 @@ function ExpensesView() {
   }
   const limit = paging.filterQuery === filterQuery ? paging.limit : PAGE_SIZE;
   const listQuery = `${filterQuery}${filterQuery ? "&" : ""}limit=${limit}`;
-  const spend = useCategorySpend(scopeQuery.toString(), refreshKey);
+  const spend = useCategorySpend(scopeQuery.toString(), refreshKey, {
+    keepPrevious: true,
+  });
   // "Cargar más" and a refresh keep the current rows on screen meanwhile.
   const listLoaded = loadedFilterQuery === filterQuery;
 
@@ -588,7 +591,10 @@ function ExpensesView() {
             una categoría para filtrar la lista.
           </CardDescription>
         </CardHeader>
-        <CardContent>
+        <CardContent
+          aria-busy={spend.stale}
+          className={cn("transition-opacity duration-200", spend.stale && "opacity-60")}
+        >
           {spend.error ? (
             <p className="text-sm text-muted-foreground">
               No se pudieron cargar los gastos por categoría.

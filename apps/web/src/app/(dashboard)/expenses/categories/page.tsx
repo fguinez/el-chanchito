@@ -64,16 +64,19 @@ export default function ExpenseCategoriesPage() {
     ...trailingMonthsWindow(currentMonth, range + 1),
     groupBy: "month",
   }).toString();
-  const spend = useCategorySpend(query);
+  const spend = useCategorySpend(query, 0, { keepPrevious: true });
 
   const groups = spend.data?.groups;
   const shownGroups = useMemo(
     () => groups?.filter((g) => months.includes(g.key)) ?? [],
     [groups, months]
   );
+  // The table waits for its own window: stale groups would read as zeros in
+  // the months they don't cover.
   const matrix = useMemo(
-    () => (groups ? categoryMonthMatrix(groups, months, currentMonth) : null),
-    [groups, months, currentMonth]
+    () =>
+      groups && !spend.stale ? categoryMonthMatrix(groups, months, currentMonth) : null,
+    [groups, spend.stale, months, currentMonth]
   );
   const expensesHref = (categoryId: string | null, month: string) =>
     categoryExpensesHref({ categoryId, ...monthWindow(month) });
@@ -107,7 +110,10 @@ export default function ExpenseCategoriesPage() {
             </div>
           </CardAction>
         </CardHeader>
-        <CardContent>
+        <CardContent
+          aria-busy={spend.stale}
+          className={cn("transition-opacity duration-200", spend.stale && "opacity-60")}
+        >
           {spend.error ? (
             <ErrorNote />
           ) : !spend.data ? (

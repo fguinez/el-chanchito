@@ -15,13 +15,14 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { TimeRangeControl } from "@/components/charts/time-range-control";
 import { rangeDayWindow, type XAxisRange } from "@/components/charts/x-axis-range";
 import { CategoryDonut } from "@/components/charts/category-donut";
 import { CategoryStackedBars } from "@/components/charts/category-stacked-bars";
 import { useCategorySpend } from "@/components/charts/use-category-spend";
 import { categoryExpensesHref, monthWindow } from "@/lib/category-spend";
+import { cn } from "@/lib/utils";
 
 type View = "total" | "month";
 
@@ -44,7 +45,7 @@ export function CategorySpendCard({ scope }: { scope: CategorySpendScope }) {
   if (scopeParams.productId) params.set("productId", scopeParams.productId);
   if (scopeParams.institution) params.set("institution", scopeParams.institution);
   const query = params.toString();
-  const { data, error } = useCategorySpend(query);
+  const { data, error, stale } = useCategorySpend(query, 0, { keepPrevious: true });
 
   const hrefFor = (categoryId: string | null) =>
     categoryExpensesHref({ categoryId, from, to, ...scopeParams });
@@ -69,26 +70,36 @@ export function CategorySpendCard({ scope }: { scope: CategorySpendScope }) {
             : "Lo gastado con los productos de esta institución en cada categoría, en CLP y sin transferencias internas"}
         </CardDescription>
         <CardAction className="flex flex-wrap items-center justify-end gap-2">
-          <div className="flex items-center gap-1" role="group" aria-label="Vista">
-            <Button
-              variant={view === "total" ? "secondary" : "ghost"}
-              size="xs"
+          <div className="flex items-center gap-2 text-xs" role="group" aria-label="Vista">
+            <button
+              type="button"
               onClick={() => setView("total")}
+              aria-pressed={view === "total"}
+              className={cn(view === "total" ? "font-medium" : "text-muted-foreground")}
             >
               Total
-            </Button>
-            <Button
-              variant={view === "month" ? "secondary" : "ghost"}
-              size="xs"
+            </button>
+            <Switch
+              checked={view === "month"}
+              onCheckedChange={(checked) => setView(checked ? "month" : "total")}
+              aria-label="Ver por mes"
+            />
+            <button
+              type="button"
               onClick={() => setView("month")}
+              aria-pressed={view === "month"}
+              className={cn(view === "month" ? "font-medium" : "text-muted-foreground")}
             >
               Por mes
-            </Button>
+            </button>
           </div>
           <TimeRangeControl control={{ range, setRange }} />
         </CardAction>
       </CardHeader>
-      <CardContent>
+      <CardContent
+        aria-busy={stale}
+        className={cn("transition-opacity duration-200", stale && "opacity-60")}
+      >
         {error ? (
           <p className="text-sm text-muted-foreground">
             No se pudieron cargar los gastos por categoría.
