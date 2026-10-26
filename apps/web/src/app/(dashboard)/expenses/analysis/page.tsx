@@ -79,13 +79,10 @@ export default function AnalysisPage() {
 
   return (
     <div className="space-y-6">
-      <div className="max-w-2xl">
-        <h2 className="text-2xl font-bold">Análisis</h2>
-        <p className="text-sm text-muted-foreground">
-          Gasto mensual por categoría en CLP, sin transferencias internas. Elige
-          una barra o un monto para ver sus transacciones en Gastos.
-        </p>
-      </div>
+      <p className="max-w-2xl text-sm text-muted-foreground">
+        Gasto mensual por categoría en CLP, sin transferencias internas. Elige
+        una barra o un monto para ver sus transacciones.
+      </p>
 
       <Card>
         <CardHeader>

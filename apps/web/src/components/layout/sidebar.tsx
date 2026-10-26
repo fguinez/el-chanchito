@@ -12,7 +12,6 @@ import {
   Landmark,
   ArrowLeftRight,
   Tags,
-  ChartColumnStacked,
   Replace,
   LogOut,
 } from "lucide-react";
@@ -25,7 +24,6 @@ const navItems = [
   { href: "/monitors", label: "Monitores", icon: Activity },
   { href: "/expenses", label: "Gastos", icon: Receipt },
   { href: "/categories", label: "Categorías", icon: Tags },
-  { href: "/analysis", label: "Análisis", icon: ChartColumnStacked },
   { href: "/aliases", label: "Alias", icon: Replace },
   { href: "/fixed", label: "Gastos Fijos", icon: Landmark },
   { href: "/transfers", label: "Transferencias", icon: ArrowLeftRight },

@@ -99,7 +99,6 @@ export default function ExpensesPage() {
 function ExpensesSkeleton() {
   return (
     <div className="space-y-6" aria-busy="true">
-      <h2 className="text-2xl font-bold">Gastos y Transacciones</h2>
       <div className="grid gap-4 md:grid-cols-3">
         {[0, 1, 2].map((i) => (
           <Card key={i}>
@@ -404,8 +403,6 @@ function ExpensesView() {
 
   return (
     <div className="space-y-6">
-      <h2 className="text-2xl font-bold">Gastos y Transacciones</h2>
-
       {/* Summary */}
       <div className="grid gap-4 md:grid-cols-3">
         <Card>
