@@ -22,6 +22,7 @@ import { CategoryDonut } from "@/components/charts/category-donut";
 import { CategoryStackedBars } from "@/components/charts/category-stacked-bars";
 import { useCategorySpend } from "@/components/charts/use-category-spend";
 import { categoryExpensesHref, monthWindow } from "@/lib/category-spend";
+import { cn } from "@/lib/utils";
 
 type View = "total" | "month";
 
@@ -44,7 +45,7 @@ export function CategorySpendCard({ scope }: { scope: CategorySpendScope }) {
   if (scopeParams.productId) params.set("productId", scopeParams.productId);
   if (scopeParams.institution) params.set("institution", scopeParams.institution);
   const query = params.toString();
-  const { data, error } = useCategorySpend(query);
+  const { data, error, stale } = useCategorySpend(query, 0, { keepPrevious: true });
 
   const hrefFor = (categoryId: string | null) =>
     categoryExpensesHref({ categoryId, from, to, ...scopeParams });
@@ -88,7 +89,10 @@ export function CategorySpendCard({ scope }: { scope: CategorySpendScope }) {
           <TimeRangeControl control={{ range, setRange }} />
         </CardAction>
       </CardHeader>
-      <CardContent>
+      <CardContent
+        aria-busy={stale}
+        className={cn("transition-opacity duration-200", stale && "opacity-60")}
+      >
         {error ? (
           <p className="text-sm text-muted-foreground">
             No se pudieron cargar los gastos por categoría.
