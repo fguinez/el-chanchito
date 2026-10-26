@@ -15,7 +15,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { TimeRangeControl } from "@/components/charts/time-range-control";
 import { rangeDayWindow, type XAxisRange } from "@/components/charts/x-axis-range";
 import { CategoryDonut } from "@/components/charts/category-donut";
@@ -70,21 +70,28 @@ export function CategorySpendCard({ scope }: { scope: CategorySpendScope }) {
             : "Lo gastado con los productos de esta institución en cada categoría, en CLP y sin transferencias internas"}
         </CardDescription>
         <CardAction className="flex flex-wrap items-center justify-end gap-2">
-          <div className="flex items-center gap-1" role="group" aria-label="Vista">
-            <Button
-              variant={view === "total" ? "secondary" : "ghost"}
-              size="xs"
+          <div className="flex items-center gap-2 text-xs" role="group" aria-label="Vista">
+            <button
+              type="button"
               onClick={() => setView("total")}
+              aria-pressed={view === "total"}
+              className={cn(view === "total" ? "font-medium" : "text-muted-foreground")}
             >
               Total
-            </Button>
-            <Button
-              variant={view === "month" ? "secondary" : "ghost"}
-              size="xs"
+            </button>
+            <Switch
+              checked={view === "month"}
+              onCheckedChange={(checked) => setView(checked ? "month" : "total")}
+              aria-label="Ver por mes"
+            />
+            <button
+              type="button"
               onClick={() => setView("month")}
+              aria-pressed={view === "month"}
+              className={cn(view === "month" ? "font-medium" : "text-muted-foreground")}
             >
               Por mes
-            </Button>
+            </button>
           </div>
           <TimeRangeControl control={{ range, setRange }} />
         </CardAction>
