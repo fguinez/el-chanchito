@@ -465,7 +465,7 @@ class _FakeLocator:
         return self
 
     def count(self):
-        return 1 if self.matches else 0
+        raise AssertionError("Locator.count() takes no timeout; never call it")
 
     def wait_for(self, **kwargs):
         if not self.matches:
@@ -475,6 +475,36 @@ class _FakeLocator:
         if not self.matches:
             raise RuntimeError("not clickable")
         self.page.fire_card_response()
+
+
+class _FakeHandle:
+    def __init__(self, value):
+        self.value = value
+
+    def json_value(self):
+        return self.value
+
+    def dispose(self):
+        return None
+
+
+class _FakeBody:
+    """`page.locator("body")`: the page text, and Escape (bounded calls only)."""
+
+    def __init__(self, text, on_escape=None):
+        self._text = text
+        self._on_escape = on_escape
+        self.presses = []
+
+    def inner_text(self, timeout=None):
+        assert timeout, "every page text read must be bounded"
+        return self._text()
+
+    def press(self, key, timeout=None):
+        assert timeout, "every key press must be bounded"
+        self.presses.append((key, timeout))
+        if key == "Escape" and self._on_escape is not None:
+            self._on_escape()
 
 
 # Synthetic page texts: the dashboard's checking row, and the movements view of
@@ -506,10 +536,13 @@ class _FakeCardPage:
             handler(response)
 
     def locator(self, selector):
+        if selector == "body":
+            return _FakeBody(lambda: _DASHBOARD_TEXT)
         return _FakeLocator(self, "SALDOS Y MOV.TARJETAS" in selector)
 
-    def evaluate(self, script, arg=None):
-        return _DASHBOARD_TEXT if script == banchile_web_mod._INNER_TEXT_JS else ""
+    def wait_for_function(self, script, arg=None, timeout=None):
+        assert timeout, "every hash route and in-page POST must be bounded"
+        return _FakeHandle(None)  # routes ignore it; statement replays: no answer
 
     def wait_for_timeout(self, ms):
         return None
@@ -742,15 +775,15 @@ class TestSharedSession:
         def sync_playwright():
             yield MagicMock()
 
-        def read_products(p):
+        def read_products(p, deadline):
             events.append("products")
             return BalanceFetchResult(products=[], failed_surfaces=("card",))
 
-        def read_rate(p):
+        def read_rate(p, deadline):
             events.append("rate")
             return [], ()
 
-        def read_movements(p):
+        def read_movements(p, deadline):
             events.append("movements")
             return [], ("tarjeta facturados",)
 
@@ -1331,15 +1364,15 @@ class TestReadSession:
             currency="USD",
         )
 
-        def products(page):
+        def products(page, deadline):
             calls.append("products")
             return BalanceFetchResult(products=[product], failed_surfaces=("línea",))
 
-        def rate(page):
+        def rate(page, deadline):
             calls.append("rate")
             return list(rates), tuple(rate_failed)
 
-        def movements(page):
+        def movements(page, deadline):
             calls.append("movements")
             return [movement], ("movimientos",)
 
@@ -1486,7 +1519,7 @@ class _DialogLocator:
         return _DialogLocator(self.page, self.selector, index)
 
     def count(self):
-        return len(self._items())
+        raise AssertionError("Locator.count() takes no timeout; never call it")
 
     def is_visible(self):
         return self.index < len(self._items())
@@ -1545,19 +1578,6 @@ _CLOCK = _FakeClock()
 def _use_fake_clock(monkeypatch):
     _CLOCK.now = 1000.0
     monkeypatch.setattr(movements_mod, "time", _CLOCK)
-
-
-class _FakeKeyboard:
-    def __init__(self, page):
-        self.page = page
-
-    def press(self, key):
-        if key != "Escape":
-            return
-        if self.page.select_open:
-            self.page.select_open = False
-        elif self.page.dialog_open:
-            self.page.dialog_open = False
 
 
 class _FakeDialogPage:
@@ -1635,7 +1655,16 @@ class _FakeDialogPage:
         self.auto_fetch_fails = auto_fetch_fails
         self.auto_request_body = auto_request_body
         self.handlers = {}
-        self.keyboard = _FakeKeyboard(self)
+        self.body = _FakeBody(self._text, on_escape=self._escape)
+
+    def _text(self):
+        return _DASHBOARD_TEXT if self.home_rendered() else _CARTOLA_VIEW_TEXT
+
+    def _escape(self):
+        if self.select_open:
+            self.select_open = False
+        elif self.dialog_open:
+            self.dialog_open = False
 
     def on(self, event, handler):
         self.handlers.setdefault(event, []).append(handler)
@@ -1681,11 +1710,12 @@ class _FakeDialogPage:
             handler(response)
 
     def locator(self, selector):
+        if selector == "body":
+            return self.body
         return _DialogLocator(self, selector)
 
-    def evaluate(self, script, arg=None):
-        if script == banchile_web_mod._INNER_TEXT_JS:
-            return _DASHBOARD_TEXT if self.home_rendered() else _CARTOLA_VIEW_TEXT
+    def wait_for_function(self, script, arg=None, timeout=None):
+        assert timeout, "every hash route and in-page POST must be bounded"
         if arg == movements_mod._MOVIMIENTOS_ROUTE:
             self.on_movements = True
             self.on_home = False
@@ -1698,7 +1728,7 @@ class _FakeDialogPage:
                 )
                 self.auto_fetch_in = self.auto_fetch_polls
                 self._tick_auto_fetch(advance=False)
-        return None
+        return _FakeHandle(None)
 
     def get_by_role(self, role, name=None):
         assert role == "button" and name.search("SELECCIONAR OTRA CUENTA")
@@ -1969,7 +1999,7 @@ class TestDialogSteps:
             raise RuntimeError("synthetic cleanup failure")
 
         monkeypatch.setattr(movements_mod, "_recover_to_home", broken, raising=True)
-        page.keyboard.press = broken
+        page.body.press = broken
         monkeypatch.setattr(movements_mod, "_open_cartola", _drive_returning_usd_rows)
 
         assert [m.currency for m in _read_usd_dialog(page)] == ["USD"]
@@ -2343,3 +2373,181 @@ class TestUsdCheckingSurface:
     def test_it_is_registered_right_after_the_clp_cartola(self):
         labels = [label for label, _ in movements_mod._MOVEMENT_READERS]
         assert labels[:2] == ["movimientos", "movimientos USD"]
+
+
+class TestSessionReadBudget:
+    """A portal that stops rendering must end the run in minutes, not hang it."""
+
+    @pytest.fixture(autouse=True)
+    def _fake_time(self, monkeypatch):
+        _use_fake_clock(monkeypatch)
+        # The deadline is set and checked in banchile_web, so its clock moves too.
+        monkeypatch.setattr(banchile_web_mod, "time", _CLOCK)
+
+    def _readers(self, monkeypatch, first):
+        calls = []
+
+        def later(label):
+            def read(page, attempt):
+                calls.append(label)
+                return []
+
+            return read
+
+        monkeypatch.setattr(
+            movements_mod,
+            "_MOVEMENT_READERS",
+            [
+                ("movimientos", first),
+                ("movimientos USD", later("movimientos USD")),
+                ("tarjeta no facturados", later("tarjeta no facturados")),
+            ],
+        )
+        return calls
+
+    def test_a_read_past_the_deadline_skips_later_surfaces(self, monkeypatch, caplog):
+        budget_s = banchile_web_mod._SESSION_READ_BUDGET_MS / 1000
+
+        def slow(page, attempt):
+            _CLOCK.now += budget_s + 1  # one attempt outlives the whole budget
+            return [parse_cartola_movement(_cartola_row())]
+
+        calls = self._readers(monkeypatch, slow)
+
+        with caplog.at_level("WARNING", logger=banchile_web_mod.__name__):
+            movements, failed = read_movement_surfaces(MagicMock())
+
+        assert len(movements) == 1  # what was read before the deadline is kept
+        assert failed == ("movimientos USD", "tarjeta no facturados")
+        assert calls == []
+        skips = [r for r in caplog.records if "skipped surfaces" in r.getMessage()]
+        assert len(skips) == 1
+        assert "movimientos USD, tarjeta no facturados" in skips[0].getMessage()
+
+    def test_a_surface_stops_retrying_once_the_deadline_passes(self, monkeypatch):
+        attempts = []
+        budget_s = banchile_web_mod._SESSION_READ_BUDGET_MS / 1000
+
+        def frozen(page, attempt):
+            attempts.append(attempt)
+            _CLOCK.now += budget_s + 1
+            return None  # never loaded: would normally be retried twice more
+
+        self._readers(monkeypatch, frozen)
+
+        _, failed = read_movement_surfaces(MagicMock())
+
+        assert attempts == [0]
+        assert failed == ("movimientos", "movimientos USD", "tarjeta no facturados")
+
+    def test_a_healthy_read_is_untouched(self, monkeypatch):
+        calls = self._readers(monkeypatch, lambda page, attempt: [])
+
+        assert read_movement_surfaces(MagicMock()) == ([], ())
+        assert calls == ["movimientos USD", "tarjeta no facturados"]
+
+    def test_the_session_shares_one_deadline(self, monkeypatch):
+        seen = []
+
+        def products(page, deadline):
+            seen.append(deadline)
+            return BalanceFetchResult(products=[], failed_surfaces=())
+
+        def rate(page, deadline):
+            seen.append(deadline)
+            return [], ()
+
+        def movements(page, deadline):
+            seen.append(deadline)
+            return [], ()
+
+        monkeypatch.setattr(movements_mod, "_read_all_surfaces", products)
+        monkeypatch.setattr(movements_mod, "read_exchange_rate_surface", rate)
+        monkeypatch.setattr(movements_mod, "read_movement_surfaces", movements)
+
+        movements_mod.read_session(MagicMock())
+
+        budget_s = banchile_web_mod._SESSION_READ_BUDGET_MS / 1000
+        assert seen == [_CLOCK.now + budget_s] * 3
+
+
+class TestLeavingTheMovementsView:
+    def test_escape_is_a_bounded_call(self):
+        """`keyboard.press` has no timeout and hung for minutes on a frozen
+        portal; the cleanup presses through a locator, under a timeout."""
+        page = _FakeDialogPage()
+        page.keyboard = MagicMock()
+        page.dialog_open = True
+
+        movements_mod._leave_movements_view(page)
+
+        page.keyboard.press.assert_not_called()
+        assert page.body.presses
+        assert all(
+            press == ("Escape", banchile_web_mod._PAGE_CALL_TIMEOUT_MS)
+            for press in page.body.presses
+        )
+        assert not page.dialog_open
+
+
+class TestBoundedDialogReads:
+    """`Locator.count()` and `page.evaluate` take no timeout; the dialog and the
+    in-page POSTs only use calls that carry one."""
+
+    def test_counts_stop_at_the_first_missing_match(self):
+        page = _FakeDialogPage(radios={"CLP": ["A", "B", "C"], "USD": []})
+        page.dialog_open = True
+        page.chosen = "CLP"
+
+        radios = page.locator(movements_mod._ACCOUNT_RADIO_SELECTOR)
+
+        assert movements_mod._visible_count(radios) == 3
+
+    def test_counts_are_capped(self):
+        locator = MagicMock()
+        locator.nth.return_value.is_visible.return_value = True
+
+        assert movements_mod._visible_count(locator) == movements_mod._MAX_DIALOG_ITEMS
+        locator.count.assert_not_called()
+
+    def test_the_dialog_drive_never_calls_count(self):
+        """`_DialogLocator.count` raises, so a drive that still counted would fail."""
+        page = _FakeDialogPage(cartolas={"CLP": {"movimientos": [_cartola_row()]}})
+
+        found = movements_mod._read_checking_movements(page, attempt=0)
+
+        assert found and found[0].currency == "CLP"
+
+    def test_an_in_page_post_is_bounded(self):
+        page = MagicMock()
+        page.wait_for_function.return_value.json_value.return_value = {
+            "status": 200,
+            "payload": {"ok": True},
+        }
+
+        status, payload = movements_mod._post_json(page, "https://synthetic/x", {})
+
+        assert (status, payload) == (200, {"ok": True})
+        page.evaluate.assert_not_called()
+        kwargs = page.wait_for_function.call_args.kwargs
+        assert kwargs["timeout"] == movements_mod._POST_JSON_CALL_TIMEOUT_MS
+        assert kwargs["arg"]["timeoutMs"] == movements_mod._POST_JSON_TIMEOUT_MS
+        assert kwargs["timeout"] > kwargs["arg"]["timeoutMs"]
+        page.wait_for_function.return_value.dispose.assert_called_once()
+
+    def test_glosa_lookups_stop_after_a_call_gets_no_answer(self, monkeypatch):
+        """A stalled detalle-glosa would cost a full timeout per movement."""
+        calls = []
+
+        def no_answer(page, url, body):
+            calls.append(url)
+            return 0, None
+
+        monkeypatch.setattr(movements_mod, "_post_json", no_answer)
+        rows = [_cartola_row(), _cartola_row(), _cartola_row()]
+
+        ids, remaining = movements_mod._operation_ids_for(MagicMock(), rows, 80)
+
+        assert ids == [None, None, None]
+        assert len(calls) == 1
+        assert remaining == 0

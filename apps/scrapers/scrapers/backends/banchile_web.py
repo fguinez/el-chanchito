@@ -83,6 +83,22 @@ _CARD_LINK_TIMEOUTS_MS = (6_000, 9_000, 12_000)  # per-attempt card shortcut bud
 _ASIDE_CLICK_TIMEOUTS_MS = (6_000, 9_000, 12_000)    # per-attempt VER DETALLE budget
 _ASIDE_RENDER_TIMEOUTS_MS = (10_000, 15_000, 20_000)  # per-attempt aside render/poll
 _RETRY_PAUSES_MS = (2_000, 4_000)                # pause before attempt 2 / attempt 3
+# Bound on each in-page text read, hash route and key press. `page.evaluate`
+# and `page.keyboard.press` take no timeout (not even `set_default_timeout`'s),
+# so they wait as long as a stalled renderer does (the likely cause of the
+# ~10 min single attempts seen live); the locator / `wait_for_function` calls
+# used instead run under one. A live page answers each in milliseconds.
+_PAGE_CALL_TIMEOUT_MS = 10_000
+# Overall budget for one session's post-login reads (products, rate and
+# movements share it; see `read_session`). Once spent, the surfaces not yet
+# started are skipped and reported failed, and a surface mid-retries stops
+# after its current attempt. A healthy session reads everything in a few
+# minutes (products took ~2 min live) and one attempt's worst case is ~2.5 min
+# (a 60 s render budget plus its dialog steps and portal-home recoveries), so
+# 12 min leaves room for a slow surface to run its whole retry ladder, while a
+# frozen portal ends the run in about 15 min instead of running every
+# surface's three attempts.
+_SESSION_READ_BUDGET_MS = 12 * 60_000
 
 # --- Selectors, each a fallback list (BdC markup drifts — see issue #27) ------
 _LOGIN_ACCESS_SELECTORS = [
@@ -585,9 +601,69 @@ def linea_saldo_from_text(text: Optional[str]) -> Optional[dict[str, float]]:
     return entry
 
 
-# Guarded: right after the post-login redirect `document.body` can still be
-# null, and the balances load via a later XHR — so this must not throw.
-_INNER_TEXT_JS = "() => (document.body && document.body.innerText) || ''"
+# Assigns the SPA's hash route; returns true so `wait_for_function` resolves on
+# its first evaluation (see `_route_to`).
+_SET_HASH_JS = "route => { window.location.hash = route; return true; }"
+
+
+def _body_text(page) -> str:
+    """The page's visible text (`body.innerText`), bounded by `_PAGE_CALL_TIMEOUT_MS`.
+
+    `Locator.inner_text` runs the whole read under its timeout, where
+    `page.evaluate` has none. Right after the post-login redirect `body` can
+    still be missing, which raises here once the timeout passes; every caller
+    treats a raise as "no text yet".
+    """
+    text = page.locator("body").inner_text(timeout=_PAGE_CALL_TIMEOUT_MS)
+    return text if isinstance(text, str) else ""
+
+
+def _route_to(page, route: str) -> None:
+    """Assign the SPA's hash route under `_PAGE_CALL_TIMEOUT_MS`; raises on failure.
+
+    `wait_for_function` evaluates its predicate once right away and, unlike
+    `page.evaluate`, under a timeout; this predicate assigns the hash and
+    returns true, so that first evaluation is the whole call.
+    """
+    _dispose(
+        page.wait_for_function(_SET_HASH_JS, arg=route, timeout=_PAGE_CALL_TIMEOUT_MS)
+    )
+
+
+def _dispose(handle) -> None:
+    """Release a `wait_for_function` handle's in-page object; never raises."""
+    try:
+        handle.dispose()
+    except Exception:
+        pass
+
+
+def _evaluate_bounded(page, script: str, arg, timeout_ms: int):
+    """Run an async in-page `script` and return its JSON result, bounded; raises.
+
+    `page.evaluate` takes no timeout. `wait_for_function` runs its predicate
+    once right away, and when that returns a promise (always truthy) it waits
+    for the promise inside its timeout too, so the script itself is bounded.
+    `json_value` (copying the settled result out) has no timeout of its own,
+    a narrow window left open. Playwright re-runs the predicate if the page's
+    context is swapped mid-call, so `script` must be safe to run twice: only
+    read-only queries go through here.
+    """
+    handle = page.wait_for_function(script, arg=arg, timeout=timeout_ms)
+    try:
+        return handle.json_value()
+    finally:
+        _dispose(handle)
+
+
+def _press_escape(page) -> None:
+    """Press Escape, bounded by `_PAGE_CALL_TIMEOUT_MS`; raises on failure.
+
+    `page.keyboard.press` has no timeout. `Locator.press` focuses its target
+    and presses under one; `body` is not focusable, so focus stays on the open
+    panel or dialog and the key lands where `keyboard.press` sent it.
+    """
+    page.locator("body").press("Escape", timeout=_PAGE_CALL_TIMEOUT_MS)
 
 
 def _read_checking(page) -> Optional[int]:
@@ -598,7 +674,7 @@ def _read_checking(page) -> Optional[int]:
     loaded" signal `_wait_for_balances` polls on.
     """
     try:
-        text = page.evaluate(_INNER_TEXT_JS)
+        text = _body_text(page)
     except Exception:
         return None
     return _balance_from_text(text)
@@ -656,12 +732,12 @@ def balances_from_page(page) -> list[ScrapedProduct]:
     """Read the dashboard balances off an already-authenticated page.
 
     This is the seam the tests mock: it only reads `page`'s visible text (via
-    ``page.evaluate``) and delegates the shaping to `dashboard_balances_from_text`,
+    `_body_text`) and delegates the shaping to `dashboard_balances_from_text`,
     so it can be exercised with a fake page and no real bank. Returns [] on error
     or when nothing is found.
     """
     try:
-        text = page.evaluate(_INNER_TEXT_JS)
+        text = _body_text(page)
     except Exception:
         logger.exception("BanChile: could not read page text")
         return []
@@ -1120,11 +1196,7 @@ def _click_first(page, selectors: list[str], timeout: int = 5000) -> bool:
         element.click()
         return True
     except Exception:
-        try:  # JS click as a fallback for overlay-covered elements
-            page.evaluate("el => el.click()", element)
-            return True
-        except Exception:
-            return False
+        return False
 
 
 def _nth_visible(page, selectors: list[str], index: int, timeout: int = 5000):
@@ -1154,11 +1226,7 @@ def _click_nth(page, selectors: list[str], index: int, timeout: int = 5000) -> b
         element.click()
         return True
     except Exception:
-        try:  # JS click as a fallback for overlay-covered elements
-            page.evaluate("el => el.click()", element)
-            return True
-        except Exception:
-            return False
+        return False
 
 
 def _launch_browser(playwright, headless: bool):
@@ -1217,7 +1285,7 @@ def _login(page, rut: str, password: str) -> None:
     password_field.fill(password)
 
     if not _click_first(page, _SUBMIT_SELECTORS, timeout=5000):
-        page.keyboard.press("Enter")  # some layouts submit on Enter
+        password_field.press("Enter")  # some layouts submit on Enter
 
     try:
         page.wait_for_function(_LOGIN_SUCCESS_JS, timeout=LOGIN_TIMEOUT)
@@ -1356,7 +1424,7 @@ def _wait_for_text(page, ready_re: "re.Pattern[str]", timeout_ms: int) -> Option
         if not _on_portal(page):
             return None
         try:
-            text = page.evaluate(_INNER_TEXT_JS)
+            text = _body_text(page)
         except Exception:
             text = ""
         if text and ready_re.search(text):
@@ -1384,8 +1452,31 @@ def _budget(values: tuple[int, ...], index: int) -> int:
     return values[min(index, len(values) - 1)]
 
 
+def _read_deadline(budget_ms: int = _SESSION_READ_BUDGET_MS) -> float:
+    """The `time.monotonic()` value after which a session's surface reads stop."""
+    return time.monotonic() + budget_ms / 1000
+
+
+def _deadline_passed(deadline: Optional[float]) -> bool:
+    """True once `deadline` (from `_read_deadline`; None means none) has passed."""
+    return deadline is not None and time.monotonic() >= deadline
+
+
+def _skip_surfaces(surfaces: list[str]) -> None:
+    """Log the one warning for the surfaces a spent read budget skips."""
+    logger.warning(
+        "BanChile: session read budget (%d min) spent; skipped surfaces: %s",
+        _SESSION_READ_BUDGET_MS // 60_000,
+        ", ".join(surfaces),
+    )
+
+
 def _read_surface_with_retries(
-    page, surface: str, read: Callable, allow_empty: bool = False
+    page,
+    surface: str,
+    read: Callable,
+    allow_empty: bool = False,
+    deadline: Optional[float] = None,
 ):
     """Run one surface's reader with bounded retries and escalating budgets.
 
@@ -1407,8 +1498,24 @@ def _read_surface_with_retries(
       with no national statement), so a reader signals failure by returning
       None and success with a possibly empty list. Exhaustion returns None, so
       the caller can tell "nothing happened this month" from "never loaded".
+
+    `deadline` (from `_read_deadline`) is checked before every attempt: once it
+    has passed, the remaining attempts are skipped with one warning and the
+    surface ends as exhausted. It cannot interrupt an attempt already running;
+    the per-call bounds (`_PAGE_CALL_TIMEOUT_MS` and the budgets) keep that
+    finite.
     """
     for attempt in range(_SURFACE_ATTEMPTS):
+        if _deadline_passed(deadline):
+            logger.warning(
+                "BanChile: session read budget (%d min) spent; %s surface "
+                "stopped before attempt %d/%d",
+                _SESSION_READ_BUDGET_MS // 60_000,
+                surface,
+                attempt + 1,
+                _SURFACE_ATTEMPTS,
+            )
+            return None if allow_empty else []
         if attempt:
             page.wait_for_timeout(_budget(_RETRY_PAUSES_MS, attempt - 1))
             _recover_to_home(page)
@@ -1480,7 +1587,7 @@ def _read_linea_detail(page, attempt: int) -> list[ScrapedProduct]:
     """
     if not _ensure_on_portal(page):
         return []
-    page.evaluate("route => { window.location.hash = route; }", _LINEA_ROUTE)
+    _route_to(page, _LINEA_ROUTE)
     text = _wait_for_text(page, _LINEA_READY_RE, _budget(_RENDER_TIMEOUTS_MS, attempt))
     if text is None:
         logger.info(
@@ -1502,7 +1609,7 @@ def _close_aside(page) -> None:
     if _click_first(page, _ASIDE_CLOSE_SELECTORS, timeout=2000):
         return
     try:
-        page.keyboard.press("Escape")
+        _press_escape(page)
     except Exception:
         pass
 
@@ -1521,7 +1628,7 @@ def _wait_for_aside(page, extract: Callable, timeout_ms: int) -> Optional[dict]:
         if not _on_portal(page):
             return None
         try:
-            text = page.evaluate(_INNER_TEXT_JS)
+            text = _body_text(page)
         except Exception:
             text = ""
         if text:
@@ -1589,7 +1696,7 @@ def _read_depositos_detail(page, attempt: int) -> list[ScrapedProduct]:
     """
     if not _ensure_on_portal(page):
         return []
-    page.evaluate("route => { window.location.hash = route; }", _DEPOSITOS_ROUTE)
+    _route_to(page, _DEPOSITOS_ROUTE)
     text = _wait_for_text(page, _DEPOSITOS_READY_RE, _budget(_RENDER_TIMEOUTS_MS, attempt))
     if text is None:
         logger.info(
@@ -1621,7 +1728,7 @@ def _read_fondos_detail(page, attempt: int) -> list[ScrapedProduct]:
     """
     if not _ensure_on_portal(page):
         return []
-    page.evaluate("route => { window.location.hash = route; }", _FONDOS_ROUTE)
+    _route_to(page, _FONDOS_ROUTE)
     text = _wait_for_text(page, _FONDOS_READY_RE, _budget(_RENDER_TIMEOUTS_MS, attempt))
     if text is None:
         logger.info(
@@ -1657,19 +1764,25 @@ _SURFACE_READERS: list[tuple[str, Callable]] = [
 ]
 
 
-def _read_all_surfaces(page) -> BalanceFetchResult:
+def _read_all_surfaces(page, deadline: Optional[float] = None) -> BalanceFetchResult:
     """Read every product surface off an authenticated page, with retries.
 
     This is the seam the retry tests drive with a fake page. A detail reading
     supersedes the dashboard's entry for the same product (a card picks up its
     límite; the depósitos/fondos listings supply the per-holding term_deposit
     and investment products), and a surface with no products after all its
-    attempts lands in `failed_surfaces`.
+    attempts lands in `failed_surfaces`. Past `deadline` (from `_read_deadline`)
+    the surfaces not yet started are skipped and land there too.
     """
     balances: list[ScrapedProduct] = []
     failed: list[str] = []
-    for surface, read in _SURFACE_READERS:
-        products = _read_surface_with_retries(page, surface, read)
+    for position, (surface, read) in enumerate(_SURFACE_READERS):
+        if _deadline_passed(deadline):
+            skipped = [label for label, _ in _SURFACE_READERS[position:]]
+            _skip_surfaces(skipped)
+            failed.extend(skipped)
+            break
+        products = _read_surface_with_retries(page, surface, read, deadline=deadline)
         if products:
             balances = _merge_balances(balances, products)
         else:
@@ -1875,7 +1988,9 @@ def _authenticated_session(browser, rut: str, password: str) -> Iterator:
     problem is a miss: the file is deleted and, unless the login cooldown
     refuses it (`LoginCooldownError`), `_login` runs in a fresh context, raising
     on failure as before. The state is saved after authenticating and again
-    after the caller's reads, to keep rotated cookies.
+    after the caller's reads, to keep rotated cookies, unless those reads
+    outlasted the session read budget (`_SESSION_READ_BUDGET_MS`) and the page
+    no longer answers.
     """
     path = _session_file()
     state, reason = _load_session_state(path)
@@ -1893,8 +2008,25 @@ def _authenticated_session(browser, rut: str, password: str) -> Iterator:
         _claim_login_attempt()
         _login(page, rut, password)
     _save_session(context, path)
+    reads_deadline = _read_deadline()  # the callers' read budget starts here too
     yield page
+    if _deadline_passed(reads_deadline) and not _page_answers(page):
+        # `storage_state` takes no timeout and reads the page's storage, so on a
+        # portal that stopped answering (the likely reason the budget ran out)
+        # it could hang the end of the run. The cache saved above stays. A run
+        # that was only slow still answers the bounded probe and re-saves.
+        logger.warning("BanChile: read budget spent; session cache not re-saved")
+        return
     _save_session(context, path)
+
+
+def _page_answers(page) -> bool:
+    """True when the page answers a bounded text read (`_body_text`)."""
+    try:
+        _body_text(page)
+    except Exception:
+        return False
+    return True
 
 
 def _scrape_sync(rut: str, password: str, headless: bool) -> BalanceFetchResult:
@@ -1907,7 +2039,7 @@ def _scrape_sync(rut: str, password: str, headless: bool) -> BalanceFetchResult:
         try:
             with _authenticated_session(browser, rut, password) as page:
                 _dismiss_popup(page)
-                return _read_all_surfaces(page)
+                return _read_all_surfaces(page, _read_deadline())
         finally:
             browser.close()
 

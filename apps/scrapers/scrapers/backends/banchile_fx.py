@@ -23,7 +23,7 @@ same SPA service posts real payments to `autorizacion-pago-internacional` and
 
 Privacy: the selector answers with the customer's name, RUT and card ids, and
 the rate response also carries the e-mail, an opaque payment token and the 2FA
-device setup. So the whole chain runs inside ONE `page.evaluate`, which hands
+device setup. So the whole chain runs inside ONE in-page script, which hands
 Python only the rate, its date and a status code for diagnostics. Nothing else
 of either payload ever reaches Python, a log line or a run warning.
 
@@ -42,9 +42,13 @@ from scrapers.backends.banchile_web import (
     _RENDER_TIMEOUTS_MS,
     _SURFACE_ATTEMPTS,
     _budget,
+    _PAGE_CALL_TIMEOUT_MS,
+    _deadline_passed,
     _ensure_on_portal,
+    _evaluate_bounded,
     _parse_date_ddmmyyyy,
     _read_surface_with_retries,
+    _skip_surfaces,
 )
 from scrapers.base import ProductRef, ScrapedExchangeRate
 
@@ -215,16 +219,21 @@ def _read_exchange_rate(page, attempt: int) -> list[ScrapedExchangeRate]:
     are same-origin and cookie-authed, so the fence is staying on the portal
     (checked here and again inside the script). Retries start from the home,
     which `_read_surface_with_retries` recovers to.
+
+    Bounded twice: both fetches share an in-page `AbortSignal.timeout` of the
+    attempt's budget, and `_evaluate_bounded` gives up on the whole script a
+    little after it (`page.evaluate` has no timeout), even if the renderer
+    stops answering. The two fetches only read (the selector GET and the rate
+    display POST), so a re-run after a context swap is harmless.
     """
     if not _ensure_on_portal(page):
         return []
-    result = page.evaluate(
+    budget = _budget(_RENDER_TIMEOUTS_MS, attempt)
+    result = _evaluate_bounded(
+        page,
         _EXCHANGE_RATE_JS,
-        {
-            "productsPath": _PRODUCTS_PATH,
-            "ratePath": _RATE_PATH,
-            "timeoutMs": _budget(_RENDER_TIMEOUTS_MS, attempt),
-        },
+        {"productsPath": _PRODUCTS_PATH, "ratePath": _RATE_PATH, "timeoutMs": budget},
+        budget + _PAGE_CALL_TIMEOUT_MS,
     )
     rate = exchange_rate_from_result(result)
     if rate is None:
@@ -239,15 +248,21 @@ def _read_exchange_rate(page, attempt: int) -> list[ScrapedExchangeRate]:
 
 
 def read_exchange_rate_surface(
-    page,
+    page, deadline: Optional[float] = None
 ) -> tuple[list[ScrapedExchangeRate], tuple[str, ...]]:
     """Read the USD card rate with retries: (rates, failed surfaces).
 
     The account always has the card, so a read that never yields the rate is a
     failure (`SURFACE` in the second element), which the scraper reports as a
-    run warning.
+    run warning. So is a read skipped because `deadline` (the session read
+    budget, see `_read_deadline`) has already passed.
     """
-    rates = _read_surface_with_retries(page, SURFACE, _read_exchange_rate)
+    if _deadline_passed(deadline):
+        _skip_surfaces([SURFACE])
+        return [], (SURFACE,)
+    rates = _read_surface_with_retries(
+        page, SURFACE, _read_exchange_rate, deadline=deadline
+    )
     if rates:
         logger.info("BanChile: tipo de cambio read for the USD card")
         return rates, ()
