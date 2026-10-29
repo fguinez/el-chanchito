@@ -1,7 +1,7 @@
 """Tests for the Banco de Chile USD card exchange rate surface.
 
 Never launches a browser or hits the real bank: the in-page script is checked
-as text, and the surface runs on a fake page whose `evaluate` returns synthetic
+as text, and the surface runs on a fake page whose bounded script call returns synthetic
 results shaped like the script's. Every rate, date, name and id below is
 fabricated (see the repo's personal-data policy).
 """
@@ -9,6 +9,7 @@ fabricated (see the repo's personal-data policy).
 import datetime
 import logging
 import re
+import time
 from decimal import Decimal
 
 import pytest
@@ -43,8 +44,17 @@ def _ok(rate=950.0, date="01/01/2026", **extra):
     return {**result, **extra}
 
 
+class _Handle:
+    def __init__(self, value):
+        self.value = value
+
+    def json_value(self):
+        return self.value
+
+
 class _FakeFxPage:
-    """A portal page whose `evaluate` answers with canned script results.
+    """A portal page whose bounded script call (`wait_for_function`, then
+    `json_value`) answers with canned script results.
 
     One result per call (the last one repeats); an exception instance is raised
     instead of returned.
@@ -54,14 +64,17 @@ class _FakeFxPage:
         self.url = url
         self.results = list(results)
         self.calls: list[tuple[str, dict]] = []
+        self.timeouts: list[int] = []
         self.gotos: list[str] = []
 
-    def evaluate(self, script, arg=None):
+    def wait_for_function(self, script, arg=None, timeout=None):
+        assert timeout, "the script call must be bounded"
         self.calls.append((script, arg))
+        self.timeouts.append(timeout)
         result = self.results.pop(0) if len(self.results) > 1 else self.results[0]
         if isinstance(result, Exception):
             raise result
-        return result
+        return _Handle(result)
 
     def wait_for_timeout(self, ms):
         return None
@@ -139,6 +152,10 @@ class TestTheInPageScript:
         read_exchange_rate_surface(page)
 
         ((_, arg),) = page.calls
+        # The whole call outlives the in-page fetch budget only by a margin.
+        assert page.timeouts == [
+            fx_mod._RENDER_TIMEOUTS_MS[0] + fx_mod._PAGE_CALL_TIMEOUT_MS
+        ]
         assert arg == {
             "productsPath": fx_mod._PRODUCTS_PATH,
             "ratePath": fx_mod._RATE_PATH,
@@ -296,6 +313,18 @@ class TestSurface:
         assert rates == []
         assert failed == (SURFACE,) == ("tipo de cambio",)
         assert len(page.calls) == fx_mod._SURFACE_ATTEMPTS
+
+    def test_a_spent_read_budget_skips_the_rate(self, caplog):
+        page = _FakeFxPage(_ok())
+
+        with caplog.at_level(logging.WARNING):
+            rates, failed = read_exchange_rate_surface(
+                page, deadline=time.monotonic() - 1
+            )
+
+        assert (rates, failed) == ([], (SURFACE,))
+        assert page.calls == []
+        assert "skipped surfaces: tipo de cambio" in caplog.text
 
     def test_an_off_portal_page_is_brought_back_first(self):
         page = _FakeFxPage(_ok(), url="https://sitiospublicos.bancochile.cl/personas")

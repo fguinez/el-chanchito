@@ -2,7 +2,7 @@
 
 These never launch a browser or hit the real bank: the pure parsing helpers
 are exercised directly, and `balances_from_page` is driven with a fake page
-whose `evaluate` returns canned page text.
+whose body locator returns canned page text.
 """
 
 import datetime
@@ -315,7 +315,7 @@ class TestBalancesByKind:
 
 def _fake_page(text):
     page = MagicMock()
-    page.evaluate.return_value = text
+    page.locator.return_value.inner_text.return_value = text
     return page
 
 
@@ -332,9 +332,9 @@ class TestBalancesFromPage:
     def test_no_balance_returns_empty(self):
         assert balances_from_page(_fake_page("nada por aquí")) == []
 
-    def test_evaluate_failure_returns_empty(self):
+    def test_text_read_failure_returns_empty(self):
         page = MagicMock()
-        page.evaluate.side_effect = RuntimeError("page closed")
+        page.locator.return_value.inner_text.side_effect = RuntimeError("page closed")
         assert balances_from_page(page) == []
 
     def test_emits_clp_then_usd_checking(self):
@@ -1529,20 +1529,16 @@ def _fake_portal_page(fondos_texts=None):
             "depósitos": DEPOSITOS_LISTADO,
         }[state["route"]]
 
-    def evaluate(js, *args):
-        if args and isinstance(args[0], str):  # hash assignment (SPA navigation)
-            state["asides"] = []
-            if "linea" in args[0]:
-                state["route"] = "linea"
-            elif "depositos-a-plazo" in args[0]:
-                state["route"] = "depósitos"
-            elif "fondos-mutuos" in args[0]:
-                state["route"] = "fondos"
-                state["fondos_visits"] += 1
-            return None
-        if args:  # JS-click fallback on an element handle: no-op
-            return None
-        return base_text() + "".join(state["asides"])
+    def route(js, arg=None, timeout=None):  # hash assignment (SPA navigation)
+        state["asides"] = []
+        if "linea" in arg:
+            state["route"] = "linea"
+        elif "depositos-a-plazo" in arg:
+            state["route"] = "depósitos"
+        elif "fondos-mutuos" in arg:
+            state["route"] = "fondos"
+            state["fondos_visits"] += 1
+        return True
 
     def _detail_button(route, index):
         button = MagicMock()
@@ -1566,7 +1562,11 @@ def _fake_portal_page(fondos_texts=None):
 
     def locator(selector):
         loc = MagicMock()
-        if "ver-detalle" in selector or "Ver detalle" in selector:
+        if selector == "body":  # the page text every poll reads
+            loc.inner_text.side_effect = (
+                lambda **kwargs: base_text() + "".join(state["asides"])
+            )
+        elif "ver-detalle" in selector or "Ver detalle" in selector:
             buttons = detail_buttons.get(state["route"], [])
 
             def nth(index):
@@ -1587,7 +1587,7 @@ def _fake_portal_page(fondos_texts=None):
         state["route"] = "home"
         state["asides"] = []
 
-    page.evaluate.side_effect = evaluate
+    page.wait_for_function.side_effect = route
     page.locator.side_effect = locator
     page.goto.side_effect = goto
     page.card_link = card_link
@@ -1625,6 +1625,19 @@ class TestSurfaceRetries:
         ] == _ALL_SURFACE_PRODUCTS
         page.goto.assert_not_called()
         page.wait_for_timeout.assert_not_called()
+
+    def test_a_spent_read_budget_skips_the_surfaces_not_started(self):
+        """Past the session deadline nothing more is read; every surface left
+        is reported failed instead of run through its three attempts."""
+        page = _fake_portal_page()
+
+        result = _read_all_surfaces(page, deadline=time.monotonic() - 1)
+
+        assert result.products == []
+        assert result.failed_surfaces == tuple(
+            label for label, _ in banchile_web_mod._SURFACE_READERS
+        )
+        page.locator.assert_not_called()
 
     def test_per_holding_products_carry_aside_data(self):
         """The deposit asides and fund asides feed the typed payloads."""
@@ -1817,7 +1830,7 @@ def _fake_context(landing_url=banchile_web_mod._PORTAL_HOME, text=REAL_DASHBOARD
         page.url = landing_url
 
     page.goto.side_effect = goto
-    page.evaluate.return_value = text
+    page.locator.return_value.inner_text.return_value = text
     context.new_page.return_value = page
     context.storage_state.return_value = FRESH_STATE
     return context
@@ -2298,7 +2311,7 @@ class TestScrapeSyncSession:
         browser = _fake_browser(restored)
         expected = BalanceFetchResult(products=[], failed_surfaces=("card",))
 
-        result = self._run(monkeypatch, browser, lambda page: expected)
+        result = self._run(monkeypatch, browser, lambda page, deadline: expected)
 
         assert result is expected
         login.assert_not_called()
@@ -2325,8 +2338,175 @@ class TestScrapeSyncSession:
         browser = _fake_browser(fresh)
         expected = BalanceFetchResult(products=[], failed_surfaces=())
 
-        result = self._run(monkeypatch, browser, lambda page: expected)
+        result = self._run(monkeypatch, browser, lambda page, deadline: expected)
 
         assert result is expected
         login.assert_called_once()
         assert not session_file.exists()
+
+
+class _Clock:
+    """Stands in for `time` in banchile_web: only the tests move it."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+
+class TestReadBudget:
+    """The session read budget (`_SESSION_READ_BUDGET_MS`) in banchile_web."""
+
+    @pytest.fixture
+    def clock(self, monkeypatch):
+        clock = _Clock()
+        monkeypatch.setattr(banchile_web_mod, "time", clock)
+        return clock
+
+    def test_a_deadline_mid_run_skips_the_rest(self, clock, monkeypatch, caplog):
+        calls = []
+        product = balances_from_page(_fake_page("Saldo Disponible $ 1.000.000"))
+
+        def slow(page, attempt):
+            calls.append("dashboard")
+            clock.now += banchile_web_mod._SESSION_READ_BUDGET_MS / 1000 + 1
+            return product
+
+        def later(label):
+            def read(page, attempt):
+                calls.append(label)
+                return product
+
+            return read
+
+        monkeypatch.setattr(
+            banchile_web_mod,
+            "_SURFACE_READERS",
+            [("dashboard", slow), ("card", later("card")), ("línea", later("línea"))],
+        )
+
+        with caplog.at_level(logging.WARNING, logger=banchile_web_mod.__name__):
+            result = _read_all_surfaces(
+                MagicMock(), deadline=banchile_web_mod._read_deadline()
+            )
+
+        assert calls == ["dashboard"]
+        assert result.products == product  # what was read is kept
+        assert result.failed_surfaces == ("card", "línea")
+        assert "skipped surfaces: card, línea" in caplog.text
+
+    def test_the_balance_only_path_gets_the_budget_too(self, clock, monkeypatch):
+        seen = []
+
+        def reads(page, deadline):
+            seen.append(deadline)
+            return BalanceFetchResult(products=[], failed_surfaces=())
+
+        session = MagicMock()
+        monkeypatch.setattr(
+            banchile_web_mod, "_authenticated_session", lambda *args: session
+        )
+        monkeypatch.setattr(banchile_web_mod, "_launch_browser", lambda *a: MagicMock())
+        monkeypatch.setattr(banchile_web_mod, "_refuse_a_certain_login", lambda: None)
+        monkeypatch.setattr(banchile_web_mod, "_dismiss_popup", lambda page: None)
+        monkeypatch.setattr(banchile_web_mod, "_read_all_surfaces", reads)
+        monkeypatch.setattr(
+            "playwright.sync_api.sync_playwright", lambda: _fake_playwright(MagicMock())
+        )
+
+        _scrape_sync(RUT, PASSWORD, headless=True)
+
+        assert seen == [clock.now + banchile_web_mod._SESSION_READ_BUDGET_MS / 1000]
+
+    def test_a_spent_budget_skips_the_final_session_save(
+        self, clock, session_file, login, monkeypatch, caplog
+    ):
+        """`storage_state` has no timeout; after a frozen portal it is skipped."""
+        fresh = _fake_context()
+        fresh.new_page.return_value.locator.return_value.inner_text.side_effect = (
+            TimeoutError("frozen")
+        )
+        browser = _fake_browser(fresh)
+
+        def frozen_reads(page, deadline):
+            clock.now += banchile_web_mod._SESSION_READ_BUDGET_MS / 1000 + 1
+            return BalanceFetchResult(products=[], failed_surfaces=("dashboard",))
+
+        monkeypatch.setattr(
+            "playwright.sync_api.sync_playwright", lambda: _fake_playwright(browser)
+        )
+        monkeypatch.setattr(banchile_web_mod, "_dismiss_popup", lambda page: None)
+        monkeypatch.setattr(banchile_web_mod, "_read_all_surfaces", frozen_reads)
+
+        with caplog.at_level(logging.WARNING, logger=banchile_web_mod.__name__):
+            _scrape_sync(RUT, PASSWORD, headless=True)
+
+        assert fresh.storage_state.call_count == 1  # the post-login save only
+        assert "session cache not re-saved" in caplog.text
+
+    def test_a_slow_but_live_run_still_re_saves_the_session(
+        self, clock, session_file, login, monkeypatch, caplog
+    ):
+        """Past the budget but answering: the rotated cookies are still saved."""
+        fresh = _fake_context()
+        browser = _fake_browser(fresh)
+
+        def slow_reads(page, deadline):
+            clock.now += banchile_web_mod._SESSION_READ_BUDGET_MS / 1000 + 1
+            return BalanceFetchResult(products=[], failed_surfaces=())
+
+        monkeypatch.setattr(
+            "playwright.sync_api.sync_playwright", lambda: _fake_playwright(browser)
+        )
+        monkeypatch.setattr(banchile_web_mod, "_dismiss_popup", lambda page: None)
+        monkeypatch.setattr(banchile_web_mod, "_read_all_surfaces", slow_reads)
+
+        with caplog.at_level(logging.WARNING, logger=banchile_web_mod.__name__):
+            _scrape_sync(RUT, PASSWORD, headless=True)
+
+        assert fresh.storage_state.call_count == 2
+        assert "session cache not re-saved" not in caplog.text
+
+
+class TestClickFallback:
+    """A click that times out is a miss: there is no JS click fallback (the old
+    one passed a Locator to `page.evaluate`, which arrives as undefined, so it
+    always failed; the live flows are built on that)."""
+
+    def test_a_timed_out_click_returns_false(self):
+        page = MagicMock()
+        element = page.locator.return_value.first
+        element.click.side_effect = RuntimeError("synthetic click timeout")
+
+        assert banchile_web_mod._click_first(page, ["button.synthetic"]) is False
+        element.dispatch_event.assert_not_called()
+        page.evaluate.assert_not_called()
+
+    def test_a_timed_out_nth_click_returns_false(self):
+        page = MagicMock()
+        element = page.locator.return_value.nth.return_value
+        element.click.side_effect = RuntimeError("synthetic click timeout")
+
+        assert banchile_web_mod._click_nth(page, ["button.synthetic"], 1) is False
+        element.dispatch_event.assert_not_called()
+
+    def test_login_falls_back_to_enter_when_submit_times_out(self):
+        page = MagicMock()
+        locators = {}
+
+        def locator(selector):
+            if selector not in locators:
+                loc = MagicMock()
+                if selector in banchile_web_mod._SUBMIT_SELECTORS:
+                    loc.first.click.side_effect = RuntimeError("synthetic timeout")
+                locators[selector] = loc
+            return locators[selector]
+
+        page.locator.side_effect = locator
+
+        banchile_web_mod._login(page, RUT, PASSWORD)
+
+        password_field = locators[banchile_web_mod._PASSWORD_SELECTORS[0]].first
+        password_field.press.assert_called_once_with("Enter")
+        page.keyboard.press.assert_not_called()

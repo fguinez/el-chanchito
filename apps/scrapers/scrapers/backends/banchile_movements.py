@@ -94,22 +94,28 @@ from scrapers.backends.banchile_fx import read_exchange_rate_surface
 from scrapers.backends.banchile_web import (
     _CARD_LINK_SELECTORS,
     _CARD_LINK_TIMEOUTS_MS,
-    _INNER_TEXT_JS,
     _PORTAL_HOST,
     _PRODUCT_ROWS,
     _RENDER_TIMEOUTS_MS,
     _authenticated_session,
+    _body_text,
     _budget,
     _click_first,
+    _deadline_passed,
     _dismiss_popup,
     _ensure_on_portal,
+    _evaluate_bounded,
     _launch_browser,
     _on_portal,
     _parse_date_ddmmyyyy,
+    _press_escape,
     _read_all_surfaces,
+    _read_deadline,
     _read_surface_with_retries,
     _recover_to_home,
     _refuse_a_certain_login,
+    _route_to,
+    _skip_surfaces,
     parse_clp,
 )
 from scrapers.base import ScrapedExchangeRate, ScrapedProduct, TransactionLocation
@@ -1116,6 +1122,8 @@ _STALE_GRACE_MS = 8_000
 _DASHBOARD_READY_MS = 15_000
 _DASHBOARD_SETTLE_MS = 1_500
 _DASHBOARD_POLL_MS = 500
+# Most matches `_visible_count` looks for: the lists here hold a handful.
+_MAX_DIALOG_ITEMS = 20
 _CURRENCY_OPTION_SELECTOR = "mat-option"
 _ACCOUNT_RADIO_SELECTOR = "mat-radio-button"
 _MODAL_ACCEPT_SELECTOR = "#modalPrimaryBtn button"
@@ -1145,13 +1153,24 @@ _MAX_CHECKING_ACCOUNTS = 4
 # without walking the whole history on every scrape.
 _BILLED_STATEMENTS = 2
 
+# Two layers bound each in-page POST: `_evaluate_bounded` gives up on the
+# whole call after `_POST_JSON_CALL_TIMEOUT_MS`, even if the renderer stops
+# answering, and inside the page the fetch (body included) aborts after
+# `_POST_JSON_TIMEOUT_MS`, so a slow server ends as a clean (0, None) first.
+# Both POSTs are read-only queries (a glosa lookup, a statement replay), so the
+# re-run `_evaluate_bounded` may do after a context swap is harmless.
+_POST_JSON_TIMEOUT_MS = 20_000
+_POST_JSON_CALL_TIMEOUT_MS = _POST_JSON_TIMEOUT_MS + 5_000
 _POST_JSON_JS = """
-async ({url, body}) => {
+async ({url, body, timeoutMs}) => {
+  const signal = typeof AbortSignal.timeout === 'function'
+    ? AbortSignal.timeout(timeoutMs) : undefined;
   const response = await fetch(url, {
     method: 'POST',
     credentials: 'include',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(body),
+    signal,
   });
   let payload = null;
   try { payload = await response.json(); } catch (error) { payload = null; }
@@ -1168,7 +1187,9 @@ class _JsonCapture:
     module docstring). Both halves are kept: the response body is the data, and
     the request body is what lets the billed leg replay an older statement.
     Every callback is defensive: an event handler that raises would surface as
-    an unrelated Playwright error much later.
+    an unrelated Playwright error much later. `response.json()` takes no
+    timeout, but the sync API runs each event handler in its own greenlet, so
+    a body that never arrives parks that handler only, never the read.
     """
 
     def __init__(self, page, fragment: str) -> None:
@@ -1315,7 +1336,12 @@ def _post_json(page, url: str, body: dict) -> tuple[int, Optional[dict]]:
     Callers treat every non-200 as "no data", never as fatal.
     """
     try:
-        result = page.evaluate(_POST_JSON_JS, {"url": url, "body": body})
+        result = _evaluate_bounded(
+            page,
+            _POST_JSON_JS,
+            {"url": url, "body": body, "timeoutMs": _POST_JSON_TIMEOUT_MS},
+            _POST_JSON_CALL_TIMEOUT_MS,
+        )
     except Exception:
         logger.debug("BanChile: POST %s failed", url, exc_info=True)
         return 0, None
@@ -1382,6 +1408,19 @@ def matching_radio_indices(radio_labels: list[str], currency: str) -> list[int]:
     if label_re is None:
         return list(range(len(radio_labels)))
     return [i for i, label in enumerate(radio_labels) if label_re.search(label or "")]
+
+
+def _visible_count(locator) -> int:
+    """How many of `locator`'s matches are visible, in order, up to `_MAX_DIALOG_ITEMS`.
+
+    `Locator.count()` takes no timeout; `is_visible` runs under the page's
+    default one and never waits for a match, so each probe is bounded and the
+    first missing index ends the count. Raises like the calls it makes.
+    """
+    count = 0
+    while count < _MAX_DIALOG_ITEMS and locator.nth(count).is_visible():
+        count += 1
+    return count
 
 
 def _visible_now(page, selector: str) -> bool:
@@ -1496,7 +1535,9 @@ def _select_currency(page, currency: str, timeout_ms: int) -> _StepResult:
         select.click()
         page.wait_for_timeout(_DIALOG_SETTLE_MS)
         options = page.locator(_CURRENCY_OPTION_SELECTOR)
-        texts = [options.nth(i).inner_text() or "" for i in range(options.count())]
+        texts = [
+            options.nth(i).inner_text() or "" for i in range(_visible_count(options))
+        ]
         # The count and the currencies recognised, never the raw option text.
         recognised = [
             c for c in _CURRENCY_OPTION_RES if matching_option_index(texts, c) is not None
@@ -1541,7 +1582,9 @@ def _click_account_radio(
             except Exception:
                 logger.debug("BanChile: no account radio rendered", exc_info=True)
                 return _RadioPick(0, _STEP_FAILED, "no account radio rendered")
-            labels = [radios.nth(i).inner_text() or "" for i in range(radios.count())]
+            labels = [
+                radios.nth(i).inner_text() or "" for i in range(_visible_count(radios))
+            ]
             # Only the count is logged: a radio's label carries the account number.
             logger.debug("BanChile: %d account radio(s) rendered", len(labels))
             matching = matching_radio_indices(labels, currency)
@@ -1557,7 +1600,7 @@ def _click_account_radio(
             page.wait_for_timeout(_DIALOG_SETTLE_MS)
             return _RadioPick(len(matching), _STEP_OK)
 
-        count = radios.count()
+        count = _visible_count(radios)
         if not count:
             return _RadioPick(0, _STEP_FAILED, "no account radio rendered")
         if index >= count:
@@ -1581,14 +1624,14 @@ def _leave_movements_view(page) -> None:
     A drive can stop with the currency panel or the modal still open (no
     option for the currency, a failed step), and either would cover the next
     surface's first click. Escape closes the panel, then the modal; it is
-    harmless when nothing is open. Cheap on purpose: it runs after every
-    checking attempt, and waiting for the dashboard is `_wait_for_dashboard`'s
+    harmless when nothing is open, and bounded (`_press_escape`). Cheap on
+    purpose: it runs after every checking attempt, and waiting for the dashboard is `_wait_for_dashboard`'s
     job, once, right before the card legs need it. Never raises: it runs in a
     `finally` and must not replace a successful read with an exception.
     """
     try:
         for _ in range(2):
-            page.keyboard.press("Escape")
+            _press_escape(page)
             page.wait_for_timeout(_DIALOG_SETTLE_MS // 3)
     except Exception:
         logger.debug("BanChile: could not press Escape on the dialog", exc_info=True)
@@ -1616,10 +1659,9 @@ def dashboard_rendered(text: Optional[str]) -> bool:
 
 def _page_text(page) -> str:
     try:
-        text = page.evaluate(_INNER_TEXT_JS)
+        return _body_text(page)
     except Exception:
         return ""
-    return text if isinstance(text, str) else ""
 
 
 def _wait_for_dashboard(page) -> None:
@@ -1688,9 +1730,7 @@ def _open_cartola(
         return _drive_failed(currency, "route", "not on the portal", index, attempt)
     with _JsonCapture(page, _CARTOLA_FRAGMENT) as capture:
         try:
-            page.evaluate(
-                "route => { window.location.hash = route; }", _MOVIMIENTOS_ROUTE
-            )
+            _route_to(page, _MOVIMIENTOS_ROUTE)
         except Exception as error:
             logger.debug("BanChile: could not route to the movements view", exc_info=True)
             return _drive_failed(
@@ -1767,6 +1807,11 @@ def _operation_ids_for(
         url = f"https://{_PORTAL_HOST}{_DETALLE_GLOSA_PATH}"
         status, payload = _post_json(page, url, detail_glosa_body(raw))
         ids.append(operation_id_from_detail(payload) if status == 200 else None)
+        if status == 0:
+            # No answer at all (a timeout or a dead page): every further call
+            # would wait out its own timeout too, so stop the lookups here.
+            logger.debug("BanChile: detalle-glosa got no answer; skipping the rest")
+            remaining = 0
         try:
             page.wait_for_timeout(_GLOSA_PAUSE_MS)
         except Exception:
@@ -1978,9 +2023,7 @@ def _read_billed_leg(
             if not _open_card_area(page, attempt):
                 return None
             try:
-                page.evaluate(
-                    "route => { window.location.hash = route; }", _BILLED_ROUTE
-                )
+                _route_to(page, _BILLED_ROUTE)
             except Exception:
                 logger.debug("BanChile: could not route to the billed tab", exc_info=True)
                 return None
@@ -2056,7 +2099,9 @@ _MOVEMENT_READERS: list[tuple[str, Callable]] = [
 CLP_CARD_SURFACES = ("tarjeta no facturados", "tarjeta facturados")
 
 
-def read_movement_surfaces(page) -> tuple[list[BanChileMovement], tuple[str, ...]]:
+def read_movement_surfaces(
+    page, deadline: Optional[float] = None
+) -> tuple[list[BanChileMovement], tuple[str, ...]]:
     """Read every movements surface off an authenticated page, with retries.
 
     This is the seam the tests drive with a fake page. Each surface goes through
@@ -2065,13 +2110,28 @@ def read_movement_surfaces(page) -> tuple[list[BanChileMovement], tuple[str, ...
     the checking movements. A surface that loaded and held nothing is NOT a
     failure (`allow_empty`), so a quiet card can't leave every run `partial`.
 
+    The reads stop at `deadline` (the session's, from `read_session`; a fresh
+    `_read_deadline()` when called alone): a surface mid-retries stops after
+    its current attempt, the ones not yet started are skipped with one
+    warning, and both are reported failed, so a portal that stops rendering
+    ends the run in minutes with whatever was already read.
+
     A charge the scrape saw on both card legs at once is collapsed onto its
     billed row before returning (`drop_unbilled_duplicates`).
     """
+    if deadline is None:
+        deadline = _read_deadline()
     movements: list[BanChileMovement] = []
     failed: list[str] = []
-    for surface, read in _MOVEMENT_READERS:
-        found = _read_surface_with_retries(page, surface, read, allow_empty=True)
+    for position, (surface, read) in enumerate(_MOVEMENT_READERS):
+        if _deadline_passed(deadline):
+            skipped = [label for label, _ in _MOVEMENT_READERS[position:]]
+            _skip_surfaces(skipped)
+            failed.extend(skipped)
+            break
+        found = _read_surface_with_retries(
+            page, surface, read, allow_empty=True, deadline=deadline
+        )
         if found is None:
             failed.append(surface)
         else:
@@ -2089,10 +2149,15 @@ def read_session(page) -> BanChileSessionResult:
     which is the leg the dashboard depends on every day. The USD card rate
     (two fetches, no navigation) goes between them, so it prices the balances
     read in the same session. This is the seam the session tests drive.
+
+    All three share one read budget (`_read_deadline`), started here, right
+    after login, so a portal that stops rendering partway ends the run in
+    minutes: what was read is kept and the rest is reported failed.
     """
-    balances = _read_all_surfaces(page)
-    rates, rate_failed = read_exchange_rate_surface(page)
-    movements, movement_failed = read_movement_surfaces(page)
+    deadline = _read_deadline()
+    balances = _read_all_surfaces(page, deadline)
+    rates, rate_failed = read_exchange_rate_surface(page, deadline)
+    movements, movement_failed = read_movement_surfaces(page, deadline)
     return BanChileSessionResult(
         products=balances.products,
         movements=movements,
