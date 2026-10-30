@@ -48,6 +48,16 @@ class TestBudaHmacSigning:
         h2 = self.scraper._sign("GET", "/path2")
         assert int(h2["X-SBTC-NONCE"]) > int(h1["X-SBTC-NONCE"])
 
+    def test_nonce_grows_when_the_clock_does_not(self, monkeypatch):
+        """Windows' clock can repeat a microsecond; the nonce must still grow."""
+        monkeypatch.setattr(buda_mod.time, "time_ns", lambda: 1_000_000_000)
+
+        nonces = [
+            int(self.scraper._sign("GET", "/path")["X-SBTC-NONCE"]) for _ in range(3)
+        ]
+
+        assert nonces == [1_000_000, 1_000_001, 1_000_002]
+
     def test_different_paths_produce_different_signatures(self):
         h1 = self.scraper._sign("GET", "/api/v2/balances")
         h2 = self.scraper._sign("GET", "/api/v2/orders")

@@ -1972,6 +1972,7 @@ class TestSessionCache:
 
         assert not session_file.exists()
 
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
     def test_session_file_is_private(self, session_file, login, monkeypatch):
         """0o600 before the swap-in, whatever the umask or the old file's mode."""
         session_file.write_text("{not json")
@@ -2045,7 +2046,10 @@ class TestSessionCache:
         assert "could not save the session cache" in caplog.text
         assert list(session_file.parent.iterdir()) == [session_file]
 
-    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+    @pytest.mark.skipif(
+        os.name == "nt" or os.geteuid() == 0,
+        reason="POSIX directory permissions (root ignores them)",
+    )
     def test_unwritable_directory_is_only_a_warning(
         self, tmp_path, monkeypatch, login, caplog
     ):
