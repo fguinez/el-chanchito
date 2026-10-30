@@ -266,7 +266,7 @@ def main() -> int:
     try:
         scraper = cls()
     except KeyError as e:
-        raise SystemExit(f"{cls.__name__} needs env var {e}; load .env and the Keychain secrets")
+        raise SystemExit(f"{cls.__name__} needs env var {e}; load .env and the stored secrets")
     print(f"dry run: {scraper.name} (legs: {', '.join(sorted(legs))}); nothing is written to the DB")
 
     try:

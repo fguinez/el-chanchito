@@ -66,14 +66,12 @@ All in `apps/scrapers/main.py`:
 
 - [ ] `.env.example`: add the non-secret identifiers (RUT, e-mail, CDP URL)
       with empty values and a comment. Add each secret's name to the
-      comment that lists Keychain-held secrets. Never put a real value in it,
+      comment that lists the secret-store secrets. Never put a real value in it,
       not even as an example; use `00.000.000-0` or `user@example.com`.
-- [ ] `Makefile` → `SECRET_KEYS`: add each secret (password, API secret,
-      token) so `make secrets-init` / `secrets-status` know it.
-- [ ] `scripts/load-secrets.sh`: add the same names to its `for _key in ...`
-      list. It is a separate list, not generated from `SECRET_KEYS` (the two
-      already differ on legacy and web-only names), so a secret missing here
-      is never exported.
+- [ ] `scripts/secret_store.py` → `SECRET_KEYS`: add each secret (password,
+      API secret, token) so `make secrets-init` / `secrets-status` know it
+      and `scripts/load-secrets.sh` exports it (only names listed in
+      `NOT_EXPORTED_BY_DEFAULT` are skipped).
 - [ ] `docker-compose.yml` → `scrapers.environment`: add `VAR: ${VAR:-}`
       passthroughs, but only if the scraper can run headless in the
       container. A rung-7 (real Chrome) scraper needs a display, so leave it
@@ -205,7 +203,7 @@ See `testing.md` for the content. Files:
   "Migrations" table for any migration you added, and update the system
   overview diagram if the institution list appears there.
 - [ ] `USAGE.md`:
-  - "Configuration": the `.env` block and the Keychain secrets table;
+  - "Configuration": the `.env` block and the secrets table;
   - "Scrapers": a subsection if sign-in is special (model it on "Fintual sign-in" or "Tarjeta Lider Bci");
   - "Running scrapers on schedule": the schedule list.
 - [ ] `README.md`: the institution list in "Overview", the count in

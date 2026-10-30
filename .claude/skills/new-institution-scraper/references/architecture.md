@@ -288,8 +288,8 @@ module.
   `LIDER_BCI_*` is a historical exception). Read required ones with
   `os.environ["..."]` in `__init__` and optional ones with `.get`.
   `build_scrapers()` enables the scraper only when the required ones are set.
-- **Secrets** (passwords, API secrets, tokens) live in the macOS Keychain as
-  `chanchito.<VAR>`, set with `make secret-set KEY=<VAR>` and exported by
+- **Secrets** (passwords, API secrets, tokens) live in the secret store
+  (`scripts/secret_store.py`) as `chanchito.<VAR>`, set with `make secret-set KEY=<VAR>` and exported by
   `scripts/load-secrets.sh`. `.env.example` documents the names with empty
   values; non-secret config may live in `.env`.
 - **Session caches**: a JSON file under `apps/scrapers/` named

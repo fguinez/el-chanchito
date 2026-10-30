@@ -13,7 +13,7 @@
         "The scraper maps the portfolio onto the existing product model (kind 'investment' with InvestmentMetrics) instead of inventing a new structure.",
         "The scraper module subclasses BaseScraper with method and institution set, implements both scrape_transactions and scrape_products, and raises a typed, actionable error on auth failure whose message contains no secret.",
         "A test file is provided that fakes the network (httpx.MockTransport or monkeypatch) and uses only clearly synthetic values (no realistic balances, RUTs or account numbers).",
-        "The registration steps cover build_scrapers() gating, a _SCHEDULES entry, .env.example, and both secret lists (Makefile SECRET_KEYS and scripts/load-secrets.sh).",
+        "The registration steps cover build_scrapers() gating, a _SCHEDULES entry, .env.example, and the secret key list (SECRET_KEYS in scripts/secret_store.py, which also drives scripts/load-secrets.sh).",
         "If contributions (aportes) are emitted as transactions, they target a singleton product (no external_ref) or the plan explains why they are left out; transactions are never filed against per-ref products.",
         "No file written contains an em dash character."
       ]
