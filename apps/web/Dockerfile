@@ -13,7 +13,7 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app/apps/web/node_modules ./apps/web/node_modules
 COPY . .
-RUN pnpm --filter @chanchito/web build
+RUN NEXT_STANDALONE=1 pnpm --filter @chanchito/web build
 
 FROM base AS runner
 WORKDIR /app
