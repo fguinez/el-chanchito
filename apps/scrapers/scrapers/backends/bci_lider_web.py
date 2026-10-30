@@ -48,6 +48,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -88,23 +89,74 @@ def _cdp_port() -> int:
     return int(os.environ.get("LIDER_BCI_CDP_PORT", _DEFAULT_CDP_PORT))
 
 
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+# Chrome's own install dirs under each Windows base folder (Chromium installs
+# per user, like Chrome's non-admin install).
+_WINDOWS_CHROME_DIRS = (
+    ("PROGRAMFILES", ("Google", "Chrome", "Application", "chrome.exe")),
+    ("PROGRAMFILES(X86)", ("Google", "Chrome", "Application", "chrome.exe")),
+    ("LOCALAPPDATA", ("Google", "Chrome", "Application", "chrome.exe")),
+    ("LOCALAPPDATA", ("Chromium", "Application", "chrome.exe")),
+)
+# Linux names on PATH. Google Chrome has no ARM64 Linux build, so on a
+# Raspberry Pi this finds Debian's `chromium`.
+_PATH_CHROME_NAMES = (
+    "google-chrome",
+    "google-chrome-stable",
+    "chromium",
+    "chromium-browser",
+    "chrome",
+)
+
+
+def _chrome_candidates() -> list[str]:
+    """Where a real Chrome/Chromium usually lives on this OS, most preferred first."""
+    candidates: list[str] = []
+    if sys.platform == "darwin":
+        for app in ("Google Chrome.app/Contents/MacOS/Google Chrome",
+                    "Chromium.app/Contents/MacOS/Chromium"):
+            candidates.append(os.path.join("/Applications", app))
+            candidates.append(os.path.join(os.path.expanduser("~/Applications"), app))
+    if _is_windows():
+        for env_var, parts in _WINDOWS_CHROME_DIRS:
+            base = os.environ.get(env_var)
+            if base:
+                candidates.append(os.path.join(base, *parts))
+    for name in _PATH_CHROME_NAMES:
+        found = shutil.which(name)
+        if found:
+            candidates.append(found)
+    return candidates
+
+
+def _chrome_install_hint() -> str:
+    if sys.platform == "darwin":
+        return "Install Google Chrome into /Applications."
+    if _is_windows():
+        return (
+            "Install Google Chrome (looked under %ProgramFiles%, %ProgramFiles(x86)% "
+            "and %LocalAppData%)."
+        )
+    return (
+        "Install google-chrome-stable, or Chromium (Debian/Raspberry Pi OS: "
+        "`sudo apt install chromium`; Google Chrome has no ARM64 Linux build)."
+    )
+
+
 def _chrome_executable() -> str:
     """Path to a real Chrome/Chromium (override with LIDER_BCI_CHROME_PATH)."""
     override = os.environ.get("LIDER_BCI_CHROME_PATH")
     if override:
         return override
-    candidates = [
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "/Applications/Chromium.app/Contents/MacOS/Chromium",
-        shutil.which("google-chrome"),
-        shutil.which("chromium"),
-        shutil.which("chromium-browser"),
-    ]
-    for candidate in candidates:
-        if candidate and os.path.exists(candidate):
+    for candidate in _chrome_candidates():
+        if os.path.exists(candidate):
             return candidate
     raise BciLiderWebError(
-        "Could not find Google Chrome. Set LIDER_BCI_CHROME_PATH to its binary."
+        "Could not find Google Chrome or Chromium. "
+        f"{_chrome_install_hint()} Or set LIDER_BCI_CHROME_PATH to its binary."
     )
 
 
@@ -131,10 +183,17 @@ def _launch_real_chrome(port: int, url: str, offscreen: bool = False) -> subproc
     logger.info(
         "Launching Chrome: %s (debug port %s, offscreen=%s)", exe, port, offscreen
     )
-    # start_new_session makes this Chrome its own process-group leader, so managed
-    # mode can tear down the whole tree (renderers/GPU/zygote) in one signal.
+    # Chrome gets its own process group so managed mode can tear down the whole
+    # tree (renderers/GPU/zygote): a new session (one killpg) on POSIX, a new
+    # process group (taskkill /T) on Windows, which has no sessions or killpg.
+    if _is_windows():
+        group = {
+            "creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        }
+    else:
+        group = {"start_new_session": True}
     return subprocess.Popen(
-        args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True
+        args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **group
     )
 
 
@@ -767,11 +826,19 @@ def _connect_cdp(playwright, cdp_url: str, deadline: float):
 
 
 def _terminate_chrome(proc: subprocess.Popen) -> None:
-    """Stop a Chrome we launched (managed mode), including its child processes.
+    """Stop a Chrome we launched (managed mode), including its child processes."""
+    if _is_windows():
+        _terminate_chrome_windows(proc)
+    else:
+        _terminate_chrome_posix(proc)
 
-    Signals the whole process group (Chrome spawns renderer/GPU/zygote children) so
-    a SIGKILL fallback can't orphan them, and reaps the process after each signal so
-    no zombie lingers and the debug port / profile lock is released for the next run.
+
+def _terminate_chrome_posix(proc: subprocess.Popen) -> None:
+    """Signal Chrome's whole process group, SIGTERM then SIGKILL.
+
+    Chrome spawns renderer/GPU/zygote children, so a SIGKILL fallback on the
+    parent alone could orphan them; the process is reaped after each signal so no
+    zombie lingers and the debug port / profile lock is released for the next run.
     """
     try:
         pgid = os.getpgid(proc.pid)
@@ -800,6 +867,38 @@ def _terminate_chrome(proc: subprocess.Popen) -> None:
         proc.wait(timeout=5)
     except Exception:
         logger.warning("BciLider: managed Chrome did not exit after SIGKILL")
+
+
+def _taskkill(pid: int, force: bool) -> None:
+    args = ["taskkill", "/PID", str(pid), "/T"]
+    if force:
+        args.append("/F")
+    try:
+        subprocess.run(
+            args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15, check=False
+        )
+    except Exception:
+        logger.warning("BciLider: taskkill failed for managed Chrome", exc_info=True)
+
+
+def _terminate_chrome_windows(proc: subprocess.Popen) -> None:
+    """Close Chrome's process tree with taskkill: politely, then /F.
+
+    Windows has no process-group signals; `taskkill /T` walks the tree from the
+    PID Chrome was launched with (CREATE_NEW_PROCESS_GROUP), so its children go
+    too, and the process is reaped so the debug port / profile lock is released.
+    """
+    _taskkill(proc.pid, force=False)
+    try:
+        proc.wait(timeout=10)
+        return
+    except Exception:
+        pass
+    _taskkill(proc.pid, force=True)
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        logger.warning("BciLider: managed Chrome did not exit after taskkill /F")
 
 
 def _scrape_over_cdp(cdp_url: str, rut: Optional[str], password: Optional[str]) -> BciLiderCardResult:
