@@ -2,3 +2,7 @@
 # only; `make install` / `make install-py` install this file.
 -r requirements.txt
 pytest>=9,<10
+# Host-side secret store (scripts/secret_store.py): the Linux Secret Service
+# (GNOME Keyring, KWallet) through one API. Not in requirements.txt because
+# the Docker image never reads a keyring; Compose passes secrets as env vars.
+keyring>=25,<26
