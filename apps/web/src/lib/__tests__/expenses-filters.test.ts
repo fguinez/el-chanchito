@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseExpensesFilters } from "@/lib/expenses-filters";
 import { categoryExpensesHref } from "@/lib/category-spend";
+import { SEARCH_QUERY_MAX_LENGTH } from "@/lib/transaction-search";
 
 // Synthetic ids (see the repo's personal data policy).
 const CATEGORY = "11111111-1111-4111-8111-111111111111";
@@ -39,6 +40,15 @@ describe("parseExpensesFilters", () => {
 
   it("lowercases the institution slug", () => {
     expect(parse("institution=Banco-Uno")).toEqual({ institution: "banco-uno" });
+  });
+
+  it("reads a trimmed search and drops a blank one", () => {
+    expect(parse("q=%20Caf%C3%A9%20de%20prueba%20")).toEqual({ q: "Café de prueba" });
+    expect(parse("q=%20%20")).toEqual({});
+  });
+
+  it("cuts a search to what the API accepts", () => {
+    expect(parse(`q=${"a".repeat(250)}`).q).toHaveLength(SEARCH_QUERY_MAX_LENGTH);
   });
 
   it("drops an end before the start", () => {

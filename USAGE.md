@@ -237,7 +237,7 @@ For the email parser, you need a Gmail App Password (not your regular password):
 | **Monitores** | `/monitors` | Formula alerts over product values; each monitor's page (`/monitors/[id]`) charts its history and manages its monthly variaciones |
 | **Historial** | `/history` | Net-worth timeline (patrimonio, deuda, ahorro) computed from product balances, plus legacy snapshots |
 | **Instituciones** | `/institutions` | Every scraped product grouped by institution, with on-demand refresh; drill into `/institutions/[institution]` and `/institutions/[institution]/[product]` for balance history and movements |
-| **Gastos** | `/expenses` | Transaction list, manual entry form, CSV import |
+| **Gastos** | `/expenses` | Transaction list (searchable by original or displayed description; the search stays in the URL as `?q=`), manual entry form, CSV import |
 | **Categorías** | `/categories` | Categories and keyword rules for automatic categorization |
 | **Presupuesto** | `/budget` | Monthly income split into budget items (Gasto fijo, Consumo estimado, Ahorro, with an optional shared ratio) and what is left over, as a live donut; `/fixed` redirects here |
 | **Transferencias** | `/transfers` | Internal money movements between two of your CLP products (pending/resolved); "Vincular" links each one to the scraped debit and credit that moved the money, and "Sugeridas" proposes rows that look like transfers for one-click confirm or dismiss |

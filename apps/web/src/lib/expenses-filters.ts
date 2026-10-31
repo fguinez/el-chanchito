@@ -1,8 +1,9 @@
-// The Gastos page's URL filters (?category=&from=&to=&product=&institution=),
+// The Gastos page's URL filters (?category=&from=&to=&product=&institution=&q=),
 // read leniently: a malformed value is ignored rather than sent to the API,
 // which would 400 on it. Charts link here with categoryExpensesHref.
 
 import { UNCATEGORIZED_PARAM } from "@/lib/category-spend";
+import { SEARCH_QUERY_MAX_LENGTH } from "@/lib/transaction-search";
 
 export interface ExpensesFilters {
   /** A category uuid, or UNCATEGORIZED_PARAM for "Sin categoría". */
@@ -14,6 +15,8 @@ export interface ExpensesFilters {
   product?: string;
   /** An institution slug. */
   institution?: string;
+  /** A description search, trimmed (see lib/transaction-search). */
+  q?: string;
 }
 
 export const EXPENSES_FILTER_KEYS = [
@@ -22,6 +25,7 @@ export const EXPENSES_FILTER_KEYS = [
   "to",
   "product",
   "institution",
+  "q",
 ] as const satisfies readonly (keyof ExpensesFilters)[];
 
 const DAY = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
@@ -46,5 +50,8 @@ export function parseExpensesFilters(params: URLSearchParams): ExpensesFilters {
   if (institution && SLUG.test(institution)) {
     filters.institution = institution.toLowerCase();
   }
+  // Cut to what the API accepts, so a long hand-typed URL still searches.
+  const q = params.get("q")?.trim().slice(0, SEARCH_QUERY_MAX_LENGTH).trim();
+  if (q) filters.q = q;
   return filters;
 }

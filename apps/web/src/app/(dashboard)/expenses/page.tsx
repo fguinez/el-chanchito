@@ -1,6 +1,13 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { X } from "lucide-react";
 import {
@@ -19,9 +26,11 @@ import {
 } from "@/components/ui/table";
 import { SortableTableHead } from "@/components/ui/sortable-table-head";
 import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/ui/search-input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useSortableData } from "@/lib/use-sortable-data";
+import { SEARCH_DEBOUNCE_MS } from "@/lib/use-debounced-value";
 import {
   cn,
   formatAmount,
@@ -86,6 +95,53 @@ function currentMonthInput(): string {
 
 /** How many rows a "Cargar más" click adds (and the first page size). */
 const PAGE_SIZE = 50;
+
+/** `query` without its search, to tell a new search from a new scope. */
+function withoutSearch(query: string): string {
+  const params = new URLSearchParams(query);
+  params.delete("q");
+  return params.toString();
+}
+
+/**
+ * The search box's text, in step with the URL's `q`: typing writes q once the
+ * keys pause (SEARCH_DEBOUNCE_MS), so the list fetches per pause rather than
+ * per key, and a q changed from outside (back/forward, a link) refills the
+ * box. The latest `writeQ` is the one a pause calls.
+ */
+function useUrlSearchText(urlQ: string, writeQ: (q: string | null) => void) {
+  const [text, setText] = useState(urlQ);
+  // The q the URL holds after this box's own writes (a different one came
+  // from outside) and the last URL q seen, to react once per change.
+  const [expectedQ, setExpectedQ] = useState(urlQ);
+  const [seenQ, setSeenQ] = useState(urlQ);
+  if (urlQ !== seenQ) {
+    setSeenQ(urlQ);
+    if (urlQ !== expectedQ) {
+      setExpectedQ(urlQ);
+      setText(urlQ);
+    }
+  }
+
+  const latestWrite = useRef(writeQ);
+  useEffect(() => {
+    latestWrite.current = writeQ;
+  });
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(timer.current), []);
+
+  const onChange = useCallback((next: string) => {
+    setText(next);
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => {
+      const q = next.trim();
+      setExpectedQ(q);
+      latestWrite.current(q || null);
+    }, SEARCH_DEBOUNCE_MS);
+  }, []);
+
+  return { text, onChange, pending: text.trim() !== urlQ };
+}
 
 // useSearchParams needs a Suspense boundary for the static prerender.
 export default function ExpensesPage() {
@@ -186,13 +242,14 @@ function ExpensesView() {
     return params;
   }, [hasWindow, filters, month]);
 
-  // The list also narrows to the selected category; the donut does not, so
-  // it keeps every slice and highlights the selected one.
+  // The list also narrows to the selected category and the search; the donut
+  // does not, so it keeps every slice and highlights the selected one.
   const filterQuery = useMemo(() => {
     const params = new URLSearchParams(scopeQuery);
     if (filters.category) params.set("categoryId", filters.category);
+    if (filters.q) params.set("q", filters.q);
     return params.toString();
-  }, [scopeQuery, filters.category]);
+  }, [scopeQuery, filters.category, filters.q]);
   // "Cargar más" pages within one filter set; new filters start over on the
   // first page in the same render, so the list fetches once. Resetting the
   // stored paging (not only reading past it) keeps a filter set seen before
@@ -208,6 +265,18 @@ function ExpensesView() {
   });
   // "Cargar más" and a refresh keep the current rows on screen meanwhile.
   const listLoaded = loadedFilterQuery === filterQuery;
+  // So does a new search over the same scope, dimmed until its rows arrive.
+  const listSearching =
+    !listLoaded &&
+    loadedFilterQuery !== null &&
+    withoutSearch(loadedFilterQuery) === withoutSearch(filterQuery);
+  /** Rows are on screen: the summary and the count describe them meanwhile. */
+  const rowsShown = listLoaded || listSearching;
+  /** The search the shown rows answer (the new one may still be loading). */
+  const shownSearch =
+    loadedFilterQuery === null
+      ? null
+      : new URLSearchParams(loadedFilterQuery).get("q");
 
   // The AbortSignal drops a slower older response (e.g. after a rapid filter
   // switch) so it cannot overwrite a newer one.
@@ -251,6 +320,7 @@ function ExpensesView() {
     },
     [router, pathname, search]
   );
+  const searchBox = useUrlSearchText(filters.q ?? "", (q) => setFilters({ q }));
 
   /** null = "Sin categoría"; undefined = no category filter. */
   const selectedCategoryId =
@@ -327,7 +397,7 @@ function ExpensesView() {
         : `en las ${transactions.length} transacciones cargadas`;
   /** A summary figure, or a placeholder until the first page arrives. */
   const summaryValue = (value: number) =>
-    listLoaded ? formatCLP(value) : "...";
+    rowsShown ? formatCLP(value) : "...";
 
   const handleAdd = async () => {
     const parsedAmount = parseNumberInput(amount);
@@ -629,36 +699,59 @@ function ExpensesView() {
             <div>
               <CardTitle>Transacciones {periodLabel}</CardTitle>
               <CardDescription>
-                {listLoaded
+                {rowsShown
                   ? `${transactions.length} transacciones`
                   : "Cargando..."}
               </CardDescription>
             </div>
-            <div>
-              <label className="mb-1 block text-sm text-muted-foreground">
-                Mes
-              </label>
-              <Input
-                type="month"
-                className="w-44"
-                value={hasWindow ? "" : month}
-                onChange={(e) => {
-                  // A new month replaces any from/to window.
-                  setMonth(e.target.value || currentMonthInput());
-                  if (hasWindow) setFilters({ from: null, to: null });
-                }}
+            <div className="flex w-full flex-wrap items-end gap-3 sm:w-auto">
+              <SearchInput
+                className="w-full sm:w-64"
+                value={searchBox.text}
+                onValueChange={searchBox.onChange}
+                loading={searchBox.pending || listSearching}
               />
+              <div>
+                <label className="mb-1 block text-sm text-muted-foreground">
+                  Mes
+                </label>
+                <Input
+                  type="month"
+                  className="w-44"
+                  value={hasWindow ? "" : month}
+                  onChange={(e) => {
+                    // A new month replaces any from/to window.
+                    setMonth(e.target.value || currentMonthInput());
+                    if (hasWindow) setFilters({ from: null, to: null });
+                  }}
+                />
+              </div>
             </div>
           </div>
         </CardHeader>
-        <CardContent>
-          {!listLoaded ? (
+        <CardContent
+          aria-busy={listSearching}
+          className={cn(
+            "transition-opacity duration-200",
+            listSearching && "opacity-60"
+          )}
+        >
+          {!rowsShown ? (
             <p className="text-muted-foreground">Cargando...</p>
           ) : transactions.length === 0 ? (
             <p className="text-muted-foreground">
-              {filterChips.length > 0
-                ? "No hay transacciones con estos filtros."
-                : "No hay transacciones este mes. Agrega una arriba o espera a que los scrapers importen datos."}
+              {shownSearch
+                ? `Sin resultados para «${shownSearch}» ${
+                    hasWindow ? "en este período" : "en este mes"
+                  }${
+                    // The window already reads as "este período".
+                    filterChips.some((chip) => chip.key !== "window")
+                      ? " con estos filtros"
+                      : ""
+                  }.`
+                : filterChips.length > 0
+                  ? "No hay transacciones con estos filtros."
+                  : "No hay transacciones este mes. Agrega una arriba o espera a que los scrapers importen datos."}
             </p>
           ) : (
             <Table>
