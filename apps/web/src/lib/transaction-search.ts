@@ -45,3 +45,16 @@ export function matchesTransactionSearch(
     .map(normalizeSearchText);
   return tokens.every((token) => haystacks.some((text) => text.includes(token)));
 }
+
+/** A tooltip (`title`) for a row shown by its `shown` description: the row's
+ *  `other` description too, labelled, when it differs, so a search that matched
+ *  the text off screen still reads as a match. Rows shown by their display
+ *  description pass the raw one (the default label); rows shown raw pass the
+ *  display one with their own label. */
+export function descriptionTitle(
+  shown: string,
+  other: string | null | undefined,
+  otherLabel = "Descripción original"
+): string {
+  return other && other !== shown ? `${shown}\n${otherLabel}: ${other}` : shown;
+}

@@ -6,7 +6,9 @@ import {
   checkTransferLink,
   findLinkClash,
   transferIsAccountedFor,
+  transferMatchesSearch,
 } from "@/lib/transfers";
+import { searchTokens } from "@/lib/transaction-search";
 
 // All figures and identifiers below are synthetic (see the repo's personal
 // data policy): fake uuids, fake CLP amounts.
@@ -263,5 +265,33 @@ describe("candidateWindow", () => {
       from: "2026-02-25",
       to: "2026-03-07",
     });
+  });
+});
+
+describe("transferMatchesSearch", () => {
+  const transfer = {
+    description: "Aporte al fondo",
+    fromTransaction: {
+      description: "TRASPASO A FONDO 00-000-00000-01",
+      displayDescription: "Ahorro de prueba",
+    },
+    toTransaction: null,
+  };
+  const matches = (q: string) => transferMatchesSearch(searchTokens(q), transfer);
+
+  it("searches its description and a linked row's raw and display text", () => {
+    expect(matches("aporte")).toBe(true);
+    expect(matches("traspaso")).toBe(true);
+    expect(matches("ahorro")).toBe(true);
+    // Words may come from different fields.
+    expect(matches("APORTE traspaso ahorro")).toBe(true);
+  });
+
+  it("drops a transfer missing a word everywhere", () => {
+    expect(matches("aporte supermercado")).toBe(false);
+  });
+
+  it("keeps every transfer for a blank search", () => {
+    expect(matches("  ")).toBe(true);
   });
 });

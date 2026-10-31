@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Card,
@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/table";
 import { SortableTableHead } from "@/components/ui/sortable-table-head";
 import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/ui/search-input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { SELECT_CLASS } from "@/components/ui/native-select";
@@ -26,9 +27,11 @@ import { useSortableData } from "@/lib/use-sortable-data";
 import { cn, formatCLP, formatPlainDateEs, parseNumberInput } from "@/lib/utils";
 import {
   TRANSFER_CURRENCY,
+  transferMatchesSearch,
   type TransferLinkedTransaction,
   type TransferProductRef,
 } from "@/lib/transfers";
+import { descriptionTitle, searchTokens } from "@/lib/transaction-search";
 import { hrefWithSearchParam, TXN_PARAM } from "@/lib/transaction-selection";
 import { TransferLinksDialog } from "@/components/transfers/transfer-links-dialog";
 import { TransferSuggestionsCard } from "@/components/transfers/transfer-suggestions-card";
@@ -88,8 +91,8 @@ function productLabel(p: TransferProductRef | null): string | null {
 }
 
 /** A transfer endpoint, linked to its product page ("-" on legacy rows), and
- *  under it the transaction it links, which opens in the product's detail
- *  panel. */
+ *  under it the transaction it links (its display description; the original
+ *  in the tooltip), which opens in the product's detail panel. */
 function ProductCell({
   product,
   transaction,
@@ -112,12 +115,15 @@ function ProductCell({
         <Link
           href={hrefWithSearchParam(productHref, "", TXN_PARAM, transaction.id)}
           className="mt-1 flex items-center gap-1 text-xs text-muted-foreground hover:underline"
-          title={transaction.description}
+          title={descriptionTitle(
+            transaction.displayDescription,
+            transaction.description
+          )}
         >
           <Link2 className="h-3 w-3 shrink-0" />
           <span className="truncate">
             {formatPlainDateEs(transaction.transactionDate)} ·{" "}
-            {transaction.description}
+            {transaction.displayDescription}
           </span>
         </Link>
       )}
@@ -350,6 +356,19 @@ export default function TransfersPage() {
   const resolved = transfers.filter((t) => t.status === "resolved");
   const pendingTotal = pending.reduce((sum, t) => sum + t.amount, 0);
 
+  // The page's search narrows both tables (the summary keeps every transfer):
+  // a transfer stays when each word is in its description or in the original
+  // or displayed description of a row it links.
+  const [search, setSearch] = useState("");
+  const tokens = useMemo(() => searchTokens(search), [search]);
+  const pendingShown = pending.filter((t) => transferMatchesSearch(tokens, t));
+  const resolvedShown = resolved.filter((t) => transferMatchesSearch(tokens, t));
+  const noResults = (
+    <p className="text-muted-foreground">
+      Sin resultados para «{search.trim()}».
+    </p>
+  );
+
   // Shared value extractor: the two tables' columns overlap, so one getValue
   // covers both. Each table keeps its own independent sort state below.
   const getValue = useCallback(
@@ -378,12 +397,12 @@ export default function TransfersPage() {
     sorted: pendingSorted,
     sort: pendingSort,
     toggleSort: togglePending,
-  } = useSortableData(pending, getValue);
+  } = useSortableData(pendingShown, getValue);
   const {
     sorted: resolvedSorted,
     sort: resolvedSort,
     toggleSort: toggleResolved,
-  } = useSortableData(resolved, getValue);
+  } = useSortableData(resolvedShown, getValue);
   // Bridge the generic header's string key to our typed key union.
   const handlePendingSort = (key: string) =>
     togglePending(key as TransferSortKey);
@@ -392,7 +411,15 @@ export default function TransfersPage() {
 
   return (
     <div className="space-y-6">
-      <h2 className="text-2xl font-bold">Movimientos Internos</h2>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-2xl font-bold">Movimientos Internos</h2>
+        <SearchInput
+          className="w-full sm:w-72"
+          aria-label="Buscar movimientos por descripción"
+          value={search}
+          onValueChange={setSearch}
+        />
+      </div>
 
       {/* Summary */}
       <div className="grid gap-4 md:grid-cols-2">
@@ -513,6 +540,8 @@ export default function TransfersPage() {
             <p className="text-muted-foreground">
               No hay movimientos pendientes.
             </p>
+          ) : pendingShown.length === 0 ? (
+            noResults
           ) : (
             <Table>
               <TableHeader>
@@ -652,128 +681,132 @@ export default function TransfersPage() {
             <CardTitle>Resueltos</CardTitle>
           </CardHeader>
           <CardContent>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <SortableTableHead
-                    label="Fecha"
-                    columnKey="fecha"
-                    active={resolvedSort?.key === "fecha"}
-                    direction={
-                      resolvedSort?.key === "fecha"
-                        ? resolvedSort.direction
-                        : undefined
-                    }
-                    onSort={handleResolvedSort}
-                  />
-                  <SortableTableHead
-                    label="Descripcion"
-                    columnKey="descripcion"
-                    active={resolvedSort?.key === "descripcion"}
-                    direction={
-                      resolvedSort?.key === "descripcion"
-                        ? resolvedSort.direction
-                        : undefined
-                    }
-                    onSort={handleResolvedSort}
-                  />
-                  <SortableTableHead
-                    label="Desde"
-                    columnKey="desde"
-                    active={resolvedSort?.key === "desde"}
-                    direction={
-                      resolvedSort?.key === "desde"
-                        ? resolvedSort.direction
-                        : undefined
-                    }
-                    onSort={handleResolvedSort}
-                  />
-                  <SortableTableHead
-                    label="Hacia"
-                    columnKey="hacia"
-                    active={resolvedSort?.key === "hacia"}
-                    direction={
-                      resolvedSort?.key === "hacia"
-                        ? resolvedSort.direction
-                        : undefined
-                    }
-                    onSort={handleResolvedSort}
-                  />
-                  <SortableTableHead
-                    label="Monto"
-                    columnKey="monto"
-                    align="right"
-                    active={resolvedSort?.key === "monto"}
-                    direction={
-                      resolvedSort?.key === "monto"
-                        ? resolvedSort.direction
-                        : undefined
-                    }
-                    onSort={handleResolvedSort}
-                  />
-                  <SortableTableHead
-                    label="Estado"
-                    columnKey="estado"
-                    active={resolvedSort?.key === "estado"}
-                    direction={
-                      resolvedSort?.key === "estado"
-                        ? resolvedSort.direction
-                        : undefined
-                    }
-                    onSort={handleResolvedSort}
-                  />
-                  <TableHead className="w-28"></TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {resolvedSorted.map((t) => (
-                  <TableRow
-                    key={t.id}
-                    id={`transfer-${t.id}`}
-                    className={cn(
-                      "opacity-60 transition-colors",
-                      highlightId === t.id && "bg-muted opacity-100"
-                    )}
-                  >
-                    <TableCell className="whitespace-nowrap">
-                      {formatPlainDateEs(t.transferDate)}
-                    </TableCell>
-                    <TableCell>
-                      <DescriptionCell transfer={t} />
-                    </TableCell>
-                    <TableCell>
-                      <ProductCell
-                        product={t.fromProduct}
-                        transaction={t.fromTransaction}
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <ProductCell
-                        product={t.toProduct}
-                        transaction={t.toTransaction}
-                      />
-                    </TableCell>
-                    <TableCell className="text-right">
-                      {formatCLP(t.amount)}
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant="outline" className="text-green-600">
-                        Resuelto
-                      </Badge>
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-1">
-                        <TransferLinksDialog
-                          transfer={t}
-                          onSaved={refreshAll}
-                        />
-                        <DeleteButton transfer={t} onDelete={handleDelete} />
-                      </div>
-                    </TableCell>
+            {resolvedShown.length === 0 ? (
+              noResults
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <SortableTableHead
+                      label="Fecha"
+                      columnKey="fecha"
+                      active={resolvedSort?.key === "fecha"}
+                      direction={
+                        resolvedSort?.key === "fecha"
+                          ? resolvedSort.direction
+                          : undefined
+                      }
+                      onSort={handleResolvedSort}
+                    />
+                    <SortableTableHead
+                      label="Descripcion"
+                      columnKey="descripcion"
+                      active={resolvedSort?.key === "descripcion"}
+                      direction={
+                        resolvedSort?.key === "descripcion"
+                          ? resolvedSort.direction
+                          : undefined
+                      }
+                      onSort={handleResolvedSort}
+                    />
+                    <SortableTableHead
+                      label="Desde"
+                      columnKey="desde"
+                      active={resolvedSort?.key === "desde"}
+                      direction={
+                        resolvedSort?.key === "desde"
+                          ? resolvedSort.direction
+                          : undefined
+                      }
+                      onSort={handleResolvedSort}
+                    />
+                    <SortableTableHead
+                      label="Hacia"
+                      columnKey="hacia"
+                      active={resolvedSort?.key === "hacia"}
+                      direction={
+                        resolvedSort?.key === "hacia"
+                          ? resolvedSort.direction
+                          : undefined
+                      }
+                      onSort={handleResolvedSort}
+                    />
+                    <SortableTableHead
+                      label="Monto"
+                      columnKey="monto"
+                      align="right"
+                      active={resolvedSort?.key === "monto"}
+                      direction={
+                        resolvedSort?.key === "monto"
+                          ? resolvedSort.direction
+                          : undefined
+                      }
+                      onSort={handleResolvedSort}
+                    />
+                    <SortableTableHead
+                      label="Estado"
+                      columnKey="estado"
+                      active={resolvedSort?.key === "estado"}
+                      direction={
+                        resolvedSort?.key === "estado"
+                          ? resolvedSort.direction
+                          : undefined
+                      }
+                      onSort={handleResolvedSort}
+                    />
+                    <TableHead className="w-28"></TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {resolvedSorted.map((t) => (
+                    <TableRow
+                      key={t.id}
+                      id={`transfer-${t.id}`}
+                      className={cn(
+                        "opacity-60 transition-colors",
+                        highlightId === t.id && "bg-muted opacity-100"
+                      )}
+                    >
+                      <TableCell className="whitespace-nowrap">
+                        {formatPlainDateEs(t.transferDate)}
+                      </TableCell>
+                      <TableCell>
+                        <DescriptionCell transfer={t} />
+                      </TableCell>
+                      <TableCell>
+                        <ProductCell
+                          product={t.fromProduct}
+                          transaction={t.fromTransaction}
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <ProductCell
+                          product={t.toProduct}
+                          transaction={t.toTransaction}
+                        />
+                      </TableCell>
+                      <TableCell className="text-right">
+                        {formatCLP(t.amount)}
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant="outline" className="text-green-600">
+                          Resuelto
+                        </Badge>
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-1">
+                          <TransferLinksDialog
+                            transfer={t}
+                            onSaved={refreshAll}
+                          />
+                          <DeleteButton transfer={t} onDelete={handleDelete} />
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
           </CardContent>
         </Card>
       )}

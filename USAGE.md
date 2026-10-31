@@ -240,7 +240,7 @@ For the email parser, you need a Gmail App Password (not your regular password):
 | **Gastos** | `/expenses` | Transaction list (searchable by original or displayed description; the search stays in the URL as `?q=`), manual entry form, CSV import |
 | **Categorías** | `/categories` | Categories and keyword rules for automatic categorization |
 | **Presupuesto** | `/budget` | Monthly income split into budget items (Gasto fijo, Consumo estimado, Ahorro, with an optional shared ratio) and what is left over, as a live donut; `/fixed` redirects here |
-| **Transferencias** | `/transfers` | Internal money movements between two of your CLP products (pending/resolved); "Vincular" links each one to the scraped debit and credit that moved the money, and "Sugeridas" proposes rows that look like transfers for one-click confirm or dismiss |
+| **Transferencias** | `/transfers` | Internal money movements between two of your CLP products (pending/resolved); "Vincular" links each one to the scraped debit and credit that moved the money, and "Sugeridas" proposes rows that look like transfers for one-click confirm or dismiss; the search box filters the pending and resolved transfers by their description or a linked row's original or displayed one |
 | **Instituciones** | `/institutions` | Every institution and its products with balances; edit institutions, accounts and products from their detail pages |
 | **Configuracion** | `/settings` | Budget parameters, income split calculator, monthly reset |
 
@@ -839,7 +839,7 @@ All API routes are under `/api/`:
 | GET | `/api/categories/rules/preview` | Transactions a keyword would match (`?keyword=`, optional `&matchType=exact`) |
 | GET/POST/PUT/DELETE | `/api/fixed-expenses` | Budget items CRUD (Presupuesto); `kind` is `fixed` (default), `estimated` or `savings` |
 | GET/PUT | `/api/budget-settings` | `{ monthlyIncome }`: the monthly income the budget splits (0 until saved); PUT takes a whole, non-negative CLP amount |
-| GET/POST/PUT/DELETE | `/api/transfers` | Internal transfers (POST needs distinct CLP `fromProductId` + `toProductId`); GET includes the linked `fromTransaction` / `toTransaction` |
+| GET/POST/PUT/DELETE | `/api/transfers` | Internal transfers (POST needs distinct CLP `fromProductId` + `toProductId`); GET includes the linked `fromTransaction` / `toTransaction` (original `description` and shown `displayDescription`) |
 | PUT | `/api/transfers/[id]/links` | Set or clear the linked transactions: `{ fromTransactionId?, toTransactionId? }` (null clears, omitted keeps) |
 | GET | `/api/transfers/[id]/candidates` | Per side, the unlinked transactions a transfer may link (same amount, right sign, within 5 days) |
 | GET | `/api/transfers/suggestions` | `{ suggestions }`: likely internal transfers (pairs and one-sided), highest score first, with legs, `score` and Spanish `evidence`; `?transactionId=` keeps those using that row |

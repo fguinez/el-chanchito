@@ -18,7 +18,7 @@ import {
   type SQL,
 } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { notDeleted } from "@/lib/db/transactions";
+import { displayDescriptionOf, notDeleted } from "@/lib/db/transactions";
 import { isUniqueViolation } from "@/lib/management";
 import {
   accounts,
@@ -73,6 +73,7 @@ function linkedTransaction(
     id: row.id,
     transactionDate: row.transactionDate as string,
     description: row.description as string,
+    displayDescription: row.displayDescription as string,
     amount: Number(row.amount),
     currency: row.currency as string,
   };
@@ -109,12 +110,13 @@ export async function loadTransfers(where?: SQL) {
         institutionSlug: toInstitution.slug,
         institutionName: toInstitution.name,
       },
-      // The linked-row display stays the raw scraped description for now; the
-      // V034 custom override is out of Phase 1's transfer scope.
+      // A linked row lives on its side's product, so that product's currency
+      // is the row's. The page shows displayDescription and searches both.
       fromTxn: {
         id: fromTxn.id,
         transactionDate: fromTxn.transactionDate,
         description: fromTxn.description,
+        displayDescription: displayDescriptionOf(fromTxn, fromProduct),
         amount: fromTxn.amount,
         currency: fromProduct.currency,
       },
@@ -122,6 +124,7 @@ export async function loadTransfers(where?: SQL) {
         id: toTxn.id,
         transactionDate: toTxn.transactionDate,
         description: toTxn.description,
+        displayDescription: displayDescriptionOf(toTxn, toProduct),
         amount: toTxn.amount,
         currency: toProduct.currency,
       },

@@ -4,6 +4,7 @@ import { alias } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
 import {
   MAX_SEARCH_TOKENS,
+  descriptionTitle,
   matchesTransactionSearch,
   normalizeSearchText,
   SEARCH_QUERY_MAX_LENGTH,
@@ -81,6 +82,24 @@ describe("matchesTransactionSearch", () => {
     const tokens = searchTokens("Café");
     expect(matchesTransactionSearch(tokens, null, undefined, ALIAS)).toBe(true);
     expect(matchesTransactionSearch(tokens, null, undefined)).toBe(false);
+  });
+});
+
+describe("descriptionTitle", () => {
+  it("names the other description when it differs", () => {
+    expect(descriptionTitle("Café de prueba", "COMPRA CAFE EJEMPLO")).toBe(
+      "Café de prueba\nDescripción original: COMPRA CAFE EJEMPLO"
+    );
+    expect(
+      descriptionTitle("COMPRA CAFE EJEMPLO", "Café de prueba", "Se muestra como")
+    ).toBe("COMPRA CAFE EJEMPLO\nSe muestra como: Café de prueba");
+  });
+
+  it("is the shown text alone when there is nothing else to say", () => {
+    expect(descriptionTitle("COMPRA CAFE EJEMPLO", "COMPRA CAFE EJEMPLO")).toBe(
+      "COMPRA CAFE EJEMPLO"
+    );
+    expect(descriptionTitle("COMPRA CAFE EJEMPLO", null)).toBe("COMPRA CAFE EJEMPLO");
   });
 });
 
