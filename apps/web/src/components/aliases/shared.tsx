@@ -73,6 +73,8 @@ export interface AliasPreviewTransaction {
   id: string;
   /** The raw scraped description: what is matched and what the alias replaces. */
   description: string;
+  /** What the row shows today (custom description or alias, else `description`). */
+  displayDescription: string;
   amount: number;
   currency: string;
   transactionDate: string;

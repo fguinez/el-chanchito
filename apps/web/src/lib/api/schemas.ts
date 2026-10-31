@@ -79,6 +79,10 @@ export const searchQuerySchema = z
   .optional()
   .transform((q) => q || undefined);
 
+/** A query string read only for its `?q=`, for routes that check their other
+ *  params by hand (the alias and the rule previews). */
+export const searchOnlyQuerySchema = z.object({ q: searchQuerySchema });
+
 /** `{ id }`, the body of the DELETE handlers. */
 export const idSchema = z.object({ id: rowId });
 

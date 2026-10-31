@@ -2,7 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { and, count, desc, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { products, transactions } from "@/lib/db/schema";
-import { notDeleted } from "@/lib/db/transactions";
+import {
+  descriptionMatches,
+  displayDescription,
+  notDeleted,
+} from "@/lib/db/transactions";
+import { searchOnlyQuerySchema } from "@/lib/api/schemas";
+import { parseSearchParams } from "@/lib/api/validation";
 import {
   amountConditionError,
   failureBody,
@@ -17,14 +23,17 @@ const PREVIEW_LIMIT = 20;
 
 /**
  * GET /api/aliases/preview?matchDescription=...&matchType=exact|substring
- * (&amountMin=&amountMax=&currency=): the transactions an alias with this
+ * (&amountMin=&amountMax=&currency=&q=): the transactions an alias with this
  * condition would relabel ("probar alias"), with the same semantics as
  * `alias_for_transaction` (V035/V036): case-insensitive description match (exact
  * = trimmed whole-string equality, substring = literal strpos) plus the optional
  * amount range on the signed amount, scoped to `currency`. Matching keys on the
  * RAW scraped `description` (what the alias replaces), never the resolved one.
- * Returns `{ matchDescription, matchType, total, transactions }`; `transactions`
- * lists up to 20 matches, newest first.
+ * `q`, the preview's search box, then narrows the matches to those with every
+ * word in the raw or the display description (see lib/transaction-search).
+ * Returns `{ matchDescription, matchType, total, transactions }`: `total`
+ * counts the (narrowed) matches and `transactions` lists up to 20, newest
+ * first, each with its `displayDescription` too.
  */
 export async function GET(request: NextRequest) {
   try {
@@ -76,6 +85,8 @@ export async function GET(request: NextRequest) {
         status: conditionError.status,
       });
     }
+    const search = parseSearchParams(params, searchOnlyQuerySchema);
+    if (!search.ok) return search.response;
 
     // Mirrors alias_for_transaction's predicate on the raw scraped description.
     // A soft-deleted row (V033) is never a match the alias could relabel.
@@ -95,11 +106,16 @@ export async function GET(request: NextRequest) {
     if (currency.value !== null) {
       conditions.push(sql`${products.currency} = ${currency.value}`);
     }
+    // The search reads the resolved description too (it needs the products
+    // join below), but never decides what the alias matches.
+    const searched = descriptionMatches(search.data.q);
+    if (searched) conditions.push(searched);
     const matches = and(...conditions);
 
     const [[counts], rows] = await Promise.all([
-      // Joins products so the currency filter can reference products.currency;
-      // every transaction has a product, so the join never changes the count.
+      // Joins products so the currency filter and the search can reference
+      // products.currency; every transaction has a product, so the join never
+      // changes the count.
       db
         .select({ total: count() })
         .from(transactions)
@@ -110,6 +126,8 @@ export async function GET(request: NextRequest) {
           id: transactions.id,
           // The RAW scraped text: what is matched and what the alias replaces.
           description: transactions.description,
+          // What the row shows today, for the preview's tooltip.
+          displayDescription,
           amount: transactions.amount,
           // `amount` is in this currency (V023): USD rows keep their cents.
           currency: products.currency,
