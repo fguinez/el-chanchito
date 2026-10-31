@@ -45,7 +45,7 @@ export function isFixedExpenseKind(value: unknown): value is FixedExpenseKind {
 }
 
 const INT32_MIN = -2_147_483_648;
-const INT32_MAX = 2_147_483_647;
+export const INT32_MAX = 2_147_483_647;
 
 /** Both bounds are inclusive: an expense ending today is still active. */
 export function fixedExpenseStatus(

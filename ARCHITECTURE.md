@@ -11,7 +11,7 @@
                                  ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                     Dashboard (Next.js 16)                      │
-│             (+ Gastos, Gastos Fijos, Transferencias)            │
+│             (+ Gastos, Presupuesto, Transferencias)             │
 │  ┌──────────┐  ┌───────────┐  ┌───────────┐  ┌───────────────┐  │
 │  │  Inicio  │  │ Monitores │  │ Historial │  │ Instituciones │  │
 │  │ (alerts) │  │ (charts)  │  │  (chart)  │  │  (products)   │  │
@@ -22,6 +22,7 @@
 │  │                    API Routes (/api/*)                    │  │
 │  │  monitors (+ adjustments) | institutions | wealth         │  │
 │  │  transactions | import | fixed-expenses | transfers       │  │
+│  │  budget-settings                                          │  │
 │  │  categories | accounts | scrapers | auth                  │  │
 │  │  institutions/refresh (→ scraper control endpoint)        │  │
 │  └─────────────────────────────┬─────────────────────────────┘  │
@@ -209,7 +210,7 @@ expression or any threshold references from
 `/api/monitors/[id]/adjustments/candidates`.
 
 `lib/budget-engine.ts` survives only as two helpers: `calcWealthMetrics`
-(Historial) and `calcPersonalAmount` (Gastos Fijos).
+(Historial) and `calcPersonalAmount` (Presupuesto).
 
 ## Exchange rates
 
@@ -1445,9 +1446,9 @@ el-chanchito/
 │   │   │   │   │   ├── institutions/ # Instituciones, [institution], [product]
 │   │   │   │   │   ├── expenses/     # Gastos + CSV import
 │   │   │   │   │   ├── categories/   # Categorías + keyword rules
-│   │   │   │   │   ├── fixed/        # Gastos fijos
+│   │   │   │   │   ├── budget/       # Presupuesto (fixed/ redirects here)
 │   │   │   │   │   └── transfers/    # Movimientos internos
-│   │   │   │   └── api/              # 11 API route groups
+│   │   │   │   └── api/              # 13 API route groups
 │   │   │   ├── components/
 │   │   │   │   ├── charts/           # Interactive chart + axis ranges
 │   │   │   │   ├── dashboard/        # ScraperStatus, CsvImport
@@ -1464,6 +1465,7 @@ el-chanchito/
 │   │   │   │   │                     # Slug -> logo file in public/logos/
 │   │   │   │   ├── networth.ts       # Asset/debt derivation per kind
 │   │   │   │   ├── rates.ts          # CLP conversion (Buda public tickers)
+│   │   │   │   ├── budget.ts         # Presupuesto split (per kind, Sobra, draft)
 │   │   │   │   ├── budget-engine.ts  # Wealth + fixed-expense helpers
 │   │   │   │   └── utils.ts          # cn(), formatCLP()
 │   │   │   └── proxy.ts              # Auth enforcement (Next 16 proxy)

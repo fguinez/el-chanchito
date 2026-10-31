@@ -9,7 +9,7 @@ import {
   Building2,
   Activity,
   Receipt,
-  Landmark,
+  ChartPie,
   ArrowLeftRight,
   Tags,
   Replace,
@@ -25,7 +25,7 @@ const navItems = [
   { href: "/expenses", label: "Gastos", icon: Receipt },
   { href: "/categories", label: "Categorías", icon: Tags },
   { href: "/aliases", label: "Alias", icon: Replace },
-  { href: "/fixed", label: "Gastos Fijos", icon: Landmark },
+  { href: "/budget", label: "Presupuesto", icon: ChartPie },
   { href: "/transfers", label: "Transferencias", icon: ArrowLeftRight },
 ];
 
