@@ -444,11 +444,17 @@ export const wealthSnapshots = pgTable("wealth_snapshots", {
     .defaultNow(),
 });
 
-// Fixed expenses
+// Budget item kinds (V043, CHECK fixed_expenses_kind_check): Gasto fijo,
+// Consumo estimado, Ahorro.
+export const FIXED_EXPENSE_KINDS = ["fixed", "estimated", "savings"] as const;
+export type FixedExpenseKind = (typeof FIXED_EXPENSE_KINDS)[number];
+
+// Fixed expenses: the items of the monthly budget (Presupuesto)
 export const fixedExpenses = pgTable("fixed_expenses", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: text("name").notNull(),
   amount: integer("amount").notNull(),
+  kind: text("kind").$type<FixedExpenseKind>().notNull().default("fixed"),
   isShared: boolean("is_shared").notNull().default(false),
   sharedRatio: numeric("shared_ratio", { precision: 5, scale: 4 }),
   activeFrom: date("active_from"),
@@ -456,6 +462,16 @@ export const fixedExpenses = pgTable("fixed_expenses", {
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+// The monthly income the Presupuesto page splits (V043): a single row whose
+// boolean id is always true; no row reads as an income of 0.
+export const budgetSettings = pgTable("budget_settings", {
+  id: boolean("id").primaryKey().default(true),
+  monthlyIncome: integer("monthly_income").notNull().default(0),
   updatedAt: timestamp("updated_at", { withTimezone: true })
     .notNull()
     .defaultNow(),

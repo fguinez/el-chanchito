@@ -1,12 +1,14 @@
-// Fixed expenses: the active window (vigente desde/hasta), the monthly totals,
-// the stored-row checks of PUT /api/fixed-expenses and the form parsing shared
-// by the add form and the edit dialog. Pure (no db, no next imports) so it
-// unit-tests in isolation.
+// Fixed expenses (the items of the monthly budget, see lib/budget): the
+// active window (vigente desde/hasta), the monthly totals, the stored-row
+// checks of PUT /api/fixed-expenses and the form parsing shared by the add
+// form and the edit dialog. Pure (no db, no next imports) so it unit-tests in
+// isolation.
 //
 // Dates are YYYY-MM-DD strings (the DATE columns), compared as strings;
 // `today` is the caller's local day (formatLocalDate), never the UTC date.
 
 import { calcPersonalAmount } from "./budget-engine";
+import { FIXED_EXPENSE_KINDS, type FixedExpenseKind } from "./db/schema";
 import { isValidDay } from "./monitors/dates";
 import type { ValidationFailure, ValidationResult } from "./monitors/validate";
 import { formatPlainDateEs } from "./utils";
@@ -24,11 +26,23 @@ export type FixedExpense = ActiveWindow & {
   id: string;
   name: string;
   amount: number;
+  kind: FixedExpenseKind;
   isShared: boolean;
   sharedRatio: string | null;
 };
 
 export const DEFAULT_SHARED_RATIO = "0.6900";
+
+/** The kinds in display order, with their Spanish labels. */
+export const FIXED_EXPENSE_KIND_LABELS: Record<FixedExpenseKind, string> = {
+  fixed: "Gasto fijo",
+  estimated: "Consumo estimado",
+  savings: "Ahorro",
+};
+
+export function isFixedExpenseKind(value: unknown): value is FixedExpenseKind {
+  return (FIXED_EXPENSE_KINDS as readonly unknown[]).includes(value);
+}
 
 const INT32_MIN = -2_147_483_648;
 const INT32_MAX = 2_147_483_647;
@@ -83,7 +97,7 @@ export function fixedExpensePersonalAmount(
 
 /** Monthly totals over the expenses active on `today` only. */
 export function fixedExpenseTotals(
-  expenses: readonly Omit<FixedExpense, "id" | "name">[],
+  expenses: readonly Omit<FixedExpense, "id" | "name" | "kind">[],
   today: string
 ): { personal: number; full: number; activeCount: number } {
   let personal = 0;
@@ -124,6 +138,7 @@ export function isCalendarDate(value: unknown): value is string {
 export type FixedExpenseFields = Partial<{
   name: string;
   amount: number;
+  kind: FixedExpenseKind;
   isShared: boolean;
   sharedRatio: string | null;
   activeFrom: string | null;
@@ -188,6 +203,7 @@ export function mergeFixedExpenseUpdate(
 
 export type FixedExpenseFormInput = {
   name: string;
+  kind: FixedExpenseKind;
   amount: string;
   isShared: boolean;
   sharedRatio: string;
@@ -197,6 +213,7 @@ export type FixedExpenseFormInput = {
 
 export type FixedExpenseBody = {
   name: string;
+  kind: FixedExpenseKind;
   amount: number;
   isShared: boolean;
   sharedRatio: number | null;
@@ -212,6 +229,9 @@ export type FormResult =
 export function parseFixedExpenseForm(input: FixedExpenseFormInput): FormResult {
   const name = input.name.trim();
   if (!name) return { ok: false, error: "El nombre es obligatorio" };
+  if (!isFixedExpenseKind(input.kind)) {
+    return { ok: false, error: "El tipo no es válido" };
+  }
 
   const rawAmount = input.amount.trim();
   const amount = Number(rawAmount);
@@ -252,6 +272,7 @@ export function parseFixedExpenseForm(input: FixedExpenseFormInput): FormResult 
     ok: true,
     body: {
       name,
+      kind: input.kind,
       amount: rounded,
       isShared: input.isShared,
       sharedRatio,

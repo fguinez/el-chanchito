@@ -34,6 +34,7 @@ function row(overrides: Partial<FixedExpense> = {}): FixedExpense {
     id: ID,
     name: "Internet",
     amount: 1_000_000,
+    kind: "fixed",
     isShared: false,
     sharedRatio: null,
     activeFrom: null,
@@ -204,6 +205,7 @@ describe("parseFixedExpenseForm", () => {
   function form(overrides: Partial<FixedExpenseFormInput> = {}): FixedExpenseFormInput {
     return {
       name: "Arriendo",
+      kind: "fixed",
       amount: "1000000",
       isShared: false,
       sharedRatio: "0.69",
@@ -218,6 +220,7 @@ describe("parseFixedExpenseForm", () => {
       ok: true,
       body: {
         name: "Arriendo",
+        kind: "fixed",
         amount: 999_999,
         isShared: false,
         sharedRatio: null,
@@ -242,12 +245,20 @@ describe("parseFixedExpenseForm", () => {
     });
   });
 
+  it("carries the kind into the body", () => {
+    expect(parseFixedExpenseForm(form({ kind: "savings" }))).toMatchObject({
+      ok: true,
+      body: { kind: "savings" },
+    });
+  });
+
   it("ignores a bad ratio when the expense is not shared", () => {
     expect(parseFixedExpenseForm(form({ sharedRatio: "abc" })).ok).toBe(true);
   });
 
   it.each<[Partial<FixedExpenseFormInput>, string]>([
     [{ name: "  " }, "El nombre es obligatorio"],
+    [{ kind: "income" as FixedExpenseFormInput["kind"] }, "El tipo no es válido"],
     [{ amount: "" }, "El monto debe ser un número"],
     [{ amount: "abc" }, "El monto debe ser un número"],
     [{ amount: "9999999999" }, "El monto está fuera de rango"],

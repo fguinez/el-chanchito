@@ -4,7 +4,11 @@
 // can never write a column its route does not name.
 
 import { z } from "zod";
-import { PRODUCT_KINDS, TRANSFER_STATUSES } from "@/lib/db/schema";
+import {
+  FIXED_EXPENSE_KINDS,
+  PRODUCT_KINDS,
+  TRANSFER_STATUSES,
+} from "@/lib/db/schema";
 import { TRANSACTION_NOTES_MAX_LENGTH } from "@/lib/transactions";
 import { SPEND_GROUP_BYS, UNCATEGORIZED_PARAM } from "@/lib/category-spend";
 
@@ -69,6 +73,7 @@ export const idSchema = z.object({ id: rowId });
 const fixedExpenseSchema = z.object({
   name: requiredText,
   amount: clpAmount,
+  kind: z.enum(FIXED_EXPENSE_KINDS),
   isShared: z.boolean(),
   sharedRatio: z.number().min(0).max(1).nullable(),
   activeFrom: isoDate.nullable(),
@@ -92,7 +97,7 @@ const orderedWindow = {
 
 /** POST /api/fixed-expenses: name and amount are required. */
 export const createFixedExpenseSchema = fixedExpenseSchema
-  .partial({ sharedRatio: true, activeFrom: true, activeTo: true })
+  .partial({ kind: true, sharedRatio: true, activeFrom: true, activeTo: true })
   .extend({ isShared: z.boolean().nullish() })
   .refine(windowIsOrdered, orderedWindow);
 
@@ -104,6 +109,11 @@ export const updateFixedExpenseSchema = fixedExpenseSchema
   .refine((body) => Object.keys(body).some((key) => key !== "id"), {
     error: "No updatable fields provided",
   });
+
+/** PUT /api/budget-settings: the monthly income, whole CLP, never negative. */
+export const updateBudgetSettingsSchema = z.object({
+  monthlyIncome: z.int32().min(0),
+});
 
 /** POST /api/import. Rows are checked one by one (csvRowSchema) so a bad
  *  line is skipped instead of failing the whole file. */

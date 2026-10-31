@@ -69,6 +69,7 @@ export default function FixedExpensesPage() {
   const handleAdd = async () => {
     const parsed = parseFixedExpenseForm({
       name,
+      kind: "fixed",
       amount,
       isShared,
       sharedRatio,

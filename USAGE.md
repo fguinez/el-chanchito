@@ -743,7 +743,8 @@ All API routes are under `/api/`:
 | POST | `/api/categories/suggestions/apply` | `{ description, categoryId }`: categorizes (manual) the uncategorized rows with that description once; returns `{ updatedCount }` |
 | POST | `/api/categories/suggestions/dismiss` | `{ description, categoryId }`: stops suggesting that category for that normalised description |
 | GET | `/api/categories/rules/preview` | Transactions a keyword would match (`?keyword=`, optional `&matchType=exact`) |
-| GET/POST/PUT/DELETE | `/api/fixed-expenses` | Fixed expenses CRUD |
+| GET/POST/PUT/DELETE | `/api/fixed-expenses` | Budget items CRUD (Presupuesto); `kind` is `fixed` (default), `estimated` or `savings` |
+| GET/PUT | `/api/budget-settings` | `{ monthlyIncome }`: the monthly income the budget splits (0 until saved); PUT takes a whole, non-negative CLP amount |
 | GET/POST/PUT/DELETE | `/api/transfers` | Internal transfers (POST needs distinct CLP `fromProductId` + `toProductId`); GET includes the linked `fromTransaction` / `toTransaction` |
 | PUT | `/api/transfers/[id]/links` | Set or clear the linked transactions: `{ fromTransactionId?, toTransactionId? }` (null clears, omitted keeps) |
 | GET | `/api/transfers/[id]/candidates` | Per side, the unlinked transactions a transfer may link (same amount, right sign, within 5 days) |

@@ -22,6 +22,7 @@ vi.mock("@/lib/db/resolve", () => ({
   resolveProductId: (...args: unknown[]) => resolveProductId(...args),
 }));
 
+const budgetSettings = await import("@/app/api/budget-settings/route");
 const categories = await import("@/app/api/categories/route");
 const categoryRules = await import("@/app/api/categories/rules/route");
 const fixedExpenses = await import("@/app/api/fixed-expenses/route");
@@ -69,6 +70,7 @@ beforeEach(() => {
 });
 
 const MUTATING_ROUTES: [string, string, Handler][] = [
+  ["PUT /api/budget-settings", "PUT", budgetSettings.PUT],
   ["POST /api/categories", "POST", categories.POST],
   ["POST /api/categories/rules", "POST", categoryRules.POST],
   ["POST /api/fixed-expenses", "POST", fixedExpenses.POST],

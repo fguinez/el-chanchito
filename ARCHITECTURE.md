@@ -40,7 +40,7 @@
 │  transactions | categories | category_rules | monitors          │
 │  monitor_adjustments | fixed_expenses | internal_transfers      │
 │  dismissed_transfer_suggestions | confirmed_transfer_patterns   │
-│  dismissed_category_suggestions                                 │
+│  dismissed_category_suggestions | budget_settings               │
 │  scraper_runs | product_prices | wealth_snapshots (legacy)      │
 └────────────────────────────────▲────────────────────────────────┘
                                  │
@@ -358,14 +358,17 @@ fixed_expenses                internal_transfers
   id PK                         id PK
   name                          description
   amount                        amount
-  is_shared                     from_product_id FK
-  shared_ratio                  to_product_id FK
-  active_from/to                from_transaction_id FK (V028)
-                                to_transaction_id FK (V028)
-                                  -- unique, ON DELETE SET NULL;
-                                  -- the scraped legs it accounts for
+  kind (fixed|estimated|        from_product_id FK
+        savings, V043)          to_product_id FK
+  is_shared                     from_transaction_id FK (V028)
+  shared_ratio                  to_transaction_id FK (V028)
+  active_from/to                  -- unique, ON DELETE SET NULL;
+  -- the Presupuesto items        -- the scraped legs it accounts for
                                 transfer_date
-                                status (pending|resolved)
+budget_settings (V043)          status (pending|resolved)
+  id PK (always true)
+  monthly_income
+  -- single row; none = 0
 
 
 dismissed_transfer_suggestions    confirmed_transfer_patterns
@@ -487,6 +490,7 @@ suggested category, cascading with the category.
 | `V040__monitor_adjustments_transactions.sql` | monitor_adjustments become links to transactions: deletes the free-form rows, drops `adjustment_date`/`amount`/`description`, adds `transaction_id` (FK, ON DELETE CASCADE, unique per monitor) |
 | `V041__category_rule_match_type.sql` | `category_rules.match_type` (`contains` default, or `exact`); `category_for_description()` matches exact rules by trimmed equality and ranks them before contains rules |
 | `V042__category_suggestion_dismissals.sql` | dismissed_category_suggestions (normalised description + suggested category, unique pair, cascades with the category); new table only |
+| `V043__budget_item_kinds_and_income.sql` | `fixed_expenses.kind` (`fixed` default, `estimated`, `savings`; CHECK), backfilled by name: `Ahorro:` prefix becomes `savings` with the prefix stripped, `Gastos diarios...` becomes `estimated`; `budget_settings`, a single-row table with the monthly income (`monthly_income >= 0`) |
 
 ## Scraper Architecture
 

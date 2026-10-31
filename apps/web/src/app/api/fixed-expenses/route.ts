@@ -27,13 +27,15 @@ export async function GET() {
 
 /** POST /api/fixed-expenses: create a fixed expense */
 export const POST = withJsonBody(createFixedExpenseSchema, async (body) => {
-  const { name, amount, isShared, sharedRatio, activeFrom, activeTo } = body;
+  const { name, amount, kind, isShared, sharedRatio, activeFrom, activeTo } =
+    body;
 
   const [created] = await db
     .insert(fixedExpenses)
     .values({
       name,
       amount,
+      kind: kind ?? "fixed",
       isShared: isShared ?? false,
       sharedRatio: isShared
         ? (sharedRatio?.toString() ?? DEFAULT_SHARED_RATIO)

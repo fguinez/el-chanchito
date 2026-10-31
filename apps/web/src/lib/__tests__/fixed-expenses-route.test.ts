@@ -59,6 +59,7 @@ const storedRow = {
   id: ID,
   name: "Internet",
   amount: 999_999,
+  kind: "fixed",
   isShared: false,
   sharedRatio: null,
   activeFrom: "2026-03-01",
@@ -116,12 +117,33 @@ describe("POST /api/fixed-expenses", () => {
       {
         name: "Arriendo",
         amount: 2_500_000,
+        kind: "fixed",
         isShared: true,
         sharedRatio: "0.6900",
         activeFrom: null,
         activeTo: null,
       },
     ]);
+  });
+
+  it("stores the given kind", async () => {
+    const response = await POST(
+      request("POST", { name: "Viaje", amount: 1_000_000, kind: "savings" })
+    );
+
+    expect(response.status).toBe(201);
+    expect(state.inserted[0]).toMatchObject({ kind: "savings" });
+    await expect(response.json()).resolves.toMatchObject({ kind: "savings" });
+  });
+
+  it("answers 400 naming the field for an unknown kind", async () => {
+    const response = await POST(
+      request("POST", { name: "Viaje", amount: 1_000_000, kind: "income" })
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ field: "kind" });
+    expect(fakeDb.insert).not.toHaveBeenCalled();
   });
 });
 
@@ -170,6 +192,26 @@ describe("PUT /api/fixed-expenses", () => {
     expect(payload).toMatchObject({ amount: 1_000_000, activeTo: "2026-12-31" });
     expect(payload.updatedAt).toBeInstanceOf(Date);
     expect(payload).not.toHaveProperty("createdAt");
+  });
+});
+
+describe("PUT /api/fixed-expenses kind", () => {
+  it("changes the kind alone", async () => {
+    state.selectRows = [storedRow];
+    state.updateRows = [{ ...storedRow, kind: "estimated" }];
+    const response = await PUT(request("PUT", { id: ID, kind: "estimated" }));
+
+    expect(response.status).toBe(200);
+    expect(Object.keys(state.setPayloads[0]).sort()).toEqual(["kind", "updatedAt"]);
+    expect(state.setPayloads[0]).toMatchObject({ kind: "estimated" });
+  });
+
+  it("answers 400 for an unknown kind without reading the row", async () => {
+    const response = await PUT(request("PUT", { id: ID, kind: "other" }));
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ field: "kind" });
+    expect(fakeDb.select).not.toHaveBeenCalled();
   });
 });
 
