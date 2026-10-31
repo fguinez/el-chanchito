@@ -11,6 +11,7 @@
 //              transaction feed (e.g. a fund), optionally backed by a rise of
 //              about the same size in that product's balance history.
 
+import { matchesTransactionSearch } from "@/lib/transaction-search";
 import { shiftDay } from "@/lib/transfers";
 
 // ---------------------------------------------------------------------------
@@ -82,7 +83,11 @@ export interface SuggestionTransactionLeg {
   institutionSlug: string;
   /** YYYY-MM-DD. */
   date: string;
+  /** The scraped text: every score and pattern reads this one. */
   description: string;
+  /** What to show (custom description or alias, else `description`); for
+   *  display and search only. */
+  displayDescription: string;
   /** Signed: negative on the source, positive on a pair's target. */
   amount: number;
   currency: string;
@@ -98,6 +103,7 @@ export interface SuggestionProductLeg {
   institutionSlug: string;
   date: null;
   description: null;
+  displayDescription: null;
   amount: null;
   currency: string;
 }
@@ -407,6 +413,29 @@ export function withoutSettled<T extends TransferSuggestion>(
         s.kind === "one_sided" &&
         s.source.transactionId === settled.source.transactionId
       )
+  );
+}
+
+/** Whether a suggestion is kept by a search's words (see
+ *  lib/transaction-search): each in the raw or display description of one of
+ *  its rows. */
+export function suggestionMatchesSearch(
+  tokens: readonly string[],
+  suggestion: {
+    source: Pick<SuggestionTransactionLeg, "description" | "displayDescription">;
+    target: Pick<
+      SuggestionTransactionLeg | SuggestionProductLeg,
+      "description" | "displayDescription"
+    >;
+  }
+): boolean {
+  const { source, target } = suggestion;
+  return matchesTransactionSearch(
+    tokens,
+    source.description,
+    source.displayDescription,
+    target.description,
+    target.displayDescription
   );
 }
 

@@ -163,6 +163,22 @@ describe.skipIf(!ADMIN_URL)("transfer suggestions (real PostgreSQL)", () => {
     });
   });
 
+  it("shows each row's custom description but scores the raw one", async () => {
+    await giveFeedlessProductsAFeed();
+    await seedPair();
+    await sql`
+      UPDATE transactions SET custom_description = 'Tarjeta de prueba'
+      WHERE id = ${ids.payDebit}`;
+
+    const [suggestion] = await lib.loadTransferSuggestions(TODAY);
+
+    expect(suggestion).toMatchObject({
+      source: { description: "Pago TC 1234", displayDescription: "Tarjeta de prueba" },
+      target: { description: "Pago recibido", displayDescription: "Pago recibido" },
+      evidence: ["Mismo monto", "1 día de diferencia", "Glosa 'Pago TC 1234'"],
+    });
+  });
+
   it.each([
     [
       "a dismissed pair",

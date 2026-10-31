@@ -356,9 +356,10 @@ export default function TransfersPage() {
   const resolved = transfers.filter((t) => t.status === "resolved");
   const pendingTotal = pending.reduce((sum, t) => sum + t.amount, 0);
 
-  // The page's search narrows both tables (the summary keeps every transfer):
-  // a transfer stays when each word is in its description or in the original
-  // or displayed description of a row it links.
+  // The page's search narrows the suggestions and both tables (the summary
+  // keeps every transfer): a transfer stays when each word is in its
+  // description or in the original or displayed description of a row it
+  // links.
   const [search, setSearch] = useState("");
   const tokens = useMemo(() => searchTokens(search), [search]);
   const pendingShown = pending.filter((t) => transferMatchesSearch(tokens, t));
@@ -522,6 +523,7 @@ export default function TransfersPage() {
       <TransferSuggestionsCard
         reloadKey={suggestionsKey}
         onConfirmed={loadTransfers}
+        search={search}
       />
 
       {/* Pending transfers */}
