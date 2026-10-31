@@ -11,6 +11,7 @@ import {
 } from "@/lib/db/schema";
 import { TRANSACTION_NOTES_MAX_LENGTH } from "@/lib/transactions";
 import { SPEND_GROUP_BYS, UNCATEGORIZED_PARAM } from "@/lib/category-spend";
+import { SEARCH_QUERY_MAX_LENGTH } from "@/lib/transaction-search";
 
 // ---------------------------------------------------------------------------
 // Shared fields
@@ -68,6 +69,15 @@ export function monthStart(day: string): string {
 
 /** A budget month (`scheduled_month`): any day of it, stored as its first. */
 const month = isoDate.transform(monthStart);
+
+/** A search box's text (`?q=`): trimmed and capped; a blank one reads as no
+ *  search (undefined). See lib/transaction-search for how it matches. */
+export const searchQuerySchema = z
+  .string()
+  .trim()
+  .max(SEARCH_QUERY_MAX_LENGTH)
+  .optional()
+  .transform((q) => q || undefined);
 
 /** `{ id }`, the body of the DELETE handlers. */
 export const idSchema = z.object({ id: rowId });
