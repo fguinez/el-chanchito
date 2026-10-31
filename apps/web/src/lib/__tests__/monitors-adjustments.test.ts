@@ -5,8 +5,10 @@ import {
   isForeignKeyViolation,
   isUniqueViolation,
   parseMonthParam,
+  searchAdjustmentsByMonth,
   type MonitorAdjustmentRow,
 } from "@/lib/monitors/adjustments";
+import { searchTokens } from "@/lib/transaction-search";
 import {
   affectsMonitor,
   monitorProductIds,
@@ -192,6 +194,7 @@ describe("withEffects", () => {
       createdAt: "2026-07-20T12:00:00.000Z",
       updatedAt: "2026-07-20T12:00:00.000Z",
       description: "Compra de prueba",
+      rawDescription: "COMPRA PRUEBA 1234",
       productName: "Producto de prueba",
       productCurrency: products.get(productId)!.currency,
       institutionSlug: "banco_demo",
@@ -321,6 +324,47 @@ describe("groupAdjustmentsByDay", () => {
   it("keeps only the requested month", () => {
     expect(groupAdjustmentsByDay(adjustments, "2026-08")).toHaveLength(1);
     expect(groupAdjustmentsByDay(adjustments, "2026-09")).toEqual([]);
+  });
+});
+
+describe("searchAdjustmentsByMonth", () => {
+  const adjustments = [
+    { id: "a", transactionDate: "2026-07-03", description: "Café de prueba", rawDescription: "COMPRA CAFE EJEMPLO" },
+    { id: "b", transactionDate: "2026-07-15", description: "Farmacia de prueba", rawDescription: "COMPRA FARMACIA" },
+    { id: "c", transactionDate: "2026-08-01", description: "Reembolso de prueba", rawDescription: "ABONO CAFE EJEMPLO" },
+    { id: "d", transactionDate: "2026-06-30", description: "Cafetería de prueba", rawDescription: "COMPRA LOCAL" },
+  ];
+  const search = (q: string) =>
+    searchAdjustmentsByMonth(adjustments, searchTokens(q)).map(
+      ({ month, entries }) => [month, entries.map((e) => e.id)]
+    );
+
+  it("searches every month, newest month first, on either description", () => {
+    expect(search("CAFE")).toEqual([
+      ["2026-08", ["c"]],
+      ["2026-07", ["a"]],
+      ["2026-06", ["d"]],
+    ]);
+    expect(search("compra ejemplo")).toEqual([["2026-07", ["a"]]]);
+  });
+
+  it("lists a month's matches in the month view's order", () => {
+    // Out of date order on purpose, with two entries on one day.
+    const mixed = [
+      { id: "late", transactionDate: "2026-07-20", description: "Compra de prueba", rawDescription: "COMPRA UNO", deleted: false, monthToDateEffect: null },
+      { id: "early", transactionDate: "2026-07-02", description: "Compra de prueba", rawDescription: "COMPRA DOS", deleted: false, monthToDateEffect: null },
+      { id: "late-2", transactionDate: "2026-07-20", description: "Compra de prueba", rawDescription: "COMPRA TRES", deleted: false, monthToDateEffect: null },
+    ];
+    const monthView = groupAdjustmentsByDay(mixed, "2026-07").flatMap((day) =>
+      day.entries.map((e) => e.id)
+    );
+    expect(monthView).toEqual(["early", "late", "late-2"]);
+    const [july] = searchAdjustmentsByMonth(mixed, searchTokens("compra"));
+    expect(july.entries.map((e) => e.id)).toEqual(monthView);
+  });
+
+  it("finds nothing for a word in no description", () => {
+    expect(search("supermercado")).toEqual([]);
   });
 });
 

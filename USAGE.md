@@ -299,6 +299,9 @@ description or amount, month by month), and links the one you pick:
   stops applying and is flagged so you can remove it. Clicking a description
   opens the transaction's detail panel.
 - A new month starts with none; the card's arrows browse other months.
+- The card's search box finds variaciones of every month by their original or
+  displayed description, grouped by month (the day and month totals show
+  without a search).
 
 For example (synthetic figures), with a balance floor that ramps down through
 the month, ignoring a $ 1.000.000 purchase on the 15th lowers the floor by

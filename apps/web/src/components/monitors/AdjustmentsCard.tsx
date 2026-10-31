@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { ChevronLeft, ChevronRight, Loader2, Plus, Trash2 } from "lucide-react";
 import {
   Card,
@@ -29,12 +29,17 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/ui/search-input";
 import { InstitutionLogo } from "@/components/institutions/institution-logo";
 import { TransactionDetailSheet } from "@/components/transactions/transaction-detail-sheet";
 import { useSelectedTransaction } from "@/components/transactions/use-selected-transaction";
-import { groupAdjustmentsByDay } from "@/lib/monitors/adjustments";
+import {
+  groupAdjustmentsByDay,
+  searchAdjustmentsByMonth,
+} from "@/lib/monitors/adjustments";
 import { formatLocalDate } from "@/lib/monitors/dates";
 import { cn, formatAmount, formatPlainDateEs } from "@/lib/utils";
+import { descriptionTitle, searchTokens } from "@/lib/transaction-search";
 import {
   formatSignedAmount,
   type AdjustmentCandidate,
@@ -348,13 +353,77 @@ function ProductLine({
   );
 }
 
+/** A variación's transaction: its description (opens the detail panel; the
+ *  original in the tooltip), flagged once deleted, over its product. */
+function AdjustmentTransaction({
+  adjustment,
+  onOpen,
+}: {
+  adjustment: ApiAdjustment;
+  onOpen: (transactionId: string) => void;
+}) {
+  const title = descriptionTitle(adjustment.description, adjustment.rawDescription);
+  return (
+    <>
+      <div className="flex flex-wrap items-center gap-2">
+        {adjustment.deleted ? (
+          <span className="text-muted-foreground line-through" title={title}>
+            {adjustment.description}
+          </span>
+        ) : (
+          <button
+            type="button"
+            className="text-left hover:underline"
+            title={title}
+            onClick={() => onOpen(adjustment.transactionId)}
+          >
+            {adjustment.description}
+          </button>
+        )}
+        {adjustment.deleted && (
+          <Badge variant="outline" className="text-muted-foreground">
+            transacción eliminada
+          </Badge>
+        )}
+      </div>
+      <ProductLine
+        slug={adjustment.institutionSlug}
+        institutionName={adjustment.institutionName}
+        productName={adjustment.productName}
+      />
+    </>
+  );
+}
+
+/** A variación's own shift of the alert threshold, or why it has none. */
+function AdjustmentEffect({
+  adjustment,
+  currency,
+}: {
+  adjustment: ApiAdjustment;
+  currency: string;
+}) {
+  if (adjustment.deleted) {
+    return <span className="text-muted-foreground">no aplica</span>;
+  }
+  if (!adjustment.affects) {
+    return (
+      <span className="text-xs text-muted-foreground">
+        no afecta a la expresión actual
+      </span>
+    );
+  }
+  return <Shift currency={currency} value={adjustment.effect} />;
+}
+
 /**
  * The monitor's variaciones for one month: transactions it ignores. Each one
  * shifts every threshold, from its day to the end of the month, by what
  * undoing it changes in the expression (its "efecto"); same-day entries show
- * their combined total. `onChanged` runs after each write so the page
- * refetches the evaluation, the chart and this list; `refreshing` is true
- * while that refetch is in flight.
+ * their combined total. A search lists the matching ones of every month
+ * instead, without the day and month totals (they add up the whole month).
+ * `onChanged` runs after each write so the page refetches the evaluation, the
+ * chart and this list; `refreshing` is true while that refetch is in flight.
  */
 export function AdjustmentsCard({
   monitorId,
@@ -374,10 +443,14 @@ export function AdjustmentsCard({
   const [rowError, setRowError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const { selectedTxnId, selectTransaction } = useSelectedTransaction();
+  const [search, setSearch] = useState("");
+  const tokens = useMemo(() => searchTokens(search), [search]);
+  const searching = tokens.length > 0;
 
   const days = groupAdjustmentsByDay(adjustments, month);
   const busy = deletingId != null || refreshing;
   const monthTotal = days.length > 0 ? days[days.length - 1].runningTotal : 0;
+  const results = searching ? searchAdjustmentsByMonth(adjustments, tokens) : [];
 
   async function handleDelete(adjustment: ApiAdjustment) {
     if (!window.confirm("¿Quitar esta variación?")) return;
@@ -397,6 +470,23 @@ export function AdjustmentsCard({
     }
   }
 
+  const removeButton = (adjustment: ApiAdjustment) => (
+    <div className="flex justify-end text-muted-foreground">
+      <Button
+        variant="ghost"
+        size="icon-xs"
+        aria-label={`Quitar variación del ${formatPlainDateEs(
+          adjustment.transactionDate
+        )} (${adjustment.description})`}
+        className="hover:text-destructive"
+        disabled={busy}
+        onClick={() => handleDelete(adjustment)}
+      >
+        <Trash2 />
+      </Button>
+    </div>
+  );
+
   return (
     <Card>
       <CardHeader>
@@ -409,25 +499,104 @@ export function AdjustmentsCard({
           sin variaciones. El efecto y los totales son los del umbral de
           alerta.
         </CardDescription>
-        <CardAction>
-          <MonthNav month={month} onChange={setMonth} />
-        </CardAction>
+        {/* A search covers every month: the month picker steps aside. */}
+        {!searching && (
+          <CardAction>
+            <MonthNav month={month} onChange={setMonth} />
+          </CardAction>
+        )}
       </CardHeader>
       <CardContent
         className={cn("space-y-4", refreshing && "opacity-60 transition-opacity")}
       >
-        <AddAdjustmentDialog
-          monitorId={monitorId}
-          initialMonth={month}
-          disabled={busy}
-          onAdded={(landed) => {
-            // Show the month the new variación landed in.
-            setMonth(landed);
-            onChanged();
-          }}
-        />
+        <div className="flex flex-wrap items-center gap-3">
+          <AddAdjustmentDialog
+            monitorId={monitorId}
+            initialMonth={month}
+            disabled={busy}
+            onAdded={(landed) => {
+              // Show the month the new variación landed in.
+              setSearch("");
+              setMonth(landed);
+              onChanged();
+            }}
+          />
+          {(adjustments.length > 0 || search !== "") && (
+            <SearchInput
+              className="w-full sm:ml-auto sm:w-64"
+              aria-label="Buscar variaciones por descripción"
+              value={search}
+              onValueChange={setSearch}
+            />
+          )}
+        </div>
 
-        {days.length === 0 ? (
+        {searching ? (
+          results.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              Sin resultados para «{search.trim()}».
+            </p>
+          ) : (
+            <>
+              <p className="text-sm text-muted-foreground">
+                Coincidencias de todos los meses. Los totales del día y del mes
+                se ven sin búsqueda.
+              </p>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Día</TableHead>
+                    <TableHead>Transacción</TableHead>
+                    <TableHead className="text-right">Monto</TableHead>
+                    <TableHead className="text-right">Efecto en el umbral</TableHead>
+                    <TableHead className="w-12"></TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {results.map((group) => (
+                    <Fragment key={group.month}>
+                      <TableRow className="hover:bg-transparent">
+                        <TableCell
+                          colSpan={5}
+                          className="pt-4 font-medium first-letter:uppercase"
+                        >
+                          {monthLabel(group.month)}
+                        </TableCell>
+                      </TableRow>
+                      {group.entries.map((adjustment) => (
+                        <TableRow key={adjustment.id}>
+                          <TableCell>
+                            {formatPlainDateEs(adjustment.transactionDate)}
+                          </TableCell>
+                          <TableCell className="whitespace-normal">
+                            <AdjustmentTransaction
+                              adjustment={adjustment}
+                              onOpen={selectTransaction}
+                            />
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {formatAmount(
+                              adjustment.productCurrency,
+                              adjustment.amount
+                            )}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            <AdjustmentEffect
+                              adjustment={adjustment}
+                              currency={currency}
+                            />
+                          </TableCell>
+                          <TableCell>{removeButton(adjustment)}</TableCell>
+                        </TableRow>
+                      ))}
+                    </Fragment>
+                  ))}
+                </TableBody>
+              </Table>
+              {rowError && <p className="text-sm text-destructive">{rowError}</p>}
+            </>
+          )
+        ) : days.length === 0 ? (
           <p className="text-sm text-muted-foreground">
             Sin variaciones en {monthLabel(month)}.
           </p>
@@ -452,7 +621,6 @@ export function AdjustmentsCard({
                       const span = day.entries.length;
                       // Shared day cells sit at the top of a multi-entry day.
                       const spanAlign = span > 1 ? "align-top" : "";
-                      const label = `del ${formatPlainDateEs(day.transactionDate)} (${adjustment.description})`;
                       return (
                         <TableRow key={adjustment.id}>
                           {index === 0 && (
@@ -461,35 +629,9 @@ export function AdjustmentsCard({
                             </TableCell>
                           )}
                           <TableCell className="whitespace-normal">
-                            <div className="flex flex-wrap items-center gap-2">
-                              {adjustment.deleted ? (
-                                <span className="text-muted-foreground line-through">
-                                  {adjustment.description}
-                                </span>
-                              ) : (
-                                <button
-                                  type="button"
-                                  className="text-left hover:underline"
-                                  onClick={() =>
-                                    selectTransaction(adjustment.transactionId)
-                                  }
-                                >
-                                  {adjustment.description}
-                                </button>
-                              )}
-                              {adjustment.deleted && (
-                                <Badge
-                                  variant="outline"
-                                  className="text-muted-foreground"
-                                >
-                                  transacción eliminada
-                                </Badge>
-                              )}
-                            </div>
-                            <ProductLine
-                              slug={adjustment.institutionSlug}
-                              institutionName={adjustment.institutionName}
-                              productName={adjustment.productName}
+                            <AdjustmentTransaction
+                              adjustment={adjustment}
+                              onOpen={selectTransaction}
                             />
                           </TableCell>
                           <TableCell className="text-right tabular-nums">
@@ -499,17 +641,10 @@ export function AdjustmentsCard({
                             )}
                           </TableCell>
                           <TableCell className="text-right tabular-nums">
-                            {adjustment.deleted ? (
-                              <span className="text-muted-foreground">
-                                no aplica
-                              </span>
-                            ) : !adjustment.affects ? (
-                              <span className="text-xs text-muted-foreground">
-                                no afecta a la expresión actual
-                              </span>
-                            ) : (
-                              <Shift currency={currency} value={adjustment.effect} />
-                            )}
+                            <AdjustmentEffect
+                              adjustment={adjustment}
+                              currency={currency}
+                            />
                           </TableCell>
                           {index === 0 && (
                             <>
@@ -530,20 +665,7 @@ export function AdjustmentsCard({
                               </TableCell>
                             </>
                           )}
-                          <TableCell>
-                            <div className="flex justify-end text-muted-foreground">
-                              <Button
-                                variant="ghost"
-                                size="icon-xs"
-                                aria-label={`Quitar variación ${label}`}
-                                className="hover:text-destructive"
-                                disabled={busy}
-                                onClick={() => handleDelete(adjustment)}
-                              >
-                                <Trash2 />
-                              </Button>
-                            </div>
-                          </TableCell>
+                          <TableCell>{removeButton(adjustment)}</TableCell>
                         </TableRow>
                       );
                     })}
