@@ -7,7 +7,11 @@ import {
   transactions,
 } from "@/lib/db/schema";
 import { resolveProductId } from "@/lib/db/resolve";
-import { displayDescription, notDeleted } from "@/lib/db/transactions";
+import {
+  descriptionMatches,
+  displayDescription,
+  notDeleted,
+} from "@/lib/db/transactions";
 import { eq, desc, and, gte, isNull, lte } from "drizzle-orm";
 import { UNCATEGORIZED_PARAM } from "@/lib/category-spend";
 import { parseSearchParams, withJsonBody } from "@/lib/api/validation";
@@ -23,15 +27,17 @@ import {
 
 /** GET /api/transactions: list transactions, newest first. Optional filters,
  *  all combined: `month` (budget month, scheduled_month), `from`/`to`
- *  (inclusive transaction_date), `productId`, `institution` (slug) and
- *  `categoryId` (a uuid, or `none` for uncategorized rows). */
+ *  (inclusive transaction_date), `productId`, `institution` (slug),
+ *  `categoryId` (a uuid, or `none` for uncategorized rows) and `q` (every word
+ *  in the display or the raw description, ignoring case and accents; see
+ *  lib/transaction-search). */
 export async function GET(request: NextRequest) {
   const query = parseSearchParams(
     request.nextUrl.searchParams,
     listTransactionsQuerySchema
   );
   if (!query.ok) return query.response;
-  const { month, from, to, institution, categoryId, limit } = query.data;
+  const { month, from, to, institution, categoryId, q, limit } = query.data;
   const productId = query.data.productId ?? query.data.accountId;
 
   // Soft-deleted rows (V033) never appear in any dashboard list.
@@ -50,6 +56,8 @@ export async function GET(request: NextRequest) {
   } else if (categoryId) {
     conditions.push(eq(transactions.categoryId, categoryId));
   }
+  const search = descriptionMatches(q);
+  if (search) conditions.push(search);
 
   const rows = await db
     .select({

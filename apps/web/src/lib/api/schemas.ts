@@ -179,7 +179,8 @@ const WINDOW_ORDER_ERROR = {
 
 /** GET /api/transactions query string. Every filter is optional and they
  *  combine: `month` is the budget month (scheduled_month), `from`/`to` an
- *  inclusive transaction_date window (either side may be open). */
+ *  inclusive transaction_date window (either side may be open), `q` a
+ *  description search. */
 export const listTransactionsQuerySchema = z
   .object({
     month: month.optional(),
@@ -190,6 +191,7 @@ export const listTransactionsQuerySchema = z
     accountId: rowId.optional(),
     institution: institutionSlug.optional(),
     categoryId: categoryFilter.optional(),
+    q: searchQuerySchema,
     limit: z.coerce
       .number()
       .int()

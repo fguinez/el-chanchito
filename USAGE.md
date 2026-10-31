@@ -824,7 +824,7 @@ All API routes are under `/api/`:
 | POST | `/api/institutions/refresh` | Trigger a scrape (all, or `{institution}`) |
 | GET | `/api/scrapers` | Latest run per scraper |
 | GET | `/api/scrapers/available` | Enabled scraper slugs, from the scraper service |
-| GET/POST | `/api/transactions` | Transactions (list, create; create takes an optional `location`) |
+| GET/POST | `/api/transactions` | Transactions (list, create; create takes an optional `location`); the list filters by `month`, `from`/`to`, `productId`, `institution`, `categoryId` and `q` (every word in the original or the displayed description, ignoring case and accents) |
 | GET/PATCH/DELETE | `/api/transactions/[id]` | One transaction with product, institution, category, location and notes; PATCH edits `description`/`customDescription`, `amount`, `transactionDate`, `scheduledMonth`, `categoryId`, `isInternalTransfer`, `productId`, `location` and `notes` (trimmed, max 2000 chars, blank or `null` clears); DELETE soft-deletes imported (scraped or CSV) rows and hard-deletes manual ones |
 | POST | `/api/transactions/[id]/category-rule` | `{ categoryId }`: categorizes the row (manual), creates or reuses an exact rule keyed on its original description, and categorizes the other non-manual rows with that same description; returns `{ rule, ruleCreated, updatedCount }` |
 | POST | `/api/import` | CSV import |
