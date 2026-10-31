@@ -201,6 +201,22 @@ describe("categoryExpensesHref", () => {
       categoryExpensesHref({ categoryId: null, from: "2026-01-01", to: "2026-01-31" })
     ).toBe("/expenses?category=none&from=2026-01-01&to=2026-01-31");
   });
+
+  it("carries a search when set", () => {
+    expect(
+      categoryExpensesHref({
+        categoryId: FOOD,
+        from: "2026-01-01",
+        to: "2026-01-31",
+        q: " café de prueba ",
+      })
+    ).toBe(
+      `/expenses?category=${FOOD}&from=2026-01-01&to=2026-01-31&q=caf%C3%A9+de+prueba`
+    );
+    expect(
+      categoryExpensesHref({ categoryId: FOOD, from: "2026-01-01", to: "2026-01-31", q: "  " })
+    ).toBe(`/expenses?category=${FOOD}&from=2026-01-01&to=2026-01-31`);
+  });
 });
 
 describe("categoryDetailHref", () => {

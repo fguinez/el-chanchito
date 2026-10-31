@@ -61,12 +61,14 @@ describe("parseExpensesFilters", () => {
       from: "2026-01-01",
       to: "2026-01-31",
       productId: PRODUCT,
+      q: "Café de prueba",
     });
     expect(parse(href.split("?")[1])).toEqual({
       category: "none",
       from: "2026-01-01",
       to: "2026-01-31",
       product: PRODUCT,
+      q: "Café de prueba",
     });
   });
 });

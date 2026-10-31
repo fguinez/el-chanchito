@@ -3,8 +3,9 @@
 // Side panel with one category's spending, open while the URL carries
 // `?category=<id|none>` (the same pattern as the `?txn=` transaction panel):
 // 12 monthly bars, the split by product and by institution over a chosen
-// window, and its latest transactions, each opening the transaction panel on
-// top without closing this one. Needs a Suspense boundary (useSearchParams).
+// window, and its latest transactions (searchable), each opening the
+// transaction panel on top without closing this one. Needs a Suspense
+// boundary (useSearchParams).
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
@@ -18,6 +19,7 @@ import {
 } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { SearchInput } from "@/components/ui/search-input";
 import { Table, TableBody, TableCell, TableRow } from "@/components/ui/table";
 import { CategoryStackedBars } from "@/components/charts/category-stacked-bars";
 import { useCategorySpend } from "@/components/charts/use-category-spend";
@@ -33,7 +35,13 @@ import {
   type CategorySpendResponse,
 } from "@/lib/category-spend";
 import { monthOf, trailingMonthsWindow } from "@/lib/category-trends";
-import { formatAmount, formatPercent, formatPlainDateEs } from "@/lib/utils";
+import { useDebouncedValue } from "@/lib/use-debounced-value";
+import {
+  cn,
+  formatAmount,
+  formatPercent,
+  formatPlainDateEs,
+} from "@/lib/utils";
 import { CategoryIcon } from "./CategoryIcon";
 import { CategorySwatch, DEFAULT_CATEGORY_COLOR, type ApiCategory } from "./shared";
 
@@ -182,14 +190,17 @@ function CategoryDetail({
     new URLSearchParams({ ...period, categoryId: categoryParam, groupBy }).toString();
   const byProduct = useCategorySpend(splitQuery("product"), refreshKey);
   const byInstitution = useCategorySpend(splitQuery("institution"), refreshKey);
-  const txns = useCategoryTransactions(
-    new URLSearchParams({
-      ...period,
-      categoryId: categoryParam,
-      limit: String(TXN_CAP + 1),
-    }).toString(),
-    refreshKey
-  );
+  // The list's search: local to this category (the panel remounts per
+  // category), queried once typing pauses.
+  const [search, setSearch] = useState("");
+  const q = useDebouncedValue(search.trim());
+  const txnsQuery = new URLSearchParams({
+    ...period,
+    categoryId: categoryParam,
+    limit: String(TXN_CAP + 1),
+  });
+  if (q) txnsQuery.set("q", q);
+  const txns = useCategoryTransactions(txnsQuery.toString(), refreshKey);
 
   const thisMonth = barsSpend.data?.groups?.find((g) => g.key === currentMonth)?.total;
   const monthHrefFor = (_: string | null, month: string) =>
@@ -255,6 +266,11 @@ function CategoryDetail({
 
         <section className="space-y-2">
           <h3 className="text-sm font-semibold">Transacciones</h3>
+          <SearchInput
+            value={search}
+            onValueChange={setSearch}
+            loading={search.trim() !== q || txns.stale}
+          />
           {txns.error ? (
             <p className="text-sm text-muted-foreground">
               No se pudieron cargar las transacciones.
@@ -263,10 +279,18 @@ function CategoryDetail({
             <Loading />
           ) : txns.rows.length === 0 ? (
             <p className="text-sm text-muted-foreground">
-              Sin transacciones en este período.
+              {txns.q
+                ? `Sin resultados para «${txns.q}» en este período.`
+                : "Sin transacciones en este período."}
             </p>
           ) : (
-            <Table>
+            <Table
+              aria-busy={txns.stale}
+              className={cn(
+                "transition-opacity duration-200",
+                txns.stale && "opacity-60"
+              )}
+            >
               <TableBody>
                 {txns.rows.slice(0, TXN_CAP).map((txn) => (
                   <TableRow key={txn.id} {...rowProps(txn.id)}>
@@ -300,7 +324,7 @@ function CategoryDetail({
           )}
           {txns.rows && txns.rows.length > 0 && (
             <Button asChild variant="outline" size="sm">
-              <Link href={categoryExpensesHref({ categoryId, ...period })}>
+              <Link href={categoryExpensesHref({ categoryId, ...period, q })}>
                 {txns.rows.length > TXN_CAP ? "Ver todas en Gastos" : "Ver en Gastos"}
               </Link>
             </Button>
@@ -375,11 +399,18 @@ function ErrorNote() {
 }
 
 /** GET /api/transactions for `query`, remembering the query each result
- *  answers (like useCategorySpend); `rows` is null while loading. */
+ *  answers (like useCategorySpend); `rows` is null while the first one loads.
+ *  A new query (a search, another window) keeps the last rows, `stale`, until
+ *  its own arrive; `q` is the search the shown rows answer. */
 function useCategoryTransactions(
   query: string,
   refreshKey: number
-): { rows: ListedTransaction[] | null; error: boolean } {
+): {
+  rows: ListedTransaction[] | null;
+  error: boolean;
+  stale: boolean;
+  q: string | null;
+} {
   const [result, setResult] = useState<{
     query: string;
     rows: ListedTransaction[] | null;
@@ -402,6 +433,13 @@ function useCategoryTransactions(
     return () => controller.abort();
   }, [query, refreshKey]);
 
-  const current = result?.query === query ? result : null;
-  return { rows: current?.rows ?? null, error: current?.error ?? false };
+  if (result?.query === query) {
+    const q = new URLSearchParams(query).get("q");
+    return { rows: result.rows, error: result.error, stale: false, q };
+  }
+  if (result?.rows) {
+    const q = new URLSearchParams(result.query).get("q");
+    return { rows: result.rows, error: false, stale: true, q };
+  }
+  return { rows: null, error: false, stale: false, q: null };
 }
