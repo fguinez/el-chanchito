@@ -61,6 +61,8 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
+from scrapers.backends.user_agent import user_agent_for
+
 logger = logging.getLogger(__name__)
 
 
@@ -479,10 +481,6 @@ _BLOCK_FRAGMENT = "/fueradelinea/"
 # fixed, stale UA contradicts the client hints the browser also sends), and
 # the `navigator.webdriver` mask. The live headless login only passed with
 # that context. No stealth plugin, no other fingerprint change.
-_UA_PLATFORMS = {
-    "darwin": "Macintosh; Intel Mac OS X 10_15_7",
-    "linux": "X11; Linux x86_64",
-}
 _WEBDRIVER_MASK_JS = "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
 VIEWPORT = {"width": 1366, "height": 768}
 LOCALE = "es-CL"
@@ -689,16 +687,6 @@ def _launch_browser(playwright, headless: bool):
     except Exception:
         logger.warning("Santander: chromium channel unavailable; using default build")
         return playwright.chromium.launch(headless=headless)
-
-
-def user_agent_for(browser_version: str, platform: str) -> str:
-    """A desktop Chrome UA for the engine actually running, minus "Headless"."""
-    major = browser_version.split(".")[0]
-    os_token = _UA_PLATFORMS.get(platform, _UA_PLATFORMS["linux"])
-    return (
-        f"Mozilla/5.0 ({os_token}) AppleWebKit/537.36 "
-        f"(KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
-    )
 
 
 def _first_visible(locators, timeout_ms: int):

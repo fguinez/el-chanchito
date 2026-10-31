@@ -5,7 +5,7 @@ Skipo (skipo.com) is a Chilean crypto and fiat wallet and exchange.
 Acquisition decision: rung 1 of the ladder. Skipo publishes a documented REST
 API (`https://api.skipo.com/v2`) with user-issued keys, so no lower rung was
 considered. Auth is a personal read-only key (`SKIPO_API_KEY`, `skp_live_...`,
-held in the Keychain) sent as a bearer token. It needs the `accounts:read`
+held in the secret store) sent as a bearer token. It needs the `accounts:read`
 scope (balances and ledger) and `market_data:read` (asset catalog and
 prices). The key carries no IP allowlist because the scrapers run from a
 dynamic residential IP. Every call is a GET; nothing here writes.

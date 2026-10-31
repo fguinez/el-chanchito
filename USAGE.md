@@ -7,11 +7,69 @@
 - **Python** >= 3.12 as `python3` (the shared `packages/product-model` requires
   it; `make install` builds `.venv` from whatever `python3` is on your PATH)
 - **Docker** + **Docker Compose**
-- **macOS** for the Keychain secret helpers (`make secrets-*`); on other hosts,
-  export the secrets as env vars instead (see "Configuration")
+- **make** and a POSIX shell for the make targets and `scripts/*.sh` (on Windows,
+  use WSL2; see "Supported platforms")
 
 `make install` installs everything, including the Playwright Chromium browser
 the BanChile scraper needs (in Docker this happens in the scrapers image).
+
+## Supported platforms
+
+| Host | Status |
+|---|---|
+| macOS | Everything. Secrets live in the login Keychain |
+| Linux (x86_64 or arm64) | Everything. Secrets live in the Secret Service (GNOME Keyring, KWallet) on a desktop, or in an owner-only file on a headless host |
+| Windows | Through **WSL2**, which is a Linux host for everything in this table: `make`, `scripts/*.sh` and the secret store (the Linux keyring or the file) run there. The Python scraper code itself has no POSIX-only calls and CI runs its tests natively on Windows, but native Windows is not a documented way to run the stack |
+| Raspberry Pi 4/5 | The whole stack through Docker Compose on 64-bit Raspberry Pi OS (Debian, `aarch64`); see [Raspberry Pi](#raspberry-pi) below. CI builds both images on `linux/arm64` |
+
+The Docker images (`postgres:16-alpine`, `python:3.12-slim`, `node:20-alpine`) are
+multi-arch, and Playwright ships its Chromium for Linux ARM64, so the headless
+scrapers (Banco de Chile, Santander, Banco Falabella) run in the container on any
+of these hosts.
+
+**Real-Chrome scrapers need a display.** Tarjeta Lider Bci drives a genuine,
+headed Chrome (see [Tarjeta Lider Bci](#tarjeta-lider-bci)), so it runs on the host
+with a desktop session, never in the headless container. On a headless Pi it
+needs a desktop session or a virtual display (for example Xvfb), and unattended
+runs there are not promised. Google Chrome has no Linux ARM64 build, so a Pi uses
+Debian's `chromium`; whether Cloudflare Turnstile passes for Debian Chromium as it
+does for Google Chrome is **unverified**.
+
+### Raspberry Pi
+
+Target: a Raspberry Pi 4 or 5 on 64-bit Raspberry Pi OS (Bookworm or
+later). A 32-bit OS will not work: the images are `arm64`.
+
+```bash
+# 1. Docker (its convenience script, or Docker's Debian guide), make and git;
+#    log out and back in so the docker group applies
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker "$USER"
+sudo apt install -y make git
+
+# 2. Clone and configure
+git clone https://github.com/fguinez/el-chanchito.git
+cd el-chanchito
+cp .env.example .env      # fill in the identifiers (see "Configuration")
+
+# 3. Secrets: no system keyring on a headless Pi, so the store is the
+#    owner-only file local/secrets.env (see "Secret store backends")
+make secrets-init
+
+# 4. Build and start postgres + web + scrapers
+make up
+```
+
+`make up` works with the system `python3` (no `.venv` needed for the secret
+store); `make install` is only needed to run the scrapers or tests outside Docker.
+The first `make up` builds both images on the Pi, which takes a while. The
+Next.js build is the memory-hungry step: on a 4 GB Pi, stop other services or add
+swap if the build is killed. Then reach the dashboard from
+another device as described in
+[Reaching the dashboard from another device](#reaching-the-dashboard-from-another-device):
+`DASHBOARD_HOST=0.0.0.0` (or the Pi's LAN or Tailscale address) in `.env`, and
+`DASHBOARD_PASSWORD` exported for `make up` (see [Authentication](#authentication-read-this-first)).
+Postgres and the scraper control endpoint stay on loopback.
 
 ## Quick Start
 
@@ -24,7 +82,7 @@ make install
 # 2. Set up environment
 cp .env.example .env
 # Edit .env with your identifiers (see "Configuration" below)
-make secrets-init   # macOS: store passwords and API keys in the Keychain
+make secrets-init   # store passwords and API keys in the secret store
 
 # 3. Start everything: postgres + migrations + scrapers (with on-demand refresh) + dashboard
 make dev
@@ -52,9 +110,11 @@ refresh is unavailable until at least one scraper is enabled.
 Configuration is split in two:
 
 - **`.env`** — non-secret config: Postgres settings and scraper identifiers.
-- **macOS Keychain** — secrets (passwords, tokens, API keys). Loaded automatically
-  by `make dev`, `make scrapers-once`, `make scrapers-start`, `make up`,
-  `make fintual-login` and `make bci-lider-login` via `scripts/load-secrets.sh`.
+- **The secret store**: secrets (passwords, tokens, API keys): the macOS
+  Keychain, the system keyring or an owner-only file (see "Secret store
+  backends" below). Loaded automatically by `make dev`, `make scrapers-once`,
+  `make scrapers-start`, `make up`, `make fintual-login` and
+  `make bci-lider-login` via `scripts/load-secrets.sh`.
 
 Copy `.env.example` to `.env` and fill in the identifiers:
 
@@ -93,8 +153,8 @@ Optional email parser tuning (defaults in parentheses):
 | `EMAIL_MAX_MESSAGES` (100) | Emails parsed per institution and run, newest first; a truncated window logs a warning |
 | `EMAIL_IMAP_MAILBOX` (`INBOX`) | Mailbox searched for notifications. Set it to Gmail's All Mail (`[Gmail]/All Mail`, or `[Gmail]/Todos` with a Spanish Gmail UI) when filters archive them. Fintual 2FA codes are always read from `INBOX` |
 
-Then store the secrets in the Keychain (prompts interactively, values never
-touch disk or shell history):
+Then store the secrets in the secret store (prompts interactively with hidden
+input, values never touch shell history):
 
 ```bash
 make secrets-init      # prompts for each missing secret
@@ -104,7 +164,7 @@ make secret-set KEY=FINTUAL_PASSWORD   # overwrite a single secret
 
 Secrets and their meaning:
 
-| Keychain item | Value |
+| Item | Value |
 |---|---|
 | `chanchito.BANCHILE_PASSWORD` | Banco de Chile web password |
 | `chanchito.LIDER_BCI_PASSWORD` | Tarjeta Lider Bci clave (autofills the login; without it someone has to type it into the Chrome window) |
@@ -130,8 +190,36 @@ A scraper is enabled only when its credentials are present:
 | Banco Falabella | `BANCO_FALABELLA_RUT` + `BANCO_FALABELLA_PASSWORD` |
 | MACH, MercadoPago, Tenpo | `EMAIL_IMAP_HOST` + `EMAIL_IMAP_USER` + `EMAIL_IMAP_PASSWORD` |
 
-On non-macOS hosts (e.g. Docker-only deploys), export the secret env vars
-directly instead of using the Keychain.
+A value already exported in your shell wins over the store, so you can also
+export the secret env vars directly (e.g. in a CI or Docker-only deploy).
+
+### Secret store backends
+
+`scripts/secret_store.py` (behind `make secrets-init`, `make secret-set`,
+`make secrets-status` and `scripts/load-secrets.sh`) keeps every secret as an
+item named `chanchito.<VAR>` with your user (`$USER`) as the account, and picks
+the first backend that works on the host:
+
+| Backend | Where | Notes |
+|---|---|---|
+| `keychain` | macOS | The login Keychain through the `security` CLI. The same items the earlier Keychain-only helpers created, so nothing to migrate |
+| `keyring` | Linux desktop (also under WSL2 when a Secret Service runs there) | The [`keyring`](https://pypi.org/project/keyring/) package (`make install-py` installs it) with the Secret Service (GNOME Keyring, KWallet). Used only when its collection is unlocked: checking never pops an unlock prompt |
+| `file` | Headless Linux (Raspberry Pi, server) | `local/secrets.env` (gitignored and Docker-ignored), a `KEY=value` dotenv file written owner-only (`0600`). The helper warns when it is readable by others. `CHANCHITO_SECRETS_FILE` moves it |
+
+`make secrets-status` and `make secrets-init` print which backend is in use, and
+no command but `export` (used by `load-secrets.sh`) ever prints a value. When the
+helper falls back to the file on its own (no keyring installed, no Secret
+Service, or a locked collection), `load-secrets.sh` says so on stderr with the
+reason, and it warns when the store holds none of the secrets. Set
+`CHANCHITO_SECRETS_BACKEND=keychain`, `keyring` or `file` to force one, for
+example `file` on a Linux desktop whose keyring is locked when the scrapers run.
+The file backend keeps secrets in plain text on disk: rely on the file mode, a
+disk you control, and keep `local/` out of backups you share.
+
+Under WSL2, keep the clone on the Linux filesystem (e.g. `~/el-chanchito`), not
+under `/mnt/c`: chmod is a no-op on the Windows drives, so `local/secrets.env`
+there can't be made owner-only. If the repo must live on `/mnt/c`, point
+`CHANCHITO_SECRETS_FILE` at a path under `~/` instead.
 
 ### Gmail App Password
 
@@ -314,12 +402,18 @@ one gets an unsolvable interactive check). So the scraper drives a **real Chrome
 over the DevTools protocol, and by default runs it **managed**: each scrape
 launches Chrome, autofills the login, reads the card, and closes Chrome. Nothing to
 keep running: just set `LIDER_BCI_RUT` (+ `chanchito.LIDER_BCI_PASSWORD` in the
-Keychain) and it runs unattended.
+secret store) and it runs unattended.
 
 Requirements: a genuine Google Chrome installed on the machine (not the Playwright
-Chromium `make install` fetches; set `LIDER_BCI_CHROME_PATH` if it's elsewhere) and
-a display (Chrome must be headed: Cloudflare blocks headless), so this runs on your
-Mac, not inside the headless Docker container. The window is launched off-screen so
+Chromium `make install` fetches) and a display (Chrome must be headed: Cloudflare
+blocks headless), so this runs on a desktop session (macOS, Windows, a Linux
+desktop), not inside the headless Docker container. The scraper looks in
+`/Applications` on macOS; for `google-chrome`, `google-chrome-stable`,
+`chromium`, `chromium-browser` and `chrome` on the `PATH`; and under
+`%ProgramFiles%`, `%ProgramFiles(x86)%` and `%LocalAppData%` on Windows. Set
+`LIDER_BCI_CHROME_PATH` if it's elsewhere. On a Raspberry Pi (no Google Chrome
+for ARM64 Linux) it finds Debian's `chromium`, but whether Cloudflare's check
+passes for it is unverified (see "Supported platforms"). The window is launched off-screen so
 it doesn't flash on your desktop; if that ever misbehaves the run retries once with
 a normal visible window. If Cloudflare ever shows the human-verification check (rare
 for a genuine Chrome), the run falls back to a visible window so you can tick it.
@@ -794,12 +888,14 @@ The dashboard uses a single shared password (single-user by design; there is no
 user management). Setup:
 
 ```bash
-# macOS: store it in the login Keychain alongside the scraper secrets
+# store it in the secret store alongside the scraper secrets
 make secret-set KEY=DASHBOARD_PASSWORD
-# ...and export it when deploying (no make target exports it, see below)
-DASHBOARD_PASSWORD="$(security find-generic-password -a "$USER" -s chanchito.DASHBOARD_PASSWORD -w)" make up
+# ...and export it for one deploy only (load-secrets.sh skips it, see below).
+# The subshell scopes the password to `make up`; a missing secret stops it.
+( dashboard_password=$(make -s secret-export KEY=DASHBOARD_PASSWORD) &&
+  eval "$dashboard_password" && make up )
 
-# anywhere else: export it (Compose passes it through to the web service)
+# or export it yourself (Compose passes it through to the web service)
 export DASHBOARD_PASSWORD='choose-a-long-random-one'
 ```
 
@@ -883,9 +979,9 @@ An unparseable value falls back to `12h` and logs one warning at startup.
 
 Auth is skipped only in `next dev` with `DASHBOARD_PASSWORD` unset, so `make dev`
 stays frictionless. `scripts/load-secrets.sh` deliberately does **not** export
-`DASHBOARD_PASSWORD`, so storing it in the Keychain for deploys never turns the
-login on locally; production reads it from the environment (Compose passes it
-through), never from the Keychain. To exercise the login locally, opt in per run:
+`DASHBOARD_PASSWORD`, so storing it in the secret store for deploys never turns
+the login on locally; production reads it from the environment (Compose passes it
+through), never from the store. To exercise the login locally, opt in per run:
 
 ```bash
 DASHBOARD_PASSWORD='changeme-example' make dev-web
@@ -905,9 +1001,10 @@ To open the dashboard from a phone or another computer, opt in with
 `DASHBOARD_HOST`, the address the dashboard listens on:
 
 ```bash
-# host-dev: both variables from your shell, in the same command
-DASHBOARD_PASSWORD="$(security find-generic-password -a "$USER" -s chanchito.DASHBOARD_PASSWORD -w)" \
-  DASHBOARD_HOST=0.0.0.0 make dev
+# host-dev: both variables, scoped to this one command (a subshell); a missing
+# secret stops it before `make dev` starts
+( dashboard_password=$(make -s secret-export KEY=DASHBOARD_PASSWORD) &&
+  eval "$dashboard_password" && DASHBOARD_HOST=0.0.0.0 make dev )
 
 # make up: DASHBOARD_HOST=0.0.0.0 in .env (or your shell), DASHBOARD_PASSWORD
 # exported as in "Authentication" above

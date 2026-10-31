@@ -1106,7 +1106,8 @@ class TestUserAgent:
         [
             ("darwin", "Macintosh; Intel Mac OS X 10_15_7"),
             ("linux", "X11; Linux x86_64"),
-            ("win32", "X11; Linux x86_64"),
+            ("win32", "Windows NT 10.0; Win64; x64"),
+            ("freebsd14", "X11; Linux x86_64"),
         ],
     )
     def test_matches_running_engine_and_host(self, platform, os_token):

@@ -69,6 +69,8 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
+from scrapers.backends.user_agent import user_agent_for
+
 logger = logging.getLogger(__name__)
 
 
@@ -528,10 +530,6 @@ TIMEZONE_ID = "America/Santiago"
 # A realistic desktop context (BanChile/Santander's ceiling, no further): a UA
 # that drops headless Chromium's "HeadlessChrome" marker but keeps the real
 # engine version and host OS, plus the `navigator.webdriver` mask.
-_UA_PLATFORMS = {
-    "darwin": "Macintosh; Intel Mac OS X 10_15_7",
-    "linux": "X11; Linux x86_64",
-}
 _WEBDRIVER_MASK_JS = "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
 
 # Timeouts (ms). Every wait is bounded; `networkidle` is never used.
@@ -839,16 +837,6 @@ _LINE_LINK_RE = r"l[ií]nea\s+de\s+cr[eé]dito"
 def _find_marker(text: str, markers: tuple[str, ...]) -> Optional[str]:
     normalized = _normalize(text)
     return next((marker for marker in markers if marker in normalized), None)
-
-
-def user_agent_for(browser_version: str, platform: str) -> str:
-    """A desktop Chrome UA for the engine actually running, minus "Headless"."""
-    major = browser_version.split(".")[0]
-    os_token = _UA_PLATFORMS.get(platform, _UA_PLATFORMS["linux"])
-    return (
-        f"Mozilla/5.0 ({os_token}) AppleWebKit/537.36 "
-        f"(KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
-    )
 
 
 def _launch_browser(playwright, headless: bool):

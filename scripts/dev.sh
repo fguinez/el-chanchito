@@ -31,8 +31,8 @@ ensure_node() {
 }
 ensure_node
 
-# Secrets come from the macOS Keychain; identifiers come from .env (the
-# scraper service loads it via python-dotenv).
+# Secrets come from the secret store (scripts/secret_store.py); identifiers
+# come from .env (the scraper service loads it via python-dotenv).
 . ./scripts/load-secrets.sh
 
 DATABASE_URL="${DATABASE_URL:-postgres://finance:finance@localhost:5435/finance}"

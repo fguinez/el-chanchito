@@ -8,7 +8,7 @@ Personal finance tracker for Chilean banks and fintechs: automated scrapers, for
 
 ## Overview
 
-El Chanchito (“the piggy bank”) is a self-hosted personal finance tracker. Python scrapers pull balances and transactions from Chilean financial institutions (Banco de Chile, Banco Santander, Banco Falabella, Tarjeta Lider Bci, Fintual, Buda, Skipo, MACH, MercadoPago and Tenpo) into PostgreSQL, and a Next.js dashboard turns them into monitors (budget drift and other alerts over your balances), a spending history, and a net-worth timeline. Everything runs locally via the Makefile or Docker Compose, and credentials stay on your machine in the macOS Keychain.
+El Chanchito (“the piggy bank”) is a self-hosted personal finance tracker. Python scrapers pull balances and transactions from Chilean financial institutions (Banco de Chile, Banco Santander, Banco Falabella, Tarjeta Lider Bci, Fintual, Buda, Skipo, MACH, MercadoPago and Tenpo) into PostgreSQL, and a Next.js dashboard turns them into monitors (budget drift and other alerts over your balances), a spending history, and a net-worth timeline. Everything runs locally via the Makefile or Docker Compose, and credentials stay on your machine in its secret store (the macOS Keychain, a Linux keyring, or an owner-only file on a headless host such as a Raspberry Pi). It runs on macOS, Linux and Windows (via WSL2), and the Docker Compose stack runs on a Raspberry Pi 4/5 (see [Supported platforms](USAGE.md#supported-platforms)).
 
 ## Highlights
 
@@ -28,7 +28,7 @@ git clone https://github.com/fguinez/el-chanchito.git
 cd el-chanchito
 make install           # Node deps + Python venv + Playwright Chromium
 cp .env.example .env   # then fill in your identifiers (see Configuration)
-make secrets-init      # store scraper secrets in the macOS Keychain
+make secrets-init      # store scraper secrets in the secret store
 make dev               # PostgreSQL (port 5435) + migrations + scrapers + dashboard at http://localhost:3000
 ```
 
@@ -59,7 +59,7 @@ A scraper is enabled only when its credentials are present. See [USAGE.md](USAGE
 | `LIDER_BCI_RUT` | no | Tarjeta Lider Bci RUT; enables its scraper (drives a real Chrome, so it needs a machine with a display) |
 | `FINTUAL_EMAIL` | no | Fintual account e-mail; enables the Fintual scraper (run `make fintual-login` once) |
 | `EMAIL_IMAP_HOST` / `EMAIL_IMAP_USER` | no | Gmail IMAP identifiers; enable the e-mail parsers (MACH, MercadoPago, Tenpo) |
-| `chanchito.*` | scrapers only | Secrets (bank passwords, Buda and Skipo API keys, Gmail App Password) live in the macOS Keychain: `make secrets-init` / `make secrets-status`. On non-macOS hosts, export them as env vars instead |
+| `chanchito.*` | scrapers only | Secrets (bank passwords, Buda and Skipo API keys, Gmail App Password) live in the secret store (macOS Keychain, system keyring, or owner-only `local/secrets.env`): `make secrets-init` / `make secrets-status`. Values exported in your shell win over the store |
 
 `.env.example` documents every other setting the code reads, with its default (e-mail lookback window, Fintual session cache, scraper mode, dashboard login, on-demand refresh wiring).
 
@@ -87,7 +87,7 @@ el-chanchito/
 │   ├── db-schema/      # Versioned SQL migrations + runner
 │   └── product-model/  # Product-kind registry (pydantic → TS/JSON codegen)
 ├── .github/workflows/  # CI: tests, typecheck, lint
-├── scripts/            # dev.sh (make dev), load-secrets.sh (Keychain → env)
+├── scripts/            # dev.sh (make dev), secret_store.py + load-secrets.sh (secrets → env)
 ├── docs/screenshots/   # README screenshot (synthetic data)
 ├── docker-compose.yml  # postgres + web + scrapers (+ postgres-test for DB tests)
 ├── Makefile            # every common task (`make help`)

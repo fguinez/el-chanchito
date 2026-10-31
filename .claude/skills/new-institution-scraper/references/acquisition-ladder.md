@@ -357,7 +357,7 @@ Build cost is the highest of any HTTP option, and it fails silently when the
 app updates.
 
 **Shape.** Same as rung 3 once the contract is known. Keep device-bound
-secrets (device id, enrollment token) in the Keychain via `make secret-set`,
+secrets (device id, enrollment token) in the secret store via `make secret-set`,
 never in the repo.
 
 **Step down when.** Attestation or device binding blocks any client that isn't

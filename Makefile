@@ -27,31 +27,29 @@ env: ## Create .env from .env.example
 	@test -f .env || (cp .env.example .env && echo "Created .env — edit it with your credentials")
 	@test -f .env && echo ".env already exists"
 
-# ─── Secrets (macOS Keychain) ────────────────────────────────────────────────
-# Secrets live in the login Keychain as generic passwords named "chanchito.<VAR>".
+# ─── Secrets ─────────────────────────────────────────────────────────────────
+# Secrets live in the secret store as items named "chanchito.<VAR>": the macOS
+# Keychain, the Linux Secret Service (through the keyring package), or the
+# owner-only local/secrets.env file on headless hosts (scripts/secret_store.py
+# picks one; CHANCHITO_SECRETS_BACKEND forces it). The key list lives there too.
 # Non-secret config (RUT, emails, hosts) stays in .env.
 
-SECRET_KEYS := BANCHILE_PASSWORD LIDER_BCI_PASSWORD SANTANDER_PASSWORD BANCO_FALABELLA_PASSWORD FINTUAL_PASSWORD BUDA_API_KEY BUDA_API_SECRET SKIPO_API_KEY EMAIL_IMAP_PASSWORD DASHBOARD_PASSWORD
+# Same interpreter choice as scripts/load-secrets.sh: .venv/bin/python, else python3.
+SECRET_STORE = $(if $(wildcard .venv/bin/python),.venv/bin/python,python3) scripts/secret_store.py
 
-secrets-init: ## Store scraper secrets in macOS Keychain (interactive, skips existing)
-	@for k in $(SECRET_KEYS); do \
-		if security find-generic-password -a "$$USER" -s "chanchito.$$k" >/dev/null 2>&1; then \
-			echo "= $$k already stored (overwrite with: make secret-set KEY=$$k)"; \
-		else \
-			echo "-> Enter value for $$k"; \
-			security add-generic-password -a "$$USER" -s "chanchito.$$k" -w && echo "+ $$k stored"; \
-		fi; \
-	done
+secrets-init: ## Store scraper secrets in the secret store (interactive, skips existing)
+	@$(SECRET_STORE) init
 
 secret-set: ## Store or overwrite one secret (usage: make secret-set KEY=FINTUAL_PASSWORD)
 	@test -n "$(KEY)" || { echo "Usage: make secret-set KEY=<VAR_NAME>"; exit 1; }
-	@security add-generic-password -U -a "$$USER" -s "chanchito.$(KEY)" -w && echo "+ chanchito.$(KEY) stored"
+	@$(SECRET_STORE) set "$(KEY)"
 
-secrets-status: ## Show which secrets are present in Keychain
-	@for k in $(SECRET_KEYS); do \
-		security find-generic-password -a "$$USER" -s "chanchito.$$k" >/dev/null 2>&1 \
-			&& echo "+ $$k" || echo "x $$k (missing)"; \
-	done
+secrets-status: ## Show which secrets are present in the secret store
+	@$(SECRET_STORE) status
+
+secret-export: ## Print one secret as an export line to eval (usage: eval "`make -s secret-export KEY=DASHBOARD_PASSWORD`")
+	@test -n "$(KEY)" || { echo "Usage: make -s secret-export KEY=<VAR_NAME>" >&2; exit 1; }
+	@$(SECRET_STORE) export "$(KEY)"
 
 # ─── Database ────────────────────────────────────────────────────────────────
 
@@ -107,6 +105,7 @@ test-ts: ## Run TypeScript tests only
 test-py: ## Run Python tests only (DB tests skip unless TEST_DATABASE_URL is set)
 	cd apps/scrapers && ../../.venv/bin/python -m pytest tests/ -v
 	cd packages/product-model && ../../.venv/bin/python -m pytest tests/ -v
+	.venv/bin/python -m pytest scripts/tests/ -v
 
 # The DB tests create and drop their own chanchito_test_* databases on the
 # server TEST_DATABASE_URL names, so it must be a disposable one: this target

@@ -122,6 +122,7 @@ class BudaScraper(BaseScraper):
     def __init__(self) -> None:
         self.api_key = os.environ["BUDA_API_KEY"]
         self.api_secret = os.environ["BUDA_API_SECRET"]
+        self._last_nonce = 0
 
     def _sign(self, request_method: str, path: str, body: str = "") -> dict[str, str]:
         """Generate HMAC-SHA384 auth headers for a request.
@@ -130,7 +131,10 @@ class BudaScraper(BaseScraper):
         suffix and any query string — otherwise the signature is rejected.
         The body component is omitted entirely for body-less requests.
         """
-        nonce = str(int(time.time() * 1e6))
+        # Windows' clock can return the same microsecond twice, and Buda
+        # rejects a repeated nonce, so it is forced to grow.
+        self._last_nonce = max(time.time_ns() // 1000, self._last_nonce + 1)
+        nonce = str(self._last_nonce)
         components = [request_method, path]
         if body:
             components.append(base64.b64encode(body.encode()).decode())

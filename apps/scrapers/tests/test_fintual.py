@@ -54,6 +54,12 @@ _REAL_ASYNC_CLIENT = httpx.AsyncClient
 _NO_STOCKS = {"data": {"stocksWallet": None, "stocksPositionsV2": None}}
 
 
+def _assert_owner_only(path) -> None:
+    """0600 on POSIX; Windows has no such mode bits (chmod only sets read-only)."""
+    if os.name != "nt":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
 @pytest.fixture(autouse=True)
 def session_file(monkeypatch, tmp_path):
     """Point the session cache at a tmp file so no test touches a real one."""
@@ -351,7 +357,7 @@ class TestSessionRefresh:
             "monolith_token": "synthetic-fresh",
             "auth_refresh_token": "synthetic-refresh-2",
         }
-        assert stat.S_IMODE(session_file.stat().st_mode) == 0o600
+        _assert_owner_only(session_file)
 
     def test_failed_refresh_relogs_in_via_imap(self, monkeypatch, session_file):
         """When FINTUAL_EMAIL == EMAIL_IMAP_USER and the refresh token is dead
@@ -408,7 +414,7 @@ class TestSessionRefresh:
         assert json.loads(session_file.read_text()) == {
             "auth_refresh_token": "synthetic-refresh-2"
         }
-        assert stat.S_IMODE(session_file.stat().st_mode) == 0o600
+        _assert_owner_only(session_file)
 
     def test_concurrent_runs_spend_the_refresh_token_once(
         self, monkeypatch, session_file
@@ -562,7 +568,7 @@ class TestLoginFailureGuard:
         assert "HTTP 401" in message and "fintual-login" in message
         assert "://" not in message and "fintual.cl" not in message
         assert "synthetic body" not in message
-        assert stat.S_IMODE(marker.stat().st_mode) == 0o600
+        _assert_owner_only(marker)
 
     def test_a_code_that_never_arrives_also_trips_the_guard(
         self, monkeypatch, session_file
@@ -1266,7 +1272,7 @@ class TestStocksLeg:
             "auth_refresh_token": "synthetic-refresh-1",
             _JWT_COOKIE: "synthetic-jwt",
         }
-        assert stat.S_IMODE(session_file.stat().st_mode) == 0o600
+        _assert_owner_only(session_file)
 
     def test_a_cached_pricing_token_is_reused(self, monkeypatch, session_file):
         """A token saved by an earlier run spares the mint."""

@@ -1491,7 +1491,7 @@ el-chanchito/
 │       ├── generated/                # index.ts + product-model.schema.json
 │       └── PRODUCTS.md               # generated per-kind field matrix
 │
-├── scripts/                          # dev.sh (make dev), load-secrets.sh (Keychain)
+├── scripts/                          # dev.sh (make dev), secret_store.py + load-secrets.sh (secret store)
 ├── docs/screenshots/                 # README screenshot (synthetic data)
 ├── docker-compose.yml               # + postgres-test (profile `test`) for DB tests
 ├── Makefile

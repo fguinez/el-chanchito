@@ -9,7 +9,7 @@ graft in the session methods of `institutions/fintual.py`.
 Acquisition decision (keep this paragraph, rewritten for the real case):
 balances and movements come from Acme's <official / private> JSON API over
 httpx. <Why the higher rungs were rejected, in a sentence each.> Auth is a
-personal API token (`ACME_API_TOKEN`, held in the Keychain); a rejected token
+personal API token (`ACME_API_TOKEN`, held in the secret store); a rejected token
 raises `AcmeAuthError` naming the fix.
 
 `scrape_products()` emits the CLP checking account as one `checking` product;

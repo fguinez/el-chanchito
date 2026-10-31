@@ -59,7 +59,7 @@ gotchas this repo already paid for, and when to step down.
 4. **Protect the account.** Cap login attempts, never retry a failed login in
    a loop, and reuse sessions. Logging in costs account risk: schedule a
    browser login daily at most.
-5. **Secrets stay local.** Passwords and tokens live in the Keychain
+5. **Secrets stay local.** Passwords and tokens live in the secret store
    (`make secret-set`), session caches are 0600 and gitignored. Exception
    messages never carry tokens, URLs with ids, or response bodies: they are
    stored in `scraper_runs.error_message` and shown on the dashboard.
@@ -146,7 +146,7 @@ Walk `references/integration-checklist.md` top to bottom:
   `_SCHEDULES` entry (without one the scraper runs once at startup, then never
   again, and can't be refreshed);
 - `.env.example`;
-- `SECRET_KEYS` and `load-secrets.sh` (two lists to keep in sync);
+- `SECRET_KEYS` in `scripts/secret_store.py` (the one key list);
 - Compose passthrough (headless-capable scrapers only);
 - `.gitignore` for session files and profiles;
 - the login target;
