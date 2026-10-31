@@ -139,14 +139,14 @@ export default function HomePage() {
             </CardContent>
           </Card>
         </Link>
-        <Link href="/fixed">
+        <Link href="/budget">
           <Card className="cursor-pointer transition-colors hover:bg-muted/50">
             <CardHeader className="pb-2">
-              <CardTitle className="text-base">Gastos fijos</CardTitle>
+              <CardTitle className="text-base">Presupuesto</CardTitle>
             </CardHeader>
             <CardContent>
               <p className="text-sm text-muted-foreground">
-                Administrar gastos mensuales fijos
+                En qué se va tu sueldo
               </p>
             </CardContent>
           </Card>

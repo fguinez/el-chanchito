@@ -4,7 +4,11 @@
 // can never write a column its route does not name.
 
 import { z } from "zod";
-import { PRODUCT_KINDS, TRANSFER_STATUSES } from "@/lib/db/schema";
+import {
+  FIXED_EXPENSE_KINDS,
+  PRODUCT_KINDS,
+  TRANSFER_STATUSES,
+} from "@/lib/db/schema";
 import { TRANSACTION_NOTES_MAX_LENGTH } from "@/lib/transactions";
 import { SPEND_GROUP_BYS, UNCATEGORIZED_PARAM } from "@/lib/category-spend";
 
@@ -20,6 +24,12 @@ export const clpAmount = z
   .number()
   .transform((n) => Math.round(n))
   .pipe(z.int32());
+
+/** A whole CLP amount that cannot be negative (budget items). */
+export const nonNegativeClpAmount = z
+  .number()
+  .transform((n) => Math.round(n))
+  .pipe(z.int32().min(0));
 
 /** A signed amount in a product's own currency, kept to the two decimals the
  *  NUMERIC(18, 2) column stores: CLP rows round to whole pesos, USD rows (V023)
@@ -68,7 +78,8 @@ export const idSchema = z.object({ id: rowId });
 
 const fixedExpenseSchema = z.object({
   name: requiredText,
-  amount: clpAmount,
+  amount: nonNegativeClpAmount,
+  kind: z.enum(FIXED_EXPENSE_KINDS),
   isShared: z.boolean(),
   sharedRatio: z.number().min(0).max(1).nullable(),
   activeFrom: isoDate.nullable(),
@@ -92,18 +103,25 @@ const orderedWindow = {
 
 /** POST /api/fixed-expenses: name and amount are required. */
 export const createFixedExpenseSchema = fixedExpenseSchema
-  .partial({ sharedRatio: true, activeFrom: true, activeTo: true })
+  .partial({ kind: true, sharedRatio: true, activeFrom: true, activeTo: true })
   .extend({ isShared: z.boolean().nullish() })
   .refine(windowIsOrdered, orderedWindow);
 
-/** PUT /api/fixed-expenses: a non-empty subset of the fields, by id. */
+/** PUT /api/fixed-expenses: a non-empty subset of the fields, by id. A
+ *  negative amount passes here; mergeFixedExpenseUpdate accepts it only when
+ *  it is the stored one (a legacy row being edited without touching it). */
 export const updateFixedExpenseSchema = fixedExpenseSchema
   .partial()
-  .extend({ id: rowId })
+  .extend({ id: rowId, amount: clpAmount.optional() })
   .refine(windowIsOrdered, orderedWindow)
   .refine((body) => Object.keys(body).some((key) => key !== "id"), {
     error: "No updatable fields provided",
   });
+
+/** PUT /api/budget-settings: the monthly income, whole CLP, never negative. */
+export const updateBudgetSettingsSchema = z.object({
+  monthlyIncome: z.int32().min(0),
+});
 
 /** POST /api/import. Rows are checked one by one (csvRowSchema) so a bad
  *  line is skipped instead of failing the whole file. */

@@ -1,12 +1,14 @@
-// Fixed expenses: the active window (vigente desde/hasta), the monthly totals,
-// the stored-row checks of PUT /api/fixed-expenses and the form parsing shared
-// by the add form and the edit dialog. Pure (no db, no next imports) so it
-// unit-tests in isolation.
+// Fixed expenses (the items of the monthly budget, see lib/budget): the
+// active window (vigente desde/hasta), the monthly totals, the stored-row
+// checks of PUT /api/fixed-expenses and the form parsing shared by the add
+// form and the edit dialog. Pure (no db, no next imports) so it unit-tests in
+// isolation.
 //
 // Dates are YYYY-MM-DD strings (the DATE columns), compared as strings;
 // `today` is the caller's local day (formatLocalDate), never the UTC date.
 
 import { calcPersonalAmount } from "./budget-engine";
+import { FIXED_EXPENSE_KINDS, type FixedExpenseKind } from "./db/schema";
 import { isValidDay } from "./monitors/dates";
 import type { ValidationFailure, ValidationResult } from "./monitors/validate";
 import { formatPlainDateEs } from "./utils";
@@ -24,14 +26,26 @@ export type FixedExpense = ActiveWindow & {
   id: string;
   name: string;
   amount: number;
+  kind: FixedExpenseKind;
   isShared: boolean;
   sharedRatio: string | null;
 };
 
 export const DEFAULT_SHARED_RATIO = "0.6900";
 
+/** The kinds in display order, with their Spanish labels. */
+export const FIXED_EXPENSE_KIND_LABELS: Record<FixedExpenseKind, string> = {
+  fixed: "Gasto fijo",
+  estimated: "Consumo estimado",
+  savings: "Ahorro",
+};
+
+export function isFixedExpenseKind(value: unknown): value is FixedExpenseKind {
+  return (FIXED_EXPENSE_KINDS as readonly unknown[]).includes(value);
+}
+
 const INT32_MIN = -2_147_483_648;
-const INT32_MAX = 2_147_483_647;
+export const INT32_MAX = 2_147_483_647;
 
 /** Both bounds are inclusive: an expense ending today is still active. */
 export function fixedExpenseStatus(
@@ -83,7 +97,7 @@ export function fixedExpensePersonalAmount(
 
 /** Monthly totals over the expenses active on `today` only. */
 export function fixedExpenseTotals(
-  expenses: readonly Omit<FixedExpense, "id" | "name">[],
+  expenses: readonly Omit<FixedExpense, "id" | "name" | "kind">[],
   today: string
 ): { personal: number; full: number; activeCount: number } {
   let personal = 0;
@@ -124,6 +138,7 @@ export function isCalendarDate(value: unknown): value is string {
 export type FixedExpenseFields = Partial<{
   name: string;
   amount: number;
+  kind: FixedExpenseKind;
   isShared: boolean;
   sharedRatio: string | null;
   activeFrom: string | null;
@@ -131,6 +146,7 @@ export type FixedExpenseFields = Partial<{
 }>;
 
 export type StoredFixedExpense = ActiveWindow & {
+  amount: number;
   isShared: boolean;
   sharedRatio: string | null;
 };
@@ -151,8 +167,10 @@ function windowFailure(
 
 /**
  * Check an update against the stored row and return the values to write:
- * the merged active window must still be ordered (a lone `activeTo` before
- * the stored `activeFrom` is refused), an expense that ends up unshared
+ * a negative amount is refused unless it is the stored one (legacy rows
+ * predate the non-negative rule and stay editable), the merged active window
+ * must still be ordered (a lone `activeTo` before the stored `activeFrom` is
+ * refused), an expense that ends up unshared
  * drops its ratio, and one that ends up shared without any ratio gets
  * DEFAULT_SHARED_RATIO (a null ratio would zero its personal amount).
  */
@@ -160,6 +178,14 @@ export function mergeFixedExpenseUpdate(
   existing: StoredFixedExpense,
   fields: FixedExpenseFields
 ): ValidationResult<FixedExpenseFields> {
+  if (
+    fields.amount !== undefined &&
+    fields.amount < 0 &&
+    fields.amount !== existing.amount
+  ) {
+    return fail("El monto no puede ser negativo", "amount");
+  }
+
   const merged: ActiveWindow = {
     activeFrom:
       fields.activeFrom !== undefined ? fields.activeFrom : existing.activeFrom,
@@ -188,6 +214,7 @@ export function mergeFixedExpenseUpdate(
 
 export type FixedExpenseFormInput = {
   name: string;
+  kind: FixedExpenseKind;
   amount: string;
   isShared: boolean;
   sharedRatio: string;
@@ -197,6 +224,7 @@ export type FixedExpenseFormInput = {
 
 export type FixedExpenseBody = {
   name: string;
+  kind: FixedExpenseKind;
   amount: number;
   isShared: boolean;
   sharedRatio: number | null;
@@ -208,10 +236,18 @@ export type FormResult =
   | { ok: true; body: FixedExpenseBody }
   | { ok: false; error: string };
 
-/** Shared by the add form and the edit dialog; empty dates mean no bound. */
-export function parseFixedExpenseForm(input: FixedExpenseFormInput): FormResult {
+/** Shared by the add form and the edit dialog; empty dates mean no bound.
+ *  The dialog passes the row's `storedAmount`, so a legacy negative amount it
+ *  leaves untouched is accepted (PUT accepts it the same way). */
+export function parseFixedExpenseForm(
+  input: FixedExpenseFormInput,
+  storedAmount?: number
+): FormResult {
   const name = input.name.trim();
   if (!name) return { ok: false, error: "El nombre es obligatorio" };
+  if (!isFixedExpenseKind(input.kind)) {
+    return { ok: false, error: "El tipo no es válido" };
+  }
 
   const rawAmount = input.amount.trim();
   const amount = Number(rawAmount);
@@ -221,6 +257,9 @@ export function parseFixedExpenseForm(input: FixedExpenseFormInput): FormResult 
   const rounded = Math.round(amount);
   if (rounded < INT32_MIN || rounded > INT32_MAX) {
     return { ok: false, error: "El monto está fuera de rango" };
+  }
+  if (rounded < 0 && rounded !== storedAmount) {
+    return { ok: false, error: "El monto no puede ser negativo" };
   }
 
   let sharedRatio: number | null = null;
@@ -252,6 +291,7 @@ export function parseFixedExpenseForm(input: FixedExpenseFormInput): FormResult 
     ok: true,
     body: {
       name,
+      kind: input.kind,
       amount: rounded,
       isShared: input.isShared,
       sharedRatio,

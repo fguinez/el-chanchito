@@ -13,13 +13,17 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { SELECT_CLASS } from "@/components/ui/native-select";
+import { cn } from "@/lib/utils";
+import { FIXED_EXPENSE_KINDS, type FixedExpenseKind } from "@/lib/db/schema";
 import {
+  FIXED_EXPENSE_KIND_LABELS,
   parseFixedExpenseForm,
   ratioInput,
   type FixedExpense,
 } from "@/lib/fixed-expenses";
 
-/** Pencil button + dialog editing every field of one fixed expense. */
+/** Pencil button + dialog editing every field of one budget item. */
 export function FixedExpenseEditDialog({
   expense,
   onSaved,
@@ -29,6 +33,7 @@ export function FixedExpenseEditDialog({
 }) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState(expense.name);
+  const [kind, setKind] = useState<FixedExpenseKind>(expense.kind);
   const [amount, setAmount] = useState(String(expense.amount));
   const [isShared, setIsShared] = useState(expense.isShared);
   const [sharedRatio, setSharedRatio] = useState(ratioInput(expense.sharedRatio));
@@ -42,6 +47,7 @@ export function FixedExpenseEditDialog({
     if (!next) return;
     // Start every opening from the expense as it is now.
     setName(expense.name);
+    setKind(expense.kind);
     setAmount(String(expense.amount));
     setIsShared(expense.isShared);
     setSharedRatio(ratioInput(expense.sharedRatio));
@@ -52,14 +58,18 @@ export function FixedExpenseEditDialog({
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
-    const parsed = parseFixedExpenseForm({
-      name,
-      amount,
-      isShared,
-      sharedRatio,
-      activeFrom,
-      activeTo,
-    });
+    const parsed = parseFixedExpenseForm(
+      {
+        name,
+        kind,
+        amount,
+        isShared,
+        sharedRatio,
+        activeFrom,
+        activeTo,
+      },
+      expense.amount
+    );
     if (!parsed.ok) {
       setError(parsed.error);
       return;
@@ -74,18 +84,18 @@ export function FixedExpenseEditDialog({
         body: JSON.stringify({ id: expense.id, ...parsed.body }),
       });
       if (res.status === 404) {
-        setError("Este gasto ya no existe; recarga la página.");
+        setError("Este item ya no existe; recarga la página.");
         return;
       }
       if (!res.ok) {
         const data = await res.json().catch(() => null);
-        setError(data?.error ?? "No se pudo guardar el gasto");
+        setError(data?.error ?? "No se pudo guardar el item");
         return;
       }
       setOpen(false);
       onSaved();
     } catch {
-      setError("No se pudo guardar el gasto");
+      setError("No se pudo guardar el item");
     } finally {
       setSaving(false);
     }
@@ -106,11 +116,11 @@ export function FixedExpenseEditDialog({
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Editar gasto fijo</DialogTitle>
+          <DialogTitle>Editar item del presupuesto</DialogTitle>
           <DialogDescription>
-            Si el gasto dejó de existir, ponle una fecha de término en vez de
-            eliminarlo: se conserva su historia y deja de sumar al total desde
-            el día siguiente.
+            Si el item dejó de existir, ponle una fecha de término en vez de
+            eliminarlo: se conserva su historia y deja de sumar al presupuesto
+            desde el día siguiente.
           </DialogDescription>
         </DialogHeader>
 
@@ -128,20 +138,42 @@ export function FixedExpenseEditDialog({
             />
           </div>
 
-          <div className="space-y-1.5">
-            <label
-              htmlFor={`${idPrefix}-amount`}
-              className="block text-sm font-medium"
-            >
-              Monto (CLP)
-            </label>
-            <Input
-              id={`${idPrefix}-amount`}
-              type="number"
-              className="w-40"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-            />
+          <div className="flex flex-wrap gap-4">
+            <div className="space-y-1.5">
+              <label
+                htmlFor={`${idPrefix}-kind`}
+                className="block text-sm font-medium"
+              >
+                Tipo
+              </label>
+              <select
+                id={`${idPrefix}-kind`}
+                className={cn(SELECT_CLASS, "w-48")}
+                value={kind}
+                onChange={(e) => setKind(e.target.value as FixedExpenseKind)}
+              >
+                {FIXED_EXPENSE_KINDS.map((option) => (
+                  <option key={option} value={option}>
+                    {FIXED_EXPENSE_KIND_LABELS[option]}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-1.5">
+              <label
+                htmlFor={`${idPrefix}-amount`}
+                className="block text-sm font-medium"
+              >
+                Monto (CLP)
+              </label>
+              <Input
+                id={`${idPrefix}-amount`}
+                type="number"
+                className="w-40"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+              />
+            </div>
           </div>
 
           <div className="flex items-end gap-4">

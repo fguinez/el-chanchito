@@ -239,7 +239,7 @@ For the email parser, you need a Gmail App Password (not your regular password):
 | **Instituciones** | `/institutions` | Every scraped product grouped by institution, with on-demand refresh; drill into `/institutions/[institution]` and `/institutions/[institution]/[product]` for balance history and movements |
 | **Gastos** | `/expenses` | Transaction list, manual entry form, CSV import |
 | **Categorías** | `/categories` | Categories and keyword rules for automatic categorization |
-| **Gastos Fijos** | `/fixed` | Monthly fixed expenses with shared ratio (69%) |
+| **Presupuesto** | `/budget` | Monthly income split into budget items (Gasto fijo, Consumo estimado, Ahorro, with an optional shared ratio) and what is left over, as a live donut; `/fixed` redirects here |
 | **Transferencias** | `/transfers` | Internal money movements between two of your CLP products (pending/resolved); "Vincular" links each one to the scraped debit and credit that moved the money, and "Sugeridas" proposes rows that look like transfers for one-click confirm or dismiss |
 | **Instituciones** | `/institutions` | Every institution and its products with balances; edit institutions, accounts and products from their detail pages |
 | **Configuracion** | `/settings` | Budget parameters, income split calculator, monthly reset |
@@ -261,7 +261,7 @@ At the start of each month:
    preset) start over on their own, and every monitor starts the month with no variaciones
 2. Edit any monitor whose thresholds depend on a figure that changed (salary,
    credit card limit, etc.)
-3. Review **Gastos Fijos** for any changes to recurring expenses
+3. Review **Presupuesto** for any changes to your income or recurring items
 4. Check **Historial**: net worth is computed from product balances, so there
    is nothing to enter; if an institution looks stale, refresh it from
    **Instituciones** (see [Net-worth history](#net-worth-history))
@@ -837,7 +837,8 @@ All API routes are under `/api/`:
 | POST | `/api/categories/suggestions/apply` | `{ description, categoryId }`: categorizes (manual) the uncategorized rows with that description once; returns `{ updatedCount }` |
 | POST | `/api/categories/suggestions/dismiss` | `{ description, categoryId }`: stops suggesting that category for that normalised description |
 | GET | `/api/categories/rules/preview` | Transactions a keyword would match (`?keyword=`, optional `&matchType=exact`) |
-| GET/POST/PUT/DELETE | `/api/fixed-expenses` | Fixed expenses CRUD |
+| GET/POST/PUT/DELETE | `/api/fixed-expenses` | Budget items CRUD (Presupuesto); `kind` is `fixed` (default), `estimated` or `savings` |
+| GET/PUT | `/api/budget-settings` | `{ monthlyIncome }`: the monthly income the budget splits (0 until saved); PUT takes a whole, non-negative CLP amount |
 | GET/POST/PUT/DELETE | `/api/transfers` | Internal transfers (POST needs distinct CLP `fromProductId` + `toProductId`); GET includes the linked `fromTransaction` / `toTransaction` |
 | PUT | `/api/transfers/[id]/links` | Set or clear the linked transactions: `{ fromTransactionId?, toTransactionId? }` (null clears, omitted keeps) |
 | GET | `/api/transfers/[id]/candidates` | Per side, the unlinked transactions a transfer may link (same amount, right sign, within 5 days) |
