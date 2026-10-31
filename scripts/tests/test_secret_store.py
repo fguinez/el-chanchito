@@ -137,6 +137,20 @@ def test_file_backend_warns_when_others_can_read(tmp_path, capsys):
     assert "synthetic-secret" not in err
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+@pytest.mark.parametrize(
+    ("mode", "label"),
+    [(0o600, "(owner-only)"), (0o644, "(mode 0644, readable by others)")],
+)
+def test_file_backend_describes_the_actual_mode(tmp_path, mode, label):
+    """The banner never calls a file owner-only that other users can read."""
+    path = tmp_path / "secrets.env"
+    path.write_text("FINTUAL_PASSWORD=synthetic\n")
+    path.chmod(mode)
+
+    assert ss.FileBackend(path).describe().endswith(label)
+
+
 def test_file_backend_skips_permission_check_on_windows(tmp_path, capsys):
     path = tmp_path / "secrets.env"
     path.write_text("FINTUAL_PASSWORD=synthetic\n")
@@ -578,6 +592,20 @@ def test_main_reports_store_errors_without_a_traceback(monkeypatch, capsys):
 
     assert ss.main(["status"]) == 1
     assert "vault" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, EOFError])
+def test_main_exits_quietly_when_a_prompt_is_aborted(tmp_path, monkeypatch, capsys, interrupt):
+    """Ctrl-C or Ctrl-D at the hidden prompt aborts without a traceback."""
+    monkeypatch.setattr(ss, "select_backend", lambda: ss.FileBackend(tmp_path / "secrets.env"))
+
+    def abort(_prompt):
+        raise interrupt
+
+    monkeypatch.setattr(ss.getpass, "getpass", abort)
+
+    assert ss.main(["set", "FINTUAL_PASSWORD"]) == 130
+    assert "Traceback" not in capsys.readouterr().err
 
 
 def test_main_rejects_bad_usage_before_touching_a_store(monkeypatch, capsys):

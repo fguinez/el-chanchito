@@ -212,13 +212,26 @@ class FileBackend(Backend):
         self._warned = False
 
     def describe(self) -> str:
+        mode = self._loose_mode()
+        if mode is not None:
+            return f"file {self.path} (mode {mode:04o}, readable by others)"
         return f"file {self.path} (owner-only)"
 
+    def _loose_mode(self) -> Optional[int]:
+        """The file's mode when other users have access to it, else None."""
+        if self._is_windows:
+            return None
+        try:
+            mode = stat.S_IMODE(self.path.stat().st_mode)
+        except FileNotFoundError:
+            return None  # written 0600 when it is created
+        return mode if mode & 0o077 else None
+
     def _check_permissions(self) -> None:
-        if self._is_windows or self._warned:
+        if self._warned:
             return
-        mode = stat.S_IMODE(self.path.stat().st_mode)
-        if mode & 0o077:
+        mode = self._loose_mode()
+        if mode is not None:
             self._warned = True
             _warn(
                 f"{self.path} is readable by other users (mode {mode:04o}); "
@@ -618,7 +631,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     except SecretStoreError as exc:
         _warn(str(exc))
         return 1
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, EOFError):  # Ctrl-C, or Ctrl-D at a prompt
         print(file=sys.stderr)
         return 130
 
