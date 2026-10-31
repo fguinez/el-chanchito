@@ -146,6 +146,7 @@ export type FixedExpenseFields = Partial<{
 }>;
 
 export type StoredFixedExpense = ActiveWindow & {
+  amount: number;
   isShared: boolean;
   sharedRatio: string | null;
 };
@@ -166,8 +167,10 @@ function windowFailure(
 
 /**
  * Check an update against the stored row and return the values to write:
- * the merged active window must still be ordered (a lone `activeTo` before
- * the stored `activeFrom` is refused), an expense that ends up unshared
+ * a negative amount is refused unless it is the stored one (legacy rows
+ * predate the non-negative rule and stay editable), the merged active window
+ * must still be ordered (a lone `activeTo` before the stored `activeFrom` is
+ * refused), an expense that ends up unshared
  * drops its ratio, and one that ends up shared without any ratio gets
  * DEFAULT_SHARED_RATIO (a null ratio would zero its personal amount).
  */
@@ -175,6 +178,14 @@ export function mergeFixedExpenseUpdate(
   existing: StoredFixedExpense,
   fields: FixedExpenseFields
 ): ValidationResult<FixedExpenseFields> {
+  if (
+    fields.amount !== undefined &&
+    fields.amount < 0 &&
+    fields.amount !== existing.amount
+  ) {
+    return fail("El monto no puede ser negativo", "amount");
+  }
+
   const merged: ActiveWindow = {
     activeFrom:
       fields.activeFrom !== undefined ? fields.activeFrom : existing.activeFrom,
@@ -225,8 +236,13 @@ export type FormResult =
   | { ok: true; body: FixedExpenseBody }
   | { ok: false; error: string };
 
-/** Shared by the add form and the edit dialog; empty dates mean no bound. */
-export function parseFixedExpenseForm(input: FixedExpenseFormInput): FormResult {
+/** Shared by the add form and the edit dialog; empty dates mean no bound.
+ *  The dialog passes the row's `storedAmount`, so a legacy negative amount it
+ *  leaves untouched is accepted (PUT accepts it the same way). */
+export function parseFixedExpenseForm(
+  input: FixedExpenseFormInput,
+  storedAmount?: number
+): FormResult {
   const name = input.name.trim();
   if (!name) return { ok: false, error: "El nombre es obligatorio" };
   if (!isFixedExpenseKind(input.kind)) {
@@ -241,6 +257,9 @@ export function parseFixedExpenseForm(input: FixedExpenseFormInput): FormResult 
   const rounded = Math.round(amount);
   if (rounded < INT32_MIN || rounded > INT32_MAX) {
     return { ok: false, error: "El monto está fuera de rango" };
+  }
+  if (rounded < 0 && rounded !== storedAmount) {
+    return { ok: false, error: "El monto no puede ser negativo" };
   }
 
   let sharedRatio: number | null = null;

@@ -143,6 +143,19 @@ describe("budgetSummary", () => {
     expect(summary.deficitShare).toBe(40);
   });
 
+  it("counts a negative legacy amount as 0, so Sobra never passes the income", () => {
+    const summary = budgetSummary(
+      [item({ amount: 1_000_000 }), item({ amount: -999_999 })],
+      INCOME,
+      TODAY
+    );
+
+    expect(kindOf(summary, "fixed").total).toBe(1_000_000);
+    expect(kindOf(summary, "fixed").items.map((i) => i.amount)).toEqual([1_000_000, 0]);
+    expect(summary.remaining).toBe(1_500_000);
+    expect(summary.remainingShare).toBe(60);
+  });
+
   it("has no shares while the income is 0, but still the totals", () => {
     const summary = budgetSummary([item({ amount: 1_000_000 })], 0, TODAY);
 

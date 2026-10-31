@@ -25,6 +25,12 @@ export const clpAmount = z
   .transform((n) => Math.round(n))
   .pipe(z.int32());
 
+/** A whole CLP amount that cannot be negative (budget items). */
+export const nonNegativeClpAmount = z
+  .number()
+  .transform((n) => Math.round(n))
+  .pipe(z.int32().min(0));
+
 /** A signed amount in a product's own currency, kept to the two decimals the
  *  NUMERIC(18, 2) column stores: CLP rows round to whole pesos, USD rows (V023)
  *  keep their cents. The bound keeps `n * 100` below Number.MAX_SAFE_INTEGER so
@@ -72,7 +78,7 @@ export const idSchema = z.object({ id: rowId });
 
 const fixedExpenseSchema = z.object({
   name: requiredText,
-  amount: clpAmount,
+  amount: nonNegativeClpAmount,
   kind: z.enum(FIXED_EXPENSE_KINDS),
   isShared: z.boolean(),
   sharedRatio: z.number().min(0).max(1).nullable(),
@@ -101,10 +107,12 @@ export const createFixedExpenseSchema = fixedExpenseSchema
   .extend({ isShared: z.boolean().nullish() })
   .refine(windowIsOrdered, orderedWindow);
 
-/** PUT /api/fixed-expenses: a non-empty subset of the fields, by id. */
+/** PUT /api/fixed-expenses: a non-empty subset of the fields, by id. A
+ *  negative amount passes here; mergeFixedExpenseUpdate accepts it only when
+ *  it is the stored one (a legacy row being edited without touching it). */
 export const updateFixedExpenseSchema = fixedExpenseSchema
   .partial()
-  .extend({ id: rowId })
+  .extend({ id: rowId, amount: clpAmount.optional() })
   .refine(windowIsOrdered, orderedWindow)
   .refine((body) => Object.keys(body).some((key) => key !== "id"), {
     error: "No updatable fields provided",

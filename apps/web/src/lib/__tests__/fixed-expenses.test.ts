@@ -122,6 +122,7 @@ describe("isCalendarDate", () => {
 
 describe("mergeFixedExpenseUpdate", () => {
   const stored: StoredFixedExpense = {
+    amount: 999_999,
     isShared: false,
     sharedRatio: null,
     activeFrom: "2026-03-01",
@@ -190,6 +191,29 @@ describe("mergeFixedExpenseUpdate", () => {
     expect(values).toEqual({ name: "Arriendo", sharedRatio: null });
   });
 
+  it("keeps a legacy negative amount that the update leaves as it is", () => {
+    const values = expectOk(
+      mergeFixedExpenseUpdate(
+        { ...stored, amount: -999_999 },
+        { amount: -999_999, activeTo: "2026-12-31" }
+      )
+    );
+    expect(values).toEqual({ amount: -999_999, activeTo: "2026-12-31" });
+  });
+
+  it.each([
+    [999_999, -1_000_000],
+    [-999_999, -1_000_000],
+  ])("refuses changing a stored %d to the negative %d", (storedAmount, amount) => {
+    const failure = expectFailure(
+      mergeFixedExpenseUpdate({ ...stored, amount: storedAmount }, { amount })
+    );
+    expect(failure).toMatchObject({
+      error: "El monto no puede ser negativo",
+      field: "amount",
+    });
+  });
+
   it("clears the ratio when the expense stops being shared", () => {
     const values = expectOk(
       mergeFixedExpenseUpdate(
@@ -245,6 +269,26 @@ describe("parseFixedExpenseForm", () => {
     });
   });
 
+  it("accepts a zero amount", () => {
+    expect(parseFixedExpenseForm(form({ amount: "0" }))).toMatchObject({
+      ok: true,
+      body: { amount: 0 },
+    });
+  });
+
+  it("accepts a negative amount equal to the stored one", () => {
+    expect(
+      parseFixedExpenseForm(form({ amount: "-999999" }), -999_999)
+    ).toMatchObject({ ok: true, body: { amount: -999_999 } });
+  });
+
+  it("refuses a negative amount that differs from the stored one", () => {
+    expect(parseFixedExpenseForm(form({ amount: "-1000000" }), -999_999)).toEqual({
+      ok: false,
+      error: "El monto no puede ser negativo",
+    });
+  });
+
   it("carries the kind into the body", () => {
     expect(parseFixedExpenseForm(form({ kind: "savings" }))).toMatchObject({
       ok: true,
@@ -263,6 +307,7 @@ describe("parseFixedExpenseForm", () => {
     [{ amount: "abc" }, "El monto debe ser un número"],
     [{ amount: "9999999999" }, "El monto está fuera de rango"],
     [{ amount: "-9999999999" }, "El monto está fuera de rango"],
+    [{ amount: "-1000000" }, "El monto no puede ser negativo"],
     [{ isShared: true, sharedRatio: "" }, "El ratio debe estar entre 0 y 1"],
     [{ isShared: true, sharedRatio: "1.5" }, "El ratio debe estar entre 0 y 1"],
     [{ activeFrom: "2026-02-30" }, "La fecha de inicio no es válida"],

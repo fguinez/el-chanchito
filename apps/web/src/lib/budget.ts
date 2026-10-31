@@ -2,8 +2,9 @@
 // budget items (fixed_expenses rows, by kind) and what is left over. Pure, so
 // the page can recompute it on every keystroke and it unit-tests in isolation.
 //
-// An item allocates its personal amount (the shared ratio applied) and counts
-// only while it is active on `today`, the caller's local day (formatLocalDate).
+// An item allocates its personal amount (the shared ratio applied, a negative
+// one counting as 0) and counts only while it is active on `today`, the
+// caller's local day (formatLocalDate).
 // Shares are raw percents of the income (12.5 means 12,5%), null while the
 // income is 0.
 
@@ -83,7 +84,9 @@ export function budgetSummary(
           item.kind === kind && fixedExpenseStatus(item, today) === "active"
       )
       .map((item) => {
-        const amount = fixedExpensePersonalAmount(item);
+        // A negative amount (only legacy rows can hold one) would push Sobra
+        // past the income, so it allocates nothing.
+        const amount = Math.max(fixedExpensePersonalAmount(item), 0);
         return {
           id: item.id,
           name: item.name,
@@ -124,10 +127,11 @@ export function budgetSummary(
 
 /**
  * The add form's values as a draft to preview, or null while there is
- * nothing to show: no usable amount yet (empty, not a number, not above 0,
- * out of range). An empty name reads as "Nuevo item"; a shared draft with a
- * half-typed ratio previews at the default ratio. Unlike
- * parseFixedExpenseForm it never fails: bad dates count as no bound.
+ * nothing to show. The amount is read as parseFixedExpenseForm reads it
+ * (Number, rounded, int32), and only one above 0 previews: 0 has nothing to
+ * draw, and the form refuses a negative one. An empty name reads as "Nuevo
+ * item"; a shared draft with a half-typed ratio previews at the default
+ * ratio; bad dates count as no bound (the form will refuse them on Agregar).
  */
 export function budgetDraft(input: {
   name: string;

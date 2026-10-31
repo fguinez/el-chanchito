@@ -58,15 +58,18 @@ export function FixedExpenseEditDialog({
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
-    const parsed = parseFixedExpenseForm({
-      name,
-      kind,
-      amount,
-      isShared,
-      sharedRatio,
-      activeFrom,
-      activeTo,
-    });
+    const parsed = parseFixedExpenseForm(
+      {
+        name,
+        kind,
+        amount,
+        isShared,
+        sharedRatio,
+        activeFrom,
+        activeTo,
+      },
+      expense.amount
+    );
     if (!parsed.ok) {
       setError(parsed.error);
       return;
