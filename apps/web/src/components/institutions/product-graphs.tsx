@@ -69,7 +69,10 @@ import type { ProductMetrics } from "@chanchito/product-model";
 
 export interface ProductTransaction {
   id: string;
+  /** What to show: the custom override or alias, else the scraped text. */
   description: string;
+  /** The scraped (or manual) text, which a search also matches. */
+  rawDescription: string;
   /** Signed amount in the product's currency: negative = expense, positive = income. */
   amount: number;
   /** Plain YYYY-MM-DD. */

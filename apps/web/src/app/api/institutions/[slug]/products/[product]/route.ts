@@ -48,7 +48,10 @@ export interface ProductHistoryPoint {
 
 export interface ProductTransaction {
   id: string;
+  /** What to show: the custom override or alias, else the scraped text. */
   description: string;
+  /** The scraped (or manual) text, which a search also matches. */
+  rawDescription: string;
   /** Signed amount in the product's currency: negative = expense, positive = income. */
   amount: number;
   /** Plain YYYY-MM-DD. */
@@ -144,6 +147,7 @@ export async function GET(_request: Request, { params }: Context) {
         id: transactions.id,
         // Show the custom override when set, else the scraped text (V034).
         description: displayDescription,
+        rawDescription: transactions.description,
         amount: transactions.amount,
         transactionDate: transactions.transactionDate,
         source: transactions.source,
@@ -208,6 +212,7 @@ export async function GET(_request: Request, { params }: Context) {
     .map((t) => ({
       id: t.id,
       description: t.description,
+      rawDescription: t.rawDescription,
       amount: Number(t.amount),
       transactionDate: new Date(t.transactionDate).toISOString().slice(0, 10),
       source: t.source,
