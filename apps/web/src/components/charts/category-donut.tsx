@@ -21,18 +21,12 @@ import {
   prefersReducedMotion,
   useTween,
 } from "@/components/charts/use-tween";
+import { SIZE, arcPath, sliceAngles } from "@/components/charts/donut-geometry";
 
 /** Stable key of a category, UNCATEGORIZED_PARAM for "Sin categoría". */
 export function categoryKey(categoryId: string | null): string {
   return categoryId ?? UNCATEGORIZED_PARAM;
 }
-
-const SIZE = 208;
-const CENTER = SIZE / 2;
-const INNER_RADIUS = 64;
-const OUTER_RADIUS = 92;
-/** Gap between slices, in degrees. */
-const PADDING_ANGLE = 1;
 
 /** A category's slice; angles in degrees, counterclockwise from 3 o'clock. */
 interface Slice {
@@ -50,17 +44,14 @@ interface Donut {
 }
 
 function layout(categories: CategorySpend[], total: number): Donut {
-  const values = categories.map((c) => Math.max(c.amount, 0));
-  const sum = values.reduce((a, b) => a + b, 0);
-  const pad = categories.length > 1 ? PADDING_ANGLE : 0;
-  const sweep = 360 - categories.length * pad;
-  let angle = 0;
-  const slices = categories.map((c, i) => {
-    const start = angle;
-    const end = start + (sum > 0 ? (values[i] / sum) * sweep : 0);
-    angle = end + pad;
-    return { key: categoryKey(c.categoryId), category: c, amount: c.amount, percent: c.percent, start, end };
-  });
+  const angles = sliceAngles(categories.map((c) => c.amount));
+  const slices = categories.map((c, i) => ({
+    key: categoryKey(c.categoryId),
+    category: c,
+    amount: c.amount,
+    percent: c.percent,
+    ...angles[i],
+  }));
   return { total, slices };
 }
 
@@ -88,26 +79,6 @@ function interpolateDonut(from: Donut, to: Donut, t: number): Donut {
     }
   }
   return { total: lerp(from.total, to.total, t), slices };
-}
-
-function polar(radius: number, angle: number): string {
-  const rad = (angle * Math.PI) / 180;
-  return `${CENTER + radius * Math.cos(rad)},${CENTER - radius * Math.sin(rad)}`;
-}
-
-/** Ring segment between two angles (SVG y grows down, so counterclockwise
- *  on screen is sweep-flag 0). */
-function arcPath(start: number, end: number): string {
-  const span = Math.min(end - start, 359.999);
-  const stop = start + span;
-  const large = span > 180 ? 1 : 0;
-  return [
-    `M ${polar(OUTER_RADIUS, start)}`,
-    `A ${OUTER_RADIUS} ${OUTER_RADIUS} 0 ${large} 0 ${polar(OUTER_RADIUS, stop)}`,
-    `L ${polar(INNER_RADIUS, stop)}`,
-    `A ${INNER_RADIUS} ${INNER_RADIUS} 0 ${large} 1 ${polar(INNER_RADIUS, start)}`,
-    "Z",
-  ].join(" ");
 }
 
 /** Slides legend rows from their previous rank to the new one (FLIP) and
