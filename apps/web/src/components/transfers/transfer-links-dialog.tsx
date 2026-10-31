@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Link2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { SearchInput } from "@/components/ui/search-input";
 import {
   Dialog,
   DialogContent,
@@ -13,6 +14,11 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { formatCLP, formatPlainDateEs } from "@/lib/utils";
+import {
+  descriptionTitle,
+  matchesTransactionSearch,
+  searchTokens,
+} from "@/lib/transaction-search";
 import { InstitutionLogo } from "@/components/institutions/institution-logo";
 import {
   CANDIDATE_WINDOW_DAYS,
@@ -41,7 +47,9 @@ interface CandidateSide {
   candidates: {
     id: string;
     transactionDate: string;
+    /** The scraped text; `displayDescription` is what to show. */
     description: string;
+    displayDescription: string;
     amount: number;
     source: string;
     linked: boolean;
@@ -194,6 +202,8 @@ export function TransferLinksDialog({
   );
 }
 
+/** One side's radio list, with a search over its candidates' original and
+ *  displayed descriptions. A selection the search hides stays selected. */
 function SidePicker({
   side,
   product,
@@ -209,6 +219,15 @@ function SidePicker({
   onChange: (id: string) => void;
   name: string;
 }) {
+  const [search, setSearch] = useState("");
+  const tokens = useMemo(() => searchTokens(search), [search]);
+  const shown = data.candidates.filter((c) =>
+    matchesTransactionSearch(tokens, c.displayDescription, c.description)
+  );
+  const selectedHidden =
+    data.candidates.some((c) => c.id === value) &&
+    !shown.some((c) => c.id === value);
+
   return (
     <fieldset className="space-y-2">
       <legend className="text-sm font-medium">
@@ -230,6 +249,15 @@ function SidePicker({
         </p>
       ) : (
         <div className="space-y-1">
+          {data.candidates.length > 0 && (
+            <SearchInput
+              className="mb-2 w-full sm:max-w-xs"
+              inputClassName="h-8 text-sm"
+              aria-label={`Buscar en ${SIDE_LABEL[side].toLowerCase()} por descripción`}
+              value={search}
+              onValueChange={setSearch}
+            />
+          )}
           <label className="flex items-center gap-2 text-sm">
             <input
               type="radio"
@@ -239,7 +267,7 @@ function SidePicker({
             />
             <span className="text-muted-foreground">Sin vincular</span>
           </label>
-          {data.candidates.map((c) => (
+          {shown.map((c) => (
             <label key={c.id} className="flex items-center gap-2 text-sm">
               <input
                 type="radio"
@@ -250,8 +278,11 @@ function SidePicker({
               <span className="w-24 shrink-0 tabular-nums">
                 {formatPlainDateEs(c.transactionDate)}
               </span>
-              <span className="min-w-0 flex-1 truncate" title={c.description}>
-                {c.description}
+              <span
+                className="min-w-0 flex-1 truncate"
+                title={descriptionTitle(c.displayDescription, c.description)}
+              >
+                {c.displayDescription}
               </span>
               <span
                 className={`tabular-nums ${
@@ -263,11 +294,23 @@ function SidePicker({
               </span>
             </label>
           ))}
-          {data.candidates.length === 0 && (
+          {data.candidates.length === 0 ? (
             <p className="text-sm text-muted-foreground">
               {data.hasFeed
                 ? "No hay transacciones que calcen con este movimiento."
                 : "Este producto no tiene transacciones; déjalo sin vincular y marca el movimiento como resuelto a mano."}
+            </p>
+          ) : (
+            shown.length === 0 && (
+              <p className="text-sm text-muted-foreground">
+                Sin resultados para «{search.trim()}».
+              </p>
+            )
+          )}
+          {selectedHidden && (
+            <p className="text-xs text-muted-foreground">
+              La transacción elegida no aparece con esta búsqueda, pero sigue
+              elegida.
             </p>
           )}
         </div>

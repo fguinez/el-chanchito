@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Link2 } from "lucide-react";
 import {
@@ -22,9 +22,11 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatCLP, formatPlainDateEs } from "@/lib/utils";
 import { hrefWithSearchParam, TXN_PARAM } from "@/lib/transaction-selection";
+import { descriptionTitle, searchTokens } from "@/lib/transaction-search";
 import { InstitutionLogo } from "@/components/institutions/institution-logo";
 import {
   SUGGESTIONS_ANCHOR,
+  suggestionMatchesSearch,
   withoutSettled,
   type SuggestionProductLeg,
   type SuggestionTransactionLeg,
@@ -34,7 +36,8 @@ import {
 type Leg = SuggestionTransactionLeg | SuggestionProductLeg;
 
 /** One leg: its product (linked to the product page) and, for a scraped row,
- *  the row itself, which opens in the product's detail panel. */
+ *  the row itself (its display description; the original in the tooltip),
+ *  which opens in the product's detail panel. */
 function LegCell({ leg }: { leg: Leg }) {
   const productHref = `/institutions/${leg.institutionSlug}/${leg.productSlug}`;
   return (
@@ -60,11 +63,14 @@ function LegCell({ leg }: { leg: Leg }) {
         <Link
           href={hrefWithSearchParam(productHref, "", TXN_PARAM, leg.transactionId)}
           className="mt-1 flex max-w-48 min-w-0 items-center gap-1 text-xs text-muted-foreground hover:underline sm:max-w-64"
-          title={`${formatPlainDateEs(leg.date)} · ${leg.description}`}
+          title={`${formatPlainDateEs(leg.date)} · ${descriptionTitle(
+            leg.displayDescription,
+            leg.description
+          )}`}
         >
           <Link2 className="h-3 w-3 shrink-0" />
           <span className="min-w-0 truncate">
-            {formatPlainDateEs(leg.date)} · {leg.description}
+            {formatPlainDateEs(leg.date)} · {leg.displayDescription}
           </span>
         </Link>
       )}
@@ -106,19 +112,24 @@ function dismissBody(s: TransferSuggestion) {
  * `reloadKey` refetches when the page's transfers change (a deleted or
  * unlinked transfer can bring a suggestion back); `onConfirmed` lets the page
  * reload its transfer lists, after a confirm or a load that linked some.
+ * `search` (the page's search box) keeps the suggestions with each word in
+ * one of their rows' original or displayed description.
  */
 export function TransferSuggestionsCard({
   reloadKey,
   onConfirmed,
+  search = "",
 }: {
   reloadKey: number;
   onConfirmed: () => void;
+  search?: string;
 }) {
   const [suggestions, setSuggestions] = useState<TransferSuggestion[]>([]);
   const [loadFailed, setLoadFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [busy, setBusy] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const tokens = useMemo(() => searchTokens(search), [search]);
 
   // Read from the load effect without refetching each time the page renders
   // a new callback.
@@ -231,12 +242,14 @@ export function TransferSuggestionsCard({
   if (suggestions.length === 0) return null;
 
   // A row with several possible partners shows once per partner; say so, so
-  // the user knows to pick one (confirming it drops the others).
+  // the user knows to pick one (confirming it drops the others). Counted
+  // before the search, which does not change the choice.
   const perSource = new Map<string, number>();
   for (const s of suggestions) {
     const id = s.source.transactionId;
     perSource.set(id, (perSource.get(id) ?? 0) + 1);
   }
+  const shown = suggestions.filter((s) => suggestionMatchesSearch(tokens, s));
 
   return (
     <Card id={SUGGESTIONS_ANCHOR}>
@@ -250,78 +263,84 @@ export function TransferSuggestionsCard({
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Desde</TableHead>
-              <TableHead>Hacia</TableHead>
-              <TableHead className="text-right">Monto</TableHead>
-              <TableHead>Evidencia</TableHead>
-              <TableHead className="w-48"></TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {suggestions.map((s) => {
-              const options = perSource.get(s.source.transactionId) ?? 1;
-              return (
-                <TableRow key={s.id}>
-                  <TableCell>
-                    <LegCell leg={s.source} />
-                  </TableCell>
-                  <TableCell>
-                    <LegCell leg={s.target} />
-                  </TableCell>
-                  <TableCell className="text-right font-medium">
-                    {formatCLP(s.amount)}
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex max-w-56 min-w-0 flex-wrap gap-1 whitespace-normal sm:max-w-80">
-                      {s.evidence.map((item) => (
-                        <Badge
-                          key={item}
-                          variant="secondary"
-                          className="whitespace-normal"
+        {shown.length === 0 ? (
+          <p className="text-muted-foreground">
+            Sin resultados para «{search.trim()}».
+          </p>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Desde</TableHead>
+                <TableHead>Hacia</TableHead>
+                <TableHead className="text-right">Monto</TableHead>
+                <TableHead>Evidencia</TableHead>
+                <TableHead className="w-48"></TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {shown.map((s) => {
+                const options = perSource.get(s.source.transactionId) ?? 1;
+                return (
+                  <TableRow key={s.id}>
+                    <TableCell>
+                      <LegCell leg={s.source} />
+                    </TableCell>
+                    <TableCell>
+                      <LegCell leg={s.target} />
+                    </TableCell>
+                    <TableCell className="text-right font-medium">
+                      {formatCLP(s.amount)}
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex max-w-56 min-w-0 flex-wrap gap-1 whitespace-normal sm:max-w-80">
+                        {s.evidence.map((item) => (
+                          <Badge
+                            key={item}
+                            variant="secondary"
+                            className="whitespace-normal"
+                          >
+                            {item}
+                          </Badge>
+                        ))}
+                      </div>
+                      <span className="mt-1 block max-w-56 text-xs whitespace-normal text-muted-foreground sm:max-w-80">
+                        Puntaje {s.score}
+                        {options > 1 && ` · una de ${options} opciones para este cargo`}
+                      </span>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          size="sm"
+                          disabled={busy}
+                          onClick={() => act(s, "confirm")}
+                          aria-label={`Confirmar ${suggestionLabel(s)}`}
                         >
-                          {item}
-                        </Badge>
-                      ))}
-                    </div>
-                    <span className="mt-1 block max-w-56 text-xs whitespace-normal text-muted-foreground sm:max-w-80">
-                      Puntaje {s.score}
-                      {options > 1 && ` · una de ${options} opciones para este cargo`}
-                    </span>
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex items-center gap-2">
-                      <Button
-                        size="sm"
-                        disabled={busy}
-                        onClick={() => act(s, "confirm")}
-                        aria-label={`Confirmar ${suggestionLabel(s)}`}
-                      >
-                        Confirmar
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={busy}
-                        onClick={() => act(s, "dismiss")}
-                        aria-label={`Descartar ${suggestionLabel(s)}`}
-                      >
-                        Descartar
-                      </Button>
-                    </div>
-                    {errors[s.id] && (
-                      <p className="mt-1 max-w-48 text-xs whitespace-normal text-destructive">
-                        {errors[s.id]}
-                      </p>
-                    )}
-                  </TableCell>
-                </TableRow>
-              );
-            })}
-          </TableBody>
-        </Table>
+                          Confirmar
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={busy}
+                          onClick={() => act(s, "dismiss")}
+                          aria-label={`Descartar ${suggestionLabel(s)}`}
+                        >
+                          Descartar
+                        </Button>
+                      </div>
+                      {errors[s.id] && (
+                        <p className="mt-1 max-w-48 text-xs whitespace-normal text-destructive">
+                          {errors[s.id]}
+                        </p>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        )}
       </CardContent>
     </Card>
   );

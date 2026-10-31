@@ -14,9 +14,10 @@ import { deleteTransfer, loadTransfers } from "@/lib/transfers-db";
 /**
  * GET /api/transfers: every internal transfer, newest first, with its source
  * and target product (`fromProduct`/`toProduct`, null on legacy rows), the
- * transactions it links (`fromTransaction`/`toTransaction`: id, date,
- * description, amount, currency; null when unlinked) and whether each product
- * has a transaction feed (`fromHasFeed`/`toHasFeed`).
+ * transactions it links (`fromTransaction`/`toTransaction`: id, date, raw
+ * `description` and resolved `displayDescription`, amount, currency; null when
+ * unlinked) and whether each product has a transaction feed
+ * (`fromHasFeed`/`toHasFeed`).
  */
 export async function GET() {
   return NextResponse.json(await loadTransfers());

@@ -61,7 +61,7 @@ import {
 } from "@/lib/transfer-suggestions";
 import { TRANSFER_CURRENCY, checkTransferEndpoints, shiftDay } from "@/lib/transfers";
 import { applyTransferLinks, hasFeed, linkFieldOfViolation } from "@/lib/transfers-db";
-import { notDeleted } from "@/lib/db/transactions";
+import { displayDescriptionOf, notDeleted } from "@/lib/db/transactions";
 
 // ---------------------------------------------------------------------------
 // Shared conditions
@@ -88,6 +88,7 @@ type TxnColumns = Record<
   | "productId"
   | "transactionDate"
   | "description"
+  | "customDescription"
   | "amount"
   | "isInternalTransfer"
   | "deletedAt",
@@ -127,9 +128,10 @@ function legColumns(
     institutionName: institution.name,
     institutionSlug: institution.slug,
     date: txn.transactionDate,
-    // The suggestion leg shows the raw scraped description for now; the V034
-    // custom override is out of Phase 1's transfer scope.
+    // Scoring, patterns and name matches read the raw scraped text; the
+    // resolved one (custom description or alias) is for display and search.
     description: txn.description,
+    displayDescription: displayDescriptionOf(txn, product),
     amount: txn.amount,
     currency: product.currency,
   };
@@ -145,6 +147,7 @@ interface LegRow {
   institutionSlug: string;
   date: string;
   description: string;
+  displayDescription: string;
   amount: number;
   currency: string;
 }
@@ -162,6 +165,7 @@ function toLeg(row: LegRow): SuggestionTransactionLeg {
     institutionSlug: row.institutionSlug,
     date: row.date,
     description: row.description,
+    displayDescription: row.displayDescription,
     amount: Number(row.amount),
     currency: row.currency,
   };
@@ -277,6 +281,7 @@ async function loadFeedlessProducts(): Promise<FeedlessProduct[]> {
         institutionSlug: row.institutionSlug,
         date: null,
         description: null,
+        displayDescription: null,
         amount: null,
         currency: row.currency,
       },

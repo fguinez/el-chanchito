@@ -5,6 +5,8 @@
 // them in, and a failure carries the `{ error, field }` the route returns as a
 // 400.
 
+import { matchesTransactionSearch } from "@/lib/transaction-search";
+
 /** Transfers carry one integer amount, formatted as CLP everywhere, so both
  *  endpoints must hold CLP. */
 export const TRANSFER_CURRENCY = "CLP";
@@ -101,9 +103,34 @@ export interface LinkableTransaction {
 export interface TransferLinkedTransaction {
   id: string;
   transactionDate: string;
+  /** The scraped (or manual) text. */
   description: string;
+  /** What to show: the custom override or alias, else `description`. */
+  displayDescription: string;
   amount: number;
   currency: string;
+}
+
+type LinkedDescriptions = Pick<
+  TransferLinkedTransaction,
+  "description" | "displayDescription"
+>;
+
+/** Whether a transfer is kept by a search's words (see lib/transaction-search):
+ *  each in its own description or in the raw or display description of a
+ *  row it links. */
+export function transferMatchesSearch(
+  tokens: readonly string[],
+  transfer: {
+    description: string;
+    fromTransaction: LinkedDescriptions | null;
+    toTransaction: LinkedDescriptions | null;
+  }
+): boolean {
+  const legs = [transfer.fromTransaction, transfer.toTransaction].flatMap(
+    (leg) => (leg ? [leg.description, leg.displayDescription] : [])
+  );
+  return matchesTransactionSearch(tokens, transfer.description, ...legs);
 }
 
 /** The product a side's transaction must belong to. */

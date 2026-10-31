@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { PgDialect } from "drizzle-orm/pg-core";
-import type { SQL } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { argOf, createFakeDb, FAKE_ROW_ID, type RecordedQuery } from "./fake-db";
 import {
@@ -14,8 +14,8 @@ import {
 // The wiring of POST /api/transfers/suggestions/confirm and .../dismiss:
 // bodies are checked before any query, every re-check runs before the first
 // write, a confirmed pair becomes a resolved transfer with both rows flagged
-// and a learned pattern, and an already linked row is a 409. The db is a
-// recording double. Every id, amount and date is synthetic (see the repo's
+// and a learned pattern, and an already linked row is a 409; plus the leg
+// columns loadPairCandidates selects. The db is a recording double. Every id, amount and date is synthetic (see the repo's
 // personal data policy): a $ 1.000.000 card payment between fake products.
 
 const fake = createFakeDb();
@@ -23,6 +23,7 @@ vi.mock("@/lib/db", () => ({ db: fake.db }));
 
 const confirm = await import("@/app/api/transfers/suggestions/confirm/route");
 const dismiss = await import("@/app/api/transfers/suggestions/dismiss/route");
+const { loadPairCandidates } = await import("@/lib/transfer-suggestions-db");
 
 const CHECKING_ID = "11111111-1111-4111-8111-111111111111";
 const CARD_ID = "22222222-2222-4222-8222-222222222222";
@@ -462,5 +463,25 @@ describe("POST /api/transfers/suggestions/dismiss", () => {
       targetTransactionId: stored,
     });
     expect(insert.calls.some((c) => c.method === "onConflictDoNothing")).toBe(true);
+  });
+});
+
+describe("loadPairCandidates", () => {
+  it("resolves each leg's display description against its own product", async () => {
+    await loadPairCandidates("2026-09-01");
+
+    const [select] = fake.queries.filter((q) => q.op === "select");
+    const legs = argOf(select, "select") as Record<
+      "source" | "target",
+      { description: SQL; displayDescription: SQL }
+    >;
+    const render = (query: SQL) => new PgDialect().sqlToQuery(query).sql;
+    const shown = (leg: "source" | "target") => render(legs[leg].displayDescription);
+    expect(shown("source")).toContain('"src"."custom_description"');
+    expect(shown("source")).toContain('"src_product"."currency"');
+    expect(shown("target")).toContain('"dst"."custom_description"');
+    expect(shown("target")).toContain('"dst_product"."currency"');
+    // Scoring keeps reading the raw scraped text.
+    expect(render(sql`${legs.source.description}`)).toBe('"src"."description"');
   });
 });

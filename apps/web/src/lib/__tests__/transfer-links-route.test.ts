@@ -1,4 +1,6 @@
 import { NextRequest } from "next/server";
+import { PgDialect } from "drizzle-orm/pg-core";
+import type { SQL } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { argOf, createFakeDb, type RecordedQuery } from "./fake-db";
 import { internalTransfers, products, transactions } from "@/lib/db/schema";
@@ -6,6 +8,7 @@ import { internalTransfers, products, transactions } from "@/lib/db/schema";
 // The wiring of PUT /api/transfers/[id]/links and of DELETE /api/transfers:
 // checks run before any write, the transfer, the flag on the linked rows and
 // the status change together, and a unique violation is a 400 with a field.
+// Also what GET /api/transfers/[id]/candidates selects.
 // The db is a recording double. Every id, amount and date is synthetic (see
 // the repo's personal data policy): a $ 1.000.000 transfer between two fake
 // products.
@@ -15,6 +18,7 @@ vi.mock("@/lib/db", () => ({ db: fake.db }));
 
 const { PUT } = await import("@/app/api/transfers/[id]/links/route");
 const transfers = await import("@/app/api/transfers/route");
+const candidates = await import("@/app/api/transfers/[id]/candidates/route");
 
 const TRANSFER_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const CHECKING_ID = "11111111-1111-4111-8111-111111111111";
@@ -30,6 +34,8 @@ interface World {
   txns: { id: string; productId: string; amount: number }[];
   holders: Record<string, unknown>[];
   feedProducts: string[];
+  /** What loadTransfers' joined select answers. */
+  listed?: Record<string, unknown>[];
   updateError?: Error;
 }
 
@@ -60,10 +66,25 @@ function table(query: RecordedQuery) {
     : query.calls[0].args[0];
 }
 
+/** The select list of a recorded select ({} for a bare `select()`). */
+function selectionOf(query: RecordedQuery) {
+  return (query.calls[0].args[0] ?? {}) as Record<string, unknown>;
+}
+
+/** loadTransfers' joined select, told apart by its nested `transfer`. */
+function isListing(query: RecordedQuery) {
+  return query.op === "select" && "transfer" in selectionOf(query);
+}
+
 function respond(query: RecordedQuery): unknown {
   const target = table(query);
+  if (isListing(query)) return world.listed ?? [];
   if (query.op === "select" && target === internalTransfers) {
     if (query.calls.some((c) => c.method === "for")) {
+      return world.transfer ? [world.transfer] : [];
+    }
+    // loadTransferCandidates reads the transfer with a bare select().
+    if (Object.keys(selectionOf(query)).length === 0) {
       return world.transfer ? [world.transfer] : [];
     }
     return world.holders;
@@ -87,9 +108,6 @@ function respond(query: RecordedQuery): unknown {
         ]
       : [];
   }
-  // loadTransfers' joined select starts from internal_transfers too, but
-  // without `for`; it is answered above with the holders list, which these
-  // tests leave empty or ignore.
   return [];
 }
 
@@ -170,6 +188,70 @@ describe("PUT /api/transfers/[id]/links", () => {
     });
     const [flag] = updatesOf(transactions);
     expect(setOf(flag)).toMatchObject({ isInternalTransfer: true });
+  });
+
+  it("answers with the transfer, its linked row shown by its display description", async () => {
+    world.listed = [
+      {
+        transfer: storedTransfer({ fromTransactionId: DEBIT_ID }),
+        from: {
+          id: CHECKING_ID,
+          name: "Cuenta corriente",
+          slug: "cuenta-corriente",
+          institutionSlug: "banco-de-prueba",
+          institutionName: "Banco de Prueba",
+        },
+        to: {
+          id: CARD_ID,
+          name: "Tarjeta 1234",
+          slug: "tarjeta-1234",
+          institutionSlug: "banco-de-prueba",
+          institutionName: "Banco de Prueba",
+        },
+        fromTxn: {
+          id: DEBIT_ID,
+          transactionDate: "2026-09-15",
+          description: "TRASPASO A TARJETA DE PRUEBA",
+          displayDescription: "Pago tarjeta de prueba",
+          amount: String(-AMOUNT),
+          currency: "CLP",
+        },
+        toTxn: {
+          id: null,
+          transactionDate: null,
+          description: null,
+          displayDescription: null,
+          amount: null,
+          currency: "CLP",
+        },
+        fromHasFeed: true,
+        toHasFeed: true,
+      },
+    ];
+
+    const response = await put({ fromTransactionId: DEBIT_ID });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      id: TRANSFER_ID,
+      fromTransaction: {
+        id: DEBIT_ID,
+        description: "TRASPASO A TARJETA DE PRUEBA",
+        displayDescription: "Pago tarjeta de prueba",
+        amount: -AMOUNT,
+      },
+      toTransaction: null,
+    });
+    // Each leg resolves its own row against its own side's product.
+    const listing = selectionOf(fake.queries.find(isListing)!);
+    const shown = (leg: "fromTxn" | "toTxn") =>
+      new PgDialect().sqlToQuery(
+        (listing[leg] as { displayDescription: SQL }).displayDescription
+      ).sql;
+    expect(shown("fromTxn")).toContain('"from_txn"."custom_description"');
+    expect(shown("fromTxn")).toContain('"from_product"."currency"');
+    expect(shown("toTxn")).toContain('"to_txn"."custom_description"');
+    expect(shown("toTxn")).toContain('"to_product"."currency"');
   });
 
   it("locks the rows it validates until the links are written", async () => {
@@ -359,5 +441,36 @@ describe("DELETE /api/transfers", () => {
     );
 
     expect(updatesOf(transactions)).toHaveLength(0);
+  });
+});
+
+describe("GET /api/transfers/[id]/candidates", () => {
+  it("resolves each side's candidates against their product", async () => {
+    const response = await candidates.GET(
+      new Request(
+        `https://dashboard.example/api/transfers/${TRANSFER_ID}/candidates`
+      ),
+      { params: Promise.resolve({ id: TRANSFER_ID }) }
+    );
+
+    expect(response.status).toBe(200);
+    // One candidates select per side; displayDescription's alias lookup reads
+    // products.currency, so each joins products.
+    const listings = fake.queries.filter(
+      (q) => q.op === "select" && "displayDescription" in selectionOf(q)
+    );
+    expect(listings).toHaveLength(2);
+    for (const listing of listings) {
+      expect(
+        listing.calls.some(
+          (c) => c.method === "innerJoin" && c.args[0] === products
+        )
+      ).toBe(true);
+      const shown = new PgDialect().sqlToQuery(
+        selectionOf(listing).displayDescription as SQL
+      ).sql;
+      expect(shown).toContain('"transactions"."custom_description"');
+      expect(shown).toContain('"products"."currency"');
+    }
   });
 });

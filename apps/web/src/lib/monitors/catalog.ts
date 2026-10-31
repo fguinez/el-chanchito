@@ -120,8 +120,10 @@ async function selectAdjustments(
       productId: transactions.productId,
       transactionDate: transactions.transactionDate,
       amount: transactions.amount,
-      // Resolved like every transaction list (custom > alias > scraped).
+      // Resolved like every transaction list (custom > alias > scraped); the
+      // card's search matches the scraped text too.
       description: displayDescription,
+      rawDescription: transactions.description,
       deleted: sql<boolean>`${transactions.deletedAt} IS NOT NULL`,
       productName: products.name,
       productKind: products.kind,

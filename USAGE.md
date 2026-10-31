@@ -237,10 +237,10 @@ For the email parser, you need a Gmail App Password (not your regular password):
 | **Monitores** | `/monitors` | Formula alerts over product values; each monitor's page (`/monitors/[id]`) charts its history and manages its monthly variaciones |
 | **Historial** | `/history` | Net-worth timeline (patrimonio, deuda, ahorro) computed from product balances, plus legacy snapshots |
 | **Instituciones** | `/institutions` | Every scraped product grouped by institution, with on-demand refresh; drill into `/institutions/[institution]` and `/institutions/[institution]/[product]` for balance history and movements |
-| **Gastos** | `/expenses` | Transaction list, manual entry form, CSV import |
+| **Gastos** | `/expenses` | Transaction list (searchable by original or displayed description; the search stays in the URL as `?q=`), manual entry form, CSV import |
 | **Categorías** | `/categories` | Categories and keyword rules for automatic categorization |
 | **Presupuesto** | `/budget` | Monthly income split into budget items (Gasto fijo, Consumo estimado, Ahorro, with an optional shared ratio) and what is left over, as a live donut; `/fixed` redirects here |
-| **Transferencias** | `/transfers` | Internal money movements between two of your CLP products (pending/resolved); "Vincular" links each one to the scraped debit and credit that moved the money, and "Sugeridas" proposes rows that look like transfers for one-click confirm or dismiss |
+| **Transferencias** | `/transfers` | Internal money movements between two of your CLP products (pending/resolved); "Vincular" links each one to the scraped debit and credit that moved the money (each side's candidates have their own search), and "Sugeridas" proposes rows that look like transfers for one-click confirm or dismiss; the search box filters the suggestions and the pending and resolved transfers by description (a transfer's own, or the original or displayed one of a row it links or suggests) |
 | **Instituciones** | `/institutions` | Every institution and its products with balances; edit institutions, accounts and products from their detail pages |
 | **Configuracion** | `/settings` | Budget parameters, income split calculator, monthly reset |
 
@@ -299,6 +299,9 @@ description or amount, month by month), and links the one you pick:
   stops applying and is flagged so you can remove it. Clicking a description
   opens the transaction's detail panel.
 - A new month starts with none; the card's arrows browse other months.
+- The card's search box finds variaciones of every month by their original or
+  displayed description, grouped by month (the day and month totals show
+  without a search).
 
 For example (synthetic figures), with a balance floor that ramps down through
 the month, ignoring a $ 1.000.000 purchase on the 15th lowers the floor by
@@ -638,7 +641,9 @@ on the **Categorías** page (`/categories`).
   with PostgreSQL's `lower()`, so it follows the database's locale.
 - **Probar** previews a keyword with its match type, before or after you save the rule: how many
   transactions contain it, how many are still waiting for a category, and the
-  20 most recent matches with their current category.
+  20 most recent matches with their current category. Its search box narrows
+  the matches by their original or displayed description (the rule itself
+  only ever reads the original).
 
 When categories are assigned:
 
@@ -819,12 +824,12 @@ All API routes are under `/api/`:
 | DELETE | `/api/monitors/[id]/adjustments/[adjustmentId]` | Unlink one variación (the transaction stays) |
 | GET | `/api/institutions` | Institutions + nested products (balances included) + CLP subtotals |
 | GET/PATCH | `/api/institutions/[slug]` | One institution, same shape as a list item; edit `name`, `kind`, `country`, `url` |
-| GET/PATCH | `/api/institutions/[slug]/products/[product]` | One product (with its `defaultName`) plus its balance history, recent transactions and, for a stock, its daily closes (`prices`: `{date, price}` oldest first, empty without a ticker); edit `name` (`null` resets it to `defaultName`), `slug`, `parentProductId`, `isActive`, `displayOrder` |
+| GET/PATCH | `/api/institutions/[slug]/products/[product]` | One product (with its `defaultName`) plus its balance history, recent transactions (shown `description` and original `rawDescription`) and, for a stock, its daily closes (`prices`: `{date, price}` oldest first, empty without a ticker); edit `name` (`null` resets it to `defaultName`), `slug`, `parentProductId`, `isActive`, `displayOrder` |
 | PATCH | `/api/accounts/[id]` | Rename an account (`name`) |
 | POST | `/api/institutions/refresh` | Trigger a scrape (all, or `{institution}`) |
 | GET | `/api/scrapers` | Latest run per scraper |
 | GET | `/api/scrapers/available` | Enabled scraper slugs, from the scraper service |
-| GET/POST | `/api/transactions` | Transactions (list, create; create takes an optional `location`) |
+| GET/POST | `/api/transactions` | Transactions (list, create; create takes an optional `location`); the list filters by `month`, `from`/`to`, `productId`, `institution`, `categoryId` and `q` (every word in the original or the displayed description, ignoring case and accents) |
 | GET/PATCH/DELETE | `/api/transactions/[id]` | One transaction with product, institution, category, location and notes; PATCH edits `description`/`customDescription`, `amount`, `transactionDate`, `scheduledMonth`, `categoryId`, `isInternalTransfer`, `productId`, `location` and `notes` (trimmed, max 2000 chars, blank or `null` clears); DELETE soft-deletes imported (scraped or CSV) rows and hard-deletes manual ones |
 | POST | `/api/transactions/[id]/category-rule` | `{ categoryId }`: categorizes the row (manual), creates or reuses an exact rule keyed on its original description, and categorizes the other non-manual rows with that same description; returns `{ rule, ruleCreated, updatedCount }` |
 | POST | `/api/import` | CSV import |
@@ -836,13 +841,13 @@ All API routes are under `/api/`:
 | GET | `/api/categories/suggestions` | `{ suggestions }`: uncategorized rows grouped by description with their suggested category, count, latest date and a sample transaction id; dismissed ones left out |
 | POST | `/api/categories/suggestions/apply` | `{ description, categoryId }`: categorizes (manual) the uncategorized rows with that description once; returns `{ updatedCount }` |
 | POST | `/api/categories/suggestions/dismiss` | `{ description, categoryId }`: stops suggesting that category for that normalised description |
-| GET | `/api/categories/rules/preview` | Transactions a keyword would match (`?keyword=`, optional `&matchType=exact`) |
+| GET | `/api/categories/rules/preview` | Transactions a keyword would match (`?keyword=`, optional `&matchType=exact`; `&q=` narrows the matches and their counts to every word in the original or the displayed description) |
 | GET/POST/PUT/DELETE | `/api/fixed-expenses` | Budget items CRUD (Presupuesto); `kind` is `fixed` (default), `estimated` or `savings` |
 | GET/PUT | `/api/budget-settings` | `{ monthlyIncome }`: the monthly income the budget splits (0 until saved); PUT takes a whole, non-negative CLP amount |
-| GET/POST/PUT/DELETE | `/api/transfers` | Internal transfers (POST needs distinct CLP `fromProductId` + `toProductId`); GET includes the linked `fromTransaction` / `toTransaction` |
+| GET/POST/PUT/DELETE | `/api/transfers` | Internal transfers (POST needs distinct CLP `fromProductId` + `toProductId`); GET includes the linked `fromTransaction` / `toTransaction` (original `description` and shown `displayDescription`) |
 | PUT | `/api/transfers/[id]/links` | Set or clear the linked transactions: `{ fromTransactionId?, toTransactionId? }` (null clears, omitted keeps) |
-| GET | `/api/transfers/[id]/candidates` | Per side, the unlinked transactions a transfer may link (same amount, right sign, within 5 days) |
-| GET | `/api/transfers/suggestions` | `{ suggestions }`: likely internal transfers (pairs and one-sided), highest score first, with legs, `score` and Spanish `evidence`; `?transactionId=` keeps those using that row |
+| GET | `/api/transfers/[id]/candidates` | Per side, the unlinked transactions a transfer may link (same amount, right sign, within 5 days), with their original `description` and shown `displayDescription` |
+| GET | `/api/transfers/suggestions` | `{ suggestions }`: likely internal transfers (pairs and one-sided), highest score first, with legs (original `description`, which the score reads, and shown `displayDescription`), `score` and Spanish `evidence`; `?transactionId=` keeps those using that row |
 | POST | `/api/transfers/suggestions/confirm` | `{ sourceTransactionId, targetTransactionId }` (pair) or `{ sourceTransactionId, targetProductId }` (one-sided): creates and links a resolved transfer and saves the pattern; 201 with the transfer, 409 when a row is already linked or flagged |
 | POST | `/api/transfers/suggestions/dismiss` | `{ sourceTransactionId, targetTransactionId? }`: hides that suggestion (no target = the debit's one-sided suggestions); idempotent |
 | GET/POST/DELETE | `/api/wealth` | Net-worth series (GET); backdate a legacy snapshot before the derived series starts (POST); delete a legacy snapshot (DELETE) |

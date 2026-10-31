@@ -93,6 +93,8 @@ export interface ApiAdjustment {
   /** The transaction's display description, date and signed amount (in
    *  productCurrency). */
   description: string;
+  /** The scraped (or manual) text, which the card's search also matches. */
+  rawDescription: string;
   transactionDate: string;
   amount: number;
   productId: string;

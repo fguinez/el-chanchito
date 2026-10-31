@@ -5,7 +5,8 @@ import postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { SCORE_SHARED_INSTITUTION_MATCH } from "@/lib/transfer-suggestions";
 
-// The suggestions SQL against a real PostgreSQL. Runs only with
+// The suggestions SQL (and the Vincular dialog's link candidates) against a
+// real PostgreSQL. Runs only with
 // TEST_DATABASE_URL naming a disposable server (`make test-db-up` starts one;
 // the database in the URL is only the maintenance connection): the suite
 // creates its own chanchito_test_* database, applies every migration with
@@ -161,6 +162,49 @@ describe.skipIf(!ADMIN_URL)("transfer suggestions (real PostgreSQL)", () => {
       target: { productName: "Tarjeta 1234", amount: 1_000_000 },
       evidence: ["Mismo monto", "1 día de diferencia", "Glosa 'Pago TC 1234'"],
     });
+  });
+
+  it("shows each row's custom description but scores the raw one", async () => {
+    await giveFeedlessProductsAFeed();
+    await seedPair();
+    await sql`
+      UPDATE transactions SET custom_description = 'Tarjeta de prueba'
+      WHERE id = ${ids.payDebit}`;
+
+    const [suggestion] = await lib.loadTransferSuggestions(TODAY);
+
+    expect(suggestion).toMatchObject({
+      source: { description: "Pago TC 1234", displayDescription: "Tarjeta de prueba" },
+      target: { description: "Pago recibido", displayDescription: "Pago recibido" },
+      evidence: ["Mismo monto", "1 día de diferencia", "Glosa 'Pago TC 1234'"],
+    });
+  });
+
+  it("offers link candidates with their custom description", async () => {
+    await seedPair();
+    await sql`
+      UPDATE transactions SET custom_description = 'Tarjeta de prueba'
+      WHERE id = ${ids.payDebit}`;
+    const [transfer] = await sql`
+      INSERT INTO internal_transfers (description, amount, from_product_id, to_product_id, transfer_date)
+      VALUES ('Pago TC', 1000000, ${ids.checking}, ${ids.card}, '2026-09-15')
+      RETURNING id`;
+
+    const sides = await transfersLib.loadTransferCandidates(transfer.id);
+
+    expect(sides?.from.candidates).toEqual([
+      expect.objectContaining({
+        id: ids.payDebit,
+        description: "Pago TC 1234",
+        displayDescription: "Tarjeta de prueba",
+      }),
+    ]);
+    expect(sides?.to.candidates).toEqual([
+      expect.objectContaining({
+        id: ids.payCredit,
+        displayDescription: "Pago recibido",
+      }),
+    ]);
   });
 
   it.each([

@@ -25,6 +25,7 @@ import {
   pickAutoLinks,
   scoreSuggestion,
   sortSuggestions,
+  suggestionMatchesSearch,
   suggestionsForTransaction,
   withoutSettled,
   type ConfirmedPattern,
@@ -32,6 +33,7 @@ import {
   type PairCandidate,
   type SuggestionTransactionLeg,
 } from "@/lib/transfer-suggestions";
+import { searchTokens } from "@/lib/transaction-search";
 
 // Every id, name, description and amount below is synthetic (see the repo's
 // personal data policy): fake uuids, a $ 1.000.000 transfer between fake
@@ -54,6 +56,7 @@ function leg(
     institutionSlug: "banco-de-prueba",
     date: "2026-09-15",
     description: "Compra comercio de prueba",
+    displayDescription: "Compra comercio de prueba",
     amount: -AMOUNT,
     currency: "CLP",
     ...overrides,
@@ -72,6 +75,7 @@ function pair(
       productId: CARD_ID,
       productName: "Tarjeta de crédito",
       description: "Abono recibido",
+      displayDescription: "Abono recibido",
       amount: AMOUNT,
       ...target,
     }),
@@ -91,6 +95,7 @@ function oneSided(overrides: Partial<OneSidedCandidate> = {}): OneSidedCandidate
       institutionSlug: "fintual",
       date: null,
       description: null,
+      displayDescription: null,
       amount: null,
       currency: "CLP",
     },
@@ -223,6 +228,25 @@ describe("scoreSuggestion", () => {
       "Mismo día",
       "Glosa 'Traspaso a 00-000-00...'",
     ]);
+  });
+
+  it("reads the raw description, never the displayed one", () => {
+    const relabeled = scoreSuggestion(
+      pair({
+        description: "Traspaso a 00-000-00000-02 de prueba",
+        displayDescription: "Ahorro de prueba",
+      })
+    );
+    const keywordOnlyShown = scoreSuggestion(
+      pair(
+        { displayDescription: "Traspaso de prueba" },
+        { description: "Compra devuelta", displayDescription: "Abono de prueba" }
+      )
+    );
+
+    expect(relabeled.score).toBe(SCORE_EXACT_AMOUNT + SCORE_SAME_DAY + SCORE_KEYWORD);
+    expect(relabeled.evidence).toContain("Glosa 'Traspaso a 00-000-00...'");
+    expect(keywordOnlyShown.score).toBe(SCORE_EXACT_AMOUNT + SCORE_SAME_DAY);
   });
 
   it("ranks a confirmed pattern on top of the same products", () => {
@@ -371,6 +395,28 @@ describe("suggestionsForTransaction", () => {
     ["an unrelated row", "cccccccc-cccc-4ccc-8ccc-cccccccccccc", 0],
   ])("keeps the suggestions using %s", (_, id, count) => {
     expect(suggestionsForTransaction(suggestions, id)).toHaveLength(count);
+  });
+});
+
+describe("suggestionMatchesSearch", () => {
+  const matches = (q: string, suggestion: Parameters<typeof suggestionMatchesSearch>[1]) =>
+    suggestionMatchesSearch(searchTokens(q), suggestion);
+  const relabeled = pair(
+    { description: "TRASPASO A TARJETA", displayDescription: "Pago de prueba" },
+    { description: "Abono recibido", displayDescription: "Abono de prueba" }
+  );
+
+  it("searches both rows' raw and display descriptions", () => {
+    expect(matches("traspaso", relabeled)).toBe(true);
+    expect(matches("PAGO", relabeled)).toBe(true);
+    expect(matches("abono", relabeled)).toBe(true);
+    expect(matches("tarjeta recibido", relabeled)).toBe(true);
+    expect(matches("tarjeta supermercado", relabeled)).toBe(false);
+  });
+
+  it("searches only the source row of a one-sided suggestion", () => {
+    expect(matches("fintual", oneSided())).toBe(true);
+    expect(matches("fondo", oneSided())).toBe(false);
   });
 });
 

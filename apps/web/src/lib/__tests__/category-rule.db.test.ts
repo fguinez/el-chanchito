@@ -227,6 +227,37 @@ describe.skipIf(!ADMIN_URL)("category rule from a transaction (real PostgreSQL)"
     });
   });
 
+  it("narrows the preview with a search on the raw or the custom description", async () => {
+    const cafe = await txn("COMERCIO CAFE EJEMPLO");
+    const relabeled = await txn("COMERCIO TIENDA EJEMPLO");
+    await txn("COMERCIO FARMACIA EJEMPLO");
+    await sql`
+      UPDATE transactions SET custom_description = 'Café de prueba'
+      WHERE id = ${relabeled}`;
+
+    const preview = async (q: string) => {
+      const url = `http://localhost:3000/api/categories/rules/preview?keyword=comercio&q=${encodeURIComponent(q)}`;
+      return (await previewRoute.GET(new NextRequest(url))).json();
+    };
+    const ids = (body: { transactions: { id: string }[] }) =>
+      body.transactions.map((t) => t.id).sort();
+
+    // "café" folds to "cafe": the raw text of one row, the custom text of the other.
+    const both = await preview("Café");
+    expect(both).toMatchObject({ total: 2, uncategorized: 2 });
+    expect(ids(both)).toEqual([cafe, relabeled].sort());
+    expect(both.transactions).toContainEqual(
+      expect.objectContaining({
+        id: relabeled,
+        description: "COMERCIO TIENDA EJEMPLO",
+        displayDescription: "Café de prueba",
+      })
+    );
+    // Every word must match, each in either description.
+    expect(await preview("prueba tienda")).toMatchObject({ total: 1 });
+    expect(await preview("prueba farmacia")).toMatchObject({ total: 0 });
+  });
+
   it("allows one exact rule per keyword through the rules API (400, not 500)", async () => {
     const send = (method: string, url: string, body: unknown) =>
       new NextRequest(`http://localhost:3000${url}`, {

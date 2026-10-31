@@ -1,10 +1,12 @@
 // Monitor adjustments ("variaciones", V040): the API shape of a linked
 // transaction with its effect on the thresholds, the per-day grouping the
-// monitor page renders, and small request helpers the routes share. Pure and
-// engine-free, so the client card can import it; the effects are computed in
-// effects.ts, and how a variación moves the thresholds lives in evaluate.ts
-// (thresholdShift, adjustmentOnDate) and undo.ts.
+// monitor page renders, its search (across every month, grouped by month),
+// and small request helpers the routes share. Pure and engine-free, so the
+// client card can import it; the effects are computed in effects.ts, and how
+// a variación moves the thresholds lives in evaluate.ts (thresholdShift,
+// adjustmentOnDate) and undo.ts.
 
+import { matchesTransactionSearch } from "@/lib/transaction-search";
 import type { MonitorAdjustment } from "./types";
 import type { ValidationResult } from "./validate";
 
@@ -53,7 +55,10 @@ export type MonitorAdjustmentRow = MonitorAdjustment & {
   monitorId: string;
   createdAt: Date | string;
   updatedAt: Date | string;
+  /** What to show: the custom description or alias, else the scraped text. */
   description: string;
+  /** The scraped (or manual) text, which the card's search also matches. */
+  rawDescription: string;
   /** Display name (see lib/product-names). */
   productName: string;
   productCurrency: string;
@@ -121,4 +126,46 @@ export function groupAdjustmentsByDay<A extends GroupableAdjustment>(
     previous = runningTotal;
     return { transactionDate, entries, dayTotal, runningTotal };
   });
+}
+
+/** The variaciones a search keeps (see lib/transaction-search: each word in
+ *  the display or the raw description), grouped by month (YYYY-MM), newest
+ *  month first. Each month lists its entries in the month view's order
+ *  (groupAdjustmentsByDay: oldest day first, a day's entries in the order
+ *  given), so turning the search on or off never reorders a month's rows. */
+export function searchAdjustmentsByMonth<
+  A extends { transactionDate: string; description: string; rawDescription: string },
+>(adjustments: readonly A[], tokens: readonly string[]): { month: string; entries: A[] }[] {
+  const byMonth = new Map<string, A[]>();
+  for (const adjustment of adjustments) {
+    if (
+      !matchesTransactionSearch(
+        tokens,
+        adjustment.description,
+        adjustment.rawDescription
+      )
+    ) {
+      continue;
+    }
+    const month = adjustment.transactionDate.slice(0, 7);
+    const entries = byMonth.get(month) ?? [];
+    entries.push(adjustment);
+    byMonth.set(month, entries);
+  }
+  return [...byMonth.keys()]
+    .sort()
+    .reverse()
+    .map((month) => ({
+      month,
+      // A stable sort: same-day entries keep the order given.
+      entries: byMonth
+        .get(month)!
+        .sort((a, b) =>
+          a.transactionDate < b.transactionDate
+            ? -1
+            : a.transactionDate > b.transactionDate
+              ? 1
+              : 0
+        ),
+    }));
 }

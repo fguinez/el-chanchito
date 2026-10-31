@@ -11,6 +11,7 @@ import {
 } from "@/lib/db/schema";
 import { TRANSACTION_NOTES_MAX_LENGTH } from "@/lib/transactions";
 import { SPEND_GROUP_BYS, UNCATEGORIZED_PARAM } from "@/lib/category-spend";
+import { SEARCH_QUERY_MAX_LENGTH } from "@/lib/transaction-search";
 
 // ---------------------------------------------------------------------------
 // Shared fields
@@ -68,6 +69,19 @@ export function monthStart(day: string): string {
 
 /** A budget month (`scheduled_month`): any day of it, stored as its first. */
 const month = isoDate.transform(monthStart);
+
+/** A search box's text (`?q=`): trimmed and capped; a blank one reads as no
+ *  search (undefined). See lib/transaction-search for how it matches. */
+export const searchQuerySchema = z
+  .string()
+  .trim()
+  .max(SEARCH_QUERY_MAX_LENGTH)
+  .optional()
+  .transform((q) => q || undefined);
+
+/** A query string read only for its `?q=`, for routes that check their other
+ *  params by hand (the alias and the rule previews). */
+export const searchOnlyQuerySchema = z.object({ q: searchQuerySchema });
 
 /** `{ id }`, the body of the DELETE handlers. */
 export const idSchema = z.object({ id: rowId });
@@ -169,7 +183,8 @@ const WINDOW_ORDER_ERROR = {
 
 /** GET /api/transactions query string. Every filter is optional and they
  *  combine: `month` is the budget month (scheduled_month), `from`/`to` an
- *  inclusive transaction_date window (either side may be open). */
+ *  inclusive transaction_date window (either side may be open), `q` a
+ *  description search. */
 export const listTransactionsQuerySchema = z
   .object({
     month: month.optional(),
@@ -180,6 +195,7 @@ export const listTransactionsQuerySchema = z
     accountId: rowId.optional(),
     institution: institutionSlug.optional(),
     categoryId: categoryFilter.optional(),
+    q: searchQuerySchema,
     limit: z.coerce
       .number()
       .int()

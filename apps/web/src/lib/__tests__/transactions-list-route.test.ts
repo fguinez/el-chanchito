@@ -101,10 +101,48 @@ describe("GET /api/transactions filters", () => {
     ["?institution=a%20b", "institution"],
     ["?from=2026-02-01&to=2026-01-01", "to"],
     ["?categoryId=food", "categoryId"],
+    [`?q=${"a".repeat(201)}`, "q"],
   ])("rejects %s on %s before querying", async (query, field) => {
     const res = await get(query);
     expect(res.status).toBe(400);
     expect((await res.json()).field).toBe(field);
     expect(fake.queries).toHaveLength(0);
+  });
+});
+
+describe("GET /api/transactions search", () => {
+  it("keeps rows with every word in the display or the raw description", async () => {
+    const res = await get("?q=%20Caf%C3%A9%20%20PRUEBA%20&month=2026-01-01");
+    expect(res.status).toBe(200);
+    const select = fake.queries.find((q) => q.op === "select")!;
+    const sql = listWhereSql();
+    // Next to the other filters, an AND over the words of an OR over the
+    // fields: one accent-folded strpos per word and field, each word bound.
+    const strpos = String.raw`strpos\((?:(?! and | or ).)+, \$\d+\) > 0`;
+    const word = String.raw`\(${strpos} or ${strpos}\)`;
+    expect(sql).toMatch(new RegExp(String.raw`\(${word} and ${word}\)`));
+    expect(sql.match(/strpos\(/g)).toHaveLength(4);
+    expect(sql).toContain("normalize(");
+    expect(sql).toContain("alias_for_transaction(");
+    expect(sql).toContain('"transactions"."description"');
+    expect(sql).toContain("scheduled_month");
+    expect(sql).toContain("deleted_at");
+    expect(sql).not.toContain("'cafe'");
+    expect(
+      whereParams(select).filter((param) => param === "cafe" || param === "prueba")
+    ).toEqual(["cafe", "cafe", "prueba", "prueba"]);
+  });
+
+  it("matches wildcard characters literally", async () => {
+    await get("?q=50%25_");
+    const select = fake.queries.find((q) => q.op === "select")!;
+    expect(listWhereSql()).not.toContain(" like ");
+    expect(whereParams(select)).toContain("50%_");
+  });
+
+  it.each(["?q=", "?q=%20%20"])("ignores a blank search (%s)", async (query) => {
+    const res = await get(query);
+    expect(res.status).toBe(200);
+    expect(listWhereSql()).not.toContain("strpos");
   });
 });

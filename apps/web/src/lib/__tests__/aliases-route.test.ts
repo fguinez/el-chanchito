@@ -398,6 +398,65 @@ describe("GET /api/aliases/preview", () => {
     expect(body.matchType).toBe("exact");
   });
 
+  /** Every recorded select (the count and the rows) with its where SQL. */
+  function previewSelects() {
+    return fake.queries
+      .filter((q) => q.op === "select")
+      .map((query) => ({ query, sql: whereSql(query) }));
+  }
+
+  it("narrows both the count and the rows with q, on either description", async () => {
+    previewResponder();
+    const res = await PREVIEW(
+      new NextRequest(
+        "https://dashboard.example/api/aliases/preview?matchDescription=compra" +
+          "&matchType=substring&q=%20Caf%C3%A9%20PRUEBA%20"
+      )
+    );
+
+    expect(res.status).toBe(200);
+    const selects = previewSelects();
+    expect(selects).toHaveLength(2);
+    for (const { query, sql } of selects) {
+      // The alias's own strpos, then one per search word and field.
+      expect(sql.match(/strpos\(/g)).toHaveLength(5);
+      expect(sql).toContain("normalize(");
+      expect(sql).toContain("alias_for_transaction(");
+      expect(whereParams(query)).toEqual(
+        expect.arrayContaining(["compra", "cafe", "prueba"])
+      );
+    }
+    // The rows carry what they show today, for the tooltip.
+    const rows = selects.find(({ query }) =>
+      query.calls.some((c) => c.method === "limit")
+    )!.query;
+    expect(rows.calls[0].args[0]).toHaveProperty("displayDescription");
+  });
+
+  it("ignores a blank q", async () => {
+    previewResponder();
+    const res = await PREVIEW(
+      new NextRequest(
+        "https://dashboard.example/api/aliases/preview?matchDescription=compra&q=%20%20"
+      )
+    );
+
+    expect(res.status).toBe(200);
+    for (const { sql } of previewSelects()) expect(sql).not.toContain("normalize(");
+  });
+
+  it("answers 400 to a q over the length cap without querying", async () => {
+    const res = await PREVIEW(
+      new NextRequest(
+        `https://dashboard.example/api/aliases/preview?matchDescription=compra&q=${"a".repeat(201)}`
+      )
+    );
+
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toMatchObject({ field: "q" });
+    expect(fake.queries).toHaveLength(0);
+  });
+
   it("answers 400 to a blank matchDescription without querying", async () => {
     const res = await PREVIEW(
       new NextRequest(

@@ -11,14 +11,16 @@ import { autoLinkSuggestions } from "@/lib/transfer-suggestions-db";
  * products within 3 days; `one_sided`: a debit naming a CLP product with no
  * transaction feed), its `source` and `target` legs (`transactionId`,
  * `productId`, `productName`, `productSlug`, `institutionName`,
- * `institutionSlug`, `date`, `description`, `amount`, `currency`; a one-sided
- * target has nulls for the row fields), the positive `amount`, a `score` and
- * Spanish `evidence`. Only unlinked, unflagged, undismissed rows of the last
- * 90 days count. Before answering, every pair scoring at least 85 that
- * shares no row with another suggestion is confirmed on its own (an
- * automatic transfer, undone by deleting it); `autoLinked` lists the ids of
- * the transfers this request created, and those suggestions are left out.
- * The rest wait for POST /api/transfers/suggestions/confirm.
+ * `institutionSlug`, `date`, the raw `description` that scoring reads,
+ * `displayDescription` (its custom description or alias, for display and
+ * search), `amount`, `currency`; a one-sided target has nulls for the row
+ * fields), the positive `amount`, a `score` and Spanish `evidence`. Only
+ * unlinked, unflagged, undismissed rows of the last 90 days count. Before
+ * answering, every pair scoring at least 85 that shares no row with another
+ * suggestion is confirmed on its own (an automatic transfer, undone by
+ * deleting it); `autoLinked` lists the ids of the transfers this request
+ * created, and those suggestions are left out. The rest wait for
+ * POST /api/transfers/suggestions/confirm.
  *
  * `?transactionId=<uuid>` keeps only the suggestions that use that row on
  * either side (the transaction detail panel's hint); auto-linking still

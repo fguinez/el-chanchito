@@ -31,7 +31,10 @@ export interface ApiCategory {
 
 export interface RulePreviewTransaction {
   id: string;
+  /** The raw scraped text the rule matches. */
   description: string;
+  /** What the row shows today (custom description or alias, else `description`). */
+  displayDescription: string;
   amount: number;
   currency: string;
   transactionDate: string;
