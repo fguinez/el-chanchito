@@ -170,18 +170,42 @@ export function budgetDraft(input: {
   };
 }
 
+export type IncomeParse =
+  | { ok: true; value: number }
+  | { ok: false; reason: "format" | "range" };
+
+/** Whole pesos: plain digits, or "." thousands groups ("2.500.000"); no
+ *  leading zero, so "0.500" (a decimal, not 500) is refused. */
+const INCOME_FORMAT = /^(0|[1-9]\d*)$|^[1-9]\d{0,2}(\.\d{3})+$/;
+/** The start of an INCOME_FORMAT text, as it reads while being typed
+ *  ("2.5" on the way to "2.500.000"). */
+const INCOME_PREFIX = /^(0|[1-9]\d*)$|^[1-9]\d{0,2}(\.\d{3})*(\.\d{0,2})?$/;
+
+function compactIncome(raw: string): string {
+  return raw.replace(/[$\s]/g, "");
+}
+
 /**
- * The income field's text as whole CLP, or null when it is not one. Empty
- * means 0; "$", spaces and "." thousands separators are ignored, so
- * "2.500.000" and "$ 2.500.000" read as 2500000. A decimal comma or point
- * followed by other than three digits is refused rather than guessed.
+ * The income field's text as whole CLP. Empty means 0; "$" and spaces are
+ * ignored, so "2.500.000", "$ 2.500.000" and "2500000" all read as 2500000.
+ * Anything else (decimals, a leading zero, a sign) fails with "format";
+ * past the int32 column with "range".
  */
-export function parseIncomeInput(raw: string): number | null {
-  const text = raw.replace(/[$\s]/g, "");
-  if (!text) return 0;
-  if (!/^\d{1,3}(\.\d{3})*$|^\d+$/.test(text)) return null;
+export function parseIncomeInput(raw: string): IncomeParse {
+  const text = compactIncome(raw);
+  if (!text) return { ok: true, value: 0 };
+  if (!INCOME_FORMAT.test(text)) return { ok: false, reason: "format" };
   const value = Number(text.replace(/\./g, ""));
-  return Number.isSafeInteger(value) && value <= INT32_MAX ? value : null;
+  return value <= INT32_MAX
+    ? { ok: true, value }
+    : { ok: false, reason: "range" };
+}
+
+/** Whether the text is valid or still on its way to a valid amount, so the
+ *  field holds back its error while the user types. */
+export function isIncomePrefix(raw: string): boolean {
+  const text = compactIncome(raw);
+  return !text || INCOME_PREFIX.test(text);
 }
 
 /** Whole CLP with es-CL thousands separators and no symbol ("2.500.000"). */

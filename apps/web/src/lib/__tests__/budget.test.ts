@@ -5,6 +5,7 @@ import {
   budgetSummary,
   formatIncomeInput,
   incomeShare,
+  isIncomePrefix,
   parseIncomeInput,
 } from "@/lib/budget";
 import type { FixedExpense } from "@/lib/fixed-expenses";
@@ -248,19 +249,54 @@ describe("parseIncomeInput", () => {
     ["$ 2.500.000", 2_500_000],
     ["999.999", 999_999],
     ["0", 0],
+    ["2.147.483.647", 2_147_483_647],
   ])("reads %j as %d", (raw, expected) => {
-    expect(parseIncomeInput(raw)).toBe(expected);
+    expect(parseIncomeInput(raw)).toEqual({ ok: true, value: expected });
   });
 
-  it.each(["abc", "-1000", "2,5", "2500000,50", "25.00", "2.500.00", "99999999999"])(
-    "refuses %j",
+  it.each([
+    "abc",
+    "-1000",
+    "2,5",
+    "2500000,50",
+    "25.00",
+    "2.500.00",
+    "0.500",
+    "0500",
+    "2.5",
+    "2500.000",
+  ])("refuses %j as a format error", (raw) => {
+    expect(parseIncomeInput(raw)).toEqual({ ok: false, reason: "format" });
+  });
+
+  it.each(["2147483648", "99.999.999.999"])("refuses %j as out of range", (raw) => {
+    expect(parseIncomeInput(raw)).toEqual({ ok: false, reason: "range" });
+  });
+
+  it("reads back what formatIncomeInput writes", () => {
+    expect(parseIncomeInput(formatIncomeInput(2_500_000))).toEqual({
+      ok: true,
+      value: 2_500_000,
+    });
+    expect(parseIncomeInput(formatIncomeInput(999_999))).toEqual({
+      ok: true,
+      value: 999_999,
+    });
+  });
+});
+
+describe("isIncomePrefix", () => {
+  it.each(["", "2", "2.", "2.5", "2.50", "2.500", "2.500.", "2.500.0", "$ 2.500.000", "0"])(
+    "lets %j through while typing",
     (raw) => {
-      expect(parseIncomeInput(raw)).toBeNull();
+      expect(isIncomePrefix(raw)).toBe(true);
     }
   );
 
-  it("reads back what formatIncomeInput writes", () => {
-    expect(parseIncomeInput(formatIncomeInput(2_500_000))).toBe(2_500_000);
-    expect(parseIncomeInput(formatIncomeInput(999_999))).toBe(999_999);
-  });
+  it.each(["abc", "2,5", "0.5", "05", "2.5000", "-1", "2.500.0000"])(
+    "flags %j at once",
+    (raw) => {
+      expect(isIncomePrefix(raw)).toBe(false);
+    }
+  );
 });

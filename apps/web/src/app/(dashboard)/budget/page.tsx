@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Card,
   CardContent,
@@ -21,7 +21,15 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { SELECT_CLASS } from "@/components/ui/native-select";
-import { BudgetDonut, KIND_COLORS } from "@/components/budget/budget-donut";
+import {
+  BudgetBreakdown,
+  BudgetDonut,
+  KIND_SWATCH_CLASSES,
+} from "@/components/budget/budget-donut";
+import {
+  useMonthlyIncome,
+  type IncomeStatus,
+} from "@/components/budget/use-monthly-income";
 import { FixedExpenseEditDialog } from "@/components/fixed-expenses/fixed-expense-edit-dialog";
 import { useSortableData } from "@/lib/use-sortable-data";
 import { cn, formatCLP, formatPercent } from "@/lib/utils";
@@ -38,13 +46,7 @@ import {
   sortByStatus,
   type FixedExpense,
 } from "@/lib/fixed-expenses";
-import {
-  budgetDraft,
-  budgetSummary,
-  formatIncomeInput,
-  incomeShare,
-  parseIncomeInput,
-} from "@/lib/budget";
+import { budgetDraft, budgetSummary, incomeShare } from "@/lib/budget";
 import { formatLocalDate } from "@/lib/monitors/dates";
 import { ChevronDown, Trash2 } from "lucide-react";
 
@@ -59,11 +61,6 @@ const NAME_PLACEHOLDERS: Record<FixedExpenseKind, string> = {
   savings: "Ej: Fondo de emergencia",
 };
 
-/** Wait after the last keystroke before saving the income. */
-const INCOME_SAVE_DELAY_MS = 600;
-
-type SaveState = "idle" | "load-error" | "saving" | "saved" | "error";
-
 type ItemSortKey =
   | "item"
   | "tipo"
@@ -72,133 +69,48 @@ type ItemSortKey =
   | "ingreso"
   | "compartido";
 
-function putIncome(monthlyIncome: number, keepalive = false) {
-  return fetch("/api/budget-settings", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ monthlyIncome }),
-    keepalive,
-  });
-}
+const ERROR_TEXT = "text-destructive dark:text-destructive-foreground";
 
-/**
- * The monthly income field's state: what the field shows, the last valid
- * value (what the chart uses while the text is not a number), and saving
- * with a debounce, at once on blur, and on leaving the page.
- */
-function useMonthlyIncome() {
-  const [text, setText] = useState("");
-  const [income, setIncome] = useState(0);
-  const [loaded, setLoaded] = useState(false);
-  const [saveState, setSaveState] = useState<SaveState>("idle");
-  // The last value sent (or loaded): a save of the same value is skipped.
-  const requested = useRef<number | null>(null);
-  const pending = useRef<{ timer: ReturnType<typeof setTimeout>; value: number } | null>(
-    null
+function IncomeStatusLine({
+  status,
+  error,
+  onRetry,
+}: {
+  status: IncomeStatus;
+  error: string | null;
+  onRetry: () => void;
+}) {
+  if (error) return <span className={ERROR_TEXT}>{error}</span>;
+  const retry = (
+    <button
+      type="button"
+      onClick={onRetry}
+      className="ml-2 underline underline-offset-2 hover:text-foreground"
+    >
+      Reintentar
+    </button>
   );
-  const sequence = useRef(0);
-
-  useEffect(() => {
-    let active = true;
-    fetch("/api/budget-settings")
-      .then((res) => (res.ok ? res.json() : Promise.reject(res)))
-      .then((data: { monthlyIncome: number }) => {
-        if (!active) return;
-        requested.current = data.monthlyIncome;
-        setIncome(data.monthlyIncome);
-        setText(data.monthlyIncome > 0 ? formatIncomeInput(data.monthlyIncome) : "");
-      })
-      .catch(() => {
-        if (active) setSaveState("load-error");
-      })
-      .finally(() => {
-        if (active) setLoaded(true);
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  const cancelPending = () => {
-    if (pending.current) clearTimeout(pending.current.timer);
-    pending.current = null;
-  };
-
-  const save = useCallback(async (value: number) => {
-    cancelPending();
-    if (value === requested.current) return;
-    requested.current = value;
-    const id = ++sequence.current;
-    setSaveState("saving");
-    try {
-      const res = await putIncome(value);
-      if (!res.ok) throw new Error(`PUT /api/budget-settings: ${res.status}`);
-      if (id === sequence.current) setSaveState("saved");
-    } catch {
-      // Let the next edit or blur retry the same value.
-      if (requested.current === value) requested.current = null;
-      if (id === sequence.current) setSaveState("error");
-    }
-  }, []);
-
-  // Leaving the page with a save still waiting sends it anyway.
-  useEffect(
-    () => () => {
-      if (pending.current) {
-        const { value } = pending.current;
-        cancelPending();
-        putIncome(value, true).catch(() => {});
-      }
-    },
-    []
-  );
-
-  const onChange = (next: string) => {
-    setText(next);
-    const value = parseIncomeInput(next);
-    cancelPending();
-    if (value == null) return;
-    setIncome(value);
-    pending.current = {
-      value,
-      timer: setTimeout(() => void save(value), INCOME_SAVE_DELAY_MS),
-    };
-  };
-
-  const onBlur = () => {
-    const value = parseIncomeInput(text);
-    if (value == null) return;
-    setText(value > 0 ? formatIncomeInput(value) : "");
-    void save(value);
-  };
-
-  const invalid = parseIncomeInput(text) == null;
-  return { text, income, loaded, saveState, invalid, onChange, onBlur };
-}
-
-function SaveStatus({ state, invalid }: { state: SaveState; invalid: boolean }) {
-  if (invalid) {
-    return (
-      <span className="text-destructive dark:text-destructive-foreground">
-        Escribe un monto en pesos, sin decimales
-      </span>
-    );
-  }
-  switch (state) {
+  switch (status) {
+    case "loading":
+      return <span>Cargando…</span>;
+    case "load-error":
+      return (
+        <span>
+          <span className={ERROR_TEXT}>No se pudo cargar el ingreso guardado.</span>
+          {retry}
+        </span>
+      );
+    case "dirty":
+      return <span>Sin guardar</span>;
     case "saving":
       return <span>Guardando…</span>;
     case "saved":
       return <span>Guardado</span>;
-    case "load-error":
-      return (
-        <span className="text-destructive dark:text-destructive-foreground">
-          No se pudo cargar el ingreso guardado
-        </span>
-      );
     case "error":
       return (
-        <span className="text-destructive dark:text-destructive-foreground">
-          No se pudo guardar
+        <span>
+          <span className={ERROR_TEXT}>No se pudo guardar.</span>
+          {retry}
         </span>
       );
     default:
@@ -206,13 +118,44 @@ function SaveStatus({ state, invalid }: { state: SaveState; invalid: boolean }) 
   }
 }
 
+/** "Compartido 69 %, desde 01-10-2026": the hidden options at a glance. */
+function optionsSummary({
+  isShared,
+  sharedRatio,
+  activeFrom,
+  activeTo,
+}: {
+  isShared: boolean;
+  sharedRatio: string;
+  activeFrom: string;
+  activeTo: string;
+}): string | null {
+  const parts: string[] = [];
+  if (isShared) {
+    const ratio = Number(sharedRatio);
+    parts.push(
+      sharedRatio.trim() && Number.isFinite(ratio)
+        ? `compartido ${Math.round(ratio * 100)}%`
+        : "compartido"
+    );
+  }
+  if (activeFrom || activeTo) {
+    parts.push(
+      formatActiveWindow({
+        activeFrom: activeFrom || null,
+        activeTo: activeTo || null,
+      }).toLowerCase()
+    );
+  }
+  return parts.length ? parts.join(", ") : null;
+}
+
 function KindBadge({ kind }: { kind: FixedExpenseKind }) {
   return (
     <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-sm">
       <span
         aria-hidden
-        className="size-2.5 shrink-0 rounded-sm"
-        style={{ backgroundColor: KIND_COLORS[kind] }}
+        className={cn("size-2.5 shrink-0 rounded-sm", KIND_SWATCH_CLASSES[kind])}
       />
       {FIXED_EXPENSE_KIND_LABELS[kind]}
     </span>
@@ -272,6 +215,10 @@ export default function BudgetPage() {
       });
 
       if (res.ok) {
+        // Swap the draft for the saved row in the same render, so the chart
+        // keeps its slice instead of animating it out and back in.
+        const created: FixedExpense = await res.json();
+        setExpenses((current) => [...current, created]);
         setName("");
         setAmount("");
         setIsShared(false);
@@ -312,7 +259,10 @@ export default function BudgetPage() {
   });
   const summary = budgetSummary(expenses, income, today, draft);
   const totals = fixedExpenseTotals(expenses, today);
-  const optionsOpen = showOptions || isShared || activeFrom !== "" || activeTo !== "";
+  const hiddenOptions = showOptions
+    ? null
+    : optionsSummary({ isShared, sharedRatio, activeFrom, activeTo });
+  const draftCounted = summary.kinds.some((k) => k.draftAmount > 0);
 
   const registeredLabel =
     expenses.length === 1 ? "1 item" : `${expenses.length} items`;
@@ -376,77 +326,91 @@ export default function BudgetPage() {
         <p className="text-sm text-muted-foreground">En qué se va tu sueldo</p>
       </div>
 
-      {/* Income and its split */}
+      {/* Income and its split. Sized by the card, not the window (the sidebar
+          eats into it): stacked when narrow, income beside the donut with the
+          breakdown below from @2xl, all three in a row from @5xl. */}
       <Card>
-        <CardContent className="grid gap-8 lg:grid-cols-[16rem_minmax(0,1fr)]">
-          <div className="space-y-5">
-            <div className="space-y-1.5">
-              <label htmlFor="monthly-income" className="block text-sm font-medium">
-                Ingreso mensual
-              </label>
-              <div className="relative">
-                <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-sm text-muted-foreground">
-                  $
-                </span>
-                <Input
-                  id="monthly-income"
-                  inputMode="numeric"
-                  autoComplete="off"
-                  placeholder="0"
-                  className="pl-7 text-lg tabular-nums"
-                  value={monthlyIncome.text}
-                  disabled={!monthlyIncome.loaded}
-                  aria-invalid={monthlyIncome.invalid || undefined}
-                  aria-describedby="monthly-income-status"
-                  onChange={(e) => monthlyIncome.onChange(e.target.value)}
-                  onBlur={monthlyIncome.onBlur}
-                />
+        <CardContent className="@container">
+          <div className="grid gap-8 @2xl:grid-cols-[16rem_minmax(0,1fr)] @5xl:grid-cols-[16rem_auto_minmax(0,1fr)]">
+            <div className="space-y-5">
+              <div className="space-y-1.5">
+                <label htmlFor="monthly-income" className="block text-sm font-medium">
+                  Ingreso mensual
+                </label>
+                <div className="relative">
+                  <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-sm text-muted-foreground">
+                    $
+                  </span>
+                  <Input
+                    id="monthly-income"
+                    inputMode="numeric"
+                    autoComplete="off"
+                    placeholder="0"
+                    className="pl-7 text-lg tabular-nums"
+                    value={monthlyIncome.text}
+                    disabled={monthlyIncome.disabled}
+                    aria-invalid={monthlyIncome.error != null || undefined}
+                    aria-describedby="monthly-income-status"
+                    onChange={(e) => monthlyIncome.onChange(e.target.value)}
+                    onBlur={monthlyIncome.onBlur}
+                  />
+                </div>
+                <p
+                  id="monthly-income-status"
+                  aria-live="polite"
+                  className="text-xs text-muted-foreground"
+                >
+                  <IncomeStatusLine
+                    status={monthlyIncome.status}
+                    error={monthlyIncome.error}
+                    onRetry={monthlyIncome.retry}
+                  />
+                </p>
               </div>
-              <p
-                id="monthly-income-status"
-                aria-live="polite"
-                className="text-xs text-muted-foreground"
-              >
-                <SaveStatus
-                  state={monthlyIncome.saveState}
-                  invalid={monthlyIncome.invalid}
-                />
-              </p>
+
+              <dl className="space-y-3 text-sm">
+                <div>
+                  <dt className="text-muted-foreground">Asignado</dt>
+                  <dd className="font-semibold tabular-nums">
+                    {formatCLP(summary.allocated)}
+                    {summary.allocatedShare != null && (
+                      <span className="ml-2 font-normal text-muted-foreground">
+                        {formatPercent(summary.allocatedShare)} del ingreso
+                      </span>
+                    )}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">
+                    {summary.deficit > 0 && income > 0 ? "Déficit" : "Sobra"}
+                  </dt>
+                  <dd
+                    className={cn(
+                      "font-semibold tabular-nums",
+                      summary.deficit > 0 &&
+                        income > 0 &&
+                        "text-destructive dark:text-destructive-foreground"
+                    )}
+                  >
+                    {income === 0
+                      ? "Sin ingreso"
+                      : formatCLP(summary.deficit > 0 ? summary.deficit : summary.remaining)}
+                  </dd>
+                </div>
+              </dl>
+              {draftCounted && (
+                <p className="text-xs text-muted-foreground">
+                  (incluye el item sin guardar)
+                </p>
+              )}
             </div>
 
-            <dl className="space-y-3 text-sm">
-              <div>
-                <dt className="text-muted-foreground">Asignado</dt>
-                <dd className="font-semibold tabular-nums">
-                  {formatCLP(summary.allocated)}
-                  {summary.allocatedShare != null && (
-                    <span className="ml-2 font-normal text-muted-foreground">
-                      {formatPercent(summary.allocatedShare)} del ingreso
-                    </span>
-                  )}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-muted-foreground">
-                  {summary.deficit > 0 && income > 0 ? "Déficit" : "Sobra"}
-                </dt>
-                <dd
-                  className={cn(
-                    "font-semibold tabular-nums",
-                    summary.deficit > 0 &&
-                      income > 0 &&
-                      "text-destructive dark:text-destructive-foreground"
-                  )}
-                >
-                  {income === 0
-                    ? "Sin ingreso"
-                    : formatCLP(summary.deficit > 0 ? summary.deficit : summary.remaining)}
-                </dd>
-              </div>
-            </dl>
+            <BudgetDonut summary={summary} draftName={draft?.name} />
+            <BudgetBreakdown
+              summary={summary}
+              className="@2xl:col-span-2 @5xl:col-span-1"
+            />
           </div>
-
-          <BudgetDonut summary={summary} draftName={draft?.name} />
         </CardContent>
       </Card>
 
@@ -518,17 +482,20 @@ export default function BudgetPage() {
 
             <button
               type="button"
-              aria-expanded={optionsOpen}
+              aria-expanded={showOptions}
               aria-controls="item-options"
-              onClick={() => setShowOptions(!optionsOpen)}
+              onClick={() => setShowOptions(!showOptions)}
               className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
             >
               <ChevronDown
-                className={cn("h-3.5 w-3.5 transition-transform", optionsOpen && "rotate-180")}
+                className={cn("h-3.5 w-3.5 transition-transform", showOptions && "rotate-180")}
               />
               Compartido y vigencia
+              {hiddenOptions && (
+                <span className="text-foreground">: {hiddenOptions}</span>
+              )}
             </button>
-            {optionsOpen && (
+            {showOptions && (
               <div id="item-options" className="flex flex-wrap items-end gap-3">
                 <div className="flex h-9 items-center gap-2">
                   <input
