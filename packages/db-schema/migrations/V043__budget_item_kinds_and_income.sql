@@ -12,13 +12,24 @@
 -- and the kind replaces that prefix, so it is stripped and the rest trimmed
 -- ("Ahorro: Viaje" -> "Viaje"; a bare "Ahorro:" keeps the name "Ahorro"); a
 -- name starting with "Gastos diarios" (any case) is estimated. Every other row
--- stays 'fixed'. Only rows still 'fixed' are touched, so a rerun is a no-op.
+-- stays 'fixed'. The backfill only looks at rows still 'fixed', so a savings
+-- row is never stripped twice; but it is not a no-op on a later database: a
+-- 'fixed' item named "Ahorro: ..." or "Gastos diarios ..." after this
+-- migration would be re-kinded if it ran again. Flyway runs it once.
 --
 -- budget_settings holds the monthly income: a single row (the boolean primary
 -- key can only be true), absent until the page first saves it, which reads
 -- as an income of 0. Whole CLP, never negative.
 --
--- Safe on a fresh database, and idempotent.
+-- The DDL is idempotent (IF NOT EXISTS, guarded CHECK) and safe on a fresh
+-- database.
+--
+-- ROLLOUT: run this migration, then deploy the web on the new code. The new
+-- web reads fixed_expenses.kind and budget_settings and fails without them
+-- (500 on /api/fixed-expenses and /api/budget-settings). The old web keeps
+-- working against the migrated schema: it never sends kind, so its new rows
+-- default to 'fixed', and it ignores budget_settings. The scrapers do not
+-- touch either table.
 
 ALTER TABLE fixed_expenses
   ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'fixed';
