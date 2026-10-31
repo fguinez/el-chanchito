@@ -8,11 +8,11 @@ type Context = { params: Promise<{ id: string }> };
 
 /**
  * GET /api/transfers/[id]/candidates: per side (`from`, `to`), the product,
- * whether it has a transaction feed, and the transactions the side may link:
- * on that product, with the right sign and exactly the transfer amount, dated
- * within 5 days of the transfer, and linked by no other transfer. The row the
- * side links today comes back with `linked: true`. 404 for an unknown
- * transfer.
+ * whether it has a transaction feed, and the transactions the side may link
+ * (with their raw `description` and resolved `displayDescription`): on that
+ * product, with the right sign and exactly the transfer amount, dated within
+ * 5 days of the transfer, and linked by no other transfer. The row the side
+ * links today comes back with `linked: true`. 404 for an unknown transfer.
  */
 export async function GET(_request: Request, { params }: Context) {
   const { id } = await params;

@@ -18,7 +18,11 @@ import {
   type SQL,
 } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { displayDescriptionOf, notDeleted } from "@/lib/db/transactions";
+import {
+  displayDescription,
+  displayDescriptionOf,
+  notDeleted,
+} from "@/lib/db/transactions";
 import { isUniqueViolation } from "@/lib/management";
 import {
   accounts,
@@ -403,7 +407,10 @@ export async function deleteTransfer(transferId: string): Promise<boolean> {
 export interface TransferCandidate {
   id: string;
   transactionDate: string;
+  /** The scraped (or manual) text. */
   description: string;
+  /** What to show: the custom override or alias, else `description`. */
+  displayDescription: string;
   amount: number;
   source: string;
   isInternalTransfer: boolean;
@@ -437,11 +444,14 @@ export async function loadTransferCandidates(transferId: string) {
             id: transactions.id,
             transactionDate: transactions.transactionDate,
             description: transactions.description,
+            displayDescription,
             amount: transactions.amount,
             source: transactions.source,
             isInternalTransfer: transactions.isInternalTransfer,
           })
           .from(transactions)
+          // displayDescription's alias lookup reads products.currency.
+          .innerJoin(products, eq(transactions.productId, products.id))
           .where(
             and(
               eq(transactions.productId, productId),

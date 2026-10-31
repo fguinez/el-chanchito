@@ -8,6 +8,7 @@ import { internalTransfers, products, transactions } from "@/lib/db/schema";
 // The wiring of PUT /api/transfers/[id]/links and of DELETE /api/transfers:
 // checks run before any write, the transfer, the flag on the linked rows and
 // the status change together, and a unique violation is a 400 with a field.
+// Also what GET /api/transfers/[id]/candidates selects.
 // The db is a recording double. Every id, amount and date is synthetic (see
 // the repo's personal data policy): a $ 1.000.000 transfer between two fake
 // products.
@@ -17,6 +18,7 @@ vi.mock("@/lib/db", () => ({ db: fake.db }));
 
 const { PUT } = await import("@/app/api/transfers/[id]/links/route");
 const transfers = await import("@/app/api/transfers/route");
+const candidates = await import("@/app/api/transfers/[id]/candidates/route");
 
 const TRANSFER_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const CHECKING_ID = "11111111-1111-4111-8111-111111111111";
@@ -79,6 +81,10 @@ function respond(query: RecordedQuery): unknown {
   if (isListing(query)) return world.listed ?? [];
   if (query.op === "select" && target === internalTransfers) {
     if (query.calls.some((c) => c.method === "for")) {
+      return world.transfer ? [world.transfer] : [];
+    }
+    // loadTransferCandidates reads the transfer with a bare select().
+    if (Object.keys(selectionOf(query)).length === 0) {
       return world.transfer ? [world.transfer] : [];
     }
     return world.holders;
@@ -435,5 +441,36 @@ describe("DELETE /api/transfers", () => {
     );
 
     expect(updatesOf(transactions)).toHaveLength(0);
+  });
+});
+
+describe("GET /api/transfers/[id]/candidates", () => {
+  it("resolves each side's candidates against their product", async () => {
+    const response = await candidates.GET(
+      new Request(
+        `https://dashboard.example/api/transfers/${TRANSFER_ID}/candidates`
+      ),
+      { params: Promise.resolve({ id: TRANSFER_ID }) }
+    );
+
+    expect(response.status).toBe(200);
+    // One candidates select per side; displayDescription's alias lookup reads
+    // products.currency, so each joins products.
+    const listings = fake.queries.filter(
+      (q) => q.op === "select" && "displayDescription" in selectionOf(q)
+    );
+    expect(listings).toHaveLength(2);
+    for (const listing of listings) {
+      expect(
+        listing.calls.some(
+          (c) => c.method === "innerJoin" && c.args[0] === products
+        )
+      ).toBe(true);
+      const shown = new PgDialect().sqlToQuery(
+        selectionOf(listing).displayDescription as SQL
+      ).sql;
+      expect(shown).toContain('"transactions"."custom_description"');
+      expect(shown).toContain('"products"."currency"');
+    }
   });
 });
