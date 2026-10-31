@@ -2,7 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { and, count, desc, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { products, transactions } from "@/lib/db/schema";
-import { notDeleted } from "@/lib/db/transactions";
+import {
+  descriptionMatches,
+  displayDescription,
+  notDeleted,
+} from "@/lib/db/transactions";
+import { searchOnlyQuerySchema } from "@/lib/api/schemas";
+import { parseSearchParams } from "@/lib/api/validation";
 import {
   RULE_MATCH_TYPES,
   failureBody,
@@ -13,14 +19,18 @@ import {
 const PREVIEW_LIMIT = 20;
 
 /**
- * GET /api/categories/rules/preview?keyword=...&matchType=...: what a rule with
- * this keyword would match ("probar regla"), with the same normalization and
- * semantics as `category_for_description`: `matchType` "contains" (default) is
- * the literal substring of V021, "exact" the trimmed, case-insensitive equality
- * of V041. Returns `{ keyword, matchType, total, uncategorized, transactions }`: `total` counts every
- * matching transaction, `uncategorized` the matches a backfill could still
- * categorize (no category, not manual), and `transactions` lists up to 20
- * matches, newest first.
+ * GET /api/categories/rules/preview?keyword=...&matchType=...(&q=...): what a
+ * rule with this keyword would match ("probar regla"), with the same
+ * normalization and semantics as `category_for_description`: `matchType`
+ * "contains" (default) is the literal substring of V021, "exact" the trimmed,
+ * case-insensitive equality of V041. `q`, the preview's search box, narrows
+ * the matches to those with every word in the raw or the display description
+ * (see lib/transaction-search); the rule itself only ever reads the raw one.
+ * Returns `{ keyword, matchType, total, uncategorized, transactions }`: `total`
+ * counts every (narrowed) matching transaction, `uncategorized` the matches a
+ * backfill could still categorize (no category, not manual), and
+ * `transactions` lists up to 20 matches, newest first, each with its
+ * `displayDescription` too.
  */
 export async function GET(request: NextRequest) {
   try {
@@ -42,6 +52,11 @@ export async function GET(request: NextRequest) {
       );
     }
     const matchType = rawMatchType as RuleMatchType;
+    const search = parseSearchParams(
+      request.nextUrl.searchParams,
+      searchOnlyQuerySchema
+    );
+    if (!search.ok) return search.response;
 
     // A soft-deleted row (V033) is not a match a rule could ever categorize.
     // The rule matches the raw scraped `description`, not the custom override.
@@ -49,7 +64,8 @@ export async function GET(request: NextRequest) {
       matchType === "exact"
         ? sql`lower(btrim(${transactions.description})) = lower(${keyword.value})`
         : sql`strpos(lower(${transactions.description}), lower(${keyword.value})) > 0`,
-      notDeleted
+      notDeleted,
+      descriptionMatches(search.data.q)
     );
     const uncategorized = sql<number>`count(*) FILTER (
       WHERE ${transactions.categoryId} IS NULL
@@ -63,11 +79,16 @@ export async function GET(request: NextRequest) {
           uncategorized: uncategorized.mapWith(Number),
         })
         .from(transactions)
+        // The search's display description reads products.currency; every
+        // transaction has a product, so the join never changes the counts.
+        .innerJoin(products, eq(transactions.productId, products.id))
         .where(matches),
       db
         .select({
           id: transactions.id,
+          // The raw text the rule matches; what the row shows today too.
           description: transactions.description,
+          displayDescription,
           amount: transactions.amount,
           // `amount` is in this currency (V023): USD rows keep their cents.
           currency: products.currency,

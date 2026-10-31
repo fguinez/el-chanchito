@@ -12,8 +12,11 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { SearchInput } from "@/components/ui/search-input";
 import { useSelectedTransaction } from "@/components/transactions/use-selected-transaction";
-import { formatAmount, formatPlainDateEs } from "@/lib/utils";
+import { cn, formatAmount, formatPlainDateEs } from "@/lib/utils";
+import { descriptionTitle } from "@/lib/transaction-search";
+import { usePreviewSearch } from "@/lib/use-preview-search";
 import { trimKeyword, type RuleMatchType } from "@/lib/categories";
 import {
   CategoryLabel,
@@ -23,29 +26,29 @@ import {
   type RulePreviewResult,
 } from "./shared";
 
+/** `q` is the search the result answers ("" for none). */
 type PreviewState =
   | { status: "loading" }
   | { status: "error"; error: string }
-  | { status: "done"; result: RulePreviewResult };
+  | { status: "done"; result: RulePreviewResult; q: string };
 
-function summary({ total, uncategorized }: RulePreviewResult): string {
-  const matches = plural(
-    total,
-    "transacción contiene",
-    "transacciones contienen"
-  );
+function summary({ total, uncategorized }: RulePreviewResult, q: string): string {
+  const matches = q
+    ? `${plural(total, "coincidencia", "coincidencias")} con la búsqueda`
+    : `${plural(total, "transacción contiene", "transacciones contienen")} esta palabra`;
   const pending =
     uncategorized === 0
       ? "ninguna queda por categorizar"
       : plural(uncategorized, "queda por categorizar", "quedan por categorizar");
-  return `${matches} esta palabra; ${pending}.`;
+  return `${matches}; ${pending}.`;
 }
 
 /**
  * What a rule with `keyword` and `matchType` would match: counts plus the
- * most recent matches with their current category. Refetches when `version`
- * (bumped on every data reload) changes; callers key it by keyword and match
- * type.
+ * most recent matches with their current category (what each row shows today
+ * in the tooltip). A search box narrows the matches, server-side once typing
+ * pauses. Refetches when `version` (bumped on every data reload) changes;
+ * callers key it by keyword and match type.
  */
 export function RulePreview({
   keyword,
@@ -62,22 +65,24 @@ export function RulePreview({
 }) {
   const [state, setState] = useState<PreviewState>({ status: "loading" });
   const { rowProps } = useSelectedTransaction();
+  const { search, setSearch, q, stale, showSearch } = usePreviewSearch(
+    state.status === "done" ? { q: state.q, total: state.result.total } : null
+  );
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch(
-      `/api/categories/rules/preview?keyword=${encodeURIComponent(
-        keyword
-      )}&matchType=${matchType}`,
-      { signal: controller.signal }
-    )
+    const params = new URLSearchParams({ keyword, matchType });
+    if (q) params.set("q", q);
+    fetch(`/api/categories/rules/preview?${params}`, {
+      signal: controller.signal,
+    })
       .then(async (res) => {
         if (!res.ok) {
           const error = await readApiError(res, "No se pudo probar la regla");
           setState({ status: "error", error });
           return;
         }
-        setState({ status: "done", result: await res.json() });
+        setState({ status: "done", result: await res.json(), q });
       })
       .catch(() => {
         if (!controller.signal.aborted) {
@@ -85,7 +90,7 @@ export function RulePreview({
         }
       });
     return () => controller.abort();
-  }, [keyword, matchType, version]);
+  }, [keyword, matchType, q, version]);
 
   return (
     <div className="space-y-3 rounded-md border bg-muted/30 p-4">
@@ -97,7 +102,7 @@ export function RulePreview({
           </p>
           {state.status === "done" && state.result.total > 0 && (
             <p className="text-sm text-muted-foreground">
-              {summary(state.result)}
+              {summary(state.result, state.q)}
             </p>
           )}
         </div>
@@ -112,6 +117,16 @@ export function RulePreview({
         </Button>
       </div>
 
+      {showSearch && (
+        <SearchInput
+          className="w-full sm:max-w-xs"
+          inputClassName="h-8 text-sm"
+          aria-label="Buscar en las coincidencias por descripción"
+          value={search}
+          onValueChange={setSearch}
+          loading={stale}
+        />
+      )}
       {state.status === "loading" && (
         <p className="text-sm text-muted-foreground">Cargando...</p>
       )}
@@ -120,11 +135,19 @@ export function RulePreview({
       )}
       {state.status === "done" && state.result.total === 0 && (
         <p className="text-sm text-muted-foreground">
-          Ninguna transacción contiene esta palabra.
+          {state.q
+            ? `Sin resultados para «${state.q}».`
+            : "Ninguna transacción contiene esta palabra."}
         </p>
       )}
       {state.status === "done" && state.result.total > 0 && (
-        <>
+        <div
+          aria-busy={stale}
+          className={cn(
+            "space-y-3 transition-opacity duration-200",
+            stale && "opacity-60"
+          )}
+        >
           <Table>
             <TableHeader>
               <TableRow>
@@ -144,7 +167,14 @@ export function RulePreview({
                     <TableCell className="text-muted-foreground">
                       {formatPlainDateEs(txn.transactionDate)}
                     </TableCell>
-                    <TableCell className="max-w-80 truncate" title={txn.description}>
+                    <TableCell
+                      className="max-w-80 truncate"
+                      title={descriptionTitle(
+                        txn.description,
+                        txn.displayDescription,
+                        "Se muestra como"
+                      )}
+                    >
                       {txn.description}
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
@@ -179,7 +209,7 @@ export function RulePreview({
               Se muestran las {state.result.transactions.length} más recientes.
             </p>
           )}
-        </>
+        </div>
       )}
     </div>
   );

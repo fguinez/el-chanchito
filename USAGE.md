@@ -641,7 +641,9 @@ on the **Categorías** page (`/categories`).
   with PostgreSQL's `lower()`, so it follows the database's locale.
 - **Probar** previews a keyword with its match type, before or after you save the rule: how many
   transactions contain it, how many are still waiting for a category, and the
-  20 most recent matches with their current category.
+  20 most recent matches with their current category. Its search box narrows
+  the matches by their original or displayed description (the rule itself
+  only ever reads the original).
 
 When categories are assigned:
 
@@ -839,7 +841,7 @@ All API routes are under `/api/`:
 | GET | `/api/categories/suggestions` | `{ suggestions }`: uncategorized rows grouped by description with their suggested category, count, latest date and a sample transaction id; dismissed ones left out |
 | POST | `/api/categories/suggestions/apply` | `{ description, categoryId }`: categorizes (manual) the uncategorized rows with that description once; returns `{ updatedCount }` |
 | POST | `/api/categories/suggestions/dismiss` | `{ description, categoryId }`: stops suggesting that category for that normalised description |
-| GET | `/api/categories/rules/preview` | Transactions a keyword would match (`?keyword=`, optional `&matchType=exact`) |
+| GET | `/api/categories/rules/preview` | Transactions a keyword would match (`?keyword=`, optional `&matchType=exact`; `&q=` narrows the matches and their counts to every word in the original or the displayed description) |
 | GET/POST/PUT/DELETE | `/api/fixed-expenses` | Budget items CRUD (Presupuesto); `kind` is `fixed` (default), `estimated` or `savings` |
 | GET/PUT | `/api/budget-settings` | `{ monthlyIncome }`: the monthly income the budget splits (0 until saved); PUT takes a whole, non-negative CLP amount |
 | GET/POST/PUT/DELETE | `/api/transfers` | Internal transfers (POST needs distinct CLP `fromProductId` + `toProductId`); GET includes the linked `fromTransaction` / `toTransaction` (original `description` and shown `displayDescription`) |
