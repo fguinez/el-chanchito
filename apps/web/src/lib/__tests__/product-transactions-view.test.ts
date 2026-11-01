@@ -139,6 +139,32 @@ describe("productTransactionsView", () => {
     expect(unknown.matching).toHaveLength(1);
   });
 
+  it("says how many movements without a status a billing filter hides", () => {
+    expect(view({ billingFilter: "billed" }).unknownNote).toBe(
+      "1 movimiento sin estado no aparece con este filtro."
+    );
+    const twoUnknown = [...CARD_ROWS, row("f", "Compra manual", null)];
+    expect(
+      view({ rows: twoUnknown, billingFilter: "unbilled" }).unknownNote
+    ).toBe("2 movimientos sin estado no aparecen con este filtro.");
+    // Only those the search would keep.
+    expect(
+      view({ rows: twoUnknown, billingFilter: "unbilled", search: "super" })
+        .unknownNote
+    ).toBeNull();
+    expect(
+      view({ rows: twoUnknown, billingFilter: "unbilled", search: "manual" })
+        .unknownNote
+    ).toBe("2 movimientos sin estado no aparecen con este filtro.");
+    // Todos shows them, and a list without statuses has no filter.
+    expect(view().unknownNote).toBeNull();
+    expect(
+      view({ showBilling: false, billingFilter: "billed" }).unknownNote
+    ).toBeNull();
+    const allKnown = CARD_ROWS.filter((r) => r.billing != null);
+    expect(view({ rows: allKnown, billingFilter: "billed" }).unknownNote).toBeNull();
+  });
+
   it("says why the table is empty", () => {
     expect(view({ rows: [] }).emptyMessage).toBe(
       "Sin transacciones registradas para este producto."

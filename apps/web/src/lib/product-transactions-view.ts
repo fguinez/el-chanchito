@@ -82,6 +82,9 @@ export interface ProductTransactionsView<T> {
   description: string;
   /** Under the controls when the search or filter runs over a cut list. */
   coverageNote: string | null;
+  /** Under the controls when the billing filter hides movements with no
+   *  status (they show only under Todos) that the search would keep. */
+  unknownNote: string | null;
   /** Instead of the table, when nothing is stored or nothing matches. */
   emptyMessage: string | null;
   /** Next to "Ver más" while more matching rows remain. */
@@ -125,6 +128,10 @@ export function productTransactionsView<T extends ListedTransaction>(input: {
     : rows;
   const matching = filterByBilling(searched, billingFilter);
   const shown = matching.slice(0, input.visible);
+  const hiddenUnknown =
+    billingFilter === "all"
+      ? 0
+      : searched.filter((row) => row.billing == null).length;
 
   const noun = total === 1 ? "transacción" : "transacciones";
   const description =
@@ -161,6 +168,12 @@ export function productTransactionsView<T extends ListedTransaction>(input: {
       filtering && truncated
         ? `${searching ? "La búsqueda" : "El filtro"} cubre las ${total} transacciones más recientes.`
         : null,
+    unknownNote:
+      hiddenUnknown === 0
+        ? null
+        : hiddenUnknown === 1
+          ? "1 movimiento sin estado no aparece con este filtro."
+          : `${hiddenUnknown} movimientos sin estado no aparecen con este filtro.`,
     emptyMessage,
     pagingNote:
       matching.length > shown.length

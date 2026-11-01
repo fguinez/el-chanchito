@@ -182,6 +182,11 @@ function TransactionsList({
                 {view.coverageNote}
               </p>
             )}
+            {view.unknownNote && (
+              <p className="text-xs text-muted-foreground">
+                {view.unknownNote}
+              </p>
+            )}
           </div>
           {view.emptyMessage ? (
             <p className="text-muted-foreground">{view.emptyMessage}</p>
