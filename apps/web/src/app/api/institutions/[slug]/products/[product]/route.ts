@@ -10,7 +10,12 @@ import {
   transactions,
 } from "@/lib/db/schema";
 import { and, eq, desc } from "drizzle-orm";
-import { displayDescription, notDeleted } from "@/lib/db/transactions";
+import {
+  displayDescription,
+  newestTransactionsFirst,
+  notDeleted,
+  PRODUCT_TRANSACTIONS_LIMIT,
+} from "@/lib/db/transactions";
 import { rateInfoFor, ratesFor, santiagoDay, toClp } from "@/lib/rates";
 import { getRateBook } from "@/lib/rate-book";
 import { isRetiredGhost } from "@/lib/retired-products";
@@ -29,8 +34,6 @@ type Context = { params: Promise<{ slug: string; product: string }> };
 
 /** Cap the returned history so a long-lived product can't bloat the page. */
 const MAX_HISTORY_POINTS = 500;
-/** Cap the returned transactions (most recent kept). */
-const MAX_TRANSACTIONS = 500;
 /** Cap the returned daily closes (most recent kept): about five years of
  *  trading days. */
 const MAX_PRICE_POINTS = 1300;
@@ -84,10 +87,10 @@ export interface ProductParent {
  * GET /api/institutions/[slug]/products/[product] — one product by its
  * institution-unique slug, with its balance-over-time history from
  * `product_snapshots` (most recent first, capped at MAX_HISTORY_POINTS) and
- * its latest MAX_TRANSACTIONS transactions (`transactionsTruncated` says
- * whether older ones were left out). `prices` are a stock's daily closes from
- * `product_prices`, oldest first (the latest MAX_PRICE_POINTS); empty for a
- * product without a ticker. `product.exchangeRate` is the rate its
+ * its latest PRODUCT_TRANSACTIONS_LIMIT transactions (`transactionsTruncated`
+ * says whether older ones were left out). `prices` are a stock's daily closes
+ * from `product_prices`, oldest first (the latest MAX_PRICE_POINTS); empty for
+ * a product without a ticker. `product.exchangeRate` is the rate its
  * CLP figures use (institution/product override or provider, with staleness;
  * see lib/rates). `billing` is a credit card's billing cycle, latest statement
  * and billed / unbilled totals as of today in Santiago, null for any other
@@ -175,13 +178,9 @@ export async function GET(_request: Request, { params }: Context) {
       .where(
         and(eq(transactions.productId, row.productId), notDeleted)
       )
-      // createdAt breaks same-day ties so the order is stable across loads.
-      .orderBy(
-        desc(transactions.transactionDate),
-        desc(transactions.createdAt)
-      )
+      .orderBy(...newestTransactionsFirst)
       // One extra row tells whether the cap dropped anything.
-      .limit(MAX_TRANSACTIONS + 1),
+      .limit(PRODUCT_TRANSACTIONS_LIMIT + 1),
     ticker
       ? db
           .select({ date: productPrices.priceDate, price: productPrices.price })
@@ -215,8 +214,8 @@ export async function GET(_request: Request, { params }: Context) {
 
   // Most recent first makes the cap drop the oldest transactions; returned
   // ascending so the client can walk the sequence forward.
-  const transactionsTruncated = txns.length > MAX_TRANSACTIONS;
-  const kept = txns.slice(0, MAX_TRANSACTIONS).reverse();
+  const transactionsTruncated = txns.length > PRODUCT_TRANSACTIONS_LIMIT;
+  const kept = txns.slice(0, PRODUCT_TRANSACTIONS_LIMIT).reverse();
   const listed = kept.map((t) => ({
     id: t.id,
     description: t.description,

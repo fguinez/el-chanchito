@@ -8,9 +8,15 @@ import {
   internalTransfers,
   products,
   transactions,
+  type BillingStatus,
   type TransferStatus,
 } from "@/lib/db/schema";
-import { displayDescription, notDeleted } from "@/lib/db/transactions";
+import {
+  displayDescription,
+  newestTransactionsFirst,
+  notDeleted,
+  PRODUCT_TRANSACTIONS_LIMIT,
+} from "@/lib/db/transactions";
 import { UUID_RE } from "@/lib/monitors/validate";
 import type { ProductKind } from "@chanchito/product-model";
 import {
@@ -21,6 +27,13 @@ import {
 } from "@/lib/transaction-location";
 import { failureBody, readJsonBody } from "@/lib/api/validation";
 import { updateTransactionSchema } from "@/lib/api/schemas";
+import {
+  effectiveBillingStatus,
+  listedBillingCycle,
+  type BillingCycleInput,
+  type TransactionBilling,
+} from "@/lib/card-billing";
+import { santiagoDay } from "@/lib/rates";
 
 // Next 16: dynamic segment params arrive as a Promise on the context arg.
 type Context = { params: Promise<{ id: string }> };
@@ -75,6 +88,10 @@ export interface TransactionDetail {
     side: "from" | "to";
     autoLinked: boolean;
   } | null;
+  /** A credit card movement's effective billing status, the one its card's
+   *  movement list shows (lib/card-billing); null on other kinds or when
+   *  nothing tells it. */
+  billing: TransactionBilling | null;
 }
 
 const detailColumns = {
@@ -99,12 +116,16 @@ const detailColumns = {
   locationLatitude: transactions.locationLatitude,
   locationLongitude: transactions.locationLongitude,
   locationIsManual: transactions.locationIsManual,
+  billingStatus: transactions.billingStatus,
+  statementDate: transactions.statementDate,
   createdAt: transactions.createdAt,
   updatedAt: transactions.updatedAt,
   productName: products.name,
   productKind: products.kind,
   productSlug: products.slug,
   productCurrency: products.currency,
+  productAttributes: products.attributes,
+  productMetrics: products.metrics,
   institutionId: institutions.id,
   institutionName: institutions.name,
   institutionSlug: institutions.slug,
@@ -114,8 +135,9 @@ const detailColumns = {
 /**
  * GET /api/transactions/[id]: the full transaction row joined with its
  * product, institution, (optional) category and the internal transfer that
- * links it, if any. 400 `{ error, field }` on a
- * malformed id, 404 `{ error }` when no transaction has that id.
+ * links it, if any, plus a credit card movement's billing status. 400
+ * `{ error, field }` on a malformed id, 404 `{ error }` when no transaction
+ * has that id.
  */
 export async function GET(_request: Request, { params }: Context) {
   const { id } = await params;
@@ -153,24 +175,27 @@ async function loadTransactionDetail(id: string) {
     );
   }
 
-  const [link] = await db
-    .select({
-      id: internalTransfers.id,
-      description: internalTransfers.description,
-      amount: internalTransfers.amount,
-      transferDate: internalTransfers.transferDate,
-      status: internalTransfers.status,
-      autoLinked: internalTransfers.autoLinked,
-      fromTransactionId: internalTransfers.fromTransactionId,
-    })
-    .from(internalTransfers)
-    .where(
-      or(
-        eq(internalTransfers.fromTransactionId, id),
-        eq(internalTransfers.toTransactionId, id)
+  const [[link], billing] = await Promise.all([
+    db
+      .select({
+        id: internalTransfers.id,
+        description: internalTransfers.description,
+        amount: internalTransfers.amount,
+        transferDate: internalTransfers.transferDate,
+        status: internalTransfers.status,
+        autoLinked: internalTransfers.autoLinked,
+        fromTransactionId: internalTransfers.fromTransactionId,
+      })
+      .from(internalTransfers)
+      .where(
+        or(
+          eq(internalTransfers.fromTransactionId, id),
+          eq(internalTransfers.toTransactionId, id)
+        )
       )
-    )
-    .limit(1);
+      .limit(1),
+    row.productKind === "credit_card" ? cardMovementBilling(row) : null,
+  ]);
 
   const detail: TransactionDetail = {
     id: row.id,
@@ -220,8 +245,39 @@ async function loadTransactionDetail(id: string) {
           autoLinked: link.autoLinked,
         }
       : null,
+    billing,
   };
   return NextResponse.json(detail);
+}
+
+/**
+ * A credit card movement's effective billing status, against the cycle its
+ * card's movement list resolves: that cycle can rest on the newest statement
+ * date among the listed movements (when the card's metrics carry none), so
+ * this reads the same newest PRODUCT_TRANSACTIONS_LIMIT rows the product
+ * route lists.
+ */
+async function cardMovementBilling(row: {
+  productId: string;
+  productAttributes: BillingCycleInput["attributes"];
+  productMetrics: BillingCycleInput["metrics"];
+  transactionDate: string;
+  billingStatus: BillingStatus | null;
+  statementDate: string | null;
+}): Promise<TransactionBilling | null> {
+  const listed = await db
+    .select({ statementDate: transactions.statementDate })
+    .from(transactions)
+    .where(and(eq(transactions.productId, row.productId), notDeleted))
+    .orderBy(...newestTransactionsFirst)
+    .limit(PRODUCT_TRANSACTIONS_LIMIT);
+  const cycle = listedBillingCycle({
+    attributes: row.productAttributes,
+    metrics: row.productMetrics,
+    transactions: listed,
+    today: santiagoDay(new Date()),
+  });
+  return effectiveBillingStatus(row, cycle);
 }
 
 // Columns of the transactions table that PATCH may write, by name, so an

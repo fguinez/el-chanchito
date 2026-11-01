@@ -396,6 +396,34 @@ export function resolveBillingCycle(
 }
 
 /**
+ * The cycle of a card whose movement list holds `transactions`: its last
+ * closing falls back on the newest statement date among them. summarizeBilling
+ * resolves the cycle this way, so anything that shows one movement's status
+ * on its own (the detail panel) must pass the same listed movements to agree
+ * with the list.
+ */
+export function listedBillingCycle(input: {
+  attributes: BillingCycleInput["attributes"];
+  metrics: BillingCycleInput["metrics"];
+  transactions: readonly Pick<BillingTransactionInput, "statementDate">[];
+  today: string;
+}): BillingCycle | null {
+  let latestStatementDate: string | null = null;
+  for (const t of input.transactions) {
+    const statementDate = plainDate(t.statementDate);
+    if (statementDate && statementDate > (latestStatementDate ?? "")) {
+      latestStatementDate = statementDate;
+    }
+  }
+  return resolveBillingCycle({
+    attributes: input.attributes,
+    metrics: input.metrics,
+    latestStatementDate,
+    today: input.today,
+  });
+}
+
+/**
  * A movement's effective billing status. The bank's "billed" always wins. The
  * bank's "unbilled" holds, except for a movement dated on or before the
  * previous closing (a charge does not stay unposted for a whole cycle, so the
@@ -512,21 +540,16 @@ export function summarizeBilling(input: {
   if (input.kind !== "credit_card") return null;
   const { transactions, today } = input;
 
-  let latestStatementDate: string | null = null;
   let oldest: string | null = null;
   for (const t of transactions) {
-    const statementDate = plainDate(t.statementDate);
-    if (statementDate && statementDate > (latestStatementDate ?? "")) {
-      latestStatementDate = statementDate;
-    }
     const date = t.transactionDate.slice(0, 10);
     if (!oldest || date < oldest) oldest = date;
   }
 
-  const cycle = resolveBillingCycle({
+  const cycle = listedBillingCycle({
     attributes: input.attributes,
     metrics: input.metrics,
-    latestStatementDate,
+    transactions,
     today,
   });
   const statement = statementFigures(input.metrics);
@@ -590,6 +613,22 @@ export function summarizeBilling(input: {
 // ---------------------------------------------------------------------------
 // Display decisions (the card page)
 // ---------------------------------------------------------------------------
+
+export const BILLING_STATUS_LABELS: Record<BillingStatus, string> = {
+  billed: "Facturado",
+  unbilled: "No facturado",
+};
+
+export type BillingFilter = "all" | BillingStatus;
+
+/** The rows `filter` keeps, by their effective status (the one the badge and
+ *  the totals use). A row without a status shows only under "all". */
+export function filterByBilling<
+  T extends { billing: TransactionBilling | null },
+>(rows: readonly T[], filter: BillingFilter): readonly T[] {
+  if (filter === "all") return rows;
+  return rows.filter((row) => row.billing?.status === filter);
+}
 
 /** How the card page labels the billed debt: nothing billed on the last
  *  statement, still owed, paid since, or not known. */

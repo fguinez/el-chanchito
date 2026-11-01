@@ -4,14 +4,17 @@ import {
   dayInMonth,
   daysBetween,
   effectiveBillingStatus,
+  filterByBilling,
   isMinimumPaid,
   isPaymentOverdue,
+  listedBillingCycle,
   olderStatementDate,
   resolveBillingCycle,
   statementFigures,
   summarizeBilling,
   type BillingCycle,
   type BillingTransactionInput,
+  type TransactionBilling,
 } from "@/lib/card-billing";
 import type { CreditCardMetrics } from "@chanchito/product-model";
 
@@ -498,6 +501,145 @@ describe("effectiveBillingStatus", () => {
 
   it("is null with neither a reported status nor a cycle", () => {
     expect(effectiveBillingStatus(txn("2026-10-16", -999999), null)).toBeNull();
+  });
+});
+
+describe("listedBillingCycle", () => {
+  const TODAY = "2026-10-31";
+
+  it("falls back on the newest statement date among the listed movements", () => {
+    const listed = [
+      txn("2026-09-10", -999999, "billed", "2026-09-15"),
+      txn("2026-10-10", -999999, "billed", "2026-10-15"),
+      txn("2026-10-12", -1000000),
+      txn("2026-10-20", -1000000),
+    ];
+    const cycle = listedBillingCycle({
+      attributes: {},
+      metrics: null,
+      transactions: listed,
+      today: TODAY,
+    });
+    expect(cycle).toMatchObject({
+      basis: "transactions",
+      lastClosing: { date: "2026-10-15", estimated: false },
+    });
+    // summarizeBilling resolves the very same cycle, so a movement's status
+    // read on its own (the detail panel) matches the list's.
+    const billing = summarizeBilling({
+      kind: "credit_card",
+      attributes: {},
+      metrics: null,
+      transactions: listed,
+      truncated: false,
+      today: TODAY,
+    })!;
+    expect(cycle).toEqual(billing.summary.cycle);
+    expect(listed.map((t) => effectiveBillingStatus(t, cycle))).toEqual(
+      billing.statuses
+    );
+  });
+
+  it("keeps the latest statement over older statement dates on the movements", () => {
+    expect(
+      listedBillingCycle({
+        attributes: cardAttributes(15, 5),
+        metrics: cardMetrics({ statement_date: "2026-10-15" }),
+        transactions: [{ statementDate: "2026-09-15" }],
+        today: TODAY,
+      })
+    ).toMatchObject({
+      basis: "statement",
+      lastClosing: { date: "2026-10-15", estimated: false },
+    });
+  });
+
+  it("is null when no listed movement carries a valid statement date", () => {
+    expect(
+      listedBillingCycle({
+        attributes: {},
+        metrics: null,
+        transactions: [{ statementDate: "2026-02-30" }, { statementDate: null }],
+        today: TODAY,
+      })
+    ).toBeNull();
+  });
+});
+
+describe("filterByBilling", () => {
+  const billed: TransactionBilling = {
+    status: "billed",
+    estimated: false,
+    statementDate: "2026-10-15",
+  };
+  const rows = [
+    { id: "billed", billing: billed },
+    {
+      id: "unbilled-estimated",
+      billing: { status: "unbilled", estimated: true, statementDate: null },
+    },
+    { id: "unknown", billing: null },
+    {
+      id: "billed-estimated",
+      billing: { status: "billed", estimated: true, statementDate: null },
+    },
+  ] satisfies { id: string; billing: TransactionBilling | null }[];
+  const ids = (kept: readonly { id: string }[]) => kept.map((row) => row.id);
+
+  it("keeps every row under Todos, those without a status too", () => {
+    expect(filterByBilling(rows, "all")).toBe(rows);
+  });
+
+  it("keeps the rows of one status, reported or estimated", () => {
+    expect(ids(filterByBilling(rows, "billed"))).toEqual([
+      "billed",
+      "billed-estimated",
+    ]);
+    expect(ids(filterByBilling(rows, "unbilled"))).toEqual([
+      "unbilled-estimated",
+    ]);
+  });
+
+  it("lists the unbilled payments and reversed pairs the No facturado total leaves out", () => {
+    const transactions = [
+      txn("2026-10-10", -999999, "billed", "2026-10-15"),
+      txn("2026-10-12", -1000000),
+      txn("2026-10-20", -999999, "unbilled"),
+      txn("2026-10-21", -1000000),
+      // A card payment the bank still lists as unbilled.
+      txn("2026-10-22", 2500000, "unbilled"),
+      // An unbilled charge and its reversal (anulación).
+      txn("2026-10-23", -2500000, "unbilled"),
+      txn("2026-10-24", 2500000),
+    ];
+    const billing = summarizeBilling({
+      kind: "credit_card",
+      attributes: {},
+      metrics: null,
+      transactions,
+      truncated: false,
+      today: "2026-10-31",
+    })!;
+    const listed = transactions.map((t, i) => ({
+      ...t,
+      billing: billing.statuses[i],
+    }));
+    const unbilled = filterByBilling(listed, "unbilled");
+    expect(unbilled.map((t) => t.transactionDate)).toEqual([
+      "2026-10-20",
+      "2026-10-21",
+      "2026-10-22",
+      "2026-10-23",
+      "2026-10-24",
+    ]);
+    // The total counts only the charges left once the reversed one drops out
+    // with its reversal; payments never count.
+    const charges = unbilled.filter((t) => t.amount < 0);
+    expect(charges).toHaveLength(3);
+    expect(billing.summary.unbilledCount).toBe(2);
+    expect(billing.summary.unbilledCharges).toBe(
+      charges.reduce((sum, t) => sum - t.amount, 0) - 2500000
+    );
   });
 });
 

@@ -402,6 +402,7 @@ export default function ProductDetailPage() {
         currency={product.currency}
         transactions={transactions}
         truncated={transactionsTruncated}
+        showBilling={product.kind === "credit_card"}
         onTransferChanged={() => setReloadKey((k) => k + 1)}
       />
     </div>

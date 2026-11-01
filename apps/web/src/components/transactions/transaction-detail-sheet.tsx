@@ -35,6 +35,7 @@ import { TransactionEditForm } from "@/components/transactions/transaction-edit-
 import { TransactionNotesField } from "@/components/transactions/transaction-notes-field";
 import { CategorySuggestionHint } from "@/components/transactions/category-suggestion-hint";
 import { SUGGESTIONS_ANCHOR } from "@/lib/transfer-suggestions";
+import { BILLING_STATUS_LABELS } from "@/lib/card-billing";
 
 type LoadResult =
   | { id: string; status: "ok"; data: TransactionDetail }
@@ -311,6 +312,18 @@ function TransactionDetailBody({
               <Muted>Sin asignar</Muted>
             )}
           </Field>
+          {txn.billing && (
+            <Field label="Facturación">
+              {BILLING_STATUS_LABELS[txn.billing.status]}
+              {txn.billing.estimated && <Muted> (estimado)</Muted>}
+              {txn.billing.statementDate && (
+                <span className="block text-xs text-muted-foreground">
+                  Estado de cuenta del{" "}
+                  {formatPlainDateEs(txn.billing.statementDate)}
+                </span>
+              )}
+            </Field>
+          )}
           <Field label="Categoría">
             <span className="inline-flex flex-wrap items-center gap-2">
               {txn.category ? txn.category.name : <Muted>Sin categoría</Muted>}
