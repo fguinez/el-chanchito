@@ -387,6 +387,141 @@ class TestParseBilled:
         assert parse_billed_movements(None) == []
 
 
+def _section(rows):
+    return {
+        "totalTransacciones": len(rows),
+        "numeroDeTransacciones": len(rows),
+        "transaccionesTarjetas": rows,
+    }
+
+
+def _charge_row(monto, descripcion="COMISION SINTETICA", fecha="22/08/2026"):
+    """A `seccionCargosImpuestosAbonos` row: signed amount, no reference."""
+    return _billed_row(
+        referencia="2208 00000000",
+        monto=monto,
+        fecha=fecha,
+        descripcion=descripcion,
+        grupo="generico",
+    )
+
+
+class TestParseBilledSections:
+    """Every row-bearing section of the national statement is read (fix A)."""
+
+    def test_charges_and_credits_section_is_read(self):
+        """Commissions and merchant credits live outside `seccionOperaciones`."""
+        # Arrange
+        payload = _billed_payload([_billed_row()])
+        payload["seccionCargosImpuestosAbonos"] = _section([_charge_row(999999)])
+
+        # Act
+        parsed = parse_billed_movements(payload, "2026-08-25")
+
+        # Assert
+        assert [m.description for m in parsed] == [
+            "COMERCIO SINTETICO",
+            "COMISION SINTETICA",
+        ]
+
+    @pytest.mark.parametrize(
+        ("monto", "expected"),
+        [
+            pytest.param(999999, Decimal(-999999), id="commission-is-an-expense"),
+            pytest.param(-1000000, Decimal(1000000), id="credit-is-income"),
+        ],
+    )
+    def test_charges_section_amounts_are_signed(self, monto, expected):
+        """Outside operations the bank signs the amount; `grupo` says nothing."""
+        # Arrange
+        payload = {"seccionCargosImpuestosAbonos": _section([_charge_row(monto)])}
+
+        # Act
+        (movement,) = parse_billed_movements(payload, "2026-08-25")
+
+        # Assert
+        assert movement.amount == expected
+
+    def test_voluntary_products_section_is_read_signed(self):
+        """Any other row-bearing section follows the signed rule too."""
+        # Arrange
+        payload = {"seccionProductosServiciosVoluntarios": _section([_charge_row(999999)])}
+
+        # Act
+        (movement,) = parse_billed_movements(payload, "2026-08-25")
+
+        # Assert
+        assert movement.amount == Decimal(-999999)
+
+    def test_installment_report_section_is_skipped(self):
+        """`seccionComprasEnCuotas` repeats installments already in operations."""
+        # Arrange
+        payload = _billed_payload([_billed_row()])
+        payload["seccionComprasEnCuotas"] = _section(
+            [_billed_row(referencia="2008 12345679", grupo="cuotas")]
+        )
+
+        # Act
+        parsed = parse_billed_movements(payload)
+
+        # Assert
+        assert [m.operation_id for m in parsed] == ["2008 12345678"]
+
+    def test_undated_subtotal_rows_are_dropped(self):
+        """The "TOTAL TARJETA" line has no `totales` flag but no date either."""
+        # Arrange
+        subtotal = _billed_row(referencia="", descripcion="TOTAL TARJETA SINTETICA")
+        subtotal["fechaTransaccionString"] = None
+        payload = _billed_payload([_billed_row(), subtotal])
+
+        # Act
+        parsed = parse_billed_movements(payload)
+
+        # Assert
+        assert [m.operation_id for m in parsed] == ["2008 12345678"]
+
+    def test_empty_or_null_sections_are_ignored(self):
+        """An empty section carries `transaccionesTarjetas: null` instead."""
+        # Arrange
+        payload = _billed_payload([_billed_row()])
+        payload["seccionCargosImpuestosAbonos"] = {"transaccionesTarjetas": None}
+        payload["seccionProductosServiciosVoluntarios"] = {"mensajeSinTransacciones": "x"}
+
+        # Act
+        parsed = parse_billed_movements(payload)
+
+        # Assert
+        assert len(parsed) == 1
+
+    def test_operations_fingerprint_is_unchanged(self):
+        """Rows already stored under the four-field key must not re-key."""
+        # Arrange
+        rows = [_billed_row(referencia="2008 00000000", monto=2500000, grupo="pagos")]
+
+        # Act
+        (movement,) = parse_billed_movements(_billed_payload(rows), "2026-08-25")
+
+        # Assert
+        assert movement.fingerprint == (
+            "20/08/2026",
+            "2500000",
+            f"VISA ****{CARD_LAST4}",
+            "2026-08-25",
+        )
+
+    def test_charges_fingerprint_carries_the_section(self):
+        """A credit can never share a key with an operations row."""
+        # Arrange
+        payload = {"seccionCargosImpuestosAbonos": _section([_charge_row(-1000000)])}
+
+        # Act
+        (movement,) = parse_billed_movements(payload, "2026-08-25")
+
+        # Assert
+        assert movement.operation_id is None
+        assert movement.fingerprint[-1] == "seccionCargosImpuestosAbonos"
+
+
 class TestStatementDates:
     def test_newest_first_and_bounded(self):
         payload = {

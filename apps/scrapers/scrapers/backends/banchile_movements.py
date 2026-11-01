@@ -722,6 +722,10 @@ def parse_unbilled_movements(payload) -> list[BanChileMovement]:
 
 
 _BARE_DDMM_RE = re.compile(r"^\d{4}$")
+# The national statement's section whose amounts are unsigned (`grupo` carries
+# the direction); every other section signs them (`parse_billed_movement`).
+_OPERATIONS_SECTION = "seccionOperaciones"
+_NATIONAL_SKIPPED_SECTIONS = frozenset({"seccionComprasEnCuotas"})
 # A statement row's installment counter, "NN/NN" (observed as "01/NN").
 _CUOTAS_RE = re.compile(r"^\s*(\d{1,3})\s*/\s*(\d{1,3})\s*$")
 
@@ -751,7 +755,9 @@ def billed_reference(raw_reference) -> Optional[str]:
     return reference
 
 
-def parse_billed_movement(raw, fecha_facturacion: str = ""):
+def parse_billed_movement(
+    raw, fecha_facturacion: str = "", section: str = _OPERATIONS_SECTION
+):
     """One `transaccionesTarjetas` row -> a BanChileMovement (or None).
 
     `totales: true` rows are the section summary lines the SPA prints under
@@ -773,9 +779,19 @@ def parse_billed_movement(raw, fecha_facturacion: str = ""):
     for the row, and `numReferencia`'s "DDMM" prefix carries no year, so nothing
     here is a trustworthy posting date and `accounting_date` stays NULL.
 
+    That holds for `seccionOperaciones` only. The other row-bearing sections
+    (`seccionCargosImpuestosAbonos`: commissions, interest, stamp tax, debt
+    transfers and merchant credits; `seccionProductosServiciosVoluntarios`)
+    SIGN `montoTransaccion` like the unbilled leg: a charge is positive and a
+    credit negative, and their `grupo` ("generico") says nothing about the
+    direction. So outside `seccionOperaciones` the sign is simply flipped.
+
     The fallback identity (for a row whose reference is absent or all zeros) is
-    date + amount + card + statement date; the merchant and the `grupo` section
-    name are deliberately excluded, since keying on either is the issue #56 bug.
+    date + amount + card + statement date; the merchant and the `grupo` name
+    are deliberately excluded, since keying on either is the issue #56 bug.
+    A row outside `seccionOperaciones` also carries its `section`, so a credit
+    there can never share a key with an operations row; operations rows keep
+    the four-field identity they were always stored under.
     """
     if not isinstance(raw, dict):
         return None
@@ -786,10 +802,20 @@ def parse_billed_movement(raw, fecha_facturacion: str = ""):
     if tx_date is None:
         return None
 
-    if _text(raw.get("grupo")).lower() == "pagos":
+    if section != _OPERATIONS_SECTION:
+        amount = Decimal(-int(round(monto)))
+    elif _text(raw.get("grupo")).lower() == "pagos":
         amount = Decimal(int(round(abs(monto))))
     else:
         amount = Decimal(-int(round(monto)))
+    fingerprint = (
+        _fingerprint_value(raw.get("fechaTransaccionString")),
+        _fingerprint_value(raw.get("montoTransaccion")),
+        _fingerprint_value(raw.get("nombreTarjeta")),
+        _text(fecha_facturacion),
+    )
+    if section != _OPERATIONS_SECTION:
+        fingerprint += (_text(section),)
 
     description = (
         _text(raw.get("descripcion")) or _text(raw.get("comercio")) or "Movimiento"
@@ -801,12 +827,7 @@ def parse_billed_movement(raw, fecha_facturacion: str = ""):
         amount=amount,
         transaction_date=tx_date,
         operation_id=billed_reference(raw.get("numReferencia")),
-        fingerprint=(
-            _fingerprint_value(raw.get("fechaTransaccionString")),
-            _fingerprint_value(raw.get("montoTransaccion")),
-            _fingerprint_value(raw.get("nombreTarjeta")),
-            _text(fecha_facturacion),
-        ),
+        fingerprint=fingerprint,
         statement_date=_text(fecha_facturacion),
         # The national statement reports the merchant's city, never a country.
         location=card_location(raw.get("ciudad"), None),
@@ -814,22 +835,46 @@ def parse_billed_movement(raw, fecha_facturacion: str = ""):
     )
 
 
+def _national_sections(payload: dict) -> list[str]:
+    """The national statement's row-bearing `seccion*` keys, operations first.
+
+    `seccionComprasEnCuotas` is left out: the SPA renders it as "Información
+    Compra en Cuotas en Período", a report on installment plans whose billed
+    installment is already a `seccionOperaciones` row (`grupo: "cuotas"`), so
+    reading it would count the installment twice.
+    """
+    names = [
+        name
+        for name, value in payload.items()
+        if isinstance(name, str)
+        and name.startswith("seccion")
+        and name not in _NATIONAL_SKIPPED_SECTIONS
+        and isinstance(value, dict)
+        and isinstance(value.get("transaccionesTarjetas"), list)
+    ]
+    return sorted(names, key=lambda name: name != _OPERATIONS_SECTION)
+
+
 def parse_billed_movements(payload, fecha_facturacion: str = "") -> list[BanChileMovement]:
-    """Every real row of a `resumen-por-fecha` response, summaries dropped."""
+    """Every real row of a national `resumen-por-fecha` response.
+
+    Every row-bearing section is read (see `_national_sections`), not only
+    `seccionOperaciones`: commissions, interest, taxes and merchant credits
+    live in `seccionCargosImpuestosAbonos`. Summary lines are dropped: the
+    `totales: true` group totals, and the per-card "TOTAL TARJETA" subtotal,
+    which has no `totales` flag but no transaction date either (and so is
+    dropped by `parse_billed_movement`).
+    """
     if not isinstance(payload, dict):
         return []
-    seccion = payload.get("seccionOperaciones")
-    if not isinstance(seccion, dict):
-        return []
-    rows = seccion.get("transaccionesTarjetas")
-    if not isinstance(rows, list):
-        return []
     movements = []
-    for raw in rows:
-        if isinstance(raw, dict) and raw.get("totales"):
-            continue  # a group summary line, not a movement
-        movement = parse_billed_movement(raw, fecha_facturacion)
-        if movement is not None:
+    for section in _national_sections(payload):
+        for raw in payload[section]["transaccionesTarjetas"]:
+            if isinstance(raw, dict) and raw.get("totales"):
+                continue  # a group summary line, not a movement
+            movement = parse_billed_movement(raw, fecha_facturacion, section)
+            if movement is None:
+                continue
             movements.append(movement)
     return movements
 
