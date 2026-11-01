@@ -65,6 +65,7 @@ import {
   rangeChange,
   type ProductPricePoint,
 } from "@/lib/price-history";
+import type { TransactionBilling } from "@/lib/card-billing";
 import type { ProductMetrics } from "@chanchito/product-model";
 
 export interface ProductTransaction {
@@ -85,6 +86,9 @@ export interface ProductTransaction {
   /** Linked to an internal transfer: left out of Ingresos/Gastos, still part
    *  of the balance walk. */
   isInternalTransfer: boolean;
+  /** A credit card movement's effective billing status; null on other kinds
+   *  or when nothing tells it. */
+  billing: TransactionBilling | null;
 }
 
 export interface ProductHistoryPoint {

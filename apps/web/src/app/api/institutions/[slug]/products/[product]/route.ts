@@ -11,7 +11,7 @@ import {
 } from "@/lib/db/schema";
 import { and, eq, desc } from "drizzle-orm";
 import { displayDescription, notDeleted } from "@/lib/db/transactions";
-import { rateInfoFor, ratesFor, toClp } from "@/lib/rates";
+import { rateInfoFor, ratesFor, santiagoDay, toClp } from "@/lib/rates";
 import { getRateBook } from "@/lib/rate-book";
 import { isRetiredGhost } from "@/lib/retired-products";
 import {
@@ -22,6 +22,7 @@ import {
 import type { ProductKind, ProductMetrics } from "@/lib/db/schema";
 import { formatLocationText } from "@/lib/transaction-location";
 import { productTicker, type ProductPricePoint } from "@/lib/price-history";
+import { summarizeBilling, type TransactionBilling } from "@/lib/card-billing";
 
 // Next 16: dynamic segment params arrive as a Promise on the context arg.
 type Context = { params: Promise<{ slug: string; product: string }> };
@@ -64,6 +65,9 @@ export interface ProductTransaction {
   /** Linked to an internal transfer: left out of Ingresos/Gastos, still part
    *  of the balance. */
   isInternalTransfer: boolean;
+  /** A credit card movement's effective billing status (lib/card-billing);
+   *  null on other kinds or when nothing tells it. */
+  billing: TransactionBilling | null;
 }
 
 /** The product this one hangs from (debit card -> checking, línea -> cta. cte.). */
@@ -85,7 +89,11 @@ export interface ProductParent {
  * `product_prices`, oldest first (the latest MAX_PRICE_POINTS); empty for a
  * product without a ticker. `product.exchangeRate` is the rate its
  * CLP figures use (institution/product override or provider, with staleness;
- * see lib/rates). Returns 404 when the institution or the product is unknown.
+ * see lib/rates). `billing` is a credit card's billing cycle, latest statement
+ * and billed / unbilled totals as of today in Santiago, null for any other
+ * kind; each transaction carries its effective billing status (see
+ * lib/card-billing). Returns 404 when the institution or the product is
+ * unknown.
  */
 export async function GET(_request: Request, { params }: Context) {
   const { slug, product } = await params;
@@ -156,6 +164,8 @@ export async function GET(_request: Request, { params }: Context) {
         locationName: transactions.locationName,
         locationCity: transactions.locationCity,
         locationCountry: transactions.locationCountry,
+        billingStatus: transactions.billingStatus,
+        statementDate: transactions.statementDate,
       })
       .from(transactions)
       // displayDescription resolves an alias against products.currency (V035),
@@ -206,24 +216,41 @@ export async function GET(_request: Request, { params }: Context) {
   // Most recent first makes the cap drop the oldest transactions; returned
   // ascending so the client can walk the sequence forward.
   const transactionsTruncated = txns.length > MAX_TRANSACTIONS;
-  const productTransactions: ProductTransaction[] = txns
-    .slice(0, MAX_TRANSACTIONS)
-    .reverse()
-    .map((t) => ({
-      id: t.id,
-      description: t.description,
-      rawDescription: t.rawDescription,
-      amount: Number(t.amount),
-      transactionDate: new Date(t.transactionDate).toISOString().slice(0, 10),
-      source: t.source,
-      externalId: t.externalId,
-      isInternalTransfer: t.isInternalTransfer,
-      location: formatLocationText({
-        name: t.locationName,
-        city: t.locationCity,
-        country: t.locationCountry,
-      }),
-    }));
+  const kept = txns.slice(0, MAX_TRANSACTIONS).reverse();
+  const listed = kept.map((t) => ({
+    id: t.id,
+    description: t.description,
+    rawDescription: t.rawDescription,
+    amount: Number(t.amount),
+    transactionDate: isoDay(t.transactionDate),
+    source: t.source,
+    externalId: t.externalId,
+    isInternalTransfer: t.isInternalTransfer,
+    location: formatLocationText({
+      name: t.locationName,
+      city: t.locationCity,
+      country: t.locationCountry,
+    }),
+  }));
+
+  // A credit card's billing over the loaded movements; null for other kinds.
+  const billing = summarizeBilling({
+    kind: row.kind,
+    attributes: row.attributes,
+    metrics: row.metrics,
+    transactions: listed.map((t, i) => ({
+      amount: t.amount,
+      transactionDate: t.transactionDate,
+      billingStatus: kept[i].billingStatus,
+      statementDate: kept[i].statementDate && isoDay(kept[i].statementDate),
+    })),
+    truncated: transactionsTruncated,
+    today: santiagoDay(new Date()),
+  });
+  const productTransactions: ProductTransaction[] = listed.map((t, i) => ({
+    ...t,
+    billing: billing?.statuses[i] ?? null,
+  }));
 
   // Newest first makes the cap drop the oldest closes; returned ascending.
   const prices: ProductPricePoint[] = priceRows
@@ -274,8 +301,14 @@ export async function GET(_request: Request, { params }: Context) {
     history,
     transactions: productTransactions,
     transactionsTruncated,
+    billing: billing?.summary ?? null,
     prices,
   });
+}
+
+/** Plain YYYY-MM-DD of a DATE column value. */
+function isoDay(value: string): string {
+  return new Date(value).toISOString().slice(0, 10);
 }
 
 /** The parent product's identity for the detail page, or null when it no
