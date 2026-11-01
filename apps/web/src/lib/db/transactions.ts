@@ -12,11 +12,14 @@ export const notDeleted = isNull(transactions.deletedAt);
  *  shows one movement's billing status loads them too (lib/card-billing). */
 export const PRODUCT_TRANSACTIONS_LIMIT = 500;
 
-/** A product's movements newest first; createdAt breaks same-day ties so the
- *  order (and so which rows PRODUCT_TRANSACTIONS_LIMIT keeps) is stable. */
+/** A product's movements newest first: createdAt breaks same-day ties, and the
+ *  id breaks the ties left (rows inserted in one statement share createdAt),
+ *  so the order, and so which rows PRODUCT_TRANSACTIONS_LIMIT keeps, is the
+ *  same on every load and in every route that reads it. */
 export const newestTransactionsFirst = [
   desc(transactions.transactionDate),
   desc(transactions.createdAt),
+  desc(transactions.id),
 ];
 
 /** displayDescription over a given transactions table and the products table

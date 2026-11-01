@@ -43,6 +43,7 @@ describe.skipIf(!ADMIN_URL)("detail panel billing vs the card's list (real Postg
   let productRoute: ProductRoute;
   let detailRoute: DetailRoute;
   let olderBilledId: string;
+  let tiedCard: string;
 
   beforeAll(async () => {
     admin = postgres(ADMIN_URL as string, { max: 1 });
@@ -75,7 +76,7 @@ describe.skipIf(!ADMIN_URL)("detail panel billing vs the card's list (real Postg
         INSERT INTO products (account_id, kind, name, default_name, slug, currency,
           external_ref, attributes, metrics)
         VALUES (${account.id}, 'credit_card', 'Tarjeta de prueba', 'Tarjeta de prueba',
-          ${slug}, 'CLP', ${`tarjeta-${last4}`}, ${sql.json(attributes)},
+          ${slug}, 'CLP', ${slug}, ${sql.json(attributes)},
           ${sql.json(metrics)})
         RETURNING id`;
       return row.id as string;
@@ -113,6 +114,15 @@ describe.skipIf(!ADMIN_URL)("detail panel billing vs the card's list (real Postg
         source)
       SELECT ${longCard}, 'COMPRA MANUAL', -999999, '2026-10-01', 'manual'
       FROM generate_series(1, 500)`;
+
+    // 501 movements tied on date and created_at (one INSERT): only the id
+    // decides which 500 the page lists.
+    tiedCard = await card("tarjeta-empate", "1234");
+    await sql`
+      INSERT INTO transactions (product_id, description, amount, transaction_date,
+        source)
+      SELECT ${tiedCard}, 'COMPRA MANUAL', -999999, '2026-10-01', 'manual'
+      FROM generate_series(1, 501)`;
   });
 
   afterAll(async () => {
@@ -188,5 +198,17 @@ describe.skipIf(!ADMIN_URL)("detail panel billing vs the card's list (real Postg
         statementDate: "2026-01-15",
       });
     });
+  });
+
+  it("cuts a fully tied list at the same rows on every load", async () => {
+    const newestIds = await sql`
+      SELECT id FROM transactions WHERE product_id = ${tiedCard}
+      ORDER BY id DESC LIMIT 500`;
+    const expected = newestIds.map((r) => r.id as string).sort();
+    for (let load = 0; load < 2; load++) {
+      const { transactions, transactionsTruncated } = await listed("tarjeta-empate");
+      expect(transactionsTruncated).toBe(true);
+      expect(transactions.map((t) => t.id).sort()).toEqual(expected);
+    }
   });
 });
