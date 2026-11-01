@@ -596,6 +596,62 @@ class TestBilledFingerprintCollisions:
         assert len(kept) == 2
 
 
+class TestBilledStatementCount:
+    """`BANCHILE_BILLED_STATEMENTS` sets how far back the billed legs read (fix F)."""
+
+    def test_defaults_to_two(self, monkeypatch):
+        """Unset, every scrape reads the newest two statements as before."""
+        # Arrange
+        monkeypatch.delenv("BANCHILE_BILLED_STATEMENTS", raising=False)
+
+        # Act
+        count = movements_mod.billed_statement_count()
+
+        # Assert
+        assert count == 2
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            pytest.param("12", 12, id="backfill"),
+            pytest.param(" 1 ", 1, id="padded-minimum"),
+            pytest.param("", 2, id="blank"),
+            pytest.param("0", 2, id="zero"),
+            pytest.param("13", 2, id="over-the-portal-limit"),
+            pytest.param("-3", 2, id="negative"),
+            pytest.param("doce", 2, id="not-a-number"),
+            pytest.param("2.5", 2, id="fractional"),
+        ],
+    )
+    def test_reads_the_env_var(self, monkeypatch, raw, expected):
+        """Only a whole number from 1 to 12 is honoured; anything else is the default."""
+        # Arrange
+        monkeypatch.setenv("BANCHILE_BILLED_STATEMENTS", raw)
+
+        # Act
+        count = movements_mod.billed_statement_count()
+
+        # Assert
+        assert count == expected
+
+    def test_limits_the_statement_dates_read(self, monkeypatch):
+        """The count is what `statement_dates` is asked for."""
+        # Arrange
+        monkeypatch.setenv("BANCHILE_BILLED_STATEMENTS", "3")
+        payload = {
+            "listaNacional": [
+                {"fechaFacturacion": f"2026-0{month}-05", "existeEstadoCuentaNacional": True}
+                for month in (8, 7, 6, 5)
+            ]
+        }
+
+        # Act
+        dates = statement_dates(payload, movements_mod.billed_statement_count())
+
+        # Assert
+        assert dates == ["2026-08-05", "2026-07-05", "2026-06-05"]
+
+
 class TestStatementDates:
     def test_newest_first_and_bounded(self):
         payload = {

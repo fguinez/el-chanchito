@@ -84,6 +84,7 @@ import asyncio
 import datetime
 import logging
 import math
+import os
 import re
 import time
 from dataclasses import dataclass, field, replace
@@ -1390,8 +1391,37 @@ _MAX_CHECKING_ACCOUNTS = 4
 # How far back the billed leg reads. The unbilled leg only covers the current
 # cycle, so reading the newest two statements covers a charge that crossed the
 # billing boundary since the last run (the crossing is what issue #56 is about)
-# without walking the whole history on every scrape.
-_BILLED_STATEMENTS = 2
+# without walking the whole history on every scrape. A one-off backfill raises
+# it with BANCHILE_BILLED_STATEMENTS (the portal lists twelve periods).
+_BILLED_STATEMENTS_ENV = "BANCHILE_BILLED_STATEMENTS"
+_DEFAULT_BILLED_STATEMENTS = 2
+_MAX_BILLED_STATEMENTS = 12
+
+
+def billed_statement_count() -> int:
+    """How many statements per currency the billed legs read (default 2).
+
+    `BANCHILE_BILLED_STATEMENTS` overrides it, between 1 and 12; anything else
+    (blank, not a whole number, out of range) is logged and the default used,
+    so a typo can never stop the billed legs or walk an unbounded history.
+    """
+    raw = os.environ.get(_BILLED_STATEMENTS_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_BILLED_STATEMENTS
+    try:
+        count = int(raw)
+    except ValueError:
+        count = 0
+    if not 1 <= count <= _MAX_BILLED_STATEMENTS:
+        logger.warning(
+            "Ignoring %s=%r (expected 1 to %d); using %d",
+            _BILLED_STATEMENTS_ENV,
+            raw,
+            _MAX_BILLED_STATEMENTS,
+            _DEFAULT_BILLED_STATEMENTS,
+        )
+        return _DEFAULT_BILLED_STATEMENTS
+    return count
 
 # Two layers bound each in-page POST: `_evaluate_bounded` gives up on the
 # whole call after `_POST_JSON_CALL_TIMEOUT_MS`, even if the renderer stops
@@ -2282,7 +2312,7 @@ def _read_billed_leg(
         statements = [(loaded, payload)]
 
         dates = dates_of(
-            fechas_payloads[-1] if fechas_payloads else None, _BILLED_STATEMENTS
+            fechas_payloads[-1] if fechas_payloads else None, billed_statement_count()
         )
         for fecha in dates:
             if not fecha or fecha == loaded or not requests:

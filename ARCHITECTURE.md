@@ -635,8 +635,10 @@ remembered account's automatic `getCartola`: a payload whose `moneda` or account
 is not the drive's is never read); the card's unbilled movements, which the SPA
 loads when the card page opens (from home it first waits, bounded, for the
 dashboard's checking row: a click on a dashboard still rendering is lost); and
-the card's billed statements, the newest two,
-read by replaying the SPA's own statement request with a different
+the card's billed statements, the newest two (`BANCHILE_BILLED_STATEMENTS`
+raises it, up to 12, for a one-off backfill), every row-bearing section of
+each (commissions, interest, taxes and merchant credits live outside
+`seccionOperaciones`, with signed amounts), read by replaying the SPA's own statement request with a different
 `fechaFacturacion`. Only calls whose body is fully known are composed (the
 per-movement `cartola/detalle-glosa` that carries the operation id, spaced and
 bounded); everything else is captured from the portal's own traffic, because the
@@ -1326,6 +1328,7 @@ Browser → web POST /api/institutions/refresh {institution?}
 | `SCRAPER_CONTROL_HOST` | scrapers | Address the control server binds (default `127.0.0.1`; Compose sets `0.0.0.0`) |
 | `SCRAPER_CONTROL_URL` | web | Base URL the refresh proxy calls (e.g. `http://scrapers:8080`) |
 | `BANCHILE_LOGIN_COOLDOWN_MINUTES` | scrapers | Minimum minutes between full BanChile logins, which also gates manual refreshes (default `10`; `0` disables) |
+| `BANCHILE_BILLED_STATEMENTS` | scrapers | Card statements per currency each BanChile run reads, newest first (default `2`, at most `12`); raise it for a one-off backfill of older billed history |
 
 ## Dashboard authentication
 

@@ -94,6 +94,9 @@ services:
       # Minimum minutes between full Banco de Chile logins, which also gates
       # manual refreshes (empty = default 10).
       BANCHILE_LOGIN_COOLDOWN_MINUTES: ${BANCHILE_LOGIN_COOLDOWN_MINUTES:-}
+      # Card statements per currency each Banco de Chile run reads (empty =
+      # default 2, at most 12); raise it only for a one-off backfill.
+      BANCHILE_BILLED_STATEMENTS: ${BANCHILE_BILLED_STATEMENTS:-}
       # On-demand refresh: the web app POSTs to this port to trigger a scrape.
       SCRAPER_CONTROL_PORT: ${SCRAPER_CONTROL_PORT:-8080}
       # All interfaces inside the container so `web` can reach it over the
