@@ -176,9 +176,9 @@ export function productIdentityChips(product: InstitutionProduct): string[] {
   if ("portfolio" in a && a.portfolio != null) chips.push(a.portfolio);
   if ("risk_profile" in a && a.risk_profile != null) chips.push(a.risk_profile);
   if ("statement_day" in a && a.statement_day != null)
-    chips.push(`corte día ${a.statement_day}`);
+    chips.push(`facturación día ${a.statement_day}`);
   if ("due_day" in a && a.due_day != null)
-    chips.push(`vence día ${a.due_day}`);
+    chips.push(`vencimiento día ${a.due_day}`);
 
   return chips;
 }
