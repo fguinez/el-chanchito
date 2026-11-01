@@ -175,27 +175,29 @@ async function loadTransactionDetail(id: string) {
     );
   }
 
-  const [link] = await db
-    .select({
-      id: internalTransfers.id,
-      description: internalTransfers.description,
-      amount: internalTransfers.amount,
-      transferDate: internalTransfers.transferDate,
-      status: internalTransfers.status,
-      autoLinked: internalTransfers.autoLinked,
-      fromTransactionId: internalTransfers.fromTransactionId,
-    })
-    .from(internalTransfers)
-    .where(
-      or(
-        eq(internalTransfers.fromTransactionId, id),
-        eq(internalTransfers.toTransactionId, id)
+  // Neither depends on the other: the transfer link, and (cards only) the
+  // movement's billing status.
+  const [[link], billing] = await Promise.all([
+    db
+      .select({
+        id: internalTransfers.id,
+        description: internalTransfers.description,
+        amount: internalTransfers.amount,
+        transferDate: internalTransfers.transferDate,
+        status: internalTransfers.status,
+        autoLinked: internalTransfers.autoLinked,
+        fromTransactionId: internalTransfers.fromTransactionId,
+      })
+      .from(internalTransfers)
+      .where(
+        or(
+          eq(internalTransfers.fromTransactionId, id),
+          eq(internalTransfers.toTransactionId, id)
+        )
       )
-    )
-    .limit(1);
-
-  const billing =
-    row.productKind === "credit_card" ? await cardMovementBilling(row) : null;
+      .limit(1),
+    row.productKind === "credit_card" ? cardMovementBilling(row) : null,
+  ]);
 
   const detail: TransactionDetail = {
     id: row.id,
