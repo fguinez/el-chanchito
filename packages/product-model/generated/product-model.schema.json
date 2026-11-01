@@ -1602,6 +1602,23 @@
           "description": "Signed amount in the transaction's currency: negative=expense, positive=income. At most 2 decimals (stored as NUMERIC(18, 2)); CLP amounts are whole numbers and may be sent as integers.",
           "title": "Amount"
         },
+        "billing_status": {
+          "anyOf": [
+            {
+              "enum": [
+                "unbilled",
+                "billed"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Whether the institution has billed the movement on a statement ('billed', facturado) or not yet ('unbilled'); None when the source does not say. Never part of a dedup key. On a stored row it only moves forward: 'unbilled' fills a status that was never reported, 'billed' replaces either, and nothing replaces 'billed'.",
+          "title": "Billing Status"
+        },
         "category_hint": {
           "anyOf": [
             {
@@ -1686,6 +1703,20 @@
           "default": null,
           "description": "First-of-month date the charge lands, for deferred/installment purchases.",
           "title": "Scheduled Month"
+        },
+        "statement_date": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Closing date of the statement that billed the movement, when the source reports it; only with billing_status 'billed'. A stored row keeps the first statement date it was given.",
+          "title": "Statement Date"
         },
         "transaction_date": {
           "description": "Date the transaction occurred.",

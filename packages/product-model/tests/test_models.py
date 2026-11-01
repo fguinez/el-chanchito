@@ -345,6 +345,9 @@ def test_scraped_transaction_mirrors_the_scraper_dataclass():
     # Without a ref it lands on the singleton product, as it always has.
     assert txn.product_external_ref is None
     assert txn.internal_transfer is False
+    # A source that says nothing about billing leaves both unreported.
+    assert txn.billing_status is None
+    assert txn.statement_date is None
 
 
 def _stock_txn(**fields) -> ScrapedTransaction:
@@ -615,6 +618,72 @@ class TestCreditCardStatement:
     def test_a_cycle_day_out_of_range_is_rejected(self, field, day):
         with pytest.raises(ValidationError):
             CreditCardAttributes(**{field: day})
+
+
+def _card_txn(**fields) -> ScrapedTransaction:
+    """A synthetic card charge; `fields` override the defaults."""
+    values = {
+        "institution": "banchile",
+        "product_kind": "credit_card",
+        "description": "COMPRA SINTETICA",
+        "amount": -999_999,
+        "transaction_date": date(2026, 1, 10),
+        "external_id": "bch_ref_00000000000",
+    }
+    values.update(fields)
+    return ScrapedTransaction(**values)
+
+
+class TestTransactionBillingStatus:
+    """`billing_status` and `statement_date` are optional, and a statement
+    date only travels with a billed movement (V044)."""
+
+    def test_a_billed_movement_carries_its_statement_date(self):
+        txn = _card_txn(billing_status="billed", statement_date=date(2026, 1, 15))
+
+        assert txn.billing_status == "billed"
+        assert txn.statement_date == date(2026, 1, 15)
+
+    def test_a_billed_movement_may_lack_a_statement_date(self):
+        """A source that only says which view a charge sat in has no date."""
+        txn = _card_txn(billing_status="billed")
+
+        assert (txn.billing_status, txn.statement_date) == ("billed", None)
+
+    def test_an_unbilled_movement_has_no_statement(self):
+        txn = _card_txn(billing_status="unbilled")
+
+        assert (txn.billing_status, txn.statement_date) == ("unbilled", None)
+
+    @pytest.mark.parametrize("status", ["unbilled", None])
+    def test_a_statement_date_without_a_billed_status_is_rejected(self, status):
+        with pytest.raises(ValidationError, match="statement_date needs"):
+            _card_txn(billing_status=status, statement_date=date(2026, 1, 15))
+
+    @pytest.mark.parametrize("status", ["facturado", "BILLED", "pending", ""])
+    def test_an_unknown_status_is_rejected(self, status):
+        with pytest.raises(ValidationError):
+            _card_txn(billing_status=status)
+
+    def test_both_round_trip_through_json(self):
+        txn = _card_txn(billing_status="billed", statement_date=date(2026, 1, 15))
+
+        dumped = txn.model_dump(mode="json")
+
+        assert (dumped["billing_status"], dumped["statement_date"]) == (
+            "billed",
+            "2026-01-15",
+        )
+        assert ScrapedTransaction.model_validate(dumped) == txn
+
+    def test_the_json_schema_describes_both_fields(self):
+        props = ScrapedTransaction.model_json_schema()["properties"]
+
+        assert {"enum": ["unbilled", "billed"], "type": "string"} in props[
+            "billing_status"
+        ]["anyOf"]
+        assert {"format": "date", "type": "string"} in props["statement_date"]["anyOf"]
+        assert props["billing_status"]["default"] is None
 
 
 def _usd_rate(**fields) -> ScrapedExchangeRate:

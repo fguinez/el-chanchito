@@ -441,7 +441,10 @@ transaction lands on its institution's product of its `product_kind` and
 `product_external_ref`, on that existing product; the writer never creates a
 product for a named ref, so such a transaction waits until a product leg has
 stored it. `internal_transfer` sets the row's `is_internal_transfer` flag on
-insert only, so a user's change survives later scrapes. A third
+insert only, so a user's change survives later scrapes. `billing_status`
+(`unbilled` / `billed`) and `statement_date` say whether a card movement is on
+a statement yet; on a stored row the writer only ever moves `unbilled` to
+`billed` and fills a missing statement date. A third
 envelope, `ScrapedExchangeRate`, carries a rate an institution applies (scoped
 to one of its products through a `ProductRef`, or institution-wide); the writer
 keeps the latest one per scope in `exchange_rates` and never creates a product

@@ -10,7 +10,7 @@ on the envelope for an exchange rate), and a price history dates each point.
 import datetime
 import re
 from decimal import Decimal
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import (
     BaseModel,
@@ -41,6 +41,10 @@ TransactionAmount = Annotated[
     ),
 ]
 _CENT = Decimal("0.01")
+
+# Whether a card movement is on a statement yet (`transactions.billing_status`,
+# V044). The column's CHECK admits exactly these.
+BillingStatus = Literal["unbilled", "billed"]
 
 # Longest location text the API accepts; the dashboard enforces the same bound.
 LOCATION_TEXT_MAX_LENGTH = 200
@@ -278,6 +282,24 @@ class ScrapedTransaction(BaseModel):
             "onto a row whose location the user edited."
         ),
     )
+    billing_status: BillingStatus | None = Field(
+        None,
+        description=(
+            "Whether the institution has billed the movement on a statement "
+            "('billed', facturado) or not yet ('unbilled'); None when the "
+            "source does not say. Never part of a dedup key. On a stored row "
+            "it only moves forward: 'unbilled' fills a status that was never "
+            "reported, 'billed' replaces either, and nothing replaces 'billed'."
+        ),
+    )
+    statement_date: datetime.date | None = Field(
+        None,
+        description=(
+            "Closing date of the statement that billed the movement, when the "
+            "source reports it; only with billing_status 'billed'. A stored "
+            "row keeps the first statement date it was given."
+        ),
+    )
 
     @field_validator("location")
     @classmethod
@@ -308,6 +330,15 @@ class ScrapedTransaction(BaseModel):
             self.amount = self.amount.quantize(Decimal(1))
         else:
             self.amount = self.amount.quantize(_CENT)
+        return self
+
+    @model_validator(mode="after")
+    def _only_a_billed_movement_has_a_statement(self) -> Self:
+        if self.statement_date is not None and self.billing_status != "billed":
+            raise ValueError(
+                "statement_date needs billing_status 'billed', "
+                f"got {self.billing_status!r}"
+            )
         return self
 
 
