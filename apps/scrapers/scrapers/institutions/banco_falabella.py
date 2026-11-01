@@ -51,10 +51,12 @@ JSON a `JSON.parse` hook can see never carries its rows.
 
 Card billing (V044): a card movement is `unbilled` when read from "Ultimos
 movimientos" and `billed` from "Movimientos facturados", whose statement
-select gives the closing date stamped on its rows and on the card's
-`CreditCardMetrics.statement_date` (plus `statement_day`). A purchase on both
-tabs keeps its billed copy. Since a purchase is stored once at its full "Monto
-total", an installment purchase is billed from its first statement on.
+select gives the closing date stamped on its rows. A purchase on both tabs
+keeps its billed copy. Since a purchase is stored once at its full "Monto
+total", an installment purchase is billed from its first statement on. The
+figures both tabs print (closing, next closing and due dates, billed amount,
+minimum payment) fill the card's `CreditCardMetrics`, and the closing and due
+dates its `statement_day` / `due_day`.
 
 Verified live: the headless login, both legs, the writer invariants, a card
 payment's sign (printed "-$..." on the unbilled tab, emitted as money in), and
@@ -87,6 +89,7 @@ from scrapers.backends.banco_falabella_web import (
     RawCheckingMovement,
     RawLineBalance,
     RawMovement,
+    RawStatement,
     fetch_session,
 )
 from scrapers.base import (
@@ -173,19 +176,19 @@ def _optional_int(value) -> int | None:
 
 
 def balance_to_product(
-    balance: RawBalance, statement_date: date | None = None
+    balance: RawBalance, statement: RawStatement | None = None
 ) -> ScrapedProduct:
     """The singleton CLP CMR Mastercard product for one parsed balance.
 
     `available` is required (the headline); `limit` and `owed` ride along when
     they parsed. The masked `last4` and the brand go in attributes.
-    `statement_date` is the billed statement's closing date when the session
-    read one: it fills `metrics.statement_date` and, unless the balance carries
-    its own, `attributes.statement_day`. The due day is not read yet.
+    `statement` is what the card detail printed of the latest statement: it
+    fills the `CreditCardMetrics` statement fields, and its closing and due
+    dates are the one source of `statement_day` / `due_day`. Whatever was not
+    read stays None, which the attribute merge reads as "keep the stored one".
     """
-    statement_day = balance.statement_day
-    if statement_day is None and statement_date is not None:
-        statement_day = statement_date.day
+    statement = statement or RawStatement()
+    closing, due = statement.statement_date, statement.payment_due_date
     return ScrapedProduct(
         institution=BancoFalabellaScraper.institution,
         kind=PRODUCT_KIND,
@@ -195,15 +198,19 @@ def balance_to_product(
         attributes=CreditCardAttributes(
             last4=balance.last4,
             brand=balance.brand,
-            statement_day=statement_day,
-            due_day=balance.due_day,
+            statement_day=closing.day if closing is not None else None,
+            due_day=due.day if due is not None else None,
         ),
         metrics=CreditCardMetrics(
             available=int(balance.available),
             limit=_optional_int(balance.limit),
             owed=_optional_int(balance.owed),
             reported_as_of=None,
-            statement_date=statement_date,
+            statement_date=closing,
+            next_statement_date=statement.next_statement_date,
+            payment_due_date=due,
+            billed_amount=_optional_int(statement.billed_amount),
+            minimum_payment=_optional_int(statement.minimum_payment),
         ),
     )
 
@@ -267,7 +274,7 @@ def products_for(session: FalabellaSession) -> list[ScrapedProduct]:
     """
     products: list[ScrapedProduct] = []
     if session.balance is not None:
-        products.append(balance_to_product(session.balance, session.statement_date))
+        products.append(balance_to_product(session.balance, session.statement))
     if session.checking is not None and session.checking.available is not None:
         products.append(checking_to_product(session.checking))
     if session.line is not None and session.line.available is not None:

@@ -27,7 +27,8 @@ The browser half, in order:
      unbilled "Ultimos movimientos" tab and the current billed "Movimientos
      facturados" statement, each row tagged with its tab, and the billed rows
      with the statement's closing date off the tab's month select
-     (`statement_date_from_selects`). Iterating the month select for older
+     (`statement_date_from_selects`); the statement figures both tabs print
+     come with them (`statement_from_texts`). Iterating the month select for older
      statements is a deliberate follow-up (see `_read_billed`).
   4. The Cuenta Corriente and Línea de Crédito cards on the same dashboard give
      their balances (`checking_from_text` / `line_from_text`). Then, one
@@ -99,9 +100,8 @@ class RawBalance:
 
     `limit` is the "Cupo de compras", `owed` the "Cupo utilizado" and
     `available` the "Cupo disponible" (the headline). Amounts are whole-peso
-    Decimals; any field is None when its label was not found. `statement_day`
-    and `due_day` are reserved for the card-detail billed header and not read
-    yet, so they stay None.
+    Decimals; any field is None when its label was not found. The statement
+    and due days come from the card detail instead (`RawStatement`).
     """
 
     name: Optional[str] = None
@@ -110,8 +110,24 @@ class RawBalance:
     limit: Optional[Decimal] = None
     owed: Optional[Decimal] = None
     available: Optional[Decimal] = None
-    statement_day: Optional[int] = None
-    due_day: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class RawStatement:
+    """The CMR statement figures the card detail prints; each None when unread.
+
+    From the "Movimientos facturados" tab: `statement_date` (its month select,
+    also printed as "Fecha de facturación"), `billed_amount` ("Monto
+    facturado"), `payment_due_date` ("Fecha de vencimiento") and
+    `minimum_payment` ("Pago mínimo"), amounts in whole pesos. From the
+    "Ultimos movimientos" tab: `next_statement_date` ("Próxima facturación").
+    """
+
+    statement_date: Optional[date] = None
+    billed_amount: Optional[Decimal] = None
+    payment_due_date: Optional[date] = None
+    minimum_payment: Optional[Decimal] = None
+    next_statement_date: Optional[date] = None
 
 
 @dataclass(frozen=True)
@@ -194,8 +210,8 @@ class FalabellaSession:
 
     `balance` is the CMR Mastercard card (None when its available cupo did not
     parse) and `movements` its parsed movements across the unbilled and billed
-    tabs. `statement_date` is the closing date of the billed statement read
-    (None when the tab did not show one). `checking` and `line` are the Cuenta
+    tabs. `statement` is the card's statement figures (`RawStatement`, every
+    field None when unread). `checking` and `line` are the Cuenta
     Corriente and Línea de Crédito
     (None when the dashboard shows no such product or its available balance did
     not parse), and `checking_movements` the checking account's movements.
@@ -209,7 +225,7 @@ class FalabellaSession:
     checking: Optional[RawCheckingBalance] = None
     line: Optional[RawLineBalance] = None
     checking_movements: list[RawCheckingMovement] = field(default_factory=list)
-    statement_date: Optional[date] = None
+    statement: RawStatement = field(default_factory=RawStatement)
 
 
 # --- Pure helpers (unit-tested; no browser) -----------------------------------
@@ -249,6 +265,24 @@ _LABEL_SALDO_DISPONIBLE = "saldo disponible"
 _LABEL_SALDO_CONTABLE = "saldo contable"
 _LABEL_CUPO_AUTORIZADO = "cupo autorizado"
 _LABEL_SALDO_UTILIZADO = "saldo utilizado"
+
+# The card detail's statement labels (accent-free, lower-cased), each followed
+# by its value: in the next text on the billed tab, in the same text on the
+# unbilled one. Live, "Pago minimo" was printed without its accent.
+_LABEL_STATEMENT_DATE = "fecha de facturacion"
+_LABEL_BILLED_AMOUNT = "monto facturado"
+_LABEL_DUE_DATE = "fecha de vencimiento"
+_LABEL_MINIMUM_PAYMENT = "pago minimo"
+_LABEL_NEXT_STATEMENT = "proxima facturacion"
+_STATEMENT_DATE_LABELS = {
+    _LABEL_STATEMENT_DATE: "statement_date",
+    _LABEL_DUE_DATE: "payment_due_date",
+    _LABEL_NEXT_STATEMENT: "next_statement_date",
+}
+_STATEMENT_AMOUNT_LABELS = {
+    _LABEL_BILLED_AMOUNT: "billed_amount",
+    _LABEL_MINIMUM_PAYMENT: "minimum_payment",
+}
 
 # The línea detail's "Tasa diaria" field, read off the accent-free, lower-cased
 # page text (label and value render with no space between them).
@@ -438,6 +472,45 @@ def movements_from_rows(
     return movements
 
 
+def _labelled_value(texts: list[str], index: int, label: str) -> Optional[str]:
+    """The value printed for `label` at `texts[index]`, else None.
+
+    The rest of the same text when there is any ("Próxima facturación
+    01/02/2025"), else the next text ("Monto facturado" then "$ 999.999").
+    """
+    normalized = _normalize(texts[index])
+    if normalized != label and not normalized.startswith(label + " "):
+        return None
+    rest = normalized[len(label):].strip()
+    if rest:
+        return rest
+    return texts[index + 1] if index + 1 < len(texts) else None
+
+
+def statement_from_texts(texts: Any) -> RawStatement:
+    """The statement figures among the card detail's visible texts.
+
+    `texts` are the component's visible non-table texts in page order. Each
+    label's first occurrence is read; a date must parse as "DD/MM/YYYY" and an
+    amount must carry a "$", so a missing value (the next label read as one)
+    or a garbled one leaves that field None. Never raises.
+    """
+    if not isinstance(texts, list):
+        return RawStatement()
+    texts = [text for text in texts if isinstance(text, str)]
+    found: dict[str, Any] = {}
+    for index in range(len(texts)):
+        for label, name in _STATEMENT_DATE_LABELS.items():
+            value = _labelled_value(texts, index, label)
+            if name not in found and value is not None:
+                found[name] = parse_dmy(value)
+        for label, name in _STATEMENT_AMOUNT_LABELS.items():
+            value = _labelled_value(texts, index, label)
+            if name not in found and value is not None:
+                found[name] = parse_clp(value) if "$" in value else None
+    return RawStatement(**found)
+
+
 def statement_date_from_selects(selects: Any) -> Optional[date]:
     """The billed statement's closing date from the tab's visible selects.
 
@@ -596,9 +669,10 @@ _SURFACE_TIMEOUT_MS = 120_000
 # An empty read must hold this many polls, after its load answered, before a
 # tab counts as empty (the table renders a beat after the response lands).
 _EMPTY_CONFIRM_POLLS = 3
-# Polls given to the billed tab's statement select once its rows showed (its
-# options load progressively); without a date the rows are stamped with none.
-_STATEMENT_SELECT_POLLS = 6
+# Polls given to the billed tab's statement select, and to each tab's
+# statement labels, once its rows showed (the select's options load
+# progressively); what never shows is left None.
+_STATEMENT_POLLS = 6
 
 # The movements BFF calls (see `_MovementsFeed`): each tab load is a chain of
 # `/movement-cc/*` calls that ends in `.../credit-card/movements`.
@@ -706,6 +780,19 @@ _STATEMENT_SELECTS_JS = (
         options: select.options.length,
       };
     });
+}"""
+)
+
+# The component's visible texts outside the movements table, in page order
+# (its tab labels, the statement figures and their labels).
+_CARD_TEXTS_JS = (
+    "() => {"
+    + _MOVEMENTS_NODES_JS
+    + """
+  return movementsNodes()
+    .filter((el) => !el.children.length && isVisible(el) && !el.closest('table'))
+    .map((el) => (el.textContent || '').trim())
+    .filter((text) => text);
 }"""
 )
 
@@ -1290,7 +1377,7 @@ def _read_surface(
 
 def _read_statement_date(page) -> Optional[date]:
     """The showing statement's closing date off the tab's selects, else None."""
-    for _ in range(_STATEMENT_SELECT_POLLS):
+    for _ in range(_STATEMENT_POLLS):
         try:
             found = statement_date_from_selects(page.evaluate(_STATEMENT_SELECTS_JS))
         except Exception:
@@ -1302,12 +1389,52 @@ def _read_statement_date(page) -> Optional[date]:
     return None
 
 
+def _read_statement_texts(page, label: str) -> RawStatement:
+    """The showing tab's statement figures, once `label` shows (else what did)."""
+    texts: list = []
+    for _ in range(_STATEMENT_POLLS):
+        try:
+            found = page.evaluate(_CARD_TEXTS_JS)
+        except Exception:
+            found = None
+        if isinstance(found, list):
+            texts = found
+            if any(isinstance(t, str) and _normalize(t).startswith(label) for t in texts):
+                break
+        page.wait_for_timeout(_TABLE_POLL_MS)
+    return statement_from_texts(texts)
+
+
+def billed_statement(select_date: Optional[date], header: RawStatement) -> RawStatement:
+    """The billed tab's statement: its select's date and its printed figures.
+
+    The select and the "Fecha de facturación" it prints were the same date
+    live; either alone is taken. If both show and disagree the tab was caught
+    mid-render, so nothing is kept (no row is stamped). A due date before the
+    closing date is dropped. The next closing date is the other tab's.
+    """
+    printed = header.statement_date
+    if select_date is not None and printed is not None and select_date != printed:
+        logger.warning("Banco Falabella: the billed statement's dates disagree; ignored")
+        return RawStatement()
+    closing = select_date or printed
+    due = header.payment_due_date
+    if closing is not None and due is not None and due < closing:
+        due = None
+    return RawStatement(
+        statement_date=closing,
+        billed_amount=header.billed_amount,
+        payment_due_date=due,
+        minimum_payment=header.minimum_payment,
+    )
+
+
 def _read_billed(
     page,
     feed: _MovementsFeed,
     warnings: list[str],
     previous: Optional[list[list[str]]] = None,
-) -> tuple[list[RawMovement], Optional[date]]:
+) -> tuple[list[RawMovement], RawStatement]:
     """Read the current billed statement (the "Movimientos facturados" tab).
 
     Only the statement showing by default (the most recent) is read. Iterating
@@ -1319,15 +1446,17 @@ def _read_billed(
     tab's rows, ignored if still on screen right after the switch.
 
     The select's showing option is the statement's closing date
-    (`statement_date_from_selects`); it is returned with the movements and
-    stamped on each of them, or None when it did not show.
+    (`statement_date_from_selects`), stamped on each movement; the tab's
+    printed figures come with it (`billed_statement`).
     """
     rows = _read_surface(page, _BILLED_TAB, feed, previous)
     if rows is None:
         warnings.append("Banco Falabella: billed movements surface never loaded")
-        return [], None
-    statement_date = _read_statement_date(page)
-    return movements_from_rows(rows, "billed", statement_date), statement_date
+        return [], RawStatement()
+    statement = billed_statement(
+        _read_statement_date(page), _read_statement_texts(page, _LABEL_STATEMENT_DATE)
+    )
+    return movements_from_rows(rows, "billed", statement.statement_date), statement
 
 
 def read_session(page) -> FalabellaSession:
@@ -1352,7 +1481,7 @@ def read_session(page) -> FalabellaSession:
         logger.warning("Banco Falabella: the card available cupo did not parse")
         warnings.append("Banco Falabella: the card available cupo did not parse")
         balance = None
-    movements, statement_date = _read_card_movements(page, feed, warnings)
+    movements, statement = _read_card_movements(page, feed, warnings)
 
     checking, line = _guarded(
         lambda: _read_dashboard_products(page, home_url, warnings),
@@ -1383,7 +1512,7 @@ def read_session(page) -> FalabellaSession:
         checking=checking,
         line=line,
         checking_movements=checking_movements,
-        statement_date=statement_date,
+        statement=statement,
     )
 
 
@@ -1420,16 +1549,18 @@ def _read_dashboard_products(
 
 def _read_card_movements(
     page, feed: _MovementsFeed, warnings: list[str]
-) -> tuple[list[RawMovement], Optional[date]]:
+) -> tuple[list[RawMovement], RawStatement]:
     """The CMR card detail's unbilled and current billed movements.
 
-    Also returns the billed statement's closing date (None when unknown).
+    Also returns the statement figures both tabs print: the billed one's
+    (`_read_billed`) plus the unbilled one's "Próxima facturación", kept only
+    when it falls after the billed closing date.
     """
     # The unbilled tab loads as the card detail opens, before it is clicked.
     since = feed.mark()
     if not _open_card_detail(page):
         warnings.append("Banco Falabella: could not open the card detail")
-        return [], None
+        return [], RawStatement()
 
     movements: list[RawMovement] = []
     unbilled = _read_surface(page, _UNBILLED_TAB, feed, since=since)
@@ -1437,10 +1568,14 @@ def _read_card_movements(
         warnings.append("Banco Falabella: unbilled movements surface never loaded")
     else:
         movements.extend(movements_from_rows(unbilled, "unbilled"))
+    upcoming = _read_statement_texts(page, _LABEL_NEXT_STATEMENT).next_statement_date
 
-    billed, statement_date = _read_billed(page, feed, warnings, previous=unbilled)
+    billed, statement = _read_billed(page, feed, warnings, previous=unbilled)
     movements.extend(billed)
-    return movements, statement_date
+    closing = statement.statement_date
+    if upcoming is not None and (closing is None or upcoming > closing):
+        statement = replace(statement, next_statement_date=upcoming)
+    return movements, statement
 
 
 def _pick_grid(texts: Any, name: str) -> Optional[str]:

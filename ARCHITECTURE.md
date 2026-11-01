@@ -762,9 +762,15 @@ emitted once at its full "Monto total" (not one row per installment). The tab a
 row was read from is its billing status (V044); a purchase seen on both tabs
 keeps its billed copy, and billed rows carry the statement's closing date, the
 showing option of the tab's month select ("Elige el mes de facturación", whose
-option text matched the tab's "Fecha de facturación" live), which also fills
-the card's `CreditCardMetrics.statement_date` and `statement_day`. No other
-statement figure is read yet. The
+option text matched the tab's "Fecha de facturación" live). The card's
+`CreditCardMetrics` statement fields come from the labelled figures the tabs
+print outside the table (`statement_from_texts`): the billed tab's "Fecha de
+facturación" (only used when the select shows none; if the two disagree the
+tab is taken as mid-render and nothing is kept), "Monto facturado", "Fecha de
+vencimiento" and "Pago mínimo", and the unbilled tab's "Próxima facturación"
+(kept only when after the closing date). The closing and due dates are the one
+source of `statement_day` / `due_day`; a figure that is missing or does not
+parse stays None. The
 gotchas handled: a post-login marketing modal whose backdrop intercepts clicks
 (dismissed first), components that render a moment after the page (each read
 waits for its content), an idle-timeout modal ("Tu sesion expirara") that logs
