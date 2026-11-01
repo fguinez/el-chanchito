@@ -4,7 +4,7 @@ import {
   Suspense,
   useDeferredValue,
   useMemo,
-  useState,
+  useReducer,
   type ReactNode,
 } from "react";
 import {
@@ -30,19 +30,16 @@ import { useSelectedTransaction } from "@/components/transactions/use-selected-t
 import type { ProductTransaction } from "@/components/institutions/product-graphs";
 import { transactionDisplayId } from "@/lib/transaction-selection";
 import {
-  matchesTransactionSearch,
-  searchTokens,
-} from "@/lib/transaction-search";
-import {
   BILLING_STATUS_LABELS,
-  filterByBilling,
   type BillingFilter,
   type TransactionBilling,
 } from "@/lib/card-billing";
+import {
+  INITIAL_LIST_CONTROLS,
+  listControlsReducer,
+  productTransactionsView,
+} from "@/lib/product-transactions-view";
 import { cn, formatAmount, formatPlainDateEs } from "@/lib/utils";
-
-/** Rows rendered per "Ver más" step. */
-const PAGE_SIZE = 50;
 
 const BILLING_FILTERS: { value: BillingFilter; label: string }[] = [
   { value: "all", label: "Todos" },
@@ -106,80 +103,52 @@ function TransactionsList({
 }: ProductTransactionsCardProps) {
   const { selectedTxnId, selectTransaction, rowProps } =
     useSelectedTransaction();
-  const [visible, setVisible] = useState(PAGE_SIZE);
-  const [search, setSearch] = useState("");
-  const [billingFilter, setBillingFilter] = useState<BillingFilter>("all");
+  const [controls, dispatch] = useReducer(
+    listControlsReducer,
+    INITIAL_LIST_CONTROLS
+  );
   // Filtering a few hundred rows can lag a keystroke: let typing go first.
-  const deferredSearch = useDeferredValue(search);
+  const deferredSearch = useDeferredValue(controls.search);
   // The endpoint sorts by date descending before reversing, so reversing
   // back yields newest first.
   const newestFirst = useMemo(
     () => transactions.slice().reverse(),
     [transactions]
   );
-  const tokens = useMemo(
-    () => searchTokens(deferredSearch),
-    [deferredSearch]
-  );
-  const searching = tokens.length > 0;
-  // The status column and its filter only mean something once a movement
-  // has a status (the product route computes them for credit cards only).
-  const hasBilling =
-    showBilling && transactions.some((txn) => txn.billing != null);
-  const activeFilter: BillingFilter = hasBilling ? billingFilter : "all";
-  const billingFiltered = useMemo(
-    () => filterByBilling(newestFirst, activeFilter),
-    [newestFirst, activeFilter]
-  );
-  const filtering = searching || activeFilter !== "all";
-  const matching = useMemo(
+  const view = useMemo(
     () =>
-      tokens.length === 0
-        ? billingFiltered
-        : billingFiltered.filter((txn) =>
-            matchesTransactionSearch(
-              tokens,
-              txn.description,
-              txn.rawDescription
-            )
-          ),
-    [billingFiltered, tokens]
+      productTransactionsView({
+        rows: newestFirst,
+        search: deferredSearch,
+        billingFilter: controls.billingFilter,
+        visible: controls.visible,
+        showBilling,
+        truncated,
+      }),
+    [
+      newestFirst,
+      deferredSearch,
+      controls.billingFilter,
+      controls.visible,
+      showBilling,
+      truncated,
+    ]
   );
-  const shown = matching.slice(0, visible);
-  const total = newestFirst.length;
-
-  const noun = total === 1 ? "transacción" : "transacciones";
-  const description =
-    total === 0
-      ? "Movimientos registrados para este producto"
-      : truncated
-        ? filtering
-          ? `${matching.length} de las ${total} transacciones más recientes`
-          : `Las ${total} transacciones más recientes`
-        : filtering
-          ? `${matching.length} de ${total} ${noun}`
-          : `${total} ${noun}`;
 
   return (
-    <TransactionsShell description={description}>
-      {total === 0 ? (
-        <p className="text-muted-foreground">
-          Sin transacciones registradas para este producto.
-        </p>
+    <TransactionsShell description={view.description}>
+      {view.total === 0 ? (
+        <p className="text-muted-foreground">{view.emptyMessage}</p>
       ) : (
         <>
           <div className="mb-4 space-y-1">
             <div className="flex flex-wrap items-center gap-2">
               <SearchInput
                 className="w-full sm:max-w-xs"
-                value={search}
-                onValueChange={(value) => {
-                  setSearch(value);
-                  // A new search starts again from the first page.
-                  setVisible(PAGE_SIZE);
-                }}
+                value={controls.search}
+                onValueChange={(search) => dispatch({ type: "search", search })}
               />
-              {hasBilling && (
+              {view.showsBilling && (
                 <div
                   className="flex items-center gap-1"
                   role="group"
@@ -189,14 +158,18 @@ function TransactionsList({
                     <Button
                       key={option.value}
                       variant={
-                        activeFilter === option.value ? "secondary" : "ghost"
+                        view.billingFilter === option.value
+                          ? "secondary"
+                          : "ghost"
                       }
                       size="sm"
-                      aria-pressed={activeFilter === option.value}
-                      onClick={() => {
-                        setBillingFilter(option.value);
-                        setVisible(PAGE_SIZE);
-                      }}
+                      aria-pressed={view.billingFilter === option.value}
+                      onClick={() =>
+                        dispatch({
+                          type: "billingFilter",
+                          billingFilter: option.value,
+                        })
+                      }
                     >
                       {option.label}
                     </Button>
@@ -204,21 +177,14 @@ function TransactionsList({
                 </div>
               )}
             </div>
-            {filtering && truncated && (
+            {view.coverageNote && (
               <p className="text-xs text-muted-foreground">
-                {searching ? "La búsqueda" : "El filtro"} cubre las {total}{" "}
-                transacciones más recientes.
+                {view.coverageNote}
               </p>
             )}
           </div>
-          {matching.length === 0 ? (
-            <p className="text-muted-foreground">
-              {searching
-                ? `Sin resultados para «${deferredSearch.trim()}».`
-                : activeFilter === "unbilled"
-                  ? "Sin movimientos no facturados."
-                  : "Sin movimientos facturados."}
-            </p>
+          {view.emptyMessage ? (
+            <p className="text-muted-foreground">{view.emptyMessage}</p>
           ) : (
             <Table>
               <TableHeader>
@@ -228,7 +194,7 @@ function TransactionsList({
                   <TableHead className="hidden md:table-cell">ID</TableHead>
                   {/* Below lg the sidebar leaves no room for one more
                       column: the badge goes under the description. */}
-                  {hasBilling && (
+                  {view.showsBilling && (
                     <TableHead className="hidden lg:table-cell">
                       Estado
                     </TableHead>
@@ -237,7 +203,7 @@ function TransactionsList({
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {shown.map((txn) => {
+                {view.shown.map((txn) => {
                   const displayId = transactionDisplayId(txn);
                   return (
                     <TableRow key={txn.id} {...rowProps(txn.id)}>
@@ -256,7 +222,7 @@ function TransactionsList({
                             {txn.location}
                           </span>
                         )}
-                        {hasBilling && txn.billing && (
+                        {view.showsBilling && txn.billing && (
                           <span className="mt-1 block lg:hidden">
                             <BillingBadge billing={txn.billing} />
                           </span>
@@ -277,7 +243,7 @@ function TransactionsList({
                           {displayId.value}
                         </code>
                       </TableCell>
-                      {hasBilling && (
+                      {view.showsBilling && (
                         <TableCell className="hidden lg:table-cell">
                           {txn.billing && (
                             <BillingBadge billing={txn.billing} />
@@ -299,21 +265,18 @@ function TransactionsList({
               </TableBody>
             </Table>
           )}
-          {hasBilling && shown.some((txn) => txn.billing?.estimated) && (
+          {view.showsEstimateLegend && (
             <p className="mt-2 text-xs text-muted-foreground">
               Borde punteado: estado estimado según la fecha de facturación.
             </p>
           )}
-          {matching.length > shown.length && (
+          {view.pagingNote && (
             <div className="mt-4 flex items-center justify-between gap-2 text-sm text-muted-foreground">
-              <span>
-                Mostrando {shown.length} de {matching.length}
-                {filtering && " resultados"}
-              </span>
+              <span>{view.pagingNote}</span>
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => setVisible((n) => n + PAGE_SIZE)}
+                onClick={() => dispatch({ type: "showMore" })}
               >
                 Ver más
               </Button>
