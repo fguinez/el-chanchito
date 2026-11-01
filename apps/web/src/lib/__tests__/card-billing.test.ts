@@ -378,8 +378,22 @@ describe("resolveBillingCycle", () => {
     ).toMatchObject({
       lastClosing: { date: "2026-10-15", estimated: true },
       previousClosing: "2026-09-15",
-      nextClosing: { date: "2026-12-15", estimated: false },
+      // A closing falls between today and the bank's: that one is next.
+      nextClosing: { date: "2026-11-15", estimated: true },
       basis: "next_statement",
+    });
+  });
+
+  it("keeps a closing worked back to today as the next one", () => {
+    expect(
+      resolveBillingCycle({
+        attributes: {},
+        metrics: cardMetrics({ next_statement_date: "2026-11-20" }),
+        today: "2026-10-20",
+      })
+    ).toMatchObject({
+      lastClosing: { date: "2026-09-20", estimated: true },
+      nextClosing: { date: "2026-10-20", estimated: true },
     });
   });
 

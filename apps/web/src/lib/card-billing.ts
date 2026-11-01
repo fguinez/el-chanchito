@@ -333,11 +333,13 @@ export function resolveBillingCycle(
     basis = "transactions";
   } else if (bankNext) {
     // The bank printed only the next closing: the last one is a cycle before,
-    // or as many as it takes to reach today.
+    // or as many as it takes to pass (a closing today has not passed yet).
+    // Stepping back means a closing falls before the bank's: that one is next.
     const day = statementDay ?? parts(bankNext)[2];
     last = closingBefore(bankNext, day);
-    for (let i = 0; last > today && i < 1200; i++) {
+    for (let i = 0; last >= today && i < 1200; i++) {
       last = closingBefore(last, day);
+      bankNext = null;
     }
     lastEstimated = true;
     basis = "next_statement";
