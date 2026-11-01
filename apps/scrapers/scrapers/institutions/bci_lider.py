@@ -34,12 +34,15 @@ from scrapers.backends.bci_lider_web import (
     save_login_session,
     scrape_card,
 )
-from scrapers.base import BaseScraper, ProductScrapeResult, ScrapedTransaction
+from scrapers.base import (
+    BILLING_STATUS_BY_FLAG,
+    BaseScraper,
+    ProductScrapeResult,
+    ScrapedTransaction,
+    one_per_key_billed_first,
+)
 
 logger = logging.getLogger(__name__)
-
-# The backend's per-view `billed` flag -> `ScrapedTransaction.billing_status`.
-_BILLING_STATUS = {True: "billed", False: "unbilled"}
 
 
 class BciLiderScraper(BaseScraper):
@@ -91,7 +94,7 @@ class BciLiderScraper(BaseScraper):
             amount=amount,
             transaction_date=tx_date,
             external_id=external_id,
-            billing_status=_BILLING_STATUS.get(movement.get("billed")),
+            billing_status=BILLING_STATUS_BY_FLAG.get(movement.get("billed")),
         )
 
     async def _scrape_once(self) -> BciLiderCardResult:
@@ -118,27 +121,17 @@ class BciLiderScraper(BaseScraper):
         """The session's charges, one transaction per `external_id`.
 
         The same charge read in both period views (its description rewritten on
-        billing, so the backend kept both) is emitted once, where it was first
-        seen; a billed copy replaces an earlier one that is not.
+        billing, so the backend kept both) is emitted once, as its billed copy
+        (`one_per_key_billed_first`).
         """
         result = await self._scrape_once()
-        transactions: list[ScrapedTransaction] = []
-        position: dict[str, int] = {}
+        converted: list[ScrapedTransaction] = []
         for mov in result.movements:
             try:
-                transaction = self._movement_to_transaction(mov)
+                converted.append(self._movement_to_transaction(mov))
             except Exception:
                 logger.exception("Failed to convert movement: %s", mov.get("description", "?"))
-                continue
-            index = position.get(transaction.external_id)
-            if index is None:
-                position[transaction.external_id] = len(transactions)
-                transactions.append(transaction)
-            elif (
-                transaction.billing_status == "billed"
-                and transactions[index].billing_status != "billed"
-            ):
-                transactions[index] = transaction
+        transactions = one_per_key_billed_first(converted)
         logger.info("BciLider: %d credit card transactions", len(transactions))
         return transactions
 

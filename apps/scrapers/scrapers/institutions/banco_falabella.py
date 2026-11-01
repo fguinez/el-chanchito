@@ -93,10 +93,12 @@ from scrapers.backends.banco_falabella_web import (
     fetch_session,
 )
 from scrapers.base import (
+    BILLING_STATUS_BY_FLAG,
     BaseScraper,
     ProductScrapeResult,
     ScrapedProduct,
     ScrapedTransaction,
+    one_per_key_billed_first,
 )
 
 logger = logging.getLogger(__name__)
@@ -108,8 +110,6 @@ CHECKING_NAME = "Cuenta Corriente"
 LINE_KIND = "line_of_credit"
 LINE_NAME = "Línea de Crédito"
 _FALSE_VALUES = {"0", "false", "no", "off"}
-# `RawMovement.billed` -> `ScrapedTransaction.billing_status`.
-_BILLING_STATUS = {True: "billed", False: "unbilled"}
 
 
 def headless_from_env() -> bool:
@@ -306,7 +306,7 @@ class BancoFalabellaScraper(BaseScraper):
         billed row carries its statement's closing date when the tab showed it.
         """
         tx_date = movement.transaction_date
-        billing_status = _BILLING_STATUS.get(movement.billed)
+        billing_status = BILLING_STATUS_BY_FLAG.get(movement.billed)
         return ScrapedTransaction(
             institution=self.institution,
             product_kind=PRODUCT_KIND,
@@ -361,33 +361,23 @@ class BancoFalabellaScraper(BaseScraper):
         """Every movement of the session, one transaction per key.
 
         A key seen twice (a purchase on both card tabs, or a documented
-        same-day/same-amount collision) is written once, in the place it was
-        first seen; a billed copy replaces an earlier one that is not, so the
-        purchase is reported billed with its statement's closing date.
+        same-day/same-amount collision) is written once
+        (`one_per_key_billed_first`), so a purchase on both tabs is reported
+        billed with its statement's closing date.
         """
         result = await self._drive_once()
-        transactions: list[ScrapedTransaction] = []
-        position: dict[str, int] = {}
+        converted: list[ScrapedTransaction] = []
         failed = 0
-        repeated = 0
         converters = [(self._movement_to_transaction, m) for m in result.movements] + [
             (self._checking_movement_to_transaction, m) for m in result.checking_movements
         ]
         for convert, movement in converters:
             try:
-                transaction = convert(movement)
+                converted.append(convert(movement))
             except Exception:
                 failed += 1
-                continue
-            index = position.get(transaction.external_id)
-            if index is not None:
-                repeated += 1
-                kept = transactions[index]
-                if transaction.billing_status == "billed" and kept.billing_status != "billed":
-                    transactions[index] = transaction
-                continue
-            position[transaction.external_id] = len(transactions)
-            transactions.append(transaction)
+        transactions = one_per_key_billed_first(converted)
+        repeated = len(converted) - len(transactions)
         if failed:
             logger.warning("Banco Falabella: %d movements could not be converted", failed)
         if repeated:
