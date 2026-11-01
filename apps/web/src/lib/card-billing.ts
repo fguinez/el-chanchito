@@ -191,6 +191,28 @@ function lastDayBefore(date: string, day: number): string {
   return sameMonth < date ? sameMonth : dayInMonthFrom(date, -1, day);
 }
 
+/** `date` moved by `days` calendar days. */
+function addDays(date: string, days: number): string {
+  const [year, month, day] = parts(date);
+  return new Date(Date.UTC(year, month - 1, day + days))
+    .toISOString()
+    .slice(0, 10);
+}
+
+/** The fewest days between two closings: a closing the bank moved across a
+ *  month boundary never puts a second closing a day or two away. */
+const MIN_CYCLE_DAYS = 20;
+
+/** The closing after `closing` on `day`, at least MIN_CYCLE_DAYS later. */
+function closingAfter(closing: string, day: number): string {
+  return firstDayAfter(addDays(closing, MIN_CYCLE_DAYS - 1), day);
+}
+
+/** The closing before `closing` on `day`, at least MIN_CYCLE_DAYS earlier. */
+function closingBefore(closing: string, day: number): string {
+  return lastDayBefore(addDays(closing, -(MIN_CYCLE_DAYS - 1)), day);
+}
+
 /** Whole days from `from` to `to` (negative when `to` is earlier). */
 export function daysBetween(from: string, to: string): number {
   const [fy, fm, fd] = parts(from);
@@ -277,14 +299,16 @@ function nextStatementDate(
  * newest statement date on the movements; one cycle before the bank's next
  * closing date; the latest closing day (attributes.statement_day) before
  * today. A date after today is ignored. From there the cycle rolls forward:
- * while the next closing (the bank's, else the same day a month later) is
- * before today, it becomes the last closing, estimated. So the next closing
- * is always today or later.
+ * while the next closing (the bank's, else the next cycle day) is before
+ * today, it becomes the last closing, estimated. So the next closing is
+ * always today or later.
  *
  * The cycle day is statement_day when known, else the last closing's own day;
- * a month shorter than it closes on its last day. The due date is the
- * statement's when it belongs to the last closing, else the first `due_day`
- * after the last closing.
+ * a month shorter than it closes on its last day. A derived closing is the
+ * first (or last) cycle day at least MIN_CYCLE_DAYS away, so a closing the
+ * bank moved across a month boundary keeps its cycle's length. The due date
+ * is the statement's when it belongs to the last closing, else the first
+ * `due_day` after the last closing.
  */
 export function resolveBillingCycle(
   input: BillingCycleInput
@@ -309,7 +333,7 @@ export function resolveBillingCycle(
     basis = "transactions";
   } else if (bankNext) {
     // The bank printed only the next closing: the last one is a cycle before.
-    last = dayInMonthFrom(bankNext, -1, statementDay ?? parts(bankNext)[2]);
+    last = closingBefore(bankNext, statementDay ?? parts(bankNext)[2]);
     lastEstimated = true;
     basis = "next_statement";
   } else if (statementDay) {
@@ -328,7 +352,7 @@ export function resolveBillingCycle(
     next =
       bankNext && bankNext > last
         ? { date: bankNext, estimated: false }
-        : { date: dayInMonthFrom(last, 1, cycleDay), estimated: true };
+        : { date: closingAfter(last, cycleDay), estimated: true };
     if (next.date >= today || i >= 1200) break;
     // That closing has passed since: it is the last one now.
     last = next.date;
@@ -351,7 +375,7 @@ export function resolveBillingCycle(
 
   return {
     lastClosing: { date: last, estimated: lastEstimated },
-    previousClosing: dayInMonthFrom(last, -1, cycleDay),
+    previousClosing: closingBefore(last, cycleDay),
     nextClosing: next,
     dueDate,
     basis,

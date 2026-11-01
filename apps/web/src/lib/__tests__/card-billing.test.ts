@@ -262,6 +262,35 @@ describe("resolveBillingCycle", () => {
     });
   });
 
+  it("keeps a cycle's length when the bank moved a closing across a month", () => {
+    // Day 30, but the September statement closed on October 1st.
+    expect(
+      resolveBillingCycle({
+        attributes: cardAttributes(30),
+        metrics: cardMetrics({ statement_date: "2026-10-01" }),
+        today: "2026-10-20",
+      })
+    ).toMatchObject({
+      lastClosing: { date: "2026-10-01", estimated: false },
+      previousClosing: "2026-08-30",
+      nextClosing: { date: "2026-10-30", estimated: true },
+      rolledOver: false,
+    });
+    // Day 1, but the October statement closed on September 30th.
+    expect(
+      resolveBillingCycle({
+        attributes: cardAttributes(1),
+        metrics: cardMetrics({ statement_date: "2026-09-30" }),
+        today: "2026-10-05",
+      })
+    ).toMatchObject({
+      lastClosing: { date: "2026-09-30", estimated: false },
+      previousClosing: "2026-09-01",
+      nextClosing: { date: "2026-11-01", estimated: true },
+      rolledOver: false,
+    });
+  });
+
   it("estimates the next closing a month on when the bank gave none", () => {
     expect(
       resolveBillingCycle({
