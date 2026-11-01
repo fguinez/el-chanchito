@@ -145,15 +145,20 @@ export function productTransactionsView<T extends ListedTransaction>(input: {
           ? `${matching.length} de ${total} ${noun}`
           : `${total} ${noun}`;
 
+  const filteredNoun =
+    billingFilter === "unbilled"
+      ? "movimientos no facturados"
+      : "movimientos facturados";
   let emptyMessage: string | null = null;
   if (total === 0) {
     emptyMessage = "Sin transacciones registradas para este producto.";
   } else if (matching.length === 0) {
-    emptyMessage = searching
-      ? `Sin resultados para «${input.search.trim()}».`
-      : billingFilter === "unbilled"
-        ? "Sin movimientos no facturados."
-        : "Sin movimientos facturados.";
+    const query = `«${input.search.trim()}»`;
+    emptyMessage = !searching
+      ? `Sin ${filteredNoun}.`
+      : billingFilter === "all"
+        ? `Sin resultados para ${query}.`
+        : `Sin resultados para ${query} entre los ${filteredNoun}.`;
   }
 
   return {

@@ -186,6 +186,15 @@ describe("productTransactionsView", () => {
     expect(view().emptyMessage).toBeNull();
   });
 
+  it("names the billing filter when a filtered search finds nothing", () => {
+    expect(
+      view({ search: "farmacia", billingFilter: "unbilled" }).emptyMessage
+    ).toBe("Sin resultados para «farmacia» entre los movimientos no facturados.");
+    expect(
+      view({ search: "cafetería", billingFilter: "billed" }).emptyMessage
+    ).toBe("Sin resultados para «cafetería» entre los movimientos facturados.");
+  });
+
   it("pages the matches", () => {
     const first = view({ visible: 2 });
     expect(ids(first.shown)).toEqual(["a", "b"]);
