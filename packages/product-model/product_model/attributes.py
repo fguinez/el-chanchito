@@ -126,10 +126,22 @@ class CreditCardAttributes(CardAttributes, RevolvingCreditAttributes):
         "credit_card", description='Payload discriminator; always "credit_card".'
     )
     statement_day: int | None = Field(
-        None, description="Day of month the statement closes (facturación)."
+        None,
+        ge=1,
+        le=31,
+        description=(
+            "Day of month (1-31) the statement closes (día de facturación); "
+            "in a shorter month it closes on the last day."
+        ),
     )
     due_day: int | None = Field(
-        None, description="Day of month the payment is due (vencimiento)."
+        None,
+        ge=1,
+        le=31,
+        description=(
+            "Day of month (1-31) the statement's payment is due (día de "
+            "vencimiento): the first such day after the statement closes."
+        ),
     )
 
 

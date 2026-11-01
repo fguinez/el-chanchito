@@ -14,6 +14,7 @@ from product_model import (
     PRODUCT_KINDS,
     REGISTRY,
     CreditCardAttributes,
+    CreditCardMetrics,
     DailyPrice,
     InvestmentAttributes,
     InvestmentMetrics,
@@ -554,6 +555,66 @@ class TestTransactionLocation:
             _located_txn({"city": "X" * 201})
         with pytest.raises(ValidationError):
             _located_txn({"street": "Calle Ficticia 123"})
+
+
+class TestCreditCardStatement:
+    """The latest statement rides in the card's metrics; the cycle days in its
+    attributes. Every figure and date is synthetic."""
+
+    STATEMENT = {
+        "statement_date": "2026-01-15",
+        "next_statement_date": "2026-02-15",
+        "payment_due_date": "2026-01-30",
+        "billed_amount": 2_500_000,
+        "minimum_payment": 1_000_000,
+    }
+
+    def test_the_statement_fields_round_trip(self):
+        payload = {
+            "kind": "credit_card",
+            **VALID_METRICS["credit_card"],
+            **self.STATEMENT,
+        }
+
+        metrics = METRICS_ADAPTER.validate_python(payload)
+
+        assert metrics.statement_date == date(2026, 1, 15)
+        assert metrics.next_statement_date == date(2026, 2, 15)
+        assert metrics.payment_due_date == date(2026, 1, 30)
+        assert metrics.billed_amount == 2_500_000
+        assert metrics.minimum_payment == 1_000_000
+        assert metrics.model_dump(mode="json", exclude_none=True) == payload
+        # The statement does not change what the card headlines.
+        assert metrics.headline() == EXPECTED_HEADLINE["credit_card"]
+
+    def test_a_card_read_without_its_statement_reports_none(self):
+        metrics = CreditCardMetrics(available=1_000_000)
+
+        for field in self.STATEMENT:
+            assert getattr(metrics, field) is None
+
+    def test_a_usd_statement_keeps_its_cents_and_may_lack_a_minimum(self):
+        metrics = CreditCardMetrics(available=1234.56, billed_amount=1234.56)
+
+        assert metrics.billed_amount == 1234.56
+        assert metrics.minimum_payment is None
+
+    def test_the_statement_amounts_carry_a_currency_denomination(self):
+        props = CreditCardMetrics.model_json_schema()["properties"]
+
+        assert props["billed_amount"]["denomination"] == "currency"
+        assert props["minimum_payment"]["denomination"] == "currency"
+
+    @pytest.mark.parametrize("field", ["statement_day", "due_day"])
+    @pytest.mark.parametrize("day", [1, 31])
+    def test_a_cycle_day_in_range_is_accepted(self, field, day):
+        assert getattr(CreditCardAttributes(**{field: day}), field) == day
+
+    @pytest.mark.parametrize("field", ["statement_day", "due_day"])
+    @pytest.mark.parametrize("day", [0, 32, -1])
+    def test_a_cycle_day_out_of_range_is_rejected(self, field, day):
+        with pytest.raises(ValidationError):
+            CreditCardAttributes(**{field: day})
 
 
 def _usd_rate(**fields) -> ScrapedExchangeRate:

@@ -143,9 +143,9 @@ export interface CreditCardAttributes {
   last4?: string | null;
   /** Card network or product brand (e.g. 'Visa Signature'). */
   brand?: string | null;
-  /** Day of month the statement closes (facturación). */
+  /** Day of month (1-31) the statement closes (día de facturación); in a shorter month it closes on the last day. */
   statement_day?: number | null;
-  /** Day of month the payment is due (vencimiento). */
+  /** Day of month (1-31) the statement's payment is due (día de vencimiento): the first such day after the statement closes. */
   due_day?: number | null;
 }
 
@@ -161,6 +161,16 @@ export interface CreditCardMetrics {
   owed?: number | null;
   /** Date the institution printed next to the card figures. */
   reported_as_of?: string | null;
+  /** Closing date of the latest statement (Fecha de facturación). */
+  statement_date?: string | null;
+  /** Next closing date, as the institution prints it (Próxima facturación). */
+  next_statement_date?: string | null;
+  /** Payment due date of the latest statement (Pagar hasta / Vencimiento). */
+  payment_due_date?: string | null;
+  /** Amount billed on the latest statement, in product currency (Monto facturado). */
+  billed_amount?: number | null;
+  /** Minimum payment of the latest statement, in product currency (Pago mínimo). */
+  minimum_payment?: number | null;
 }
 
 /** Identity fields for a debit card; money lives in the parent checking. */
@@ -471,6 +481,8 @@ export const METRIC_FIELDS: Record<
     available: { denomination: "currency" },
     limit: { denomination: "currency" },
     owed: { denomination: "currency" },
+    billed_amount: { denomination: "currency" },
+    minimum_payment: { denomination: "currency" },
   },
   debit_card: {},
   prepaid_card: {

@@ -158,6 +158,40 @@ class CreditCardMetrics(RevolvingCreditMetrics):
     reported_as_of: datetime.date | None = Field(
         None, description="Date the institution printed next to the card figures."
     )
+    # The latest statement (estado de cuenta) the institution showed; a scrape
+    # that could not read it leaves every one of these None.
+    statement_date: datetime.date | None = Field(
+        None,
+        description="Closing date of the latest statement (Fecha de facturación).",
+    )
+    next_statement_date: datetime.date | None = Field(
+        None,
+        description=(
+            "Next closing date, as the institution prints it (Próxima facturación)."
+        ),
+    )
+    payment_due_date: datetime.date | None = Field(
+        None,
+        description=(
+            "Payment due date of the latest statement (Pagar hasta / Vencimiento)."
+        ),
+    )
+    billed_amount: float | None = Field(
+        None,
+        description=(
+            "Amount billed on the latest statement, in product currency "
+            "(Monto facturado)."
+        ),
+        json_schema_extra={"denomination": "currency"},
+    )
+    minimum_payment: float | None = Field(
+        None,
+        description=(
+            "Minimum payment of the latest statement, in product currency "
+            "(Pago mínimo)."
+        ),
+        json_schema_extra={"denomination": "currency"},
+    )
 
 
 class DebitCardMetrics(BaseMetrics):

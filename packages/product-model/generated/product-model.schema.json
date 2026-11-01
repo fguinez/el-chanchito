@@ -100,6 +100,8 @@
         "due_day": {
           "anyOf": [
             {
+              "maximum": 31,
+              "minimum": 1,
               "type": "integer"
             },
             {
@@ -107,7 +109,7 @@
             }
           ],
           "default": null,
-          "description": "Day of month the payment is due (vencimiento).",
+          "description": "Day of month (1-31) the statement's payment is due (día de vencimiento): the first such day after the statement closes.",
           "title": "Due Day"
         },
         "kind": {
@@ -133,6 +135,8 @@
         "statement_day": {
           "anyOf": [
             {
+              "maximum": 31,
+              "minimum": 1,
               "type": "integer"
             },
             {
@@ -140,7 +144,7 @@
             }
           ],
           "default": null,
-          "description": "Day of month the statement closes (facturación).",
+          "description": "Day of month (1-31) the statement closes (día de facturación); in a shorter month it closes on the last day.",
           "title": "Statement Day"
         }
       },
@@ -156,6 +160,20 @@
           "description": "Available credit in product currency (Disponible).",
           "title": "Available",
           "type": "number"
+        },
+        "billed_amount": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "denomination": "currency",
+          "description": "Amount billed on the latest statement, in product currency (Monto facturado).",
+          "title": "Billed Amount"
         },
         "kind": {
           "const": "credit_card",
@@ -178,6 +196,34 @@
           "description": "Total credit limit in product currency (Cupo total).",
           "title": "Limit"
         },
+        "minimum_payment": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "denomination": "currency",
+          "description": "Minimum payment of the latest statement, in product currency (Pago mínimo).",
+          "title": "Minimum Payment"
+        },
+        "next_statement_date": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Next closing date, as the institution prints it (Próxima facturación).",
+          "title": "Next Statement Date"
+        },
         "owed": {
           "anyOf": [
             {
@@ -192,6 +238,20 @@
           "description": "Amount drawn as reported by the bank (Utilizado / Monto utilizado).",
           "title": "Owed"
         },
+        "payment_due_date": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Payment due date of the latest statement (Pagar hasta / Vencimiento).",
+          "title": "Payment Due Date"
+        },
         "reported_as_of": {
           "anyOf": [
             {
@@ -205,6 +265,20 @@
           "default": null,
           "description": "Date the institution printed next to the card figures.",
           "title": "Reported As Of"
+        },
+        "statement_date": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Closing date of the latest statement (Fecha de facturación).",
+          "title": "Statement Date"
         }
       },
       "required": [

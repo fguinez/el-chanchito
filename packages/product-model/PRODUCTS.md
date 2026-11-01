@@ -253,8 +253,8 @@ Net-worth role: **liability** · balance convention: **available** · family: **
 | `kind` | `"credit_card"` | Payload discriminator; always "credit_card". |
 | `last4` | `str?` | Last four digits of the card number (from the masked '****0000'). |
 | `brand` | `str?` | Card network or product brand (e.g. 'Visa Signature'). |
-| `statement_day` | `int?` | Day of month the statement closes (facturación). |
-| `due_day` | `int?` | Day of month the payment is due (vencimiento). |
+| `statement_day` | `int?` | Day of month (1-31) the statement closes (día de facturación); in a shorter month it closes on the last day. |
+| `due_day` | `int?` | Day of month (1-31) the statement's payment is due (día de vencimiento): the first such day after the statement closes. |
 
 ### Metrics
 
@@ -265,6 +265,11 @@ Net-worth role: **liability** · balance convention: **available** · family: **
 | `limit` | `float?` | currency | Total credit limit in product currency (Cupo total). |
 | `owed` | `float?` | currency | Amount drawn as reported by the bank (Utilizado / Monto utilizado). |
 | `reported_as_of` | `date?` |  | Date the institution printed next to the card figures. |
+| `statement_date` | `date?` |  | Closing date of the latest statement (Fecha de facturación). |
+| `next_statement_date` | `date?` |  | Next closing date, as the institution prints it (Próxima facturación). |
+| `payment_due_date` | `date?` |  | Payment due date of the latest statement (Pagar hasta / Vencimiento). |
+| `billed_amount` | `float?` | currency | Amount billed on the latest statement, in product currency (Monto facturado). |
+| `minimum_payment` | `float?` | currency | Minimum payment of the latest statement, in product currency (Pago mínimo). |
 
 ## Tarjeta de débito (`debit_card`)
 
