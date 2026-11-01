@@ -375,11 +375,13 @@ class BanChileScraper(BaseScraper):
         statement surface both loaded, the unbilled list was not empty (an
         empty reading cannot be told from a portal that answered nothing, and
         would clear the whole cycle), every statement it read confirmed its
-        closing date (no `billing_unknown` rows), and its newest statement's
-        summary was read and is current: once `today` reaches the next closing
-        date that summary prints, a newer statement exists that this scrape did
-        not read, and the charges it billed may already have left the unbilled
-        list. Then:
+        closing date (no `billing_unknown` rows, and every statement it
+        requested answered with a usable summary), and its newest statement's
+        summary was read and is known to be current: once `today` reaches the
+        next closing date that summary prints, a newer statement exists that
+        this scrape did not read, and the charges it billed may already have
+        left the unbilled list. A summary that prints no next closing date
+        cannot be checked, so it offers nothing. Then:
 
         * after the newest statement's closing date, the unbilled list is the
           whole story: every unbilled or never-reported row not in this scrape
@@ -407,9 +409,11 @@ class BanChileScraper(BaseScraper):
             if any(m.billing_unknown for m in billed):
                 continue
             statement = next((s for s in statements if s.currency == currency), None)
-            if statement is None or (
-                statement.next_statement_date is not None
-                and today >= statement.next_statement_date
+            if (
+                statement is None
+                or not statement.leg_complete
+                or statement.next_statement_date is None
+                or today >= statement.next_statement_date
             ):
                 continue
             newest = statement.statement_date

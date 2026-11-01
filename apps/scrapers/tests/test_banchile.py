@@ -1052,6 +1052,17 @@ class TestVanishedWindows:
         # Assert
         assert windows == []
 
+    def test_a_summary_without_a_next_closing_date_offers_nothing(self):
+        """Its currency cannot be checked for a newer, unread statement."""
+        # Arrange
+        statements = self._statements(next_statement_date=None)
+
+        # Act
+        windows = self._windows(statements=statements)
+
+        # Assert
+        assert windows == []
+
     def test_no_statement_summary_offers_nothing(self):
         """Without the summary the cycle boundary is unknown."""
         # Arrange / Act
@@ -1068,6 +1079,18 @@ class TestVanishedWindows:
 
         # Act
         windows = self._windows(movements=movements)
+
+        # Assert
+        assert [w.currency for w in windows] == ["USD"]
+
+    def test_an_incomplete_statement_leg_withholds_its_currency(self):
+        """A requested statement that never answered leaves its period unverified."""
+        # Arrange
+        clp, usd = self._statements()
+        statements = [replace(clp, leg_complete=False), usd]
+
+        # Act
+        windows = self._windows(statements=statements)
 
         # Assert
         assert [w.currency for w in windows] == ["USD"]

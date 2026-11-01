@@ -1670,6 +1670,43 @@ class TestStatementOrder:
         read = self._read([("2026-07-05", _billed_payload([_billed_row()]))])
         assert billing_of(read.movements[0]) == ("billed", datetime.date(2026, 7, 5))
 
+    def test_a_full_read_is_complete(self):
+        read = self._read(
+            [
+                ("2026-08-05", _statement_payload(actual="05/08/2026")),
+                ("2026-07-05", _statement_payload(actual="05/07/2026")),
+            ]
+        )
+        assert read.statement.leg_complete
+
+    def test_a_statement_that_never_answered_leaves_the_leg_incomplete(self):
+        """A replay that failed cannot vouch for the period it was asked for."""
+        read = billed_leg_from_statements(
+            [("2026-08-05", _statement_payload(actual="05/08/2026"))],
+            parse_billed_movements,
+            "CLP",
+            missing=1,
+        )
+        assert read.statement.statement_date == datetime.date(2026, 8, 5)
+        assert not read.statement.leg_complete
+
+    @pytest.mark.parametrize(
+        "older",
+        [
+            pytest.param(_billed_payload([_billed_row()]), id="no-resumen"),
+            pytest.param(_statement_payload(actual="05/08/2026"), id="another-date"),
+        ],
+    )
+    def test_an_unusable_older_statement_leaves_the_leg_incomplete(self, older):
+        read = self._read(
+            [
+                ("2026-09-05", _statement_payload(actual="05/09/2026")),
+                ("2026-07-05", older),
+            ]
+        )
+        assert read.statement.statement_date == datetime.date(2026, 9, 5)
+        assert not read.statement.leg_complete
+
     def test_no_usable_summary_is_none(self):
         read = self._read([("2026-08-05", _billed_payload([_billed_row()]))])
 

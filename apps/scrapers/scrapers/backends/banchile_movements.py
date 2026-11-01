@@ -211,6 +211,10 @@ class BanChileStatement:
     (`fechaVencimientoFacturacion`). Amounts are in the statement's currency:
     `montoFacturado` and `pagoMinimo`, whole pesos on the national statement
     and cents on the USD one, whose `pagoMinimo` is null.
+
+    `leg_complete` is False when another statement its leg requested did not
+    answer, or answered without a usable `resumen` for its own closing date:
+    the leg then cannot vouch for every period it meant to read.
     """
 
     currency: str
@@ -219,6 +223,7 @@ class BanChileStatement:
     payment_due_date: Optional[datetime.date] = None
     billed_amount: Optional[float] = None
     minimum_payment: Optional[float] = None
+    leg_complete: bool = True
 
 
 @dataclass(frozen=True)
@@ -988,12 +993,12 @@ def parse_international_billed_movements(
     if not isinstance(payload, dict):
         return []
     movements = []
+    seen: set[tuple] = set()
     for name in _INTERNATIONAL_SECTIONS:
         seccion = payload.get(name)
         rows = seccion.get("transaccionesTarjetas") if isinstance(seccion, dict) else None
         if not isinstance(rows, list):
             continue
-    seen: set[tuple] = set()
         for raw in rows:
             if isinstance(raw, dict) and raw.get("totales"):
                 continue  # a section total, not a movement
@@ -1113,7 +1118,7 @@ def _statement_order(fecha: str) -> datetime.date:
 
 
 def billed_leg_from_statements(
-    statements: list[tuple[str, dict]], parse: Callable, currency: str
+    statements: list[tuple[str, dict]], parse: Callable, currency: str, missing: int = 0
 ) -> BilledLegRead:
     """One statement leg's movements and newest summary, oldest statement first.
 
@@ -1130,15 +1135,21 @@ def billed_leg_from_statements(
     oldest first, a wrong date would otherwise be stored for good.
 
     The summary kept is the one with the latest closing date; None when no
-    statement had a usable `resumen`.
+    statement had a usable `resumen`. It is marked not `leg_complete` when
+    `missing` requested statements never answered, or any statement read had
+    no usable `resumen` or answered another closing date.
     """
     movements: list[BanChileMovement] = []
     newest: Optional[BanChileStatement] = None
+    complete = missing == 0
     for fecha, payload in sorted(statements, key=lambda read: _statement_order(read[0])):
         rows = parse(payload, fecha)
         summary = parse_statement_summary(payload, currency)
         requested = _iso_date(fecha)
+        if summary is None:
+            complete = False
         if summary is not None and requested is not None and summary.statement_date != requested:
+            complete = False
             logger.warning(
                 "BanChile: a %s statement asked for one closing date answered "
                 "another; its %d rows are not tagged",
@@ -1151,6 +1162,8 @@ def billed_leg_from_statements(
             newest is None or summary.statement_date > newest.statement_date
         ):
             newest = summary
+    if newest is not None and not complete:
+        newest = replace(newest, leg_complete=False)
     return BilledLegRead(dedupe_movements(movements), newest)
 
 
@@ -2310,18 +2323,21 @@ def _read_billed_leg(
 
         loaded = _text((requests[-1]["body"] if requests else {}).get("fechaFacturacion"))
         statements = [(loaded, payload)]
+        missing = 0
 
         dates = dates_of(
             fechas_payloads[-1] if fechas_payloads else None, billed_statement_count()
         )
         for fecha in dates:
-            if not fecha or fecha == loaded or not requests:
+            if not fecha or fecha == loaded:
                 continue
-            older = _replay_statement(page, requests[-1], fecha)
-            if older is not None:
+            older = _replay_statement(page, requests[-1], fecha) if requests else None
+            if older is None:
+                missing += 1
+            else:
                 statements.append((fecha, older))
 
-    read = billed_leg_from_statements(statements, parse, currency)
+    read = billed_leg_from_statements(statements, parse, currency, missing)
     logger.info(
         "BanChile: %d %s (%s)",
         len(read.movements),
