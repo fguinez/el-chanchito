@@ -686,13 +686,46 @@ def _read_balances(page) -> list[ScrapedProduct]:
     return card_products_from_text(_inner_text(page))
 
 
+# The two period views of the Movimientos page, each a radio inside a <label>
+# with its text: "Por facturar" (the default) and "Último periodo facturado".
+_UNBILLED_VIEW = "Por facturar"
+_BILLED_VIEW = "Último periodo facturado"
+
+# Whether the radio of the <label> holding a view's text is checked (None when
+# the text is not inside a label with a radio).
+_VIEW_RADIO_CHECKED_JS = """
+(el) => {
+  const label = el.closest('label');
+  const input = label ? label.querySelector('input[type=radio]') : null;
+  return input ? Boolean(input.checked) : null;
+}
+"""
+
+
+def _view_checked(page, view: str) -> Optional[bool]:
+    """Whether `view`'s period radio is checked; None when that can't be told."""
+    try:
+        checked = page.get_by_text(view, exact=False).first.evaluate(
+            _VIEW_RADIO_CHECKED_JS, timeout=3000
+        )
+    except Exception:
+        return None
+    return checked if isinstance(checked, bool) else None
+
+
 def _read_movements(page) -> list[dict]:
     """Open the Movimientos page and read the Nacionales charges across the pager.
 
     Stays on the default "Nacionales" tab (CLP) and reads each pager page, then
-    switches to "Último periodo facturado" for the prior cycle. Dedup keys make
-    the overlap between the two periods harmless. Best-effort: a pager/tab that
-    won't click just ends that leg with whatever was collected.
+    switches to "Último periodo facturado" for the prior cycle. Best-effort: a
+    pager/tab that won't click just ends that leg with whatever was collected.
+
+    Each movement's `billed` is the period view it was read from: False in "Por
+    facturar", True in "Último periodo facturado", but only when that view's
+    radio reads as checked; otherwise None, so a view that did not switch (or a
+    page whose radios moved) never tags a row with the wrong status. A row
+    repeated within a read is kept once, and a sighting in the billed view
+    marks the kept one billed.
     """
     page.goto(MOVEMENTS_URL, timeout=LOGIN_TIMEOUT, wait_until="domcontentloaded")
     _dismiss_popup(page)
@@ -702,18 +735,22 @@ def _read_movements(page) -> list[dict]:
     while time.monotonic() < deadline and not movements_from_text(_inner_text(page)):
         page.wait_for_timeout(1000)
 
-    seen: set[tuple] = set()
+    seen: dict[tuple, dict] = {}
     movements: list[dict] = []
 
-    def collect() -> None:
+    def collect(billed: Optional[bool]) -> None:
         for mov in movements_from_text(_inner_text(page)):
             key = (mov["date"], mov["description"], mov["amount"])
-            if key not in seen:
-                seen.add(key)
+            kept = seen.get(key)
+            if kept is None:
+                mov["billed"] = billed
+                seen[key] = mov
                 movements.append(mov)
+            elif billed:
+                kept["billed"] = True
 
-    def read_all_pages() -> None:
-        collect()
+    def read_all_pages(billed: Optional[bool]) -> None:
+        collect(billed)
         for page_num in range(2, MAX_MOVEMENT_PAGES + 1):
             before = len(movements)
             try:
@@ -723,21 +760,24 @@ def _read_movements(page) -> list[dict]:
             except Exception:
                 break
             page.wait_for_timeout(1500)
-            collect()
+            collect(billed)
             if len(movements) == before:  # pager didn't advance
                 break
 
-    read_all_pages()
+    read_all_pages(False if _view_checked(page, _UNBILLED_VIEW) else None)
     try:  # the prior billed cycle adds history on the first run
-        page.get_by_text("Último periodo facturado", exact=False).first.click(
-            timeout=3000
-        )
+        page.get_by_text(_BILLED_VIEW, exact=False).first.click(timeout=3000)
         page.wait_for_timeout(1500)
-        read_all_pages()
+        read_all_pages(True if _view_checked(page, _BILLED_VIEW) else None)
     except Exception:
         logger.info("BciLider: no 'Último periodo facturado' view; skipping")
 
-    logger.info("BciLider: %d Nacionales movements read", len(movements))
+    tagged = sum(1 for mov in movements if mov["billed"] is not None)
+    logger.info(
+        "BciLider: %d Nacionales movements read (%d with a billing status)",
+        len(movements),
+        tagged,
+    )
     return movements
 
 

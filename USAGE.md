@@ -433,6 +433,10 @@ In reuse mode scrapes drive that Chrome (reusing the signed-in tab or re-logging
 via autofill) and report `Could not reach the Chrome debug port…` when it isn't up.
 (Override the debug port with `LIDER_BCI_CDP_PORT`.)
 
+Each card movement is marked billed or not by the period view it was read in
+("Por facturar" or "Último periodo facturado"). No statement date, due date or
+billed amount is read for this card.
+
 ### Skipo API key
 
 Skipo is read through its official API with a personal key. Create one in

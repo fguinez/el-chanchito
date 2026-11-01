@@ -710,7 +710,14 @@ metrics (`available`/`limit`/`owed` from Disponible / Autorizado / Utilizado,
 plus the masked `last4` and card-name attributes), and the "Movimientos" page
 yields the Nacionales (CLP) charges, paged. Figures are anchored on their
 `$`/`US$` labels (a drift records nothing rather than a wrong number), and USD
-balances convert to CLP via lib/rates' multi-currency FX.
+balances convert to CLP via lib/rates' multi-currency FX. The charges come from
+both period views, the default "Por facturar" and then "Último periodo
+facturado", and each is reported `unbilled` or `billed` by its view (V044),
+with no statement date (the view prints none). A view only tags its rows when
+its radio reads as checked after the switch, so a click that did not switch
+the view tags nothing as billed; a charge seen in both views (its description
+rewritten on billing, the key the same) is written once, billed. No statement
+figure (closing or due date, billed amount) is read.
 
 Banco Santander has no API for individuals (Chile's Open Finance system is not
 operating yet), `fintself` reads its rendered DOM without movement ids, and its

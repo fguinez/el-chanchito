@@ -17,6 +17,11 @@ and `scrape_products()` emits the CLP + USD `credit_card` observations. Both com
 from one browser session per cycle: the transactions leg does the scrape and
 caches the result for the products leg (a session error is re-raised, not
 retried), so the Chrome is driven once.
+
+Card billing (V044): a charge read in the "Por facturar" view is `unbilled` and
+one read in "Último periodo facturado" is `billed`, without a statement date
+(the view prints none); a charge whose view could not be confirmed reports no
+status. One key seen in both views is emitted once, billed.
 """
 
 import asyncio
@@ -32,6 +37,9 @@ from scrapers.backends.bci_lider_web import (
 from scrapers.base import BaseScraper, ProductScrapeResult, ScrapedTransaction
 
 logger = logging.getLogger(__name__)
+
+# The backend's per-view `billed` flag -> `ScrapedTransaction.billing_status`.
+_BILLING_STATUS = {True: "billed", False: "unbilled"}
 
 
 class BciLiderScraper(BaseScraper):
@@ -60,6 +68,9 @@ class BciLiderScraper(BaseScraper):
         merchant's legal name replaces the storefront one), so hashing it imported
         the same charge a second time and doubled the month's spend.
 
+        `billing_status` is the period view the charge was read in (the
+        backend's `billed`: True, False or None when unconfirmed).
+
         Known limitation: two genuinely distinct charges sharing date and amount
         collapse to one row; without a per-movement id this is unavoidable, and it
         mirrors BanChile's `bch_` scheme. `cuotas` is left out of the hash for the
@@ -80,6 +91,7 @@ class BciLiderScraper(BaseScraper):
             amount=amount,
             transaction_date=tx_date,
             external_id=external_id,
+            billing_status=_BILLING_STATUS.get(movement.get("billed")),
         )
 
     async def _scrape_once(self) -> BciLiderCardResult:
@@ -103,13 +115,30 @@ class BciLiderScraper(BaseScraper):
         return result
 
     async def scrape_transactions(self) -> list[ScrapedTransaction]:
+        """The session's charges, one transaction per `external_id`.
+
+        The same charge read in both period views (its description rewritten on
+        billing, so the backend kept both) is emitted once, where it was first
+        seen; a billed copy replaces an earlier one that is not.
+        """
         result = await self._scrape_once()
         transactions: list[ScrapedTransaction] = []
+        position: dict[str, int] = {}
         for mov in result.movements:
             try:
-                transactions.append(self._movement_to_transaction(mov))
+                transaction = self._movement_to_transaction(mov)
             except Exception:
                 logger.exception("Failed to convert movement: %s", mov.get("description", "?"))
+                continue
+            index = position.get(transaction.external_id)
+            if index is None:
+                position[transaction.external_id] = len(transactions)
+                transactions.append(transaction)
+            elif (
+                transaction.billing_status == "billed"
+                and transactions[index].billing_status != "billed"
+            ):
+                transactions[index] = transaction
         logger.info("BciLider: %d credit card transactions", len(transactions))
         return transactions
 
