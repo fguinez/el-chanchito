@@ -328,6 +328,8 @@ transactions ──────────┐
     _longitude (numeric(9,6),
     both or neither)
   location_is_manual
+  billing_status (V044)       -- unbilled | billed | NULL (not reported)
+  statement_date (V044)       -- statement that billed it (billed rows only)
 
 
 monitors                      monitor_adjustments
@@ -492,6 +494,7 @@ suggested category, cascading with the category.
 | `V041__category_rule_match_type.sql` | `category_rules.match_type` (`contains` default, or `exact`); `category_for_description()` matches exact rules by trimmed equality and ranks them before contains rules |
 | `V042__category_suggestion_dismissals.sql` | dismissed_category_suggestions (normalised description + suggested category, unique pair, cascades with the category); new table only |
 | `V043__budget_item_kinds_and_income.sql` | `fixed_expenses.kind` (`fixed` default, `estimated`, `savings`; CHECK), backfilled by name: `Ahorro:` prefix becomes `savings` with the prefix stripped, `Gastos diarios...` becomes `estimated`; `budget_settings`, a single-row table with the monthly income (`monthly_income >= 0`) |
+| `V044__transactions_billing_status.sql` | transactions gain `billing_status` (`unbilled` / `billed`, NULL = not reported; CHECK) and `statement_date` (only on billed rows; CHECK); no backfill |
 
 ## Scraper Architecture
 
