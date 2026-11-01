@@ -69,6 +69,8 @@ export interface BillingTransactionInput {
   /** As the bank reported it (V044); null when it did not say. */
   billingStatus: BillingStatus | null;
   statementDate: string | null;
+  /** Linked to an internal transfer: a card payment, never a reversal. */
+  isInternalTransfer?: boolean;
 }
 
 /** The figures of the latest statement the scraper read (metrics). */
@@ -90,9 +92,10 @@ export interface CardBillingSummary {
   /** Null when nothing tells the card's closing dates. */
   cycle: BillingCycle | null;
   statement: StatementFigures;
-  /** Positive movements (payments, refunds) after the last closing; null
-   *  without a cycle. Internal transfers count: a payment from checking is
-   *  linked as one and still pays the card. */
+  /** Positive movements (payments, refunds) after the last closing, plus
+   *  those the bank still lists as unbilled; null without a cycle. Internal
+   *  transfers count: a payment from checking is linked as one and still
+   *  pays the card. A reversal of an unbilled charge does not. */
   paidSinceClosing: number | null;
   /** The statement's billed amount minus `paidSinceClosing`, never below 0.
    *  Null when the billed amount is unknown or belongs to an older statement
@@ -103,7 +106,8 @@ export interface CardBillingSummary {
   /** `billedPending > 0`; null when `billedPending` is unknown. */
   hasBilledDebt: boolean | null;
   /** Sum of the effectively unbilled charges (as a positive amount).
-   *  Unbilled payments are never netted against it. */
+   *  Unbilled payments are never netted against it; a reversed charge drops
+   *  out with its reversal. */
   unbilledCharges: number;
   /** How many charges make up `unbilledCharges`. */
   unbilledCount: number;
@@ -398,15 +402,68 @@ export function effectiveBillingStatus(
 }
 
 /**
+ * Indexes of the unbilled charges reversed (anulación) and their reversals.
+ * Conservative: a reversal is a credit after the last closing, on or after an
+ * effectively unbilled charge of exactly its amount, that is neither a linked
+ * transfer, reported billed, nor a statement figure (billed or minimum).
+ */
+function reversalPairs(
+  transactions: readonly BillingTransactionInput[],
+  statuses: readonly (TransactionBilling | null)[],
+  cycle: BillingCycle | null,
+  statement: StatementFigures
+): Set<number> {
+  const cents = (amount: number) => Math.round(Math.abs(amount) * 100);
+  const figures = new Set(
+    [statement.billedAmount, statement.minimumPayment]
+      .filter((v): v is number => v != null)
+      .map(cents)
+  );
+  const day = (i: number) => transactions[i].transactionDate.slice(0, 10);
+  // Oldest first, charges before credits on the same day.
+  const order = transactions
+    .map((_, i) => i)
+    .sort(
+      (a, b) =>
+        day(a).localeCompare(day(b)) ||
+        transactions[a].amount - transactions[b].amount
+    );
+
+  const open = new Map<number, number[]>();
+  const paired = new Set<number>();
+  for (const i of order) {
+    const t = transactions[i];
+    const key = cents(t.amount);
+    if (t.amount < 0 && statuses[i]?.status === "unbilled") {
+      open.set(key, [...(open.get(key) ?? []), i]);
+      continue;
+    }
+    const isReversal =
+      t.amount > 0 &&
+      !t.isInternalTransfer &&
+      t.billingStatus !== "billed" &&
+      (!cycle || day(i) > cycle.lastClosing.date) &&
+      !figures.has(key);
+    const charge = isReversal ? open.get(key)?.shift() : undefined;
+    if (charge !== undefined) {
+      paired.add(charge);
+      paired.add(i);
+    }
+  }
+  return paired;
+}
+
+/**
  * A credit card's billing summary plus each movement's effective status; null
  * for any other kind. `transactions` are the loaded movements in any order;
  * `truncated` says older ones were left out.
  *
- * The billed debt still owed is the statement's billed amount minus every
- * positive movement after its closing, floored at 0; it is only computed
- * while that statement is the last closing's (no rollover). The unbilled
- * total sums the effectively unbilled charges only; payments, which the bank
- * also lists as unbilled, never shrink it.
+ * The billed debt still owed is the statement's billed amount minus the
+ * payments since its closing (`paidSinceClosing`), floored at 0; it is only
+ * computed while that statement is the last closing's (no rollover). The
+ * unbilled total sums the effectively unbilled charges only; payments, which
+ * the bank also lists as unbilled, never shrink it. A reversed unbilled
+ * charge and its reversal leave both totals (see `reversalPairs`).
  */
 export function summarizeBilling(input: {
   kind: ProductKind;
@@ -438,19 +495,26 @@ export function summarizeBilling(input: {
   });
   const statement = statementFigures(input.metrics);
   const statuses = transactions.map((t) => effectiveBillingStatus(t, cycle));
+  const reversed = reversalPairs(transactions, statuses, cycle, statement);
 
   let unbilledCharges = 0;
   let unbilledCount = 0;
   let paid = 0;
   statuses.forEach((billing, i) => {
     const t = transactions[i];
+    if (reversed.has(i)) return;
     if (billing?.status === "unbilled" && t.amount < 0) {
       unbilledCharges -= t.amount;
       unbilledCount += 1;
     }
+    if (!cycle || t.amount <= 0) return;
     const afterClosing =
-      cycle != null && t.transactionDate.slice(0, 10) > cycle.lastClosing.date;
-    if (afterClosing && t.amount > 0) paid += t.amount;
+      t.transactionDate.slice(0, 10) > cycle.lastClosing.date;
+    // A credit the bank still lists as unbilled missed the statement, whatever
+    // its date, so it pays toward it too.
+    const offStatement =
+      t.billingStatus === "unbilled" && billing?.status === "unbilled";
+    if (afterClosing || offStatement) paid += t.amount;
   });
   const paidSinceClosing = cycle ? roundCents(paid) : null;
 

@@ -241,6 +241,7 @@ export async function GET(_request: Request, { params }: Context) {
     transactions: listed.map((t, i) => ({
       amount: t.amount,
       transactionDate: t.transactionDate,
+      isInternalTransfer: t.isInternalTransfer,
       billingStatus: kept[i].billingStatus,
       statementDate: kept[i].statementDate && isoDay(kept[i].statementDate),
     })),

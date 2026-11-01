@@ -197,6 +197,27 @@ describe("GET /api/institutions/[slug]/products/[product] billing", () => {
     expect(txnFields?.statementDate).toBe(transactions.statementDate);
   });
 
+  it("keeps a linked transfer as a payment, not a reversal", async () => {
+    const payment = {
+      ...txnRow("2026-10-22", "2500000", "unbilled"),
+      isInternalTransfer: true,
+    };
+    queuedRows.push(
+      [productRow()],
+      [],
+      [payment, txnRow("2026-10-20", "-2500000", "unbilled")],
+      []
+    );
+
+    const body = await (await call()).json();
+
+    expect(body.billing).toMatchObject({
+      paidSinceClosing: 2500000,
+      unbilledCharges: 2500000,
+      billedPending: 0,
+    });
+  });
+
   it("marks the totals incomplete when the cut list misses the open cycles", async () => {
     // One more row than the route keeps, all after the previous closing.
     const rows = Array.from({ length: 501 }, () =>

@@ -503,6 +503,55 @@ describe("summarizeBilling", () => {
     expect(summary.billedPending).toBe(1);
   });
 
+  it("drops a reversed unbilled charge and its reversal from both totals", () => {
+    const { summary } = summarize([
+      txn("2026-10-20", -2500000, "unbilled"),
+      txn("2026-10-22", 2500000, "unbilled"),
+      txn("2026-10-23", -999999, "unbilled"),
+    ])!;
+    expect(summary).toMatchObject({
+      unbilledCharges: 999999,
+      unbilledCount: 1,
+      paidSinceClosing: 0,
+      billedPending: 1000000,
+      hasBilledDebt: true,
+    });
+    expect(billedDebtState(summary)).toBe("pending");
+  });
+
+  it("keeps a linked transfer or a statement figure as a payment", () => {
+    const transfer = {
+      ...txn("2026-10-22", 2500000, "unbilled"),
+      isInternalTransfer: true,
+    };
+    expect(
+      summarize([txn("2026-10-20", -2500000, "unbilled"), transfer])!.summary
+    ).toMatchObject({ unbilledCharges: 2500000, paidSinceClosing: 2500000 });
+    // Paying exactly the billed amount, which an unbilled charge also costs.
+    expect(
+      summarize([
+        txn("2026-10-20", -1000000, "unbilled"),
+        txn("2026-10-22", 1000000, "unbilled"),
+      ])!.summary
+    ).toMatchObject({
+      unbilledCharges: 1000000,
+      paidSinceClosing: 1000000,
+      billedPending: 0,
+    });
+  });
+
+  it("counts a credit the bank still lists as unbilled as paid, whatever its date", () => {
+    const { summary } = summarize([
+      // Paid on the closing day, posted after it: not on the statement.
+      txn("2026-10-15", 999999, "unbilled"),
+      // On the statement already.
+      txn("2026-10-14", 2500000, "billed", "2026-10-15"),
+      txn("2026-10-14", 2500000),
+    ])!;
+    expect(summary.paidSinceClosing).toBe(999999);
+    expect(summary.billedPending).toBe(1);
+  });
+
   it("reports no billed debt on a statement that billed nothing", () => {
     const { summary } = summarize([], {
       metrics: cardMetrics({ statement_date: "2026-10-15", billed_amount: 0 }),
