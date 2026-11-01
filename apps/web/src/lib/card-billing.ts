@@ -614,6 +614,12 @@ export function summarizeBilling(input: {
 // Display decisions (the card page)
 // ---------------------------------------------------------------------------
 
+/** A movement's billing status as the card page and the detail panel name it. */
+export const BILLING_STATUS_LABELS: Record<BillingStatus, string> = {
+  billed: "Facturado",
+  unbilled: "No facturado",
+};
+
 /** How the card page labels the billed debt: nothing billed on the last
  *  statement, still owed, paid since, or not known. */
 export type BilledDebtState = "none" | "pending" | "paid" | "unknown";

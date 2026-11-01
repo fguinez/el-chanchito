@@ -2,11 +2,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
 import { TRANSACTION_NOTES_MAX_LENGTH } from "@/lib/transactions";
+import {
+  newestTransactionsFirst,
+  PRODUCT_TRANSACTIONS_LIMIT,
+} from "@/lib/db/transactions";
 
 // Where conditions recorded off the select chain, newest query first unused:
 // index 0 is the first `.where()` of the request (the detail/lookup query).
 const selectWheres: unknown[] = [];
 const updateWheres: unknown[] = [];
+// The other recorded steps of the select chain, in call order.
+const selectOrderBys: unknown[][] = [];
+const selectLimits: unknown[] = [];
 
 /** The SQL text of a recorded `where`, for asserting a filter is applied. */
 function whereSql(index: number): string {
@@ -38,7 +45,14 @@ vi.mock("@/lib/db", () => {
     selectWheres.push(condition);
     return chain;
   };
-  chain.limit = () => shiftRows();
+  chain.orderBy = (...columns: unknown[]) => {
+    selectOrderBys.push(columns);
+    return chain;
+  };
+  chain.limit = (count: unknown) => {
+    selectLimits.push(count);
+    return shiftRows();
+  };
   // PATCH: update(table).set(values).where(...) either `.returning(...)` (the
   // location-only reply) or is awaited directly; both resolve to queued rows.
   const updateChain: Record<string, unknown> = {
@@ -117,6 +131,10 @@ function joinedRow(overrides: Record<string, unknown> = {}) {
     institutionName: "Banco de Prueba",
     institutionSlug: "banco-prueba",
     categoryName: "Categoría de prueba",
+    billingStatus: null,
+    statementDate: null,
+    productAttributes: { kind: "checking" },
+    productMetrics: null,
     ...overrides,
   };
 }
@@ -131,6 +149,8 @@ beforeEach(() => {
   queuedRows.length = 0;
   selectWheres.length = 0;
   updateWheres.length = 0;
+  selectOrderBys.length = 0;
+  selectLimits.length = 0;
   selectMock.mockReset();
   setMock.mockReset();
   deleteMock.mockReset();
@@ -206,7 +226,10 @@ describe("GET /api/transactions/[id]", () => {
       },
       category: { id: CATEGORY_ID, name: "Categoría de prueba" },
       transfer: null,
+      billing: null,
     });
+    // Only a credit card movement reads its card's other movements.
+    expect(selectMock).toHaveBeenCalledTimes(2);
   });
 
   it("returns the internal transfer that links the row", async () => {
@@ -266,6 +289,85 @@ describe("GET /api/transactions/[id]", () => {
     expect(res.status).toBe(500);
     expect(await res.json()).toEqual({ error: "Internal error" });
     expect(consoleError).toHaveBeenCalledOnce();
+  });
+});
+
+describe("GET /api/transactions/[id] billing", () => {
+  // A credit card ending in 1234 whose metrics carry no statement and whose
+  // attributes no billing day: only the statement dates of its listed
+  // movements tell its cycle.
+  const CARD = {
+    productKind: "credit_card",
+    productName: "Tarjeta de prueba",
+    productSlug: "tarjeta-prueba",
+    productAttributes: { kind: "credit_card", last4: "1234", due_day: 5 },
+    productMetrics: { kind: "credit_card", available: 2500000 },
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-31T15:00:00Z"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("returns the bank's billed status with its statement date", async () => {
+    queuedRows.push(
+      [
+        joinedRow({
+          ...CARD,
+          transactionDate: "2026-10-10",
+          billingStatus: "billed",
+          statementDate: "2026-10-15",
+        }),
+      ],
+      [],
+      [{ statementDate: "2026-10-15" }]
+    );
+    const body = await (await call(TXN_ID)).json();
+    expect(body.billing).toEqual({
+      status: "billed",
+      estimated: false,
+      statementDate: "2026-10-15",
+    });
+  });
+
+  it("derives a status from the card's listed movements, as the list does", async () => {
+    queuedRows.push(
+      [joinedRow({ ...CARD, transactionDate: "2026-10-12" })],
+      [],
+      [
+        { statementDate: null },
+        { statementDate: "2026-10-15" },
+        { statementDate: "2026-09-15" },
+      ]
+    );
+    const body = await (await call(TXN_ID)).json();
+    expect(body.billing).toEqual({
+      status: "billed",
+      estimated: true,
+      statementDate: null,
+    });
+
+    // The rows the product route lists: the card's visible movements, newest
+    // first, as many as it shows.
+    expect(selectMock).toHaveBeenCalledTimes(3);
+    expect(selectLimits.at(-1)).toBe(PRODUCT_TRANSACTIONS_LIMIT);
+    expect(selectOrderBys.at(-1)).toEqual(newestTransactionsFirst);
+    const where = new PgDialect().sqlToQuery(selectWheres.at(-1) as SQL);
+    expect(where.sql.toLowerCase()).toContain("deleted_at");
+    expect(where.params).toEqual([PRODUCT_ID]);
+  });
+
+  it("has no status with neither a reported status nor a cycle", async () => {
+    queuedRows.push(
+      [joinedRow({ ...CARD, transactionDate: "2026-10-12" })],
+      [],
+      [{ statementDate: null }]
+    );
+    expect((await (await call(TXN_ID)).json()).billing).toBeNull();
   });
 });
 
