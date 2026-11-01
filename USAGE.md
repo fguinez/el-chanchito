@@ -475,7 +475,10 @@ reads three CLP products:
 
 - **CMR Mastercard** credit card: its cupo figures from the dashboard product
   card and its movements from the card-detail table (the unbilled tab and the
-  current billed statement; older statements are not read yet).
+  current billed statement; older statements are not read yet). Each movement
+  is marked billed or not by the tab it was read from, and the billed ones
+  carry the statement's closing date ("Fecha de facturación"), which also
+  becomes the card's statement date and billing day.
 - **Cuenta corriente**: its available and accounting balances from the
   dashboard and its latest movements from the account detail (older months are
   not read yet).

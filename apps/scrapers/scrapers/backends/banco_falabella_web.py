@@ -25,8 +25,10 @@ The browser half, in order:
      Balances come from that card's innerText (`balance_from_text`). Movements
      come from the card detail's shadow-DOM table (`movements_from_rows`): the
      unbilled "Ultimos movimientos" tab and the current billed "Movimientos
-     facturados" statement. Iterating the month select for older statements is a
-     deliberate follow-up (see `_read_billed`).
+     facturados" statement, each row tagged with its tab, and the billed rows
+     with the statement's closing date off the tab's month select
+     (`statement_date_from_selects`). Iterating the month select for older
+     statements is a deliberate follow-up (see `_read_billed`).
   4. The Cuenta Corriente and Línea de Crédito cards on the same dashboard give
      their balances (`checking_from_text` / `line_from_text`). Then, one
      dashboard reload each, the checking detail's movements table
@@ -122,6 +124,11 @@ class RawMovement:
     same amount in every month it shows up. `cuotas_current` / `cuotas_total`
     are the installment counter ("03/12"), kept for display only and never part
     of the identity (the portal changes the counter as a purchase is billed).
+
+    `billed` is the tab the row was read from: True on "Movimientos
+    facturados", False on "Ultimos movimientos", None when unknown.
+    `statement_date` is the closing date of the billed statement the row was
+    read on, when the tab showed one (billed rows only). Neither is identity.
     """
 
     transaction_date: date
@@ -131,6 +138,8 @@ class RawMovement:
     currency: str
     cuotas_current: Optional[int] = None
     cuotas_total: Optional[int] = None
+    billed: Optional[bool] = None
+    statement_date: Optional[date] = None
 
 
 @dataclass(frozen=True)
@@ -185,7 +194,9 @@ class FalabellaSession:
 
     `balance` is the CMR Mastercard card (None when its available cupo did not
     parse) and `movements` its parsed movements across the unbilled and billed
-    tabs. `checking` and `line` are the Cuenta Corriente and Línea de Crédito
+    tabs. `statement_date` is the closing date of the billed statement read
+    (None when the tab did not show one). `checking` and `line` are the Cuenta
+    Corriente and Línea de Crédito
     (None when the dashboard shows no such product or its available balance did
     not parse), and `checking_movements` the checking account's movements.
     `warnings` are the partial-coverage notes the scraper hands to
@@ -198,6 +209,7 @@ class FalabellaSession:
     checking: Optional[RawCheckingBalance] = None
     line: Optional[RawLineBalance] = None
     checking_movements: list[RawCheckingMovement] = field(default_factory=list)
+    statement_date: Optional[date] = None
 
 
 # --- Pure helpers (unit-tested; no browser) -----------------------------------
@@ -369,7 +381,7 @@ def balance_from_text(text: Optional[str]) -> RawBalance:
 
 
 def movements_from_rows(
-    rows: list[list[str]], section: str = ""
+    rows: list[list[str]], section: str = "", statement_date: Optional[date] = None
 ) -> list[RawMovement]:
     """Turn rendered body rows into `RawMovement`s; skip and log a bad row.
 
@@ -381,7 +393,13 @@ def movements_from_rows(
     whose description reads as a payment; a printed sign is never flipped back.
     A row without a usable date or amount is logged once (no figures) and
     dropped; the rest of the leg continues.
+
+    `section` is the tab the rows came from, "billed" or "unbilled", which
+    sets `RawMovement.billed`; any other value leaves it None. A billed row
+    also takes `statement_date`, the closing date of the statement it was read
+    on.
     """
+    billed = _BILLED_SECTIONS.get(section)
     movements: list[RawMovement] = []
     skipped = 0
     for row in rows:
@@ -411,11 +429,34 @@ def movements_from_rows(
                 currency="CLP",
                 cuotas_current=cuotas[0] if cuotas else None,
                 cuotas_total=cuotas[1] if cuotas else None,
+                billed=billed,
+                statement_date=statement_date if billed else None,
             )
         )
     if skipped:
         logger.warning("Banco Falabella: skipped %d unusable %s rows", skipped, section or "movement")
     return movements
+
+
+def statement_date_from_selects(selects: Any) -> Optional[date]:
+    """The billed statement's closing date from the tab's visible selects.
+
+    The "Movimientos facturados" tab picks its statement with a month select
+    ("Elige el mes de facturación") whose options read as "DD/MM/YYYY" dates,
+    the newest selected; live, the showing option was the same date the tab
+    prints as "Fecha de facturación". Its option values are ISO timestamps in
+    UTC and are not read. The tab also has the Persona select (Todos /
+    Titular / Adicional), whose options never parse as a date. Each entry is
+    `{"text": <selected option's text>, ...}`. The date is returned only when
+    exactly one distinct date shows; anything else (no date-like select,
+    two disagreeing ones, a malformed entry) is None, so no row is ever stamped
+    with a date read off the wrong control.
+    """
+    if not isinstance(selects, list):
+        return None
+    dates = {parse_dmy(entry.get("text")) for entry in selects if isinstance(entry, dict)}
+    dates.discard(None)
+    return dates.pop() if len(dates) == 1 else None
 
 
 def checking_from_text(text: Optional[str]) -> RawCheckingBalance:
@@ -555,6 +596,9 @@ _SURFACE_TIMEOUT_MS = 120_000
 # An empty read must hold this many polls, after its load answered, before a
 # tab counts as empty (the table renders a beat after the response lands).
 _EMPTY_CONFIRM_POLLS = 3
+# Polls given to the billed tab's statement select once its rows showed (its
+# options load progressively); without a date the rows are stamped with none.
+_STATEMENT_SELECT_POLLS = 6
 
 # The movements BFF calls (see `_MovementsFeed`): each tab load is a chain of
 # `/movement-cc/*` calls that ends in `.../credit-card/movements`.
@@ -567,6 +611,8 @@ _LOAD_FAILED = "failed"
 # Tab labels (rendered as <label> elements inside the web component).
 _UNBILLED_TAB = "Ultimos movimientos"
 _BILLED_TAB = "Movimientos facturados"
+# `movements_from_rows` section -> `RawMovement.billed`.
+_BILLED_SECTIONS = {"billed": True, "unbilled": False}
 
 # Matched against accent-free, lower-cased text. Kept conservative so marketing
 # copy cannot trip them. UNVERIFIED: no rejection was seen live.
@@ -641,6 +687,25 @@ _MOVEMENTS_ROWS_JS = (
     if (cells.length) rows.push(cells);
   });
   return {found: true, rows};
+}"""
+)
+
+# The visible <select> controls inside the component: each one's value and its
+# selected option's text (`statement_date_from_selects` picks the statement's).
+_STATEMENT_SELECTS_JS = (
+    "() => {"
+    + _MOVEMENTS_NODES_JS
+    + """
+  return movementsNodes()
+    .filter((el) => el.tagName === 'SELECT' && isVisible(el))
+    .map((select) => {
+      const option = select.selectedIndex >= 0 ? select.options[select.selectedIndex] : null;
+      return {
+        value: String(select.value || ''),
+        text: option ? (option.textContent || '').trim() : '',
+        options: select.options.length,
+      };
+    });
 }"""
 )
 
@@ -1223,12 +1288,26 @@ def _read_surface(
             since = retry_since
 
 
+def _read_statement_date(page) -> Optional[date]:
+    """The showing statement's closing date off the tab's selects, else None."""
+    for _ in range(_STATEMENT_SELECT_POLLS):
+        try:
+            found = statement_date_from_selects(page.evaluate(_STATEMENT_SELECTS_JS))
+        except Exception:
+            found = None
+        if found is not None:
+            return found
+        page.wait_for_timeout(_TABLE_POLL_MS)
+    logger.info("Banco Falabella: the billed statement date did not show")
+    return None
+
+
 def _read_billed(
     page,
     feed: _MovementsFeed,
     warnings: list[str],
     previous: Optional[list[list[str]]] = None,
-) -> list[RawMovement]:
+) -> tuple[list[RawMovement], Optional[date]]:
     """Read the current billed statement (the "Movimientos facturados" tab).
 
     Only the statement showing by default (the most recent) is read. Iterating
@@ -1238,12 +1317,17 @@ def _read_billed(
     table), and a daily run already captures every movement while it is unbilled
     and again while it is the current statement. `previous` is the unbilled
     tab's rows, ignored if still on screen right after the switch.
+
+    The select's showing option is the statement's closing date
+    (`statement_date_from_selects`); it is returned with the movements and
+    stamped on each of them, or None when it did not show.
     """
     rows = _read_surface(page, _BILLED_TAB, feed, previous)
     if rows is None:
         warnings.append("Banco Falabella: billed movements surface never loaded")
-        return []
-    return movements_from_rows(rows, "billed")
+        return [], None
+    statement_date = _read_statement_date(page)
+    return movements_from_rows(rows, "billed", statement_date), statement_date
 
 
 def read_session(page) -> FalabellaSession:
@@ -1268,7 +1352,7 @@ def read_session(page) -> FalabellaSession:
         logger.warning("Banco Falabella: the card available cupo did not parse")
         warnings.append("Banco Falabella: the card available cupo did not parse")
         balance = None
-    movements = _read_card_movements(page, feed, warnings)
+    movements, statement_date = _read_card_movements(page, feed, warnings)
 
     checking, line = _guarded(
         lambda: _read_dashboard_products(page, home_url, warnings),
@@ -1299,6 +1383,7 @@ def read_session(page) -> FalabellaSession:
         checking=checking,
         line=line,
         checking_movements=checking_movements,
+        statement_date=statement_date,
     )
 
 
@@ -1333,13 +1418,18 @@ def _read_dashboard_products(
     return checking, line
 
 
-def _read_card_movements(page, feed: _MovementsFeed, warnings: list[str]) -> list[RawMovement]:
-    """The CMR card detail's unbilled and current billed movements."""
+def _read_card_movements(
+    page, feed: _MovementsFeed, warnings: list[str]
+) -> tuple[list[RawMovement], Optional[date]]:
+    """The CMR card detail's unbilled and current billed movements.
+
+    Also returns the billed statement's closing date (None when unknown).
+    """
     # The unbilled tab loads as the card detail opens, before it is clicked.
     since = feed.mark()
     if not _open_card_detail(page):
         warnings.append("Banco Falabella: could not open the card detail")
-        return []
+        return [], None
 
     movements: list[RawMovement] = []
     unbilled = _read_surface(page, _UNBILLED_TAB, feed, since=since)
@@ -1348,8 +1438,9 @@ def _read_card_movements(page, feed: _MovementsFeed, warnings: list[str]) -> lis
     else:
         movements.extend(movements_from_rows(unbilled, "unbilled"))
 
-    movements.extend(_read_billed(page, feed, warnings, previous=unbilled))
-    return movements
+    billed, statement_date = _read_billed(page, feed, warnings, previous=unbilled)
+    movements.extend(billed)
+    return movements, statement_date
 
 
 def _pick_grid(texts: Any, name: str) -> Optional[str]:

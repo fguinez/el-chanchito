@@ -364,6 +364,114 @@ class TestMovementsFromRows:
         assert "skip" in caplog.text.lower()
 
 
+class TestBillingFromTheTab:
+    """V044: the tab a card row was read from is its billing status."""
+
+    def test_each_tab_tags_its_rows(self):
+        (unbilled,) = web.movements_from_rows([_row()], "unbilled")
+        (billed,) = web.movements_from_rows([_row()], "billed")
+
+        assert (unbilled.billed, billed.billed) == (False, True)
+
+    def test_an_unknown_section_tags_nothing(self):
+        """Never guess: a row of unknown origin reports no status."""
+        for section in ("", "checking", "Movimientos facturados"):
+            (movement,) = web.movements_from_rows([_row()], section)
+            assert movement.billed is None
+
+    def test_only_billed_rows_take_the_statement_date(self):
+        closing = date(2025, 3, 20)
+        (unbilled,) = web.movements_from_rows([_row()], "unbilled", closing)
+        (billed,) = web.movements_from_rows([_row()], "billed", closing)
+
+        assert unbilled.statement_date is None
+        assert billed.statement_date == closing
+
+
+# The billed tab's selects as `_STATEMENT_SELECTS_JS` returns them (synthetic).
+_STATEMENT_SELECT = {"value": "2025-03-20T03:00:00.000Z", "text": "20/03/2025", "options": 12}
+_PERSONA_SELECT = {"value": "todos", "text": "Todos", "options": 3}
+
+
+class TestStatementDateFromSelects:
+    def test_the_date_select_gives_the_closing_date(self):
+        selects = [_PERSONA_SELECT, _STATEMENT_SELECT]
+        assert web.statement_date_from_selects(selects) == date(2025, 3, 20)
+
+    def test_the_value_is_not_read(self):
+        """The ISO value may sit a day off in UTC; the shown text is the date."""
+        select = dict(_STATEMENT_SELECT, value="2025-03-19T23:00:00.000Z")
+        assert web.statement_date_from_selects([select]) == date(2025, 3, 20)
+
+    def test_no_date_select_is_none(self):
+        assert web.statement_date_from_selects([_PERSONA_SELECT]) is None
+        assert web.statement_date_from_selects([]) is None
+
+    def test_a_month_name_is_not_a_date(self):
+        select = dict(_STATEMENT_SELECT, text="Marzo 2025")
+        assert web.statement_date_from_selects([select]) is None
+
+    def test_two_disagreeing_dates_are_none(self):
+        """Which one is the statement's is unknown, so neither is used."""
+        other = dict(_STATEMENT_SELECT, text="20/02/2025")
+        assert web.statement_date_from_selects([_STATEMENT_SELECT, other]) is None
+
+    def test_the_same_date_twice_is_fine(self):
+        selects = [_STATEMENT_SELECT, dict(_STATEMENT_SELECT)]
+        assert web.statement_date_from_selects(selects) == date(2025, 3, 20)
+
+    def test_malformed_input_is_none(self):
+        assert web.statement_date_from_selects(None) is None
+        assert web.statement_date_from_selects(["20/03/2025"]) is None
+        assert web.statement_date_from_selects([{"text": None}]) is None
+
+
+class _SelectPage:
+    """A page whose statement select shows after `late` polls."""
+
+    def __init__(self, selects, late=0):
+        self.selects = selects
+        self.late = late
+        self.polls = 0
+
+    def evaluate(self, script, *args):
+        assert script == web._STATEMENT_SELECTS_JS
+        self.polls += 1
+        return self.selects if self.polls > self.late else [_PERSONA_SELECT]
+
+    def wait_for_timeout(self, ms):
+        pass
+
+
+class TestReadBilled:
+    def test_rows_are_billed_and_stamped(self, monkeypatch):
+        monkeypatch.setattr(web, "_read_surface", lambda page, label, feed, previous: [_row()])
+        page = _SelectPage([_STATEMENT_SELECT], late=2)
+
+        movements, closing = web._read_billed(page, None, [])
+
+        assert closing == date(2025, 3, 20)
+        assert [(m.billed, m.statement_date) for m in movements] == [(True, closing)]
+
+    def test_a_select_that_never_shows_leaves_the_date_out(self, monkeypatch):
+        """The rows are still billed; only their statement is unknown."""
+        monkeypatch.setattr(web, "_read_surface", lambda page, label, feed, previous: [_row()])
+        page = _SelectPage([_PERSONA_SELECT])
+
+        movements, closing = web._read_billed(page, None, [])
+
+        assert closing is None
+        assert [(m.billed, m.statement_date) for m in movements] == [(True, None)]
+        assert page.polls == web._STATEMENT_SELECT_POLLS
+
+    def test_a_surface_that_never_loaded_reads_no_date(self, monkeypatch):
+        monkeypatch.setattr(web, "_read_surface", lambda page, label, feed, previous: None)
+        warnings = []
+
+        assert web._read_billed(_SelectPage([_STATEMENT_SELECT]), None, warnings) == ([], None)
+        assert warnings == ["Banco Falabella: billed movements surface never loaded"]
+
+
 class TestExternalId:
     def _movement(self, **overrides):
         return web.movements_from_rows([_row(**overrides)], "billed")[0]
@@ -809,7 +917,7 @@ class TestReadSession:
         """A browser error in the checking read is a warning; card and línea land."""
         card_movements = web.movements_from_rows([_row()], "unbilled")
         monkeypatch.setattr(web, "_wait_for_card_text", lambda page: _DASHBOARD_CARD_TEXT)
-        monkeypatch.setattr(web, "_read_card_movements", lambda page, feed, warnings: card_movements)
+        monkeypatch.setattr(web, "_read_card_movements", lambda page, feed, warnings: (card_movements, None))
         monkeypatch.setattr(web, "_return_home", lambda page, home_url: True)
         monkeypatch.setattr(web, "_read_other_products", lambda page, warnings: (_checking(), _line(daily_rate_pct=None)))
         monkeypatch.setattr(web, "_open_product", lambda page, component, name: True)
@@ -828,7 +936,7 @@ class TestReadSession:
     def test_dashboard_reread_failure_keeps_the_card(self, monkeypatch):
         """An error reading the other cards drops only them, with a warning."""
         monkeypatch.setattr(web, "_wait_for_card_text", lambda page: _DASHBOARD_CARD_TEXT)
-        monkeypatch.setattr(web, "_read_card_movements", lambda page, feed, warnings: [])
+        monkeypatch.setattr(web, "_read_card_movements", lambda page, feed, warnings: ([], None))
         monkeypatch.setattr(web, "_return_home", lambda page, home_url: True)
 
         def boom(page, warnings):
@@ -926,6 +1034,63 @@ class TestScraperLegs:
         transactions = asyncio.run(self.scraper.scrape_transactions())
 
         assert len(transactions) == 1
+
+    def test_each_tab_reports_its_billing_status(self, monkeypatch):
+        closing = date(2025, 3, 20)
+        movements = web.movements_from_rows([_row()], "unbilled") + web.movements_from_rows(
+            [_row(fecha="08/03/2025")], "billed", closing
+        )
+        self._install(monkeypatch, result=_session(movements=movements))
+
+        unbilled, billed = asyncio.run(self.scraper.scrape_transactions())
+
+        assert (unbilled.billing_status, unbilled.statement_date) == ("unbilled", None)
+        assert (billed.billing_status, billed.statement_date) == ("billed", closing)
+
+    def test_a_row_of_unknown_tab_reports_no_status(self, monkeypatch):
+        self._install(monkeypatch, result=_session(movements=web.movements_from_rows([_row()])))
+
+        (txn,) = asyncio.run(self.scraper.scrape_transactions())
+
+        assert (txn.billing_status, txn.statement_date) == (None, None)
+
+    @pytest.mark.parametrize("billed_first", [True, False], ids=["billed-first", "unbilled-first"])
+    def test_a_purchase_on_both_tabs_keeps_its_billed_copy(self, monkeypatch, billed_first):
+        """Whatever the read order, the one row written is the billed one."""
+        closing = date(2025, 3, 20)
+        unbilled = web.movements_from_rows([_row()], "unbilled")
+        billed = web.movements_from_rows(
+            [_row(descripcion="COMERCIO SINTETICO (FACTURADO)", cuotas="02/12")], "billed", closing
+        )
+        other = web.movements_from_rows([_row(fecha="08/03/2025")], "unbilled")
+        movements = (billed + unbilled if billed_first else unbilled + billed) + other
+        self._install(monkeypatch, result=_session(movements=movements))
+
+        first, second = asyncio.run(self.scraper.scrape_transactions())
+
+        assert (first.billing_status, first.statement_date) == ("billed", closing)
+        assert first.description == "COMERCIO SINTETICO (FACTURADO)"
+        assert first.external_id == external_id_for(unbilled[0])
+        assert second.billing_status == "unbilled"
+
+    def test_the_statement_date_reaches_the_card(self, monkeypatch):
+        self._install(monkeypatch, result=_session(statement_date=date(2025, 3, 20)))
+
+        asyncio.run(self.scraper.scrape_transactions())
+        (card,) = asyncio.run(self.scraper.scrape_products()).products
+
+        assert card.metrics.statement_date == date(2025, 3, 20)
+        assert card.attributes.statement_day == 20
+        assert card.metrics.billed_amount is None
+
+    def test_no_statement_date_leaves_the_card_without_one(self, monkeypatch):
+        self._install(monkeypatch, result=_session())
+
+        asyncio.run(self.scraper.scrape_transactions())
+        (card,) = asyncio.run(self.scraper.scrape_products()).products
+
+        assert card.metrics.statement_date is None
+        assert card.attributes.statement_day is None
 
     def test_products_alone_drives_once(self, monkeypatch):
         """Called on its own, the products leg logs in itself."""

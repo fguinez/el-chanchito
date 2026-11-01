@@ -751,7 +751,13 @@ web component (shadow DOM): the unbilled "Ultimos movimientos" tab and the
 current billed "Movimientos facturados" statement. Older statements (the tab's
 month select) are not iterated yet; a daily run already sees each movement while
 it is unbilled and again while it is the current statement. Each purchase is
-emitted once at its full "Monto total" (not one row per installment). The
+emitted once at its full "Monto total" (not one row per installment). The tab a
+row was read from is its billing status (V044); a purchase seen on both tabs
+keeps its billed copy, and billed rows carry the statement's closing date, the
+showing option of the tab's month select ("Elige el mes de facturación", whose
+option text matched the tab's "Fecha de facturación" live), which also fills
+the card's `CreditCardMetrics.statement_date` and `statement_day`. No other
+statement figure is read yet. The
 gotchas handled: a post-login marketing modal whose backdrop intercepts clicks
 (dismissed first), components that render a moment after the page (each read
 waits for its content), an idle-timeout modal ("Tu sesion expirara") that logs
