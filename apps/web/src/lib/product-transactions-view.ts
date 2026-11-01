@@ -16,7 +16,6 @@ import {
 /** Rows rendered per "Ver más" step. */
 export const PAGE_SIZE = 50;
 
-/** What the user set on the list. */
 export interface ListControls {
   /** The search box's text, as typed. */
   search: string;
@@ -56,7 +55,6 @@ export function listControlsReducer(
   }
 }
 
-/** What the list reads from each movement. */
 export interface ListedTransaction {
   /** What the row shows (custom description or alias, else scraped). */
   description: string;

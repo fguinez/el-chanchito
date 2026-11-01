@@ -614,14 +614,11 @@ export function summarizeBilling(input: {
 // Display decisions (the card page)
 // ---------------------------------------------------------------------------
 
-/** A movement's billing status as the card page and the detail panel name it. */
 export const BILLING_STATUS_LABELS: Record<BillingStatus, string> = {
   billed: "Facturado",
   unbilled: "No facturado",
 };
 
-/** The movement list's billing filter: every movement, or only the billed
- *  or the unbilled ones. */
 export type BillingFilter = "all" | BillingStatus;
 
 /** The rows `filter` keeps, by their effective status (the one the badge and

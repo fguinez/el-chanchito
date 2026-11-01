@@ -175,8 +175,6 @@ async function loadTransactionDetail(id: string) {
     );
   }
 
-  // Neither depends on the other: the transfer link, and (cards only) the
-  // movement's billing status.
   const [[link], billing] = await Promise.all([
     db
       .select({
@@ -257,7 +255,7 @@ async function loadTransactionDetail(id: string) {
  * card's movement list resolves: that cycle can rest on the newest statement
  * date among the listed movements (when the card's metrics carry none), so
  * this reads the same newest PRODUCT_TRANSACTIONS_LIMIT rows the product
- * route lists. A status read from any other set could disagree with the list.
+ * route lists.
  */
 async function cardMovementBilling(row: {
   productId: string;

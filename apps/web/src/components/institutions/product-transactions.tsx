@@ -298,9 +298,8 @@ function TransactionsList({
   );
 }
 
-/** A movement's billing status. One derived from the billing cycle instead of
- *  reported by the bank is an estimate: dashed border, and the tooltip and the
- *  screen reader say so. */
+/** A status derived from the billing cycle, not reported by the bank, is an
+ *  estimate: dashed border, and the tooltip and the screen reader say so. */
 function BillingBadge({ billing }: { billing: TransactionBilling }) {
   return (
     <Badge
