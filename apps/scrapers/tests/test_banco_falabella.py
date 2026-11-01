@@ -386,6 +386,24 @@ class TestBillingFromTheTab:
         assert unbilled.statement_date is None
         assert billed.statement_date == closing
 
+    @pytest.mark.parametrize(
+        ("cuotas", "dated"),
+        [
+            pytest.param("01/01", True, id="single-payment"),
+            pytest.param("01/12", True, id="first-installment"),
+            pytest.param("", True, id="no-counter"),
+            pytest.param("03/12", False, id="later-installment"),
+            pytest.param("12/12", False, id="last-installment"),
+        ],
+    )
+    def test_a_later_installment_is_billed_without_a_date(self, cuotas, dated):
+        """Its first statement billed it earlier; this one's date would stick."""
+        closing = date(2025, 3, 20)
+        (movement,) = web.movements_from_rows([_row(cuotas=cuotas)], "billed", closing)
+
+        assert movement.billed is True
+        assert movement.statement_date == (closing if dated else None)
+
 
 # The billed tab's selects as `_STATEMENT_SELECTS_JS` returns them (synthetic).
 _STATEMENT_SELECT = {"value": "2025-03-20T03:00:00.000Z", "text": "20/03/2025", "options": 12}
@@ -1249,7 +1267,8 @@ class TestScraperLegs:
 
         first, second = asyncio.run(self.scraper.scrape_transactions())
 
-        assert (first.billing_status, first.statement_date) == ("billed", closing)
+        # A "02/12" installment: billed, but its first statement was earlier.
+        assert (first.billing_status, first.statement_date) == ("billed", None)
         assert first.description == "COMERCIO SINTETICO (FACTURADO)"
         assert first.external_id == external_id_for(unbilled[0])
         assert second.billing_status == "unbilled"

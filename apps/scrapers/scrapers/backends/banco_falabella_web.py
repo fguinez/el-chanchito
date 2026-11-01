@@ -144,7 +144,8 @@ class RawMovement:
     `billed` is the tab the row was read from: True on "Movimientos
     facturados", False on "Ultimos movimientos", None when unknown.
     `statement_date` is the closing date of the billed statement the row was
-    read on, when the tab showed one (billed rows only). Neither is identity.
+    read on, when the tab showed one (billed rows only, and never a later
+    installment, which an earlier statement billed first). Neither is identity.
     """
 
     transaction_date: date
@@ -431,7 +432,9 @@ def movements_from_rows(
     `section` is the tab the rows came from, "billed" or "unbilled", which
     sets `RawMovement.billed`; any other value leaves it None. A billed row
     also takes `statement_date`, the closing date of the statement it was read
-    on.
+    on, but only when it is not a later installment (no counter, or "01/NN"): a
+    "03/12" row was first billed on an earlier statement, and the writer never
+    replaces a stored statement date, so stamping it would pin the wrong one.
     """
     billed = _BILLED_SECTIONS.get(section)
     movements: list[RawMovement] = []
@@ -464,7 +467,9 @@ def movements_from_rows(
                 cuotas_current=cuotas[0] if cuotas else None,
                 cuotas_total=cuotas[1] if cuotas else None,
                 billed=billed,
-                statement_date=statement_date if billed else None,
+                statement_date=(
+                    statement_date if billed and (cuotas is None or cuotas[0] == 1) else None
+                ),
             )
         )
     if skipped:

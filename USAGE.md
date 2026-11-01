@@ -481,7 +481,8 @@ reads three CLP products:
   card and its movements from the card-detail table (the unbilled tab and the
   current billed statement; older statements are not read yet). Each movement
   is marked billed or not by the tab it was read from, and the billed ones
-  carry the statement's closing date ("Fecha de facturación"). The card also
+  (except a later installment, billed first on an earlier statement) carry the
+  statement's closing date ("Fecha de facturación"). The card also
   gets the statement's billed amount, minimum payment and due date, the next
   closing date ("Próxima facturación"), and its billing and due days.
 - **Cuenta corriente**: its available and accounting balances from the

@@ -760,7 +760,8 @@ month select) are not iterated yet; a daily run already sees each movement while
 it is unbilled and again while it is the current statement. Each purchase is
 emitted once at its full "Monto total" (not one row per installment). The tab a
 row was read from is its billing status (V044); a purchase seen on both tabs
-keeps its billed copy, and billed rows carry the statement's closing date, the
+keeps its billed copy, and billed rows other than a later installment ("03/12",
+first billed on an earlier statement) carry the statement's closing date, the
 showing option of the tab's month select ("Elige el mes de facturación", whose
 option text matched the tab's "Fecha de facturación" live). The card's
 `CreditCardMetrics` statement fields come from the labelled figures the tabs
