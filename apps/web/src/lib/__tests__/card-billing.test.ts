@@ -384,7 +384,8 @@ describe("resolveBillingCycle", () => {
     });
   });
 
-  it("keeps a closing worked back to today as the next one", () => {
+  it("takes a closing a cycle before the bank's next as passed, even today", () => {
+    // The bank prints November as next only once October's closing is behind.
     expect(
       resolveBillingCycle({
         attributes: {},
@@ -392,8 +393,22 @@ describe("resolveBillingCycle", () => {
         today: "2026-10-20",
       })
     ).toMatchObject({
-      lastClosing: { date: "2026-09-20", estimated: true },
-      nextClosing: { date: "2026-10-20", estimated: true },
+      lastClosing: { date: "2026-10-20", estimated: true },
+      nextClosing: { date: "2026-11-20", estimated: false },
+    });
+  });
+
+  it("keeps the bank's closing day when working back across short months", () => {
+    expect(
+      resolveBillingCycle({
+        attributes: {},
+        metrics: cardMetrics({ next_statement_date: "2027-01-31" }),
+        today: "2026-12-15",
+      })
+    ).toMatchObject({
+      lastClosing: { date: "2026-11-30", estimated: true },
+      previousClosing: "2026-10-31",
+      nextClosing: { date: "2026-12-31", estimated: true },
     });
   });
 

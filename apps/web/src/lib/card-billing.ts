@@ -325,6 +325,9 @@ export function resolveBillingCycle(
   let last: string;
   let lastEstimated = false;
   let basis: BillingCycleBasis;
+  // The cycle day when statement_day is unknown; defaults to the last
+  // closing's own day.
+  let anchorDay: number | null = null;
   if (statementDate && !(rowsDate && rowsDate > statementDate)) {
     last = statementDate;
     basis = "statement";
@@ -332,12 +335,13 @@ export function resolveBillingCycle(
     last = rowsDate;
     basis = "transactions";
   } else if (bankNext) {
-    // The bank printed only the next closing: the last one is a cycle before,
-    // or as many as it takes to pass (a closing today has not passed yet).
-    // Stepping back means a closing falls before the bank's: that one is next.
-    const day = statementDay ?? parts(bankNext)[2];
+    // The bank printed only the next closing: the last one is a cycle before
+    // (even today: the bank shows the next one once it closed), or as many as
+    // it takes to reach today, and then a closing falls before the bank's.
+    anchorDay = parts(bankNext)[2];
+    const day = statementDay ?? anchorDay;
     last = closingBefore(bankNext, day);
-    for (let i = 0; last >= today && i < 1200; i++) {
+    for (let i = 0; last > today && i < 1200; i++) {
       last = closingBefore(last, day);
       bankNext = null;
     }
@@ -351,7 +355,7 @@ export function resolveBillingCycle(
     return null;
   }
 
-  const cycleDay = statementDay ?? parts(last)[2];
+  const cycleDay = statementDay ?? anchorDay ?? parts(last)[2];
   let rolledOver = false;
   let next: BillingDate;
   // Bounded so a malformed date can never spin: 1200 months is a century.
