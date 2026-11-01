@@ -674,6 +674,22 @@ statements independently), one row per USD charge, only among rows created
 before V023 was applied (`_migrations.applied_at`; V023 ships with the fix),
 and never a row the user categorised, annotated or paired.
 
+Card billing (V044, see "Card billing status"): a movement of the unbilled leg
+is reported `unbilled`, one of a statement `billed`, with the statement's
+`fechaFacturacion` as its `statement_date`, except a later installment
+("03/12" in `cuotas`), which an earlier statement billed first and so is billed
+with no date. Each statement leg parses the
+statements it read oldest first, so a movement printed on two of them (an
+installment) reaches the writer with the statement that billed it first, and
+a statement whose `resumen` names another closing date than the one it was
+requested for (a replay answered with another period) tags none of its rows.
+The statement payload it already captures also carries a `resumen` (closing, next
+closing and due dates, billed amount, minimum payment, the latter null on the
+USD statement): the newest one of each currency fills that card's
+`CreditCardMetrics` statement fields and its `statement_day` / `due_day`
+attributes. The balance-only fallback reads no statement, so its cards carry
+none of these.
+
 BCI Lider (Tarjeta Lider Bci, the retailcard.cl card co-branded by BCI) has no
 open-banking API for individuals and isn't covered by `fintself`, and its login
 sits behind a Cloudflare Turnstile that passes invisibly only for a *genuine*
@@ -698,7 +714,16 @@ metrics (`available`/`limit`/`owed` from Disponible / Autorizado / Utilizado,
 plus the masked `last4` and card-name attributes), and the "Movimientos" page
 yields the Nacionales (CLP) charges, paged. Figures are anchored on their
 `$`/`US$` labels (a drift records nothing rather than a wrong number), and USD
-balances convert to CLP via lib/rates' multi-currency FX.
+balances convert to CLP via lib/rates' multi-currency FX. The charges come from
+both period views, the default "Por facturar" and then "Último periodo
+facturado", and each is reported `unbilled` or `billed` by its view (V044),
+with no statement date (the view prints none). A view only tags its rows when
+its radio reads as checked after the switch and, for the billed view, once its
+table shows a row the "Por facturar" read did not see (polled, bounded), so
+a click that did not switch the view or a table that did not re-render tags
+nothing as billed; a charge seen in both views (its description
+rewritten on billing, the key the same) is written once, billed. No statement
+figure (closing or due date, billed amount) is read.
 
 Banco Santander has no API for individuals (Chile's Open Finance system is not
 operating yet), `fintself` reads its rendered DOM without movement ids, and its
@@ -739,7 +764,20 @@ web component (shadow DOM): the unbilled "Ultimos movimientos" tab and the
 current billed "Movimientos facturados" statement. Older statements (the tab's
 month select) are not iterated yet; a daily run already sees each movement while
 it is unbilled and again while it is the current statement. Each purchase is
-emitted once at its full "Monto total" (not one row per installment). The
+emitted once at its full "Monto total" (not one row per installment). The tab a
+row was read from is its billing status (V044); a purchase seen on both tabs
+keeps its billed copy, and billed rows other than a later installment ("03/12",
+first billed on an earlier statement) carry the statement's closing date, the
+showing option of the tab's month select ("Elige el mes de facturación", whose
+option text matched the tab's "Fecha de facturación" live). The card's
+`CreditCardMetrics` statement fields come from the labelled figures the tabs
+print outside the table (`statement_from_texts`): the billed tab's "Fecha de
+facturación" (only used when the select shows none; if the two disagree the
+tab is taken as mid-render and nothing is kept), "Monto facturado", "Fecha de
+vencimiento" and "Pago mínimo", and the unbilled tab's "Próxima facturación"
+(kept only when after the closing date). The closing and due dates are the one
+source of `statement_day` / `due_day`; a figure that is missing or does not
+parse stays None. The
 gotchas handled: a post-login marketing modal whose backdrop intercepts clicks
 (dismissed first), components that render a moment after the page (each read
 waits for its content), an idle-timeout modal ("Tu sesion expirara") that logs

@@ -39,6 +39,96 @@ Fecha Tienda / Descripción Cuotas Monto
 08/07/2026 PAGO $-999.999
 Mostrando Página 12"""
 
+# The same page in the "Último periodo facturado" view (synthetic): an older
+# charge, plus STORE ONE again with the city suffix billing adds.
+BILLED_VIEW_TEXT = """Detalle de tus movimientos
+Fecha Tienda / Descripción Cuotas Monto
+15/07/2026 SYNTHETIC STORE ONE,SANTIAGO $35.000
+25/06/2026 SYNTHETIC STORE THREE $999.999
+Mostrando Página 1"""
+
+# A second "Por facturar" pager page (synthetic).
+PAGE_TWO_TEXT = """Detalle de tus movimientos
+Fecha Tienda / Descripción Cuotas Monto
+05/07/2026 SYNTHETIC STORE FOUR $999.999
+Mostrando Página 2"""
+
+
+class _ViewLocator:
+    def __init__(self, page, text):
+        self.page = page
+        self.text = text
+
+    @property
+    def first(self):
+        return self
+
+    def _pager_page(self):
+        """The 0-based pager page this text's button opens, if it is showing."""
+        if not self.text.isdigit() or self.page.view != "unbilled":
+            return None
+        index = int(self.text) - 1
+        return index if index < len(self.page.unbilled_pages) else None
+
+    def wait_for(self, **kwargs):
+        if self._pager_page() is None:
+            raise TimeoutError("no such pager button")
+
+    def click(self, timeout=None):
+        if self._pager_page() is not None:
+            self.page.page_index = self._pager_page()
+            return
+        if self.text != web._BILLED_VIEW:
+            raise TimeoutError("not clickable")
+        if self.page.switches:
+            self.page.view = "billed"
+
+    def evaluate(self, script, timeout=None):
+        assert script == web._VIEW_RADIO_CHECKED_JS
+        assert timeout, "every view check must be bounded"
+        if self.page.radios is None:
+            return None  # the text is not inside a radio label
+        view = {web._UNBILLED_VIEW: "unbilled", web._BILLED_VIEW: "billed"}[self.text]
+        return self.page.view == view
+
+
+class _MovementsPage:
+    """The Movimientos page: two period views behind their radios (synthetic)."""
+
+    def __init__(
+        self,
+        switches=True,
+        radios=True,
+        billed_text=BILLED_VIEW_TEXT,
+        stale_reads=0,
+        unbilled_pages=(MOVEMENTS_TEXT,),
+    ):
+        self.view = "unbilled"
+        self.switches = switches
+        self.radios = True if radios else None
+        self.billed_text = billed_text
+        # Reads after the switch that still show "Por facturar" page 1.
+        self.stale_reads = stale_reads
+        self.unbilled_pages = list(unbilled_pages)
+        self.page_index = 0
+
+    def goto(self, url, **kwargs):
+        pass
+
+    def wait_for_timeout(self, ms):
+        pass
+
+    def get_by_text(self, text, exact=False):
+        return _ViewLocator(self, text)
+
+    def text(self):
+        if self.view == "billed" and self.stale_reads:
+            self.stale_reads -= 1
+            return self.unbilled_pages[0]
+        if self.view == "billed":
+            return self.billed_text
+        return self.unbilled_pages[self.page_index]
+
 
 class TestAmountParsing:
     def test_clp(self):
@@ -135,6 +225,77 @@ class TestMovementsParsing:
         assert web.movements_from_text("no movements here") == []
 
 
+class TestPeriodViews:
+    """V044: the period view a charge was read in is its billing status."""
+
+    @pytest.fixture(autouse=True)
+    def _page_text(self, monkeypatch):
+        monkeypatch.setattr(web, "_inner_text", lambda page: page.text())
+        monkeypatch.setattr(web, "_dismiss_popup", lambda page: None)
+
+    def _billed_by_description(self, page):
+        return {m["description"]: m["billed"] for m in web._read_movements(page)}
+
+    def test_each_view_tags_its_rows(self):
+        tags = self._billed_by_description(_MovementsPage())
+
+        assert tags["SYNTHETIC STORE TWO"] is False
+        assert tags["SYNTHETIC STORE THREE"] is True
+        # Rewritten on billing, so the backend keeps both; the scraper folds them.
+        assert tags["SYNTHETIC STORE ONE"] is False
+        assert tags["SYNTHETIC STORE ONE,SANTIAGO"] is True
+
+    def test_a_row_seen_again_in_the_billed_view_is_billed(self):
+        """Same date, description and amount in both views: kept once, billed."""
+        billed_text = BILLED_VIEW_TEXT.replace("STORE ONE,SANTIAGO", "STORE ONE")
+
+        movements = web._read_movements(_MovementsPage(billed_text=billed_text))
+
+        ones = [m["billed"] for m in movements if m["description"] == "SYNTHETIC STORE ONE"]
+        assert ones == [True]
+
+    def test_a_view_that_did_not_switch_tags_nothing_billed(self):
+        """The click left "Por facturar" showing: its rows stay unbilled."""
+        page = _MovementsPage(switches=False)
+
+        movements = web._read_movements(page)
+
+        assert {m["billed"] for m in movements} == {False}
+        assert len(movements) == 4
+
+    def test_a_radio_switched_over_a_stale_table_tags_nothing_billed(self):
+        """The radio reads checked but the "Por facturar" rows never left."""
+        movements = web._read_movements(_MovementsPage(stale_reads=10_000))
+
+        assert {m["billed"] for m in movements} == {False}
+        assert len(movements) == 4
+
+    def test_a_table_that_re_renders_late_is_still_billed(self):
+        """A few stale reads after the switch, then the billed rows show."""
+        tags = self._billed_by_description(_MovementsPage(stale_reads=3))
+
+        assert tags["SYNTHETIC STORE TWO"] is False
+        assert tags["SYNTHETIC STORE THREE"] is True
+
+    def test_a_pager_reset_to_page_one_is_not_the_billed_view(self):
+        """The click briefly shows "Por facturar" page 1 again, which differs from
+        page 2 but holds only rows already read: no sign the view switched."""
+        page = _MovementsPage(stale_reads=3, unbilled_pages=(MOVEMENTS_TEXT, PAGE_TWO_TEXT))
+
+        tags = self._billed_by_description(page)
+
+        assert tags["SYNTHETIC STORE TWO"] is False
+        assert tags["SYNTHETIC STORE FOUR"] is False
+        assert tags["SYNTHETIC STORE THREE"] is True
+
+    def test_unconfirmed_radios_tag_nothing(self):
+        """When the views' radios can't be read, no row gets a status."""
+        tags = self._billed_by_description(_MovementsPage(radios=False))
+
+        assert set(tags.values()) == {None}
+        assert "SYNTHETIC STORE THREE" in tags
+
+
 class TestMovementConversion:
     def setup_method(self):
         self.scraper = BciLiderScraper()
@@ -168,6 +329,14 @@ class TestMovementConversion:
         )
 
         assert por_facturar.external_id == facturado.external_id
+
+    def test_the_view_is_the_billing_status(self):
+        for billed, status in ((True, "billed"), (False, "unbilled"), (None, None)):
+            txn = self.scraper._movement_to_transaction(dict(self._mov(), billed=billed))
+            assert (txn.billing_status, txn.statement_date) == (status, None)
+
+    def test_a_movement_without_a_view_reports_no_status(self):
+        assert self.scraper._movement_to_transaction(self._mov()).billing_status is None
 
 
 class TestOneLoginCaching:
@@ -229,6 +398,21 @@ class TestOneLoginCaching:
             asyncio.run(self.scraper.scrape_products())
 
         assert calls["n"] == 1
+
+    @pytest.mark.parametrize("billed_first", [True, False], ids=["billed-first", "unbilled-first"])
+    def test_a_charge_in_both_views_is_written_once_billed(self, monkeypatch, billed_first):
+        """Its rewritten description kept both copies in the backend; one key wins."""
+        unbilled = {"date": date(2026, 7, 15), "description": "STORE A", "cuotas": None,
+                    "amount": -35000, "billed": False}
+        billed = dict(unbilled, description="STORE A,SANTIAGO", billed=True)
+        other = dict(unbilled, date=date(2026, 7, 14), billed=False)
+        movements = [billed, unbilled, other] if billed_first else [unbilled, billed, other]
+        self._install(monkeypatch, result=BciLiderCardResult(movements=movements))
+
+        first, second = asyncio.run(self.scraper.scrape_transactions())
+
+        assert (first.billing_status, first.description) == ("billed", "STORE A,SANTIAGO")
+        assert second.billing_status == "unbilled"
 
     def test_warnings_propagate(self, monkeypatch):
         result = BciLiderCardResult(products=[], warnings=["BciLider: no card balances parsed"])

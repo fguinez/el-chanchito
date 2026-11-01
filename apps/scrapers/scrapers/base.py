@@ -23,6 +23,7 @@ from product_model import (
 )
 
 __all__ = [
+    "BILLING_STATUS_BY_FLAG",
     "BaseScraper",
     "DailyPrice",
     "ProductRef",
@@ -33,7 +34,34 @@ __all__ = [
     "ScrapedTransaction",
     "SupersededTransaction",
     "TransactionLocation",
+    "one_per_key_billed_first",
 ]
+
+# A scraper's "read in the billed view" flag -> `ScrapedTransaction.billing_status`
+# (None, an unknown view, maps to no status).
+BILLING_STATUS_BY_FLAG = {True: "billed", False: "unbilled"}
+
+
+def one_per_key_billed_first(
+    transactions: list[ScrapedTransaction],
+) -> list[ScrapedTransaction]:
+    """One transaction per `external_id`, a billed copy beating any other.
+
+    For a scraper that reads a card's unbilled and billed views and keys a
+    charge the same in both: each key stays where it was first seen, and a
+    later billed copy replaces an earlier one that is not billed, whatever the
+    read order. Any other repeat is dropped.
+    """
+    kept: list[ScrapedTransaction] = []
+    position: dict[str, int] = {}
+    for transaction in transactions:
+        index = position.get(transaction.external_id)
+        if index is None:
+            position[transaction.external_id] = len(kept)
+            kept.append(transaction)
+        elif transaction.billing_status == "billed" and kept[index].billing_status != "billed":
+            kept[index] = transaction
+    return kept
 
 
 @dataclass

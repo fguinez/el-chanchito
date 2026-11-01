@@ -26,6 +26,7 @@ from scrapers.backends.banco_falabella_web import (
     RawCheckingBalance,
     RawCheckingMovement,
     RawLineBalance,
+    RawStatement,
 )
 from scrapers.institutions import banco_falabella as mod
 from scrapers.institutions.banco_falabella import (
@@ -141,8 +142,6 @@ def _balance(**overrides) -> RawBalance:
         limit=Decimal(2_500_000),
         owed=Decimal(999_999),
         available=Decimal(1_500_001),
-        statement_day=None,
-        due_day=None,
     )
     values.update(overrides)
     return RawBalance(**values)
@@ -362,6 +361,314 @@ class TestMovementsFromRows:
 
         assert len(movements) == 1
         assert "skip" in caplog.text.lower()
+
+
+class TestBillingFromTheTab:
+    """V044: the tab a card row was read from is its billing status."""
+
+    def test_each_tab_tags_its_rows(self):
+        (unbilled,) = web.movements_from_rows([_row()], "unbilled")
+        (billed,) = web.movements_from_rows([_row()], "billed")
+
+        assert (unbilled.billed, billed.billed) == (False, True)
+
+    def test_an_unknown_section_tags_nothing(self):
+        """Never guess: a row of unknown origin reports no status."""
+        for section in ("", "checking", "Movimientos facturados"):
+            (movement,) = web.movements_from_rows([_row()], section)
+            assert movement.billed is None
+
+    def test_only_billed_rows_take_the_statement_date(self):
+        closing = date(2025, 3, 20)
+        (unbilled,) = web.movements_from_rows([_row()], "unbilled", closing)
+        (billed,) = web.movements_from_rows([_row()], "billed", closing)
+
+        assert unbilled.statement_date is None
+        assert billed.statement_date == closing
+
+    @pytest.mark.parametrize(
+        ("cuotas", "dated"),
+        [
+            pytest.param("01/01", True, id="single-payment"),
+            pytest.param("01/12", True, id="first-installment"),
+            pytest.param("", True, id="no-counter"),
+            pytest.param("03/12", False, id="later-installment"),
+            pytest.param("12/12", False, id="last-installment"),
+        ],
+    )
+    def test_a_later_installment_is_billed_without_a_date(self, cuotas, dated):
+        """Its first statement billed it earlier; this one's date would stick."""
+        closing = date(2025, 3, 20)
+        (movement,) = web.movements_from_rows([_row(cuotas=cuotas)], "billed", closing)
+
+        assert movement.billed is True
+        assert movement.statement_date == (closing if dated else None)
+
+
+# The billed tab's selects as `_STATEMENT_SELECTS_JS` returns them (synthetic).
+_STATEMENT_SELECT = {"value": "2025-03-20T03:00:00.000Z", "text": "20/03/2025", "options": 12}
+_PERSONA_SELECT = {"value": "todos", "text": "Todos", "options": 3}
+
+
+class TestStatementDateFromSelects:
+    def test_the_date_select_gives_the_closing_date(self):
+        selects = [_PERSONA_SELECT, _STATEMENT_SELECT]
+        assert web.statement_date_from_selects(selects) == date(2025, 3, 20)
+
+    def test_the_value_is_not_read(self):
+        """The ISO value may sit a day off in UTC; the shown text is the date."""
+        select = dict(_STATEMENT_SELECT, value="2025-03-19T23:00:00.000Z")
+        assert web.statement_date_from_selects([select]) == date(2025, 3, 20)
+
+    def test_no_date_select_is_none(self):
+        assert web.statement_date_from_selects([_PERSONA_SELECT]) is None
+        assert web.statement_date_from_selects([]) is None
+
+    def test_a_month_name_is_not_a_date(self):
+        select = dict(_STATEMENT_SELECT, text="Marzo 2025")
+        assert web.statement_date_from_selects([select]) is None
+
+    def test_two_disagreeing_dates_are_none(self):
+        """Which one is the statement's is unknown, so neither is used."""
+        other = dict(_STATEMENT_SELECT, text="20/02/2025")
+        assert web.statement_date_from_selects([_STATEMENT_SELECT, other]) is None
+
+    def test_the_same_date_twice_is_fine(self):
+        selects = [_STATEMENT_SELECT, dict(_STATEMENT_SELECT)]
+        assert web.statement_date_from_selects(selects) == date(2025, 3, 20)
+
+    def test_malformed_input_is_none(self):
+        assert web.statement_date_from_selects(None) is None
+        assert web.statement_date_from_selects(["20/03/2025"]) is None
+        assert web.statement_date_from_selects([{"text": None}]) is None
+
+
+# The movements component's visible texts on each tab, as `_CARD_TEXTS_JS`
+# returns them: the billed tab prints each value after its label, the unbilled
+# one in the same text. Every date and figure is synthetic.
+_BILLED_TEXTS = [
+    "Pagar",
+    "Ultimos movimientos",
+    "Movimientos facturados",
+    "Estados de Cuenta CMR",
+    "Próximos Vencimientos",
+    "Fecha de facturación",
+    "20/03/2025",
+    "Monto facturado",
+    "$ 1.000.000",
+    "Fecha de vencimiento",
+    "05/04/2025",
+    "Pago minimo",
+    "$ 999.999",
+    "Elige el mes de facturación",
+]
+_UNBILLED_TEXTS = [
+    "Pagar",
+    "Ultimos movimientos",
+    "Próxima facturación 20/04/2025",
+    "Próximo vencimiento 05/05/2025",
+]
+
+
+class TestStatementFromTexts:
+    def test_the_billed_tab(self):
+        assert web.statement_from_texts(_BILLED_TEXTS) == RawStatement(
+            statement_date=date(2025, 3, 20),
+            billed_amount=Decimal(1_000_000),
+            payment_due_date=date(2025, 4, 5),
+            minimum_payment=Decimal(999_999),
+        )
+
+    def test_the_unbilled_tab(self):
+        """Label and date share one text; "Próximo vencimiento" is not read."""
+        assert web.statement_from_texts(_UNBILLED_TEXTS) == RawStatement(
+            next_statement_date=date(2025, 4, 20)
+        )
+
+    def test_labels_match_with_or_without_accents(self):
+        texts = ["FECHA DE FACTURACION", "20/03/2025", "Pago mínimo", "$999.999"]
+        statement = web.statement_from_texts(texts)
+        assert statement.statement_date == date(2025, 3, 20)
+        assert statement.minimum_payment == Decimal(999_999)
+
+    def test_a_missing_value_is_none_not_the_next_label(self):
+        texts = ["Monto facturado", "Fecha de vencimiento", "05/04/2025", "Pago minimo"]
+        statement = web.statement_from_texts(texts)
+        assert statement.billed_amount is None
+        assert statement.payment_due_date == date(2025, 4, 5)
+        assert statement.minimum_payment is None
+
+    def test_a_garbled_value_is_none(self):
+        texts = ["Fecha de facturación", "pronto", "Monto facturado", "1.000.000"]
+        statement = web.statement_from_texts(texts)
+        assert statement.statement_date is None
+        assert statement.billed_amount is None  # an amount needs its "$"
+
+    def test_the_select_label_is_not_the_statement_date(self):
+        texts = ["Elige el mes de facturación", "20/03/2025"]
+        assert web.statement_from_texts(texts) == RawStatement()
+
+    def test_the_first_occurrence_wins(self):
+        texts = ["Monto facturado", "$ 999.999", "Monto facturado", "$ 1.000.000"]
+        assert web.statement_from_texts(texts).billed_amount == Decimal(999_999)
+
+    def test_a_zero_amount_is_kept(self):
+        texts = ["Monto facturado", "$0", "Pago minimo", "$ 0"]
+        statement = web.statement_from_texts(texts)
+        assert (statement.billed_amount, statement.minimum_payment) == (0, 0)
+
+    def test_malformed_input_is_empty(self):
+        assert web.statement_from_texts(None) == RawStatement()
+        assert web.statement_from_texts([None, 3, "Monto facturado"]) == RawStatement()
+
+
+class TestBilledStatement:
+    _HEADER = RawStatement(
+        statement_date=date(2025, 3, 20),
+        billed_amount=Decimal(1_000_000),
+        payment_due_date=date(2025, 4, 5),
+        minimum_payment=Decimal(999_999),
+    )
+
+    def test_select_and_header_agree(self):
+        assert web.billed_statement(date(2025, 3, 20), self._HEADER) == self._HEADER
+
+    def test_either_date_alone_is_taken(self):
+        no_date = RawStatement(billed_amount=Decimal(1_000_000))
+        assert web.billed_statement(date(2025, 3, 20), no_date).statement_date == date(2025, 3, 20)
+        assert web.billed_statement(None, self._HEADER).statement_date == date(2025, 3, 20)
+
+    def test_disagreeing_dates_keep_nothing(self):
+        """The tab was caught mid-render: no figure and no stamp is trusted."""
+        assert web.billed_statement(date(2025, 2, 20), self._HEADER) == RawStatement()
+
+    def test_a_due_date_before_the_closing_is_dropped(self):
+        header = RawStatement(statement_date=date(2025, 3, 20), payment_due_date=date(2025, 3, 5))
+        assert web.billed_statement(None, header).payment_due_date is None
+
+    def test_the_next_closing_is_never_the_billed_tabs(self):
+        header = RawStatement(next_statement_date=date(2025, 4, 20))
+        assert web.billed_statement(None, header).next_statement_date is None
+
+
+class _CardDetailPage:
+    """The card detail: its statement select and texts, showing after `late` polls."""
+
+    def __init__(self, selects, texts, late=0):
+        self.selects = selects
+        self.texts = texts
+        self.late = late
+        self.polls = 0
+
+    def evaluate(self, script, *args):
+        self.polls += 1
+        ready = self.polls > self.late
+        if script == web._STATEMENT_SELECTS_JS:
+            return self.selects if ready else [_PERSONA_SELECT]
+        assert script == web._CARD_TEXTS_JS
+        return self.texts if ready else ["Pagar"]
+
+    def wait_for_timeout(self, ms):
+        pass
+
+
+class TestReadBilled:
+    def test_rows_are_billed_and_stamped(self, monkeypatch):
+        monkeypatch.setattr(web, "_read_surface", lambda page, label, feed, previous: [_row()])
+        page = _CardDetailPage([_STATEMENT_SELECT], _BILLED_TEXTS, late=2)
+
+        movements, statement = web._read_billed(page, None, [])
+
+        closing = date(2025, 3, 20)
+        assert statement == RawStatement(
+            statement_date=closing,
+            billed_amount=Decimal(1_000_000),
+            payment_due_date=date(2025, 4, 5),
+            minimum_payment=Decimal(999_999),
+        )
+        assert [(m.billed, m.statement_date) for m in movements] == [(True, closing)]
+
+    def test_a_select_that_never_shows_leaves_the_date_to_the_header(self, monkeypatch):
+        monkeypatch.setattr(web, "_read_surface", lambda page, label, feed, previous: [_row()])
+        page = _CardDetailPage([_PERSONA_SELECT], _BILLED_TEXTS)
+
+        movements, statement = web._read_billed(page, None, [])
+
+        assert statement.statement_date == date(2025, 3, 20)
+        assert [m.statement_date for m in movements] == [date(2025, 3, 20)]
+
+    def test_nothing_showing_leaves_every_figure_out(self, monkeypatch):
+        """The rows are still billed; only their statement is unknown."""
+        monkeypatch.setattr(web, "_read_surface", lambda page, label, feed, previous: [_row()])
+        page = _CardDetailPage([_PERSONA_SELECT], ["Pagar"])
+
+        movements, statement = web._read_billed(page, None, [])
+
+        assert statement == RawStatement()
+        assert [(m.billed, m.statement_date) for m in movements] == [(True, None)]
+        assert page.polls == 2 * web._STATEMENT_POLLS
+
+    def test_a_surface_that_never_loaded_reads_no_statement(self, monkeypatch):
+        monkeypatch.setattr(web, "_read_surface", lambda page, label, feed, previous: None)
+        warnings = []
+        page = _CardDetailPage([_STATEMENT_SELECT], _BILLED_TEXTS)
+
+        assert web._read_billed(page, None, warnings) == ([], RawStatement())
+        assert warnings == ["Banco Falabella: billed movements surface never loaded"]
+
+
+class _TabbedCardPage:
+    """Both tabs: the unbilled one's texts until the billed one is read."""
+
+    def __init__(self, unbilled_texts):
+        self.unbilled_texts = unbilled_texts
+        self.tab = "unbilled"
+
+    def evaluate(self, script, *args):
+        if script == web._STATEMENT_SELECTS_JS:
+            return [_STATEMENT_SELECT, _PERSONA_SELECT]
+        assert script == web._CARD_TEXTS_JS
+        return self.unbilled_texts if self.tab == "unbilled" else _BILLED_TEXTS
+
+    def wait_for_timeout(self, ms):
+        pass
+
+
+class TestCardMovementsStatement:
+    def _read(self, monkeypatch, unbilled_texts):
+        page = _TabbedCardPage(unbilled_texts)
+
+        def read_surface(page, label, feed, previous=None, since=None):
+            page.tab = "billed" if label == web._BILLED_TAB else "unbilled"
+            return [_row()]
+
+        monkeypatch.setattr(web, "_open_card_detail", lambda page: True)
+        monkeypatch.setattr(web, "_read_surface", read_surface)
+        feed = SimpleNamespace(mark=lambda: 0)
+        return web._read_card_movements(page, feed, [])
+
+    def test_the_unbilled_tab_gives_the_next_closing(self, monkeypatch):
+        movements, statement = self._read(monkeypatch, _UNBILLED_TEXTS)
+
+        assert [m.billed for m in movements] == [False, True]
+        assert statement.statement_date == date(2025, 3, 20)
+        assert statement.next_statement_date == date(2025, 4, 20)
+
+    def test_a_next_closing_not_after_the_last_is_dropped(self, monkeypatch):
+        stale = ["Próxima facturación 20/03/2025"]
+        _, statement = self._read(monkeypatch, stale)
+
+        assert statement.next_statement_date is None
+        assert statement.statement_date == date(2025, 3, 20)
+
+    def test_a_card_detail_that_never_opened_reads_nothing(self, monkeypatch):
+        monkeypatch.setattr(web, "_open_card_detail", lambda page: False)
+        warnings = []
+
+        result = web._read_card_movements(_TabbedCardPage([]), SimpleNamespace(mark=lambda: 0), warnings)
+
+        assert result == ([], RawStatement())
+        assert warnings == ["Banco Falabella: could not open the card detail"]
 
 
 class TestExternalId:
@@ -809,7 +1116,7 @@ class TestReadSession:
         """A browser error in the checking read is a warning; card and línea land."""
         card_movements = web.movements_from_rows([_row()], "unbilled")
         monkeypatch.setattr(web, "_wait_for_card_text", lambda page: _DASHBOARD_CARD_TEXT)
-        monkeypatch.setattr(web, "_read_card_movements", lambda page, feed, warnings: card_movements)
+        monkeypatch.setattr(web, "_read_card_movements", lambda page, feed, warnings: (card_movements, RawStatement()))
         monkeypatch.setattr(web, "_return_home", lambda page, home_url: True)
         monkeypatch.setattr(web, "_read_other_products", lambda page, warnings: (_checking(), _line(daily_rate_pct=None)))
         monkeypatch.setattr(web, "_open_product", lambda page, component, name: True)
@@ -828,7 +1135,7 @@ class TestReadSession:
     def test_dashboard_reread_failure_keeps_the_card(self, monkeypatch):
         """An error reading the other cards drops only them, with a warning."""
         monkeypatch.setattr(web, "_wait_for_card_text", lambda page: _DASHBOARD_CARD_TEXT)
-        monkeypatch.setattr(web, "_read_card_movements", lambda page, feed, warnings: [])
+        monkeypatch.setattr(web, "_read_card_movements", lambda page, feed, warnings: ([], RawStatement()))
         monkeypatch.setattr(web, "_return_home", lambda page, home_url: True)
 
         def boom(page, warnings):
@@ -926,6 +1233,90 @@ class TestScraperLegs:
         transactions = asyncio.run(self.scraper.scrape_transactions())
 
         assert len(transactions) == 1
+
+    def test_each_tab_reports_its_billing_status(self, monkeypatch):
+        closing = date(2025, 3, 20)
+        movements = web.movements_from_rows([_row()], "unbilled") + web.movements_from_rows(
+            [_row(fecha="08/03/2025")], "billed", closing
+        )
+        self._install(monkeypatch, result=_session(movements=movements))
+
+        unbilled, billed = asyncio.run(self.scraper.scrape_transactions())
+
+        assert (unbilled.billing_status, unbilled.statement_date) == ("unbilled", None)
+        assert (billed.billing_status, billed.statement_date) == ("billed", closing)
+
+    def test_a_row_of_unknown_tab_reports_no_status(self, monkeypatch):
+        self._install(monkeypatch, result=_session(movements=web.movements_from_rows([_row()])))
+
+        (txn,) = asyncio.run(self.scraper.scrape_transactions())
+
+        assert (txn.billing_status, txn.statement_date) == (None, None)
+
+    @pytest.mark.parametrize("billed_first", [True, False], ids=["billed-first", "unbilled-first"])
+    def test_a_purchase_on_both_tabs_keeps_its_billed_copy(self, monkeypatch, billed_first):
+        """Whatever the read order, the one row written is the billed one."""
+        closing = date(2025, 3, 20)
+        unbilled = web.movements_from_rows([_row()], "unbilled")
+        billed = web.movements_from_rows(
+            [_row(descripcion="COMERCIO SINTETICO (FACTURADO)", cuotas="02/12")], "billed", closing
+        )
+        other = web.movements_from_rows([_row(fecha="08/03/2025")], "unbilled")
+        movements = (billed + unbilled if billed_first else unbilled + billed) + other
+        self._install(monkeypatch, result=_session(movements=movements))
+
+        first, second = asyncio.run(self.scraper.scrape_transactions())
+
+        # A "02/12" installment: billed, but its first statement was earlier.
+        assert (first.billing_status, first.statement_date) == ("billed", None)
+        assert first.description == "COMERCIO SINTETICO (FACTURADO)"
+        assert first.external_id == external_id_for(unbilled[0])
+        assert second.billing_status == "unbilled"
+
+    def test_the_statement_reaches_the_card(self, monkeypatch):
+        statement = RawStatement(
+            statement_date=date(2025, 3, 20),
+            billed_amount=Decimal(1_000_000),
+            payment_due_date=date(2025, 4, 5),
+            minimum_payment=Decimal(999_999),
+            next_statement_date=date(2025, 4, 20),
+        )
+        self._install(monkeypatch, result=_session(statement=statement))
+
+        asyncio.run(self.scraper.scrape_transactions())
+        (card,) = asyncio.run(self.scraper.scrape_products()).products
+
+        assert card.metrics.statement_date == date(2025, 3, 20)
+        assert card.metrics.next_statement_date == date(2025, 4, 20)
+        assert card.metrics.payment_due_date == date(2025, 4, 5)
+        assert card.metrics.billed_amount == 1_000_000
+        assert card.metrics.minimum_payment == 999_999
+        assert (card.attributes.statement_day, card.attributes.due_day) == (20, 5)
+        # The cupo figures and card identity are untouched.
+        assert card.metrics.available == 1_500_001
+        assert card.attributes.last4 == "1234"
+
+    def test_a_partial_statement_fills_only_what_was_read(self, monkeypatch):
+        statement = RawStatement(statement_date=date(2025, 3, 20))
+        self._install(monkeypatch, result=_session(statement=statement))
+
+        asyncio.run(self.scraper.scrape_transactions())
+        (card,) = asyncio.run(self.scraper.scrape_products()).products
+
+        assert card.metrics.statement_date == date(2025, 3, 20)
+        assert card.metrics.payment_due_date is None
+        assert card.metrics.billed_amount is None
+        assert (card.attributes.statement_day, card.attributes.due_day) == (20, None)
+
+    def test_no_statement_leaves_the_card_without_one(self, monkeypatch):
+        self._install(monkeypatch, result=_session())
+
+        asyncio.run(self.scraper.scrape_transactions())
+        (card,) = asyncio.run(self.scraper.scrape_products()).products
+
+        assert card.metrics.statement_date is None
+        assert card.metrics.billed_amount is None
+        assert (card.attributes.statement_day, card.attributes.due_day) == (None, None)
 
     def test_products_alone_drives_once(self, monkeypatch):
         """Called on its own, the products leg logs in itself."""

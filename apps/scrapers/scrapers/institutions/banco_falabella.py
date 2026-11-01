@@ -49,6 +49,15 @@ running balance (`checking_external_id_for`); both document their collision
 limit. The checking view is a legacy server-rendered page, so the decrypted
 JSON a `JSON.parse` hook can see never carries its rows.
 
+Card billing (V044): a card movement is `unbilled` when read from "Ultimos
+movimientos" and `billed` from "Movimientos facturados", whose statement
+select gives the closing date stamped on its rows. A purchase on both tabs
+keeps its billed copy. Since a purchase is stored once at its full "Monto
+total", an installment purchase is billed from its first statement on. The
+figures both tabs print (closing, next closing and due dates, billed amount,
+minimum payment) fill the card's `CreditCardMetrics`, and the closing and due
+dates its `statement_day` / `due_day`.
+
 Verified live: the headless login, both legs, the writer invariants, a card
 payment's sign (printed "-$..." on the unbilled tab, emitted as money in), and
 the checking and línea figures and an incoming transfer's sign against the
@@ -80,13 +89,16 @@ from scrapers.backends.banco_falabella_web import (
     RawCheckingMovement,
     RawLineBalance,
     RawMovement,
+    RawStatement,
     fetch_session,
 )
 from scrapers.base import (
+    BILLING_STATUS_BY_FLAG,
     BaseScraper,
     ProductScrapeResult,
     ScrapedProduct,
     ScrapedTransaction,
+    one_per_key_billed_first,
 )
 
 logger = logging.getLogger(__name__)
@@ -163,13 +175,20 @@ def _optional_int(value) -> int | None:
     return int(value) if value is not None else None
 
 
-def balance_to_product(balance: RawBalance) -> ScrapedProduct:
+def balance_to_product(
+    balance: RawBalance, statement: RawStatement | None = None
+) -> ScrapedProduct:
     """The singleton CLP CMR Mastercard product for one parsed balance.
 
     `available` is required (the headline); `limit` and `owed` ride along when
-    they parsed. The masked `last4` and the brand go in attributes (statement
-    and due days are not read yet, so they stay None).
+    they parsed. The masked `last4` and the brand go in attributes.
+    `statement` is what the card detail printed of the latest statement: it
+    fills the `CreditCardMetrics` statement fields, and its closing and due
+    dates are the one source of `statement_day` / `due_day`. Whatever was not
+    read stays None, which the attribute merge reads as "keep the stored one".
     """
+    statement = statement or RawStatement()
+    closing, due = statement.statement_date, statement.payment_due_date
     return ScrapedProduct(
         institution=BancoFalabellaScraper.institution,
         kind=PRODUCT_KIND,
@@ -179,14 +198,19 @@ def balance_to_product(balance: RawBalance) -> ScrapedProduct:
         attributes=CreditCardAttributes(
             last4=balance.last4,
             brand=balance.brand,
-            statement_day=balance.statement_day,
-            due_day=balance.due_day,
+            statement_day=closing.day if closing is not None else None,
+            due_day=due.day if due is not None else None,
         ),
         metrics=CreditCardMetrics(
             available=int(balance.available),
             limit=_optional_int(balance.limit),
             owed=_optional_int(balance.owed),
             reported_as_of=None,
+            statement_date=closing,
+            next_statement_date=statement.next_statement_date,
+            payment_due_date=due,
+            billed_amount=_optional_int(statement.billed_amount),
+            minimum_payment=_optional_int(statement.minimum_payment),
         ),
     )
 
@@ -250,7 +274,7 @@ def products_for(session: FalabellaSession) -> list[ScrapedProduct]:
     """
     products: list[ScrapedProduct] = []
     if session.balance is not None:
-        products.append(balance_to_product(session.balance))
+        products.append(balance_to_product(session.balance, session.statement))
     if session.checking is not None and session.checking.available is not None:
         products.append(checking_to_product(session.checking))
     if session.line is not None and session.line.available is not None:
@@ -277,8 +301,12 @@ class BancoFalabellaScraper(BaseScraper):
         `scheduled_month` the first of the occurrence month. The card reports no
         separate posting date, so `accounting_date` is left NULL. See
         `external_id_for` for the identity and its collision limit.
+
+        `billing_status` is the tab the row came from (None when unknown); a
+        billed row carries its statement's closing date when the tab showed it.
         """
         tx_date = movement.transaction_date
+        billing_status = BILLING_STATUS_BY_FLAG.get(movement.billed)
         return ScrapedTransaction(
             institution=self.institution,
             product_kind=PRODUCT_KIND,
@@ -288,6 +316,8 @@ class BancoFalabellaScraper(BaseScraper):
             transaction_date=tx_date,
             external_id=external_id_for(movement),
             scheduled_month=date(tx_date.year, tx_date.month, 1),
+            billing_status=billing_status,
+            statement_date=movement.statement_date if billing_status == "billed" else None,
         )
 
     def _checking_movement_to_transaction(
@@ -328,25 +358,26 @@ class BancoFalabellaScraper(BaseScraper):
         return result
 
     async def scrape_transactions(self) -> list[ScrapedTransaction]:
+        """Every movement of the session, one transaction per key.
+
+        A key seen twice (a purchase on both card tabs, or a documented
+        same-day/same-amount collision) is written once
+        (`one_per_key_billed_first`), so a purchase on both tabs is reported
+        billed with its statement's closing date.
+        """
         result = await self._drive_once()
-        transactions: list[ScrapedTransaction] = []
-        seen: set[str] = set()
+        converted: list[ScrapedTransaction] = []
         failed = 0
-        repeated = 0
         converters = [(self._movement_to_transaction, m) for m in result.movements] + [
             (self._checking_movement_to_transaction, m) for m in result.checking_movements
         ]
         for convert, movement in converters:
             try:
-                transaction = convert(movement)
+                converted.append(convert(movement))
             except Exception:
                 failed += 1
-                continue
-            if transaction.external_id in seen:
-                repeated += 1
-                continue
-            seen.add(transaction.external_id)
-            transactions.append(transaction)
+        transactions = one_per_key_billed_first(converted)
+        repeated = len(converted) - len(transactions)
         if failed:
             logger.warning("Banco Falabella: %d movements could not be converted", failed)
         if repeated:

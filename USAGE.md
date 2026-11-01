@@ -433,6 +433,10 @@ In reuse mode scrapes drive that Chrome (reusing the signed-in tab or re-logging
 via autofill) and report `Could not reach the Chrome debug port…` when it isn't up.
 (Override the debug port with `LIDER_BCI_CDP_PORT`.)
 
+Each card movement is marked billed or not by the period view it was read in
+("Por facturar" or "Último periodo facturado"). No statement date, due date or
+billed amount is read for this card.
+
 ### Skipo API key
 
 Skipo is read through its official API with a personal key. Create one in
@@ -475,7 +479,12 @@ reads three CLP products:
 
 - **CMR Mastercard** credit card: its cupo figures from the dashboard product
   card and its movements from the card-detail table (the unbilled tab and the
-  current billed statement; older statements are not read yet).
+  current billed statement; older statements are not read yet). Each movement
+  is marked billed or not by the tab it was read from, and the billed ones
+  (except a later installment, billed first on an earlier statement) carry the
+  statement's closing date ("Fecha de facturación"). The card also
+  gets the statement's billed amount, minimum payment and due date, the next
+  closing date ("Próxima facturación"), and its billing and due days.
 - **Cuenta corriente**: its available and accounting balances from the
   dashboard and its latest movements from the account detail (older months are
   not read yet).
