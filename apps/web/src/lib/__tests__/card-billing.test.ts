@@ -600,13 +600,17 @@ describe("filterByBilling", () => {
     ]);
   });
 
-  it("keeps the very charges the No facturado total adds up", () => {
+  it("lists the unbilled payments and reversed pairs the No facturado total leaves out", () => {
     const transactions = [
       txn("2026-10-10", -999999, "billed", "2026-10-15"),
       txn("2026-10-12", -1000000),
       txn("2026-10-20", -999999, "unbilled"),
       txn("2026-10-21", -1000000),
+      // A card payment the bank still lists as unbilled.
       txn("2026-10-22", 2500000, "unbilled"),
+      // An unbilled charge and its reversal (anulación).
+      txn("2026-10-23", -2500000, "unbilled"),
+      txn("2026-10-24", 2500000),
     ];
     const billing = summarizeBilling({
       kind: "credit_card",
@@ -620,12 +624,21 @@ describe("filterByBilling", () => {
       ...t,
       billing: billing.statuses[i],
     }));
-    const unbilledCharges = filterByBilling(listed, "unbilled").filter(
-      (t) => t.amount < 0
-    );
-    expect(unbilledCharges).toHaveLength(billing.summary.unbilledCount);
-    expect(unbilledCharges.reduce((sum, t) => sum - t.amount, 0)).toBe(
-      billing.summary.unbilledCharges
+    const unbilled = filterByBilling(listed, "unbilled");
+    expect(unbilled.map((t) => t.transactionDate)).toEqual([
+      "2026-10-20",
+      "2026-10-21",
+      "2026-10-22",
+      "2026-10-23",
+      "2026-10-24",
+    ]);
+    // The total counts only the charges left once the reversed one drops out
+    // with its reversal; payments never count.
+    const charges = unbilled.filter((t) => t.amount < 0);
+    expect(charges).toHaveLength(3);
+    expect(billing.summary.unbilledCount).toBe(2);
+    expect(billing.summary.unbilledCharges).toBe(
+      charges.reduce((sum, t) => sum - t.amount, 0) - 2500000
     );
   });
 });
