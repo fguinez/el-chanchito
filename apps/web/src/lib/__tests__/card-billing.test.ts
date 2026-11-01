@@ -392,6 +392,26 @@ describe("effectiveBillingStatus", () => {
     ).toEqual({ status: "billed", estimated: true, statementDate: null });
   });
 
+  it("takes an unbilled charge as billed once a later closing has passed", () => {
+    const rolled: BillingCycle = {
+      ...OCTOBER_CYCLE,
+      lastClosing: { date: "2026-10-15", estimated: true },
+      dueDate: null,
+      rolledOver: true,
+    };
+    // Reported unbilled before the October closing the scraper never read.
+    expect(
+      effectiveBillingStatus(txn("2026-10-15", -999999, "unbilled"), rolled)
+    ).toEqual({ status: "billed", estimated: true, statementDate: null });
+    expect(
+      effectiveBillingStatus(txn("2026-10-16", -999999, "unbilled"), rolled)
+    ).toEqual({ status: "unbilled", estimated: false, statementDate: null });
+    // Without a rollover the bank's unbilled still holds after the closing.
+    expect(
+      effectiveBillingStatus(txn("2026-10-15", -999999, "unbilled"), OCTOBER_CYCLE)
+    ).toEqual({ status: "unbilled", estimated: false, statementDate: null });
+  });
+
   it("derives a status from the last closing, the closing day billed", () => {
     expect(
       effectiveBillingStatus(txn("2026-10-15", -999999), OCTOBER_CYCLE)

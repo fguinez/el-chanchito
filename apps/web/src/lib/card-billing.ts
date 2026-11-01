@@ -358,10 +358,12 @@ export function resolveBillingCycle(
 /**
  * A movement's effective billing status. The bank's "billed" always wins. The
  * bank's "unbilled" holds, except for a movement dated on or before the
- * previous closing: a charge does not stay unposted for a whole cycle, so the
- * source missed the billed view and it counts as billed (estimated). Without
- * a reported status the cycle decides: on or before the last closing is
- * billed, after it unbilled, both estimated. Null when neither is known.
+ * previous closing (a charge does not stay unposted for a whole cycle, so the
+ * source missed the billed view) or, after a rollover, on or before the last
+ * closing (that closing passed after the bank said so): both count as billed
+ * (estimated). Without a reported status the cycle decides: on or before the
+ * last closing is billed, after it unbilled, both estimated. Null when
+ * neither is known.
  */
 export function effectiveBillingStatus(
   txn: Pick<
@@ -379,7 +381,10 @@ export function effectiveBillingStatus(
     };
   }
   if (txn.billingStatus === "unbilled") {
-    if (cycle && date <= cycle.previousClosing) {
+    const billedSince = cycle?.rolledOver
+      ? cycle.lastClosing.date
+      : cycle?.previousClosing;
+    if (billedSince && date <= billedSince) {
       return { status: "billed", estimated: true, statementDate: null };
     }
     return { status: "unbilled", estimated: false, statementDate: null };
