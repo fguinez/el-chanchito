@@ -12,6 +12,8 @@ import os
 from datetime import date
 from decimal import Decimal
 
+import pytest
+
 os.environ.setdefault("BANCHILE_RUT", "test")
 os.environ.setdefault("BANCHILE_PASSWORD", "test")
 
@@ -358,6 +360,27 @@ class TestCardBilling:
         for fecha in ("", "05/08/2026", "2026-13-45"):
             txn = self._billed(fecha)
             assert (txn.billing_status, txn.statement_date) == ("billed", None)
+
+    @pytest.mark.parametrize(
+        ("cuotas", "dated"),
+        [
+            pytest.param("01/01", True, id="single-payment"),
+            pytest.param("01/12", True, id="first-installment"),
+            pytest.param("", True, id="no-counter"),
+            pytest.param("03/12", False, id="later-installment"),
+            pytest.param(" 12 / 12 ", False, id="last-installment-spaced"),
+        ],
+    )
+    def test_a_later_installment_is_billed_without_a_date(self, cuotas, dated):
+        """An earlier statement billed it first; this one's date would stick."""
+        row = dict(_billed_row(), cuotas=cuotas)
+        (movement,) = parse_billed_movements(_billed_payload([row]), "2026-08-05")
+
+        txn = self.scraper._movement_to_transaction(movement)
+
+        assert txn.billing_status == "billed"
+        assert txn.statement_date == (date(2026, 8, 5) if dated else None)
+        assert txn.external_id == "bch_ref_200812345678"
 
     def test_a_checking_movement_reports_no_billing(self):
         txn = self.scraper._movement_to_transaction(

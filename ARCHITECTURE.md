@@ -676,7 +676,9 @@ and never a row the user categorised, annotated or paired.
 
 Card billing (V044, see "Card billing status"): a movement of the unbilled leg
 is reported `unbilled`, one of a statement `billed`, with the statement's
-`fechaFacturacion` as its `statement_date`. Each statement leg parses the
+`fechaFacturacion` as its `statement_date`, except a later installment
+("03/12" in `cuotas`), which an earlier statement billed first and so is billed
+with no date. Each statement leg parses the
 statements it read oldest first, so a movement printed on two of them (an
 installment) reaches the writer with the statement that billed it first, and
 a statement whose `resumen` names another closing date than the one it was

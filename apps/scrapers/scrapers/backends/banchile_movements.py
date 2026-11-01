@@ -172,6 +172,11 @@ class BanChileMovement:
     them (None elsewhere). Like the dates, it is recorded data and never
     identity.
 
+    `later_installment` is set on a statement row whose `cuotas` counter is
+    past the first ("03/12"): an earlier statement billed it first, so it
+    reports billed with no statement date (the writer never replaces a stored
+    one). Never identity.
+
     `billing_unknown` marks the rows of a statement whose `resumen` named
     another closing date than the one it was requested for: which statement
     billed them is unknown, so they report no billing status (and their
@@ -191,6 +196,7 @@ class BanChileMovement:
     legacy_amount: Optional[int] = None
     statement_date: str = ""
     location: Optional[TransactionLocation] = None
+    later_installment: bool = False
     billing_unknown: bool = False
 
 
@@ -716,6 +722,14 @@ def parse_unbilled_movements(payload) -> list[BanChileMovement]:
 
 
 _BARE_DDMM_RE = re.compile(r"^\d{4}$")
+# A statement row's installment counter, "NN/NN" (observed as "01/NN").
+_CUOTAS_RE = re.compile(r"^\s*(\d{1,3})\s*/\s*(\d{1,3})\s*$")
+
+
+def is_later_installment(raw_cuotas) -> bool:
+    """True for an installment counter past the first ("03/12"), else False."""
+    match = _CUOTAS_RE.match(_text(raw_cuotas))
+    return match is not None and int(match.group(1)) > 1
 
 
 def billed_reference(raw_reference) -> Optional[str]:
@@ -796,6 +810,7 @@ def parse_billed_movement(raw, fecha_facturacion: str = ""):
         statement_date=_text(fecha_facturacion),
         # The national statement reports the merchant's city, never a country.
         location=card_location(raw.get("ciudad"), None),
+        later_installment=is_later_installment(raw.get("cuotas")),
     )
 
 
