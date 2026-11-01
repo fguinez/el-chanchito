@@ -30,6 +30,7 @@ from db.writer import (
     UnresolvedRateScope,
     delete_superseded_transactions,
     finish_scraper_run,
+    soft_delete_vanished_transactions,
     start_scraper_run,
     upsert_exchange_rate,
     upsert_price_history,
@@ -56,7 +57,7 @@ from product_model import (
     TermDepositMetrics,
     TransactionLocation,
 )
-from scrapers.base import SupersededTransaction
+from scrapers.base import SupersededTransaction, VanishedWindow
 
 # The single user V009 seeds; `_resolve_product` attaches everything to it.
 SEEDED_USER_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -1306,6 +1307,198 @@ class TestProductRefTransactions:
         result = write_transactions([self._txn("fintual_stock_sell_1001")])
 
         assert (result.inserted, result.unresolved) == (1, 0)
+
+
+class TestVanishedTransactions:
+    """Pending card rows the bank stopped listing are soft-deleted (fix C)."""
+
+    _AFTER = date(2026, 9, 5)
+    _STALE = "bch_fp_00000000000000c1"
+
+    def _window(self, include_unreported=True, currency="CLP", after=_AFTER):
+        return VanishedWindow(
+            institution="banchile",
+            product_kind="credit_card",
+            currency=currency,
+            external_id_prefix="bch_fp_",
+            after=after,
+            include_unreported=include_unreported,
+        )
+
+    def _store(self, external_id=_STALE, tx_date=date(2026, 9, 10), **fields):
+        fields.setdefault("billing_status", "unbilled")
+        upsert_transactions([_card_txn(external_id, tx_date=tx_date, **fields)])
+
+    def _deleted(self, conn):
+        return {
+            row["external_id"]: row["deleted_at"] is not None
+            for row in conn.execute("SELECT external_id, deleted_at FROM transactions")
+        }
+
+    def test_a_stale_unbilled_row_is_soft_deleted(self, db_conn):
+        """It keeps its key, so a later listing finds it instead of re-importing."""
+        # Arrange
+        self._store()
+
+        # Act
+        deleted = soft_delete_vanished_transactions([self._window()], set())
+
+        # Assert
+        assert deleted == 1
+        assert self._deleted(db_conn) == {self._STALE: True}
+
+    def test_a_row_the_scrape_still_lists_is_kept(self, db_conn):
+        """This scrape's own keys are never candidates."""
+        # Arrange
+        self._store()
+
+        # Act
+        deleted = soft_delete_vanished_transactions([self._window()], {self._STALE})
+
+        # Assert
+        assert deleted == 0
+        assert self._deleted(db_conn) == {self._STALE: False}
+
+    @pytest.mark.parametrize(
+        ("fields", "expected"),
+        [
+            pytest.param(
+                {"billing_status": "billed", "statement_date": date(2026, 9, 5)},
+                False,
+                id="billed-never",
+            ),
+            pytest.param({"billing_status": None}, True, id="unreported-when-included"),
+        ],
+    )
+    def test_only_pending_rows_qualify(self, db_conn, fields, expected):
+        """A billed row is the bank's record; an unreported one only when asked."""
+        # Arrange
+        self._store(**fields)
+
+        # Act
+        soft_delete_vanished_transactions([self._window()], set())
+
+        # Assert
+        assert self._deleted(db_conn) == {self._STALE: expected}
+
+    def test_an_unreported_row_is_kept_outside_the_cycle_window(self, db_conn):
+        """Older billed history may carry no status: only `unbilled` goes there."""
+        # Arrange
+        self._store(billing_status=None)
+
+        # Act
+        soft_delete_vanished_transactions([self._window(include_unreported=False)], set())
+
+        # Assert
+        assert self._deleted(db_conn) == {self._STALE: False}
+
+    @pytest.mark.parametrize(
+        ("external_id", "tx_date"),
+        [
+            pytest.param(_STALE, _AFTER, id="on-the-boundary"),
+            pytest.param("bch_ref_050912345678", date(2026, 9, 10), id="bank-reference-key"),
+            pytest.param("bch_0123456789abcdef", date(2026, 9, 10), id="legacy-key"),
+        ],
+    )
+    def test_rows_outside_the_window_are_kept(self, db_conn, external_id, tx_date):
+        """Only fingerprint-keyed rows dated strictly after the boundary qualify."""
+        # Arrange
+        self._store(external_id, tx_date=tx_date)
+
+        # Act
+        soft_delete_vanished_transactions([self._window()], set())
+
+        # Assert
+        assert self._deleted(db_conn) == {external_id: False}
+
+    def test_another_currency_is_untouched(self, db_conn):
+        """The window names one product."""
+        # Arrange
+        self._store(currency="USD", amount=Decimal("-12.34"))
+
+        # Act
+        soft_delete_vanished_transactions([self._window(currency="CLP")], set())
+
+        # Assert
+        assert self._deleted(db_conn) == {self._STALE: False}
+
+    @pytest.mark.parametrize(
+        "assignment",
+        [
+            "is_manually_categorized = true",
+            "is_internal_transfer = true",
+            "notes = 'nota sintetica'",
+            "custom_description = 'Descripcion sintetica'",
+            "location_is_manual = true",
+        ],
+    )
+    def test_a_row_the_user_edited_is_kept(self, db_conn, assignment):
+        """Anything the user put on the row outranks the bank's silence."""
+        # Arrange
+        self._store()
+        db_conn.execute(f"UPDATE transactions SET {assignment}")
+
+        # Act
+        deleted = soft_delete_vanished_transactions([self._window()], set())
+
+        # Assert
+        assert deleted == 0
+        assert self._deleted(db_conn) == {self._STALE: False}
+
+    def test_a_row_linked_to_a_transfer_is_kept(self, db_conn):
+        """A transfer link is a user edit too, even without the flag."""
+        # Arrange
+        self._store()
+        row = db_conn.execute("SELECT id, product_id FROM transactions").fetchone()
+        db_conn.execute(
+            """
+            INSERT INTO internal_transfers
+                (description, amount, from_product_id, transfer_date, from_transaction_id)
+            VALUES ('Traspaso sintetico', 1000000, %s, '2026-09-10', %s)
+            """,
+            (row["product_id"], row["id"]),
+        )
+
+        # Act
+        deleted = soft_delete_vanished_transactions([self._window()], set())
+
+        # Assert
+        assert deleted == 0
+
+    def test_a_suspiciously_large_window_is_skipped(self, db_conn):
+        """More vanished rows than the cap reads as a partial listing."""
+        # Arrange
+        for n in range(writer._MAX_VANISHED_PER_WINDOW + 1):
+            self._store(f"bch_fp_{n:016x}", amount=-(n + 1))
+
+        # Act
+        deleted = soft_delete_vanished_transactions([self._window()], set())
+
+        # Assert
+        assert deleted == 0
+        assert not any(self._deleted(db_conn).values())
+
+    def test_a_soft_deleted_row_is_not_adopted_by_a_nearby_billed_charge(self, db_conn):
+        """Fix D must not hide a billed charge under a row fix C removed."""
+        # Arrange
+        self._store(description="COMERCIO SINTETICO")
+        soft_delete_vanished_transactions([self._window()], set())
+
+        # Act
+        inserted = upsert_transactions(
+            [
+                _card_txn(
+                    tx_date=date(2026, 9, 11),
+                    billing_status="billed",
+                    statement_date=date(2026, 10, 5),
+                    description="COMERCIO SINTETICO",
+                )
+            ]
+        )
+
+        # Assert
+        assert inserted == 1
+        assert self._deleted(db_conn) == {self._STALE: True, "bch_ref_200812345678": False}
 
 
 class TestSupersededTransactions:

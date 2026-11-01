@@ -676,6 +676,25 @@ statements independently), one row per USD charge, only among rows created
 before V023 was applied (`_migrations.applied_at`; V023 ships with the fix),
 and never a row the user categorised, annotated or paired.
 
+The unbilled card leg has no bank id, so a pending charge the bank re-dates,
+re-describes or moves to the other currency comes back under a new key, and a
+stale authorization just stops being listed. Two things keep those from
+lingering. A billed charge whose same-day adoption finds nothing adopts the
+single nearest unbilled (`bch_fp_`, not billed, not deleted) row of the same
+product and amount within three days whose description is similar
+(`db/writer.py::_nearby_card_sibling`). And each run the scraper names the
+windows it listed in full (`vanished_windows`, per currency: only when the
+unbilled list loaded and was not empty, that currency's statement loaded with
+every closing date confirmed, and its newest summary is not past the next
+closing date it prints): after the newest statement every unbilled or
+unreported `bch_fp_` row the scrape no longer carries is soft-deleted, and
+between the oldest and newest statement read only the ones still `unbilled`
+(`db/writer.py::soft_delete_vanished_transactions`, run only when every
+transaction of the scrape was written). A row the user edited (category,
+notes, custom description, location, transfer flag or link, monitor
+adjustment) is left in place, and a window with more than 20 candidates is
+skipped as a likely partial listing.
+
 Card billing (V044, see "Card billing status"): a movement of the unbilled leg
 is reported `unbilled`, one of a statement `billed`, with the statement's
 `fechaFacturacion` as its `statement_date`, except a later installment

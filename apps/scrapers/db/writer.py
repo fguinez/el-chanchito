@@ -21,6 +21,7 @@ from scrapers.base import (
     ScrapedTransaction,
     SupersededTransaction,
     TransactionLocation,
+    VanishedWindow,
 )
 
 logger = logging.getLogger(__name__)
@@ -491,7 +492,9 @@ def _nearby_card_sibling(
     the statement, so an exact-date match misses it and the charge would be
     stored twice. Only a billed charge looks this far, and only at rows of the
     same product, amount and source still keyed by the unbilled leg's
-    fingerprint and not billed, within `_CARD_ADOPTION_WINDOW_DAYS`, whose
+    fingerprint, not billed and not deleted (a row the vanished-row cleanup
+    removed must not hide the charge it turned out to be), within
+    `_CARD_ADOPTION_WINDOW_DAYS`, whose
     description is similar, that no movement of this scrape still carries and
     no other movement claimed. Of those, the single nearest one is adopted
     (`_closest_unique`); a tie adopts nothing.
@@ -503,6 +506,7 @@ def _nearby_card_sibling(
         WHERE product_id = %s AND amount = %s AND source = %s
           AND external_id LIKE %s
           AND billing_status IS DISTINCT FROM 'billed'
+          AND deleted_at IS NULL
           AND transaction_date BETWEEN %s AND %s
         ORDER BY created_at, id
         """,
@@ -1173,6 +1177,141 @@ def delete_superseded_transactions(
             deleted,
             len(kept),
         )
+    return deleted
+
+
+# More vanished rows than this in one window reads as a portal that answered
+# with a partial list, not as stale authorizations: the window is skipped.
+_MAX_VANISHED_PER_WINDOW = 20
+
+
+def _null_ref_products(conn, institution: str, kind: str, currency: str) -> list:
+    """The ids of an institution's (kind, currency) products with no external_ref."""
+    return [
+        row[0]
+        for row in conn.execute(
+            """
+            SELECT p.id FROM products p
+            JOIN accounts a ON p.account_id = a.id
+            JOIN institutions i ON a.institution_id = i.id
+            WHERE i.slug = %s AND p.kind = %s AND p.currency = %s
+              AND p.external_ref IS NULL
+            """,
+            (institution, kind, currency),
+        ).fetchall()
+    ]
+
+
+@with_db_retry
+def soft_delete_vanished_transactions(
+    windows: list[VanishedWindow], protected_external_ids: Collection[str]
+) -> int:
+    """Soft-delete the pending rows a scrape no longer lists. Returns the count.
+
+    Each `VanishedWindow` names a stretch of a product's history its scrape
+    listed in full (see it, and `BanChileScraper._vanished_for`). A stored row
+    in it is a candidate when its own scraper wrote it, its key starts with the
+    window's prefix and is not one of `protected_external_ids` (this scrape's
+    keys), it is dated after `after`, is not deleted yet, and its billing
+    status is `unbilled` (or NULL, for a window that `include_unreported`).
+
+    A candidate the user touched is left in place and logged: categorised,
+    annotated, given a custom description, located, flagged as an internal
+    transfer, linked to a transfer or used by a monitor adjustment. The rest
+    get a `deleted_at` (V033), so they keep their key and a later scrape that
+    lists the movement again finds it instead of importing it twice. A window
+    with more candidates than `_MAX_VANISHED_PER_WINDOW` is skipped whole.
+    """
+    if not windows:
+        return 0
+    protected = set(protected_external_ids)
+    pool = get_pool()
+    deleted = 0
+    with pool.connection() as conn:
+        for window in windows:
+            with conn.transaction():
+                product_ids = _null_ref_products(
+                    conn, window.institution, window.product_kind, window.currency
+                )
+                if not product_ids:
+                    continue
+                rows = conn.execute(
+                    """
+                    SELECT t.id, t.external_id, t.is_manually_categorized,
+                           t.is_internal_transfer, t.notes, t.location_is_manual,
+                           t.custom_description,
+                           EXISTS (
+                               SELECT 1 FROM internal_transfers it
+                               WHERE it.from_transaction_id = t.id
+                                  OR it.to_transaction_id = t.id
+                           ),
+                           EXISTS (
+                               SELECT 1 FROM monitor_adjustments ma
+                               WHERE ma.transaction_id = t.id
+                           )
+                    FROM transactions t
+                    WHERE t.product_id = ANY(%s) AND t.source = %s
+                      AND t.external_id LIKE %s
+                      AND t.deleted_at IS NULL
+                      AND t.transaction_date > %s
+                      AND (t.billing_status = 'unbilled'
+                           OR (%s AND t.billing_status IS NULL))
+                    ORDER BY t.transaction_date, t.created_at, t.id
+                    FOR UPDATE OF t
+                    """,
+                    (
+                        product_ids,
+                        f"scraper_{window.institution}",
+                        _like_prefix(window.external_id_prefix),
+                        window.after,
+                        window.include_unreported,
+                    ),
+                ).fetchall()
+                vanished = [row for row in rows if row[1] not in protected]
+                if len(vanished) > _MAX_VANISHED_PER_WINDOW:
+                    logger.warning(
+                        "%d %s %s %s rows after %s are no longer listed, more than "
+                        "%d; left in place in case the listing was partial",
+                        len(vanished),
+                        window.institution,
+                        window.product_kind,
+                        window.currency,
+                        window.after,
+                        _MAX_VANISHED_PER_WINDOW,
+                    )
+                    continue
+                doomed = []
+                for row_id, _, *flags in vanished:
+                    category, transfer, notes, located, custom, linked, adjusted = flags
+                    if (
+                        _carries_user_edits(category, transfer, notes, located)
+                        or (custom or "").strip()
+                        or linked
+                        or adjusted
+                    ):
+                        logger.warning(
+                            "Vanished transaction %s left in place: it carries user "
+                            "edits (category, notes, description, links or location)",
+                            row_id,
+                        )
+                        continue
+                    doomed.append(row_id)
+                if doomed:
+                    conn.execute(
+                        "UPDATE transactions SET deleted_at = now(), updated_at = now() "
+                        "WHERE id = ANY(%s) AND deleted_at IS NULL",
+                        (doomed,),
+                    )
+                    deleted += len(doomed)
+                    logger.info(
+                        "Soft-deleted %d %s %s %s row(s) after %s the source no "
+                        "longer lists",
+                        len(doomed),
+                        window.institution,
+                        window.product_kind,
+                        window.currency,
+                        window.after,
+                    )
     return deleted
 
 
