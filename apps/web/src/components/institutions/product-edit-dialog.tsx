@@ -14,9 +14,12 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { billingDaysPatch, storedBillingDays } from "@/lib/billing-days";
 import { normalizeSlug } from "@/lib/db/slug";
 import { fillsNameFromDefault, nameFieldPatch } from "@/lib/product-names";
 import {
+  BILLING_DAY_MAX,
+  BILLING_DAY_MIN,
   DISPLAY_ORDER_LIMIT,
   PRODUCT_NAME_MAX,
   PRODUCT_SLUG_MAX,
@@ -75,11 +78,26 @@ function nameInputValue(product: InstitutionProduct): string {
   return product.name === product.defaultName ? "" : product.name;
 }
 
+/** A credit card's billing-day inputs as stored: empty when unknown. */
+function billingDayInputs(product: InstitutionProduct) {
+  const stored = storedBillingDays(product.attributes);
+  return {
+    statementDay: String(stored.statementDay ?? ""),
+    dueDay: String(stored.dueDay ?? ""),
+  };
+}
+
+const BILLING_DAY_LABELS = {
+  statementDay: "El día de facturación",
+  dueDay: "El día de vencimiento",
+} as const;
+
 /**
  * "Editar" button + dialog for one product: display name, parent product,
- * display order and active flag in one form, and the slug in a separate one,
- * since changing it moves the product's URL. `onSaved` gets the product's
- * slug after the save (the new one when it changed).
+ * billing days (credit cards only), display order and active flag in one
+ * form, and the slug in a separate one, since changing it moves the product's
+ * URL. `onSaved` gets the product's slug after the save (the new one when it
+ * changed).
  */
 export function ProductEditDialog({
   institution,
@@ -98,6 +116,11 @@ export function ProductEditDialog({
   const [parentId, setParentId] = useState(product.parentProductId ?? "");
   const [displayOrder, setDisplayOrder] = useState(String(product.displayOrder));
   const [isActive, setIsActive] = useState(product.isActive);
+  const isCreditCard = product.kind === "credit_card";
+  const [statementDay, setStatementDay] = useState(
+    () => billingDayInputs(product).statementDay
+  );
+  const [dueDay, setDueDay] = useState(() => billingDayInputs(product).dueDay);
   const [detailsError, setDetailsError] = useState<string | null>(null);
   const [savingDetails, setSavingDetails] = useState(false);
 
@@ -115,6 +138,9 @@ export function ProductEditDialog({
     setParentId(product.parentProductId ?? "");
     setDisplayOrder(String(product.displayOrder));
     setIsActive(product.isActive);
+    const days = billingDayInputs(product);
+    setStatementDay(days.statementDay);
+    setDueDay(days.dueDay);
     setSlugInput(product.slug);
     setDetailsError(null);
     setSlugError(null);
@@ -166,8 +192,20 @@ export function ProductEditDialog({
       setDetailsError("El orden debe ser un número entero");
       return;
     }
+    const billingDays = isCreditCard
+      ? billingDaysPatch(
+          { statementDay, dueDay },
+          storedBillingDays(product.attributes)
+        )
+      : { ok: true as const, patch: {} };
+    if (!billingDays.ok) {
+      setDetailsError(
+        `${BILLING_DAY_LABELS[billingDays.field]} debe ser un número entero entre ${BILLING_DAY_MIN} y ${BILLING_DAY_MAX}`
+      );
+      return;
+    }
 
-    const body: Record<string, unknown> = {};
+    const body: Record<string, unknown> = { ...billingDays.patch };
     const namePatch = nameFieldPatch(name, product, defaultLabel);
     if (namePatch !== undefined) body.name = namePatch;
     if ((parentId || null) !== product.parentProductId) {
@@ -313,6 +351,53 @@ export function ProductEditDialog({
               corriente.
             </p>
           </div>
+
+          {/* Text inputs, not type="number": a number input reports text it
+              cannot parse as "" (which would clear the day), and its min/max
+              would refuse the whole form over an odd day a scraper stored.
+              saveDetails checks only the days that changed. */}
+          {isCreditCard && (
+            <div className="space-y-1.5">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <label
+                    htmlFor="product-statement-day"
+                    className="block text-sm font-medium"
+                  >
+                    Día de facturación
+                  </label>
+                  <Input
+                    id="product-statement-day"
+                    type="text"
+                    inputMode="numeric"
+                    className="w-32"
+                    value={statementDay}
+                    onChange={(e) => setStatementDay(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <label
+                    htmlFor="product-due-day"
+                    className="block text-sm font-medium"
+                  >
+                    Día de vencimiento
+                  </label>
+                  <Input
+                    id="product-due-day"
+                    type="text"
+                    inputMode="numeric"
+                    className="w-32"
+                    value={dueDay}
+                    onChange={(e) => setDueDay(e.target.value)}
+                  />
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Días del mes; vacío si no lo sabes. Si el banco los informa, la
+                próxima actualización los reemplaza.
+              </p>
+            </div>
+          )}
 
           <div className="space-y-1.5">
             <label
