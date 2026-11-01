@@ -589,10 +589,27 @@ export function billedDebtState(summary: CardBillingSummary): BilledDebtState {
   return summary.billedPending > 0 ? "pending" : "paid";
 }
 
-/** The due date passed with billed debt still owed. */
+/** Billed debt is still owed but the payments since the closing cover the
+ *  statement's minimum payment. */
+export function isMinimumPaid(summary: CardBillingSummary): boolean {
+  const minimum = summary.statement.minimumPayment;
+  return (
+    summary.hasBilledDebt === true &&
+    minimum != null &&
+    minimum > 0 &&
+    (summary.paidSinceClosing ?? 0) >= minimum
+  );
+}
+
+/** The due date passed with billed debt still owed and, when the statement
+ *  has one, its minimum payment not covered. */
 export function isPaymentOverdue(summary: CardBillingSummary): boolean {
   const due = summary.cycle?.dueDate;
+  const minimum = summary.statement.minimumPayment;
   return (
-    due != null && due.date < summary.asOf && summary.hasBilledDebt === true
+    due != null &&
+    due.date < summary.asOf &&
+    summary.hasBilledDebt === true &&
+    (minimum == null || (summary.paidSinceClosing ?? 0) < minimum)
   );
 }

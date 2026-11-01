@@ -4,6 +4,7 @@ import {
   dayInMonth,
   daysBetween,
   effectiveBillingStatus,
+  isMinimumPaid,
   isPaymentOverdue,
   resolveBillingCycle,
   statementFigures,
@@ -764,5 +765,28 @@ describe("isPaymentOverdue", () => {
     expect(isPaymentOverdue(summary("2026-11-06", 999999))).toBe(true);
     expect(isPaymentOverdue(summary("2026-11-05", 999999))).toBe(false);
     expect(isPaymentOverdue(summary("2026-11-06", 1000000))).toBe(false);
+  });
+
+  it("is false once the minimum payment was paid", () => {
+    const withMinimum = (payment: number) =>
+      summarizeBilling({
+        kind: "credit_card",
+        attributes: cardAttributes(15, 5),
+        metrics: {
+          ...metrics,
+          next_statement_date: "2026-11-15",
+          billed_amount: 2500000,
+          minimum_payment: 1000000,
+        },
+        transactions: [txn("2026-10-20", payment)],
+        truncated: false,
+        today: "2026-11-06",
+      })!.summary;
+    expect(isPaymentOverdue(withMinimum(999999))).toBe(true);
+    expect(isMinimumPaid(withMinimum(999999))).toBe(false);
+    expect(isPaymentOverdue(withMinimum(1000000))).toBe(false);
+    expect(isMinimumPaid(withMinimum(1000000))).toBe(true);
+    // Paid in full: no debt left, so neither applies.
+    expect(isMinimumPaid(withMinimum(2500000))).toBe(false);
   });
 });

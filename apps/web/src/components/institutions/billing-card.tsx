@@ -16,6 +16,7 @@ import { formatBalance } from "@/components/institutions/shared";
 import {
   billedDebtState,
   daysBetween,
+  isMinimumPaid,
   isPaymentOverdue,
   type BillingDate,
   type CardBillingSummary,
@@ -74,6 +75,9 @@ export function BillingCard({
                   <CycleDate value={cycle?.dueDate ?? null} />
                   {isPaymentOverdue(billing) && (
                     <Badge variant="destructive">vencido</Badge>
+                  )}
+                  {isMinimumPaid(billing) && (
+                    <Badge variant="secondary">mínimo pagado</Badge>
                   )}
                 </span>
               </Field>
