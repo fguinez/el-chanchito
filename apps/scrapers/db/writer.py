@@ -4,7 +4,7 @@ import json
 import logging
 from collections.abc import Collection
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 
@@ -499,6 +499,57 @@ def _fill_location(conn, row_id, location: TransactionLocation | None) -> None:
     )
 
 
+def _billing_fill(
+    stored_status: str | None,
+    stored_statement_date: date | None,
+    status: str | None,
+    statement_date: date | None,
+) -> tuple[str, date | None] | None:
+    """The (billing_status, statement_date) a stored row moves to, or None.
+
+    The status only moves forward (V044): an incoming `unbilled` only fills a
+    status never reported, an incoming `billed` replaces a NULL or `unbilled`
+    one, and nothing replaces `billed`. A NULL statement date takes the incoming
+    one, a stored one is kept, so an installment purchase stays on the statement
+    that first billed it. None (no status, or nothing would change) means the
+    row is left as it is.
+    """
+    if status is None:
+        return None
+    if status == "unbilled":
+        return ("unbilled", None) if stored_status is None else None
+    kept_date = stored_statement_date or statement_date
+    if stored_status == "billed" and kept_date == stored_statement_date:
+        return None
+    return "billed", kept_date
+
+
+def _fill_billing(conn, row_id, txn: ScrapedTransaction) -> None:
+    """Move the stored row's billing status forward (see `_billing_fill`).
+
+    The row is locked while it is read, so two writers cannot both decide from
+    the same stored state. A row with nothing to change is not written, so
+    `updated_at` only moves when something changed.
+    """
+    if txn.billing_status is None:
+        return
+    stored = conn.execute(
+        "SELECT billing_status, statement_date FROM transactions "
+        "WHERE id = %s FOR UPDATE",
+        (row_id,),
+    ).fetchone()
+    if stored is None:
+        return
+    fill = _billing_fill(stored[0], stored[1], txn.billing_status, txn.statement_date)
+    if fill is None:
+        return
+    conn.execute(
+        "UPDATE transactions SET billing_status = %s, statement_date = %s, "
+        "updated_at = now() WHERE id = %s",
+        (*fill, row_id),
+    )
+
+
 def _write_transaction(
     conn,
     txn: ScrapedTransaction,
@@ -520,6 +571,10 @@ def _write_transaction(
     adopted row has its `is_internal_transfer` touched, so a user who unticks
     it keeps it unticked. A row a scraper flags counts as a user edit for
     `_carries_user_edits`, so the twin cleanup leaves it in place.
+
+    `billing_status` and `statement_date` are inserted as given; a stored or
+    adopted row only has them moved forward (`_fill_billing`), so a charge
+    seen billed is never read back as unbilled.
     """
     source = f"scraper_{txn.institution}"
     row = conn.execute(
@@ -529,6 +584,7 @@ def _write_transaction(
     ).fetchone()
     if row:
         _fill_location(conn, row[0], txn.location)
+        _fill_billing(conn, row[0], txn)
         return "stored", row[0]
 
     if _adopts_stored_rows(txn.external_id):
@@ -556,6 +612,7 @@ def _write_transaction(
                 ),
             )
             _fill_location(conn, row_id, txn.location)
+            _fill_billing(conn, row_id, txn)
             logger.info(
                 "Adopted stored transaction %s onto %s",
                 row_id,
@@ -581,9 +638,10 @@ def _write_transaction(
              accounting_date, scheduled_month, source, external_id,
              is_internal_transfer,
              location_name, location_city, location_country,
-             location_latitude, location_longitude)
+             location_latitude, location_longitude,
+             billing_status, statement_date)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s)
+                %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (product_id, external_id) DO NOTHING
         """,
         (
@@ -598,6 +656,8 @@ def _write_transaction(
             txn.external_id,
             txn.internal_transfer,
             *_location_values(txn.location),
+            txn.billing_status,
+            txn.statement_date,
         ),
     )
     # A conflict means the row is already stored under this key.
@@ -669,6 +729,9 @@ def write_transactions(transactions: list[ScrapedTransaction]) -> TransactionWri
     A movement that is already stored (or adopted) only ever FILLS its row's
     location: NULL location columns take the scraped values, non-NULL ones and
     rows the user edited the location of are left alone (`_fill_location`).
+    Its billing status only moves forward, from unreported to `unbilled` or
+    `billed` and from `unbilled` to `billed`, and a NULL statement date is
+    filled while a stored one is kept (`_fill_billing`, V044).
 
     Transactions are grouped by (institution, kind, currency,
     product_external_ref). Without a ref they land on the product with no
