@@ -16,6 +16,7 @@ const CHECKING_ID = "11111111-1111-4111-8111-111111111111";
 const DEBIT_ID = "22222222-2222-4222-8222-222222222222";
 const LINE_ID = "33333333-3333-4333-8333-333333333333";
 const GHOST_ID = "44444444-4444-4444-8444-444444444444";
+const CARD_ID = "55555555-5555-4555-8555-555555555555";
 const OTHER_INSTITUTION_ID = "99999999-9999-4999-8999-999999999999";
 
 const checking: ProductEditRow = {
@@ -25,6 +26,8 @@ const checking: ProductEditRow = {
   parentProductId: null,
   isActive: true,
   currentBalance: "2500000.00000000",
+  kind: "checking",
+  attributes: {},
 };
 const debit: ProductEditRow = {
   id: DEBIT_ID,
@@ -33,6 +36,8 @@ const debit: ProductEditRow = {
   parentProductId: CHECKING_ID,
   isActive: true,
   currentBalance: null,
+  kind: "debit_card",
+  attributes: { kind: "debit_card", last4: "0000" },
 };
 const line: ProductEditRow = {
   id: LINE_ID,
@@ -41,6 +46,8 @@ const line: ProductEditRow = {
   parentProductId: null,
   isActive: true,
   currentBalance: "1000000.00000000",
+  kind: "line_of_credit",
+  attributes: {},
 };
 // A retired roll-up: inactive, balance stripped. Keeps its slug reserved.
 const ghost: ProductEditRow = {
@@ -50,9 +57,27 @@ const ghost: ProductEditRow = {
   parentProductId: null,
   isActive: false,
   currentBalance: null,
+  kind: "investment",
+  attributes: {},
+};
+// A credit card whose scraper reports its due day but not its statement day.
+const card: ProductEditRow = {
+  id: CARD_ID,
+  slug: "tarjeta-de-credito",
+  defaultName: "Banco Sintetico - credit_card",
+  parentProductId: null,
+  isActive: true,
+  currentBalance: "999999.00000000",
+  kind: "credit_card",
+  attributes: {
+    kind: "credit_card",
+    last4: "1234",
+    brand: "Visa Sintetica",
+    due_day: 5,
+  },
 };
 
-const institutionProducts = [checking, debit, line, ghost];
+const institutionProducts = [checking, debit, line, ghost, card];
 
 function expectFailure<T>(result: ManagementResult<T>) {
   if (result.ok) throw new Error("expected a failure");
@@ -99,6 +124,20 @@ describe("validateProductPatch", () => {
     expect(value).toEqual({ parentProductId: null });
   });
 
+  it.each([1, 15, 31])("accepts %i as a billing day", (day) => {
+    const value = expectValue(
+      validateProductPatch({ statementDay: day, dueDay: day })
+    );
+    expect(value).toEqual({ statementDay: day, dueDay: day });
+  });
+
+  it("accepts null to clear a billing day", () => {
+    const value = expectValue(
+      validateProductPatch({ statementDay: null, dueDay: null })
+    );
+    expect(value).toEqual({ statementDay: null, dueDay: null });
+  });
+
   it.each([
     ["kind", { kind: "savings" }],
     ["currency", { currency: "USD" }],
@@ -125,6 +164,12 @@ describe("validateProductPatch", () => {
     ["a non-boolean isActive", { isActive: "false" }, "isActive"],
     ["a fractional displayOrder", { displayOrder: 1.5 }, "displayOrder"],
     ["an out-of-range displayOrder", { displayOrder: 1_000_001 }, "displayOrder"],
+    ["a statement day of 0", { statementDay: 0 }, "statementDay"],
+    ["a statement day of 32", { statementDay: 32 }, "statementDay"],
+    ["a negative due day", { dueDay: -1 }, "dueDay"],
+    ["a fractional statement day", { statementDay: 10.5 }, "statementDay"],
+    ["a string due day", { dueDay: "10" }, "dueDay"],
+    ["a boolean statement day", { statementDay: true }, "statementDay"],
   ])("rejects %s", (_label, body, field) => {
     const failure = expectFailure(validateProductPatch(body));
     expect(failure.status).toBe(400);
@@ -231,6 +276,70 @@ describe("planProductUpdate", () => {
       planProductUpdate(checking, { displayOrder: -1 }, institutionProducts)
     );
     expect(changes).toEqual({ displayOrder: -1 });
+  });
+
+  it("merges a billing day into a credit card's attributes", () => {
+    const changes = expectValue(
+      planProductUpdate(card, { statementDay: 20 }, institutionProducts)
+    );
+    expect(changes).toEqual({
+      attributes: {
+        kind: "credit_card",
+        last4: "1234",
+        brand: "Visa Sintetica",
+        statement_day: 20,
+        due_day: 5,
+      },
+    });
+  });
+
+  it("removes a billing day cleared with null and keeps the rest", () => {
+    const changes = expectValue(
+      planProductUpdate(card, { dueDay: null }, institutionProducts)
+    );
+    expect(changes).toEqual({
+      attributes: { kind: "credit_card", last4: "1234", brand: "Visa Sintetica" },
+    });
+  });
+
+  it("sets both days on a card with no stored attributes", () => {
+    const bare = { ...card, attributes: {} };
+    const changes = expectValue(
+      planProductUpdate(bare, { statementDay: 20, dueDay: 5 }, [bare])
+    );
+    expect(changes).toEqual({
+      attributes: { kind: "credit_card", statement_day: 20, due_day: 5 },
+    });
+  });
+
+  it("writes no attributes when the billing days already hold their values", () => {
+    const changes = expectValue(
+      planProductUpdate(
+        card,
+        { statementDay: null, dueDay: 5 },
+        institutionProducts
+      )
+    );
+    expect(changes).toEqual({});
+  });
+
+  it("does not modify the stored attributes object", () => {
+    const attributes = { ...card.attributes };
+    planProductUpdate(card, { statementDay: 20, dueDay: null }, institutionProducts);
+    expect(card.attributes).toEqual(attributes);
+  });
+
+  it.each([
+    ["a line of credit", line, { statementDay: 20 }, "statementDay"],
+    ["a debit card", debit, { dueDay: 5 }, "dueDay"],
+    ["a checking account clearing a day", checking, { statementDay: null }, "statementDay"],
+  ])("refuses billing days on %s", (_label, product, patch, field) => {
+    const failure = expectFailure(
+      planProductUpdate(product, patch, institutionProducts)
+    );
+    expect(failure.status).toBe(400);
+    expect(failure.field).toBe(field);
+    expect(failure.error).toMatch(/only applies to credit cards/);
   });
 });
 
