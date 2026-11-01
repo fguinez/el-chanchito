@@ -7,10 +7,18 @@
 // - product kind, currency and external_ref are the scrapers' identity key
 //   (`uq_products_identity`), and the typed attributes/metrics payloads are
 //   keyed by kind; editing any of them would fork the product on its next
-//   scrape, so they are read-only here.
+//   scrape, so they are read-only here. The one exception inside attributes
+//   is a credit card's billing days (`statement_day` / `due_day`), for cards
+//   whose scraper never reports them; the writer merges attributes key by
+//   key, so a scraper that does report them overwrites the manual value.
 // - an institution's slug is the key scrapers and the refresh endpoint resolve
 //   by, so it is read-only too. Everything else is display metadata.
 
+import type {
+  CreditCardAttributes,
+  ProductAttributes,
+  ProductKind,
+} from "@chanchito/product-model";
 import { normalizeSlug } from "@/lib/db/slug";
 import { isRetiredGhost } from "@/lib/retired-products";
 
@@ -40,6 +48,8 @@ export const INSTITUTION_URL_MAX = 300;
 export const ACCOUNT_NAME_MAX = 80;
 /** Well inside a Postgres integer; display orders are small by nature. */
 export const DISPLAY_ORDER_LIMIT = 1_000_000;
+export const BILLING_DAY_MIN = 1;
+export const BILLING_DAY_MAX = 31;
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -79,6 +89,15 @@ function fail(
 
 export function isUuid(value: unknown): value is string {
   return typeof value === "string" && UUID_RE.test(value);
+}
+
+export function isBillingDay(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= BILLING_DAY_MIN &&
+    value <= BILLING_DAY_MAX
+  );
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -142,6 +161,10 @@ export type ProductPatch = {
   parentProductId?: string | null;
   isActive?: boolean;
   displayOrder?: number;
+  /** A credit card's statement day (facturación), or null to clear it. */
+  statementDay?: number | null;
+  /** A credit card's due day (vencimiento), or null to clear it. */
+  dueDay?: number | null;
 };
 
 const PRODUCT_FIELDS = [
@@ -150,7 +173,18 @@ const PRODUCT_FIELDS = [
   "parentProductId",
   "isActive",
   "displayOrder",
+  "statementDay",
+  "dueDay",
 ] as const;
+
+const BILLING_DAY_ATTRIBUTES = {
+  statementDay: "statement_day",
+  dueDay: "due_day",
+} as const;
+export type BillingDayField = keyof typeof BILLING_DAY_ATTRIBUTES;
+export const BILLING_DAY_FIELDS = Object.keys(
+  BILLING_DAY_ATTRIBUTES
+) as readonly BillingDayField[];
 
 const PRODUCT_READ_ONLY: Record<string, string> = {
   kind: "Field 'kind' is part of the product's scraper identity and cannot be edited",
@@ -231,6 +265,18 @@ export function validateProductPatch(
     out.displayOrder = order;
   }
 
+  for (const field of BILLING_DAY_FIELDS) {
+    const day = checked[field];
+    if (day === undefined) continue;
+    if (day !== null && !isBillingDay(day)) {
+      return fail(
+        `Field '${field}' must be an integer between ${BILLING_DAY_MIN} and ${BILLING_DAY_MAX}, or null`,
+        field
+      );
+    }
+    out[field] = day;
+  }
+
   return { ok: true, value: out };
 }
 
@@ -244,14 +290,20 @@ export interface ProductRuleRow {
   currentBalance: string | number | null;
 }
 
-/** The product being edited: its rule row plus the name a reset restores. */
+/** The product being edited: its rule row plus the name a reset restores
+ *  and the kind and attributes the billing days merge into. */
 export interface ProductEditRow extends ProductRuleRow {
   defaultName: string;
+  kind: ProductKind;
+  attributes: ProductAttributes | Record<string, never>;
 }
 
 /** The columns a product PATCH writes: a reset is already resolved to the
- *  default name. */
-export type ProductChanges = Omit<ProductPatch, "name"> & { name?: string };
+ *  default name, and billing days to the merged attributes. */
+export type ProductChanges = Omit<ProductPatch, "name" | BillingDayField> & {
+  name?: string;
+  attributes?: CreditCardAttributes;
+};
 
 /**
  * True when making `parentId` the parent of `productId` would close a loop,
@@ -274,11 +326,43 @@ export function createsParentCycle(
 }
 
 /**
+ * Merge a patch's billing days into a credit card's attributes, keeping every
+ * other key; null removes the day (the writer never stores nulls either).
+ * Null when the patch sets no billing day or each already holds its value.
+ * Any other kind is refused: only `CreditCardAttributes` has these days.
+ */
+function planBillingDays(
+  product: ProductEditRow,
+  patch: ProductPatch
+): ManagementResult<CreditCardAttributes | null> {
+  const fields = BILLING_DAY_FIELDS.filter((f) => patch[f] !== undefined);
+  if (fields.length === 0) return { ok: true, value: null };
+  if (product.kind !== "credit_card") {
+    return fail(`Field '${fields[0]}' only applies to credit cards`, fields[0]);
+  }
+
+  // The kind is a credit card; only the stored payload may still be `{}`.
+  const current = product.attributes as Partial<CreditCardAttributes>;
+  const next: CreditCardAttributes = { ...current, kind: "credit_card" };
+  let changed = false;
+  for (const field of fields) {
+    const key = BILLING_DAY_ATTRIBUTES[field];
+    const day = patch[field] ?? null;
+    if ((current[key] ?? null) === day) continue;
+    changed = true;
+    if (day === null) delete next[key];
+    else next[key] = day;
+  }
+  return { ok: true, value: changed ? next : null };
+}
+
+/**
  * Check a validated patch against the product and every product of its
  * institution (retired ghosts included, since they keep their slugs
  * reserved), and return only the columns that actually change.
  *
  * - `name: null` resets the name to the product's default name.
+ * - Billing days apply to a credit card only and merge into its attributes.
  * - Deactivating a product with no balance is refused: inactive + no balance
  *   is exactly the retired-ghost shape (lib/retired-products), which the UI
  *   hides everywhere, so the product would vanish with no way to reactivate
@@ -293,6 +377,10 @@ export function planProductUpdate(
   institutionProducts: readonly ProductRuleRow[]
 ): ManagementResult<ProductChanges> {
   const changes: ProductChanges = {};
+
+  const billing = planBillingDays(product, patch);
+  if (!billing.ok) return billing;
+  if (billing.value) changes.attributes = billing.value;
 
   if (patch.name !== undefined) changes.name = patch.name ?? product.defaultName;
 

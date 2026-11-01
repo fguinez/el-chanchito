@@ -1125,12 +1125,18 @@ split, with their rules in `lib/management.ts`:
   `parent_product_id`, `is_active` and `display_order`; `name: null` copies
   `default_name` back, so the name follows the scrapers again. Kind,
   currency and external_ref are refused, since changing them would fork the product on its
-  next scrape. A new slug is canonicalized with the generated-slug rules and
-  must be free across the institution (retired products included); the
-  `(account_id, slug)` index backstops a scraper minting the same slug
-  mid-edit. Parents stay inside the institution and can't form a loop. The
-  institution and product rows are locked (`FOR NO KEY UPDATE`) while the
-  rules run, so concurrent edits serialize per institution.
+  next scrape. The one scraper-owned field it writes is a credit card's
+  billing days: `statementDay` / `dueDay` (1 to 31, `null` removes the key)
+  merge into `attributes` as `statement_day` / `due_day`, for cards whose
+  scraper reports none, and any other kind gets a 400 for them. They are the
+  exception to the rule above: the writer shallow-merges `attributes`, so a
+  scraper that does report the days overwrites the manual value. A new slug
+  is canonicalized with the generated-slug rules and must be free across the
+  institution (retired products included); the `(account_id, slug)` index
+  backstops a scraper minting the same slug mid-edit. Parents stay inside
+  the institution and can't form a loop. The institution and product rows
+  are locked (`FOR NO KEY UPDATE`) while the rules run, so concurrent edits
+  serialize per institution.
 - Deactivating a product with no balance is refused: inactive without a
   balance is the retired-ghost shape (`lib/retired-products.ts`) the UI hides,
   so the product could never be reactivated from the dashboard. The writer

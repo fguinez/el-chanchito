@@ -348,9 +348,11 @@ async function loadParent(parentId: string): Promise<ProductParent | null> {
  * product's `defaultName` (the scrapers' name, which it then follows again on
  * later scrapes); a blank string is a 400. A rename never touches the slug; a new
  * slug moves the product's page URL, while monitors keep working since they
- * reference products by uuid. Returns the product's new identity; 400 for a
- * bad body, 404 for an unknown or retired product, 409 for a taken slug or a
- * deactivation that would hide the product.
+ * reference products by uuid. A credit card also takes `statementDay` and
+ * `dueDay` (1..31, null clears), merged into its attributes as
+ * `statement_day` / `due_day`; any other kind gets a 400 for them. Returns the
+ * product's new identity; 400 for a bad body, 404 for an unknown or retired
+ * product, 409 for a taken slug or a deactivation that would hide the product.
  */
 export async function PATCH(request: NextRequest, { params }: Context) {
   try {
@@ -371,8 +373,9 @@ export async function PATCH(request: NextRequest, { params }: Context) {
       // Locking the institution serializes edits across its products, so two
       // concurrent PATCHes can't claim one slug or link two products into a
       // loop; locking the product keeps its balance (the deactivation rule)
-      // steady against a scrape landing mid-edit. NO KEY UPDATE does both
-      // without blocking the scraper's inserts that reference these rows.
+      // and its attributes (the billing-day merge) steady against a scrape
+      // landing mid-edit. NO KEY UPDATE does both without blocking the
+      // scraper's inserts that reference these rows.
       const [institution] = await tx
         .select({ id: institutions.id })
         .from(institutions)
@@ -388,6 +391,8 @@ export async function PATCH(request: NextRequest, { params }: Context) {
           parentProductId: products.parentProductId,
           isActive: products.isActive,
           currentBalance: products.currentBalance,
+          kind: products.kind,
+          attributes: products.attributes,
         })
         .from(products)
         .innerJoin(accounts, eq(products.accountId, accounts.id))
@@ -430,6 +435,7 @@ export async function PATCH(request: NextRequest, { params }: Context) {
           parentProductId: products.parentProductId,
           isActive: products.isActive,
           displayOrder: products.displayOrder,
+          attributes: products.attributes,
         });
       return { ok: true as const, value: updated };
     });
