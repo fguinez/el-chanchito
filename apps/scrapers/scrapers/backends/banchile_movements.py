@@ -149,9 +149,11 @@ class BanChileMovement:
     or `dedupe_movements`: dates are exactly what the pre-#57 scheme keyed on,
     and re-keying on one again would restart the bug this module exists to end.
 
-    `source` is for logging only. It is deliberately NOT part of any key either:
-    a charge crossing from the unbilled to the billed leg must not re-key
-    itself, which is exactly the bug issue #56 tracks.
+    `source` names the leg; on a card movement it is also the billing status
+    (`card_unbilled` / `card_billed`, see `institutions/banchile.py`). It is
+    deliberately NOT part of any key: a charge crossing from the unbilled to
+    the billed leg must not re-key itself, which is exactly the bug issue #56
+    tracks.
 
     `currency` routes the movement to its product ("CLP" or "USD"); `amount` is
     a Decimal, whole for CLP and with exact cents for USD. `legacy_fingerprint`
@@ -160,10 +162,11 @@ class BanChileMovement:
     which is how those misrouted rows are found and removed. Neither is ever
     identity.
 
-    `statement_date` is the `fechaFacturacion` a billed row was read from (""
-    on every other leg). It only tells the cleanup which statements a scrape
-    covered and is never identity on its own (the billed fingerprints carry
-    their own copy).
+    `statement_date` is the ISO `fechaFacturacion` a billed row was read from
+    ("" on every other leg): the closing date of the statement that billed it,
+    stored with the transaction, and how the cleanup knows which statements a
+    scrape covered. It is never identity on its own (the billed fingerprints
+    carry their own copy).
 
     `location` is the merchant's city and country where the card legs report
     them (None elsewhere). Like the dates, it is recorded data and never
@@ -186,6 +189,37 @@ class BanChileMovement:
 
 
 @dataclass(frozen=True)
+class BanChileStatement:
+    """The `resumen` of one card statement (estado de cuenta), one currency.
+
+    Dates are the statement's own closing date (`fechaFacturacionActual`, the
+    same day as the `fechaFacturacion` it was requested with), the next closing
+    date it prints (`fechaProximaFacturacion`) and its payment due date
+    (`fechaVencimientoFacturacion`). Amounts are in the statement's currency:
+    `montoFacturado` and `pagoMinimo`, whole pesos on the national statement
+    and cents on the USD one, whose `pagoMinimo` is null.
+    """
+
+    currency: str
+    statement_date: datetime.date
+    next_statement_date: Optional[datetime.date] = None
+    payment_due_date: Optional[datetime.date] = None
+    billed_amount: Optional[float] = None
+    minimum_payment: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class BilledLegRead:
+    """What one card statement leg read: its movements and newest statement.
+
+    `statement` is None when no statement the leg read had a usable `resumen`.
+    """
+
+    movements: list[BanChileMovement] = field(default_factory=list)
+    statement: Optional[BanChileStatement] = None
+
+
+@dataclass(frozen=True)
 class BanChileSessionResult:
     """Everything one BanChile login produced: products, movements, failures.
 
@@ -193,13 +227,16 @@ class BanChileSessionResult:
     card / línea / depósitos / fondos), banchile_fx's "tipo de cambio" and the
     movement ones, so the scraper can report partial coverage from any part of
     the shared session. `exchange_rates` is the USD card's rate (banchile_fx),
-    kept apart from `products`: it is not a product observation.
+    kept apart from `products`: it is not a product observation, and so are
+    `statements`, the newest statement each card statement leg read (at most
+    one per currency), which the scraper folds into the card products.
     """
 
     products: list[ScrapedProduct] = field(default_factory=list)
     movements: list[BanChileMovement] = field(default_factory=list)
     failed_surfaces: tuple[str, ...] = ()
     exchange_rates: list[ScrapedExchangeRate] = field(default_factory=list)
+    statements: list[BanChileStatement] = field(default_factory=list)
 
 
 # --- Pure helpers (unit-tested; no browser) -----------------------------------
@@ -911,6 +948,83 @@ def _flag_set(value) -> bool:
     if isinstance(value, int):
         return value == 1
     return _text(value).upper() in {"1", "S", "SI", "Y", "YES", "TRUE"}
+
+
+def _statement_amount(value, currency: str) -> Optional[float]:
+    """A `resumen` amount: whole pesos for CLP, cents for USD (None if absent)."""
+    if currency == "USD":
+        usd = _usd(value)
+        return float(usd) if usd is not None else None
+    number = _number(value)
+    if number is None or not math.isfinite(number):
+        return None
+    return float(round(number))
+
+
+def parse_statement_summary(payload, currency: str) -> Optional[BanChileStatement]:
+    """The `resumen` of one `resumen-por-fecha` response (None when unusable).
+
+    The national and the USD statement share the `resumen` keys; its dates are
+    "DD/MM/YYYY" strings. A statement whose own closing date does not parse,
+    or that the bank says does not exist (`existeEstadoCuenta: false`), yields
+    None: its figures could not be tied to a statement. Any other field that is
+    missing or garbled is just None.
+    """
+    if not isinstance(payload, dict) or payload.get("existeEstadoCuenta") is False:
+        return None
+    resumen = payload.get("resumen")
+    if not isinstance(resumen, dict):
+        return None
+    statement_date = _parse_date_ddmmyyyy(_text(resumen.get("fechaFacturacionActual")))
+    if statement_date is None:
+        return None
+    return BanChileStatement(
+        currency=currency,
+        statement_date=statement_date,
+        next_statement_date=_parse_date_ddmmyyyy(
+            _text(resumen.get("fechaProximaFacturacion"))
+        ),
+        payment_due_date=_parse_date_ddmmyyyy(
+            _text(resumen.get("fechaVencimientoFacturacion"))
+        ),
+        billed_amount=_statement_amount(resumen.get("montoFacturado"), currency),
+        minimum_payment=_statement_amount(resumen.get("pagoMinimo"), currency),
+    )
+
+
+def _statement_order(fecha: str) -> datetime.date:
+    """Sort key for a statement read: its ISO date, unknown ones last."""
+    try:
+        return datetime.date.fromisoformat(fecha)
+    except ValueError:
+        return datetime.date.max
+
+
+def billed_leg_from_statements(
+    statements: list[tuple[str, dict]], parse: Callable, currency: str
+) -> BilledLegRead:
+    """One statement leg's movements and newest summary, oldest statement first.
+
+    `statements` pairs each `resumen-por-fecha` payload with the ISO
+    `fechaFacturacion` it was requested with ("" when unknown). They are parsed
+    oldest first, so a movement printed on two statements (an installment
+    purchase, say) reaches the writer first with the statement that billed it
+    first; the writer never replaces a stored statement date. A payload with no
+    known date sorts last: it is the SPA's own default load, the newest.
+
+    The summary kept is the one with the latest closing date; None when no
+    statement had a usable `resumen`.
+    """
+    movements: list[BanChileMovement] = []
+    newest: Optional[BanChileStatement] = None
+    for fecha, payload in sorted(statements, key=lambda read: _statement_order(read[0])):
+        movements.extend(parse(payload, fecha))
+        summary = parse_statement_summary(payload, currency)
+        if summary is not None and (
+            newest is None or summary.statement_date > newest.statement_date
+        ):
+            newest = summary
+    return BilledLegRead(dedupe_movements(movements), newest)
 
 
 def drop_unbilled_duplicates(
@@ -2006,16 +2120,18 @@ def _read_billed_leg(
     parse: Callable,
     dates_of: Callable,
     label: str,
-) -> Optional[list[BanChileMovement]]:
+    currency: str,
+) -> Optional[BilledLegRead]:
     """Read one currency's newest statements (one attempt).
 
     The SPA loads the most recent statement itself when the facturados tab
     opens (both currencies' at once, with identical request bodies); older
     periods are read by replaying that same request with a different
-    `fechaFacturacion`, taken from `fechas-facturacion`.
+    `fechaFacturacion`, taken from `fechas-facturacion`. Every statement read
+    is then parsed oldest first (`billed_leg_from_statements`).
 
-    Returns None when the statement never loaded (worth retrying) and a list
-    once it did, which may legitimately be empty.
+    Returns None when the statement never loaded (worth retrying) and a
+    `BilledLegRead` once it did, whose movements may legitimately be empty.
     """
     budget = _budget(_RENDER_TIMEOUTS_MS, attempt)
     with _JsonCapture(page, _FECHAS_FACTURACION_FRAGMENT) as fechas_capture:
@@ -2037,7 +2153,7 @@ def _read_billed_leg(
             fechas_payloads = list(fechas_capture.payloads)
 
         loaded = _text((requests[-1]["body"] if requests else {}).get("fechaFacturacion"))
-        movements = parse(payload, loaded)
+        statements = [(loaded, payload)]
 
         dates = dates_of(
             fechas_payloads[-1] if fechas_payloads else None, _BILLED_STATEMENTS
@@ -2047,15 +2163,20 @@ def _read_billed_leg(
                 continue
             older = _replay_statement(page, requests[-1], fecha)
             if older is not None:
-                movements.extend(parse(older, fecha))
+                statements.append((fecha, older))
 
-    movements = dedupe_movements(movements)
-    logger.info("BanChile: %d %s", len(movements), label)
-    return movements
+    read = billed_leg_from_statements(statements, parse, currency)
+    logger.info(
+        "BanChile: %d %s (%s)",
+        len(read.movements),
+        label,
+        "statement summary read" if read.statement else "no statement summary",
+    )
+    return read
 
 
-def _read_card_billed(page, attempt: int) -> Optional[list[BanChileMovement]]:
-    """The national (CLP) statements' billed movements (one attempt)."""
+def _read_card_billed(page, attempt: int) -> Optional[BilledLegRead]:
+    """The national (CLP) statements' billed movements and summary (one attempt)."""
     return _read_billed_leg(
         page,
         attempt,
@@ -2063,11 +2184,12 @@ def _read_card_billed(page, attempt: int) -> Optional[list[BanChileMovement]]:
         parse_billed_movements,
         statement_dates,
         "billed card movements",
+        "CLP",
     )
 
 
-def _read_card_billed_usd(page, attempt: int) -> Optional[list[BanChileMovement]]:
-    """The international (USD) statements' billed movements (one attempt).
+def _read_card_billed_usd(page, attempt: int) -> Optional[BilledLegRead]:
+    """The international (USD) statements' billed movements and summary (one attempt).
 
     The same statements as the national leg (`listaInternacional` mirrors
     `listaNacional`), read from the SPA's own `internacional` call and its
@@ -2081,6 +2203,7 @@ def _read_card_billed_usd(page, attempt: int) -> Optional[list[BanChileMovement]
         parse_international_billed_movements,
         international_statement_dates,
         "billed USD card movements",
+        "USD",
     )
 
 
@@ -2101,7 +2224,7 @@ CLP_CARD_SURFACES = ("tarjeta no facturados", "tarjeta facturados")
 
 def read_movement_surfaces(
     page, deadline: Optional[float] = None
-) -> tuple[list[BanChileMovement], tuple[str, ...]]:
+) -> tuple[list[BanChileMovement], tuple[str, ...], list[BanChileStatement]]:
     """Read every movements surface off an authenticated page, with retries.
 
     This is the seam the tests drive with a fake page. Each surface goes through
@@ -2117,12 +2240,15 @@ def read_movement_surfaces(
     ends the run in minutes with whatever was already read.
 
     A charge the scrape saw on both card legs at once is collapsed onto its
-    billed row before returning (`drop_unbilled_duplicates`).
+    billed row before returning (`drop_unbilled_duplicates`). The statement
+    legs also hand back their newest statement summary (`BilledLegRead`),
+    returned third, one per leg that had one.
     """
     if deadline is None:
         deadline = _read_deadline()
     movements: list[BanChileMovement] = []
     failed: list[str] = []
+    statements: list[BanChileStatement] = []
     for position, (surface, read) in enumerate(_MOVEMENT_READERS):
         if _deadline_passed(deadline):
             skipped = [label for label, _ in _MOVEMENT_READERS[position:]]
@@ -2134,9 +2260,17 @@ def read_movement_surfaces(
         )
         if found is None:
             failed.append(surface)
+        elif isinstance(found, BilledLegRead):
+            movements.extend(found.movements)
+            if found.statement is not None:
+                statements.append(found.statement)
         else:
             movements.extend(found)
-    return drop_unbilled_duplicates(dedupe_movements(movements)), tuple(failed)
+    return (
+        drop_unbilled_duplicates(dedupe_movements(movements)),
+        tuple(failed),
+        statements,
+    )
 
 
 # --- The shared session -------------------------------------------------------
@@ -2157,12 +2291,13 @@ def read_session(page) -> BanChileSessionResult:
     deadline = _read_deadline()
     balances = _read_all_surfaces(page, deadline)
     rates, rate_failed = read_exchange_rate_surface(page, deadline)
-    movements, movement_failed = read_movement_surfaces(page, deadline)
+    movements, movement_failed, statements = read_movement_surfaces(page, deadline)
     return BanChileSessionResult(
         products=balances.products,
         movements=movements,
         failed_surfaces=balances.failed_surfaces + rate_failed + movement_failed,
         exchange_rates=rates,
+        statements=statements,
     )
 
 

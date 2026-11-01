@@ -19,6 +19,9 @@ from scrapers.backends import banchile_movements as movements_mod
 from scrapers.backends import banchile_web as banchile_web_mod
 from scrapers.backends.banchile_movements import (
     BanChileMovement,
+    BanChileStatement,
+    BilledLegRead,
+    billed_leg_from_statements,
     card_location,
     merge_locations,
     _read_card_billed,
@@ -38,6 +41,7 @@ from scrapers.backends.banchile_movements import (
     parse_billed_movements,
     parse_cartola_movement,
     parse_international_billed_movements,
+    parse_statement_summary,
     parse_unbilled_movement,
     parse_unbilled_movements,
     read_movement_surfaces,
@@ -785,7 +789,7 @@ class TestSharedSession:
 
         def read_movements(p, deadline):
             events.append("movements")
-            return [], ("tarjeta facturados",)
+            return [], ("tarjeta facturados",), []
 
         monkeypatch.setattr("playwright.sync_api.sync_playwright", sync_playwright)
         monkeypatch.setattr(movements_mod, "_authenticated_session", authenticated_session)
@@ -1192,7 +1196,7 @@ class TestInternationalSurface:
     def test_captures_the_spas_international_statement(self):
         page = _FakeCardPage(_intl_payload(compras=[_intl_row()]), self._FRAGMENT)
 
-        found = _read_card_billed_usd(page, attempt=0)
+        found = _read_card_billed_usd(page, attempt=0).movements
 
         assert [(m.currency, m.amount) for m in found] == [("USD", Decimal("-1234.56"))]
 
@@ -1224,10 +1228,208 @@ class TestSurfaceIsolation:
             ],
         )
 
-        movements, failed = read_movement_surfaces(MagicMock())
+        movements, failed, _ = read_movement_surfaces(MagicMock())
 
         assert movements == [clp]
         assert failed == ("tarjeta facturados USD",)
+
+
+def _resumen(
+    actual="05/08/2026",
+    proxima="04/09/2026",
+    vencimiento="19/08/2026",
+    facturado=999999.0,
+    minimo=99999.0,
+):
+    """A statement's `resumen`, shaped like the portal's; every value invented."""
+    return {
+        "cupo": 2500000.0,
+        "cupoUtilizado": 999999.0,
+        "cupoDisponible": 1000000,
+        "montoFacturado": facturado,
+        "pagoMinimo": minimo,
+        "fechaFacturacionActual": actual,
+        "fechaVencimientoFacturacion": vencimiento,
+        "fechaProximaFacturacion": proxima,
+        "totalPagos": -999999.0,
+        "saldoAnteriorFacturado": 999999.0,
+    }
+
+
+def _statement_payload(rows=(), **resumen):
+    return dict(_billed_payload(list(rows)), resumen=_resumen(**resumen))
+
+
+class TestStatementSummary:
+    """`resumen` -> the card's latest statement figures (V044 metrics)."""
+
+    def test_the_national_statement(self):
+        summary = parse_statement_summary(_statement_payload(), "CLP")
+
+        assert summary == BanChileStatement(
+            currency="CLP",
+            statement_date=datetime.date(2026, 8, 5),
+            next_statement_date=datetime.date(2026, 9, 4),
+            payment_due_date=datetime.date(2026, 8, 19),
+            billed_amount=999999.0,
+            minimum_payment=99999.0,
+        )
+
+    def test_clp_figures_are_whole_pesos(self):
+        summary = parse_statement_summary(
+            _statement_payload(facturado=999999.4, minimo=99999.6), "CLP"
+        )
+        assert (summary.billed_amount, summary.minimum_payment) == (999999.0, 100000.0)
+
+    def test_the_usd_statement_has_no_minimum_payment(self):
+        summary = parse_statement_summary(
+            _statement_payload(facturado=1234.56, minimo=None), "USD"
+        )
+        assert summary.currency == "USD"
+        assert summary.billed_amount == 1234.56
+        assert summary.minimum_payment is None
+
+    def test_usd_figures_keep_their_cents(self):
+        summary = parse_statement_summary(_statement_payload(facturado=12.3), "USD")
+        assert summary.billed_amount == 12.3
+
+    def test_a_garbled_secondary_date_is_none(self):
+        summary = parse_statement_summary(
+            _statement_payload(proxima="pronto", vencimiento=None), "CLP"
+        )
+        assert summary.statement_date == datetime.date(2026, 8, 5)
+        assert summary.next_statement_date is None
+        assert summary.payment_due_date is None
+
+    def test_a_missing_figure_is_none(self):
+        summary = parse_statement_summary(
+            _statement_payload(facturado="999.999", minimo=True), "CLP"
+        )
+        assert (summary.billed_amount, summary.minimum_payment) == (None, None)
+
+    def test_no_closing_date_is_no_statement(self):
+        """Its figures could not be tied to a statement."""
+        for actual in ("", None, "31/02/2026", "2026-08-05x"):
+            assert parse_statement_summary(_statement_payload(actual=actual), "CLP") is None
+
+    def test_a_statement_the_bank_says_does_not_exist(self):
+        payload = dict(_statement_payload(), existeEstadoCuenta=False)
+        assert parse_statement_summary(payload, "CLP") is None
+
+    def test_no_resumen_is_no_statement(self):
+        assert parse_statement_summary(_billed_payload([_billed_row()]), "CLP") is None
+        assert parse_statement_summary(None, "CLP") is None
+        assert parse_statement_summary({"resumen": "texto"}, "CLP") is None
+
+
+class TestStatementOrder:
+    """A leg's statements are parsed oldest first; the newest summary is kept."""
+
+    def _read(self, statements):
+        return billed_leg_from_statements(statements, parse_billed_movements, "CLP")
+
+    def test_an_installment_keeps_the_statement_that_billed_it_first(self):
+        """The same reference on two statements reaches the writer oldest first.
+
+        The writer keeps the first statement date it stores for a key, so the
+        newest-first read order would have pinned the newer statement.
+        """
+        row = _billed_row(referencia="2008 12345678", fecha="20/07/2026")
+        read = self._read(
+            [
+                ("2026-08-05", _statement_payload([row], actual="05/08/2026")),
+                ("2026-07-05", _statement_payload([row], actual="05/07/2026")),
+            ]
+        )
+
+        assert [m.statement_date for m in read.movements] == ["2026-07-05", "2026-08-05"]
+        first, second = (external_id_for(m) for m in read.movements)
+        assert first == second == "bch_ref_200812345678"
+
+    def test_the_newest_summary_wins_whatever_the_read_order(self):
+        newer = ("2026-08-05", _statement_payload(actual="05/08/2026", facturado=999999.0))
+        older = ("2026-07-05", _statement_payload(actual="05/07/2026", facturado=1.0))
+
+        for statements in ([newer, older], [older, newer]):
+            read = self._read(statements)
+            assert read.statement.statement_date == datetime.date(2026, 8, 5)
+            assert read.statement.billed_amount == 999999.0
+
+    def test_a_statement_of_unknown_date_is_read_last(self):
+        """It is the SPA's own default load: the newest one."""
+        read = self._read(
+            [
+                ("", _statement_payload([_billed_row(referencia="0509 11111111")])),
+                ("2026-07-05", _statement_payload([_billed_row()], actual="05/07/2026")),
+            ]
+        )
+        assert [m.statement_date for m in read.movements] == ["2026-07-05", ""]
+
+    def test_no_usable_summary_is_none(self):
+        read = self._read([("2026-08-05", _billed_payload([_billed_row()]))])
+
+        assert read.statement is None
+        assert len(read.movements) == 1
+
+    def test_a_captured_statement_hands_back_its_summary(self):
+        """`_read_card_billed` reads the SPA's own load: movements and resumen."""
+        page = _FakeCardPage(
+            _statement_payload([_billed_row()]),
+            "tarjetas/estadocuenta/nacional/resumen-por-fecha",
+        )
+
+        found = _read_card_billed(page, attempt=0)
+
+        assert len(found.movements) == 1
+        assert found.statement.currency == "CLP"
+        assert found.statement.statement_date == datetime.date(2026, 8, 5)
+
+    def test_the_surfaces_hand_back_one_summary_per_leg(self, monkeypatch):
+        clp = parse_statement_summary(_statement_payload(), "CLP")
+        usd = parse_statement_summary(_statement_payload(facturado=1234.56), "USD")
+        (movement,) = parse_billed_movements(_billed_payload([_billed_row()]))
+        monkeypatch.setattr(
+            movements_mod,
+            "_MOVEMENT_READERS",
+            [
+                ("tarjeta facturados", lambda page, attempt: BilledLegRead([movement], clp)),
+                ("tarjeta facturados USD", lambda page, attempt: BilledLegRead([], usd)),
+                ("tarjeta no facturados", lambda page, attempt: []),
+            ],
+        )
+
+        movements, failed, statements = read_movement_surfaces(MagicMock())
+
+        assert movements == [movement]
+        assert failed == ()
+        assert statements == [clp, usd]
+
+    def test_a_leg_without_a_summary_adds_none(self, monkeypatch):
+        monkeypatch.setattr(
+            movements_mod,
+            "_MOVEMENT_READERS",
+            [("tarjeta facturados", lambda page, attempt: BilledLegRead([], None))],
+        )
+
+        assert read_movement_surfaces(MagicMock()) == ([], (), [])
+
+    def test_the_session_carries_the_summaries(self, monkeypatch):
+        summary = parse_statement_summary(_statement_payload(), "CLP")
+        monkeypatch.setattr(
+            movements_mod,
+            "_read_all_surfaces",
+            lambda page, deadline: BalanceFetchResult(products=[], failed_surfaces=()),
+        )
+        monkeypatch.setattr(
+            movements_mod, "read_exchange_rate_surface", lambda page, deadline: ([], ())
+        )
+        monkeypatch.setattr(
+            movements_mod,
+            "read_movement_surfaces",
+            lambda page, deadline: ([], (), [summary]),
+        )
+
+        assert read_session(MagicMock()).statements == [summary]
 
 
 # Synthetic place: no real city or country.
@@ -1374,7 +1576,7 @@ class TestReadSession:
 
         def movements(page, deadline):
             calls.append("movements")
-            return [movement], ("movimientos",)
+            return [movement], ("movimientos",), []
 
         monkeypatch.setattr(movements_mod, "_read_all_surfaces", products)
         monkeypatch.setattr(movements_mod, "read_exchange_rate_surface", rate)
@@ -2345,7 +2547,7 @@ class TestUsdCheckingSurface:
             [("movimientos USD", movements_mod._read_usd_checking_movements)],
         )
 
-        movements, failed = read_movement_surfaces(_FakeDialogPage(options=("(CLP)",)))
+        movements, failed, _ = read_movement_surfaces(_FakeDialogPage(options=("(CLP)",)))
 
         assert (movements, failed) == ([], ())
 
@@ -2363,7 +2565,7 @@ class TestUsdCheckingSurface:
             ],
         )
 
-        movements, failed = read_movement_surfaces(page)
+        movements, failed, _ = read_movement_surfaces(page)
 
         assert failed == ("movimientos USD",)
         assert [(m.currency, external_id_for(m)) for m in movements] == [
@@ -2415,7 +2617,7 @@ class TestSessionReadBudget:
         calls = self._readers(monkeypatch, slow)
 
         with caplog.at_level("WARNING", logger=banchile_web_mod.__name__):
-            movements, failed = read_movement_surfaces(MagicMock())
+            movements, failed, _ = read_movement_surfaces(MagicMock())
 
         assert len(movements) == 1  # what was read before the deadline is kept
         assert failed == ("movimientos USD", "tarjeta no facturados")
@@ -2435,7 +2637,7 @@ class TestSessionReadBudget:
 
         self._readers(monkeypatch, frozen)
 
-        _, failed = read_movement_surfaces(MagicMock())
+        _, failed, _ = read_movement_surfaces(MagicMock())
 
         assert attempts == [0]
         assert failed == ("movimientos", "movimientos USD", "tarjeta no facturados")
@@ -2443,7 +2645,7 @@ class TestSessionReadBudget:
     def test_a_healthy_read_is_untouched(self, monkeypatch):
         calls = self._readers(monkeypatch, lambda page, attempt: [])
 
-        assert read_movement_surfaces(MagicMock()) == ([], ())
+        assert read_movement_surfaces(MagicMock()) == ([], (), [])
         assert calls == ["movimientos USD", "tarjeta no facturados"]
 
     def test_the_session_shares_one_deadline(self, monkeypatch):
@@ -2459,7 +2661,7 @@ class TestSessionReadBudget:
 
         def movements(page, deadline):
             seen.append(deadline)
-            return [], ()
+            return [], (), []
 
         monkeypatch.setattr(movements_mod, "_read_all_surfaces", products)
         monkeypatch.setattr(movements_mod, "read_exchange_rate_surface", rate)

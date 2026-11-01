@@ -20,6 +20,12 @@ removes them once their USD replacements are written.
 The same session also reads the rate the bank bills that USD debt at
 (`backends/banchile_fx.py`), which the products leg hands on as
 `ProductScrapeResult.exchange_rates` for `run_scraper` to store.
+
+Card billing (V044): every card movement says whether it is billed, from the
+leg it came from, and a billed one carries the closing date of the statement
+it was read from. The newest statement's `resumen` of each currency fills that
+card's statement metrics and its statement and due days
+(`with_statements`).
 """
 
 import hashlib
@@ -28,10 +34,12 @@ import os
 import re
 from datetime import date
 
+from product_model import CreditCardAttributes, CreditCardMetrics
 from scrapers.backends.banchile_movements import (
     CLP_CARD_SURFACES,
     BanChileMovement,
     BanChileSessionResult,
+    BanChileStatement,
     fetch_session,
 )
 from scrapers.backends.banchile_web import (
@@ -42,6 +50,7 @@ from scrapers.backends.banchile_web import (
 from scrapers.base import (
     BaseScraper,
     ProductScrapeResult,
+    ScrapedProduct,
     ScrapedTransaction,
     SupersededTransaction,
 )
@@ -156,6 +165,83 @@ def _fingerprint_id(parts: tuple[str, ...]) -> str:
     return f"bch_fp_{hashlib.md5(raw.encode()).hexdigest()[:16]}"
 
 
+def billing_of(movement: BanChileMovement) -> tuple[str | None, date | None]:
+    """A movement's (billing_status, statement_date), from the leg it came from.
+
+    The unbilled card leg is "unbilled"; the billed one is "billed" with its
+    statement's ISO `fechaFacturacion` as the statement date (None when blank
+    or malformed). Checking movements have no billing cycle: (None, None).
+    """
+    if movement.source == "card_unbilled":
+        return "unbilled", None
+    if movement.source != "card_billed":
+        return None, None
+    try:
+        return "billed", date.fromisoformat(movement.statement_date)
+    except ValueError:
+        return "billed", None
+
+
+def with_statements(
+    products: list[ScrapedProduct], statements: list[BanChileStatement]
+) -> list[ScrapedProduct]:
+    """The card products with their currency's newest statement folded in.
+
+    Each statement fills its card's `CreditCardMetrics` statement fields and
+    sets `statement_day` / `due_day` from its closing and due dates. A
+    statement is only folded when exactly one credit card of its currency was
+    read; otherwise it is dropped (logged), since its figures could land on the
+    wrong card. Products are returned in their order, unchanged when no
+    statement applies.
+    """
+    if not statements:
+        return products
+    cards: dict[str, list[int]] = {}
+    for index, product in enumerate(products):
+        if product.kind == "credit_card":
+            cards.setdefault(product.currency, []).append(index)
+    result = list(products)
+    for statement in statements:
+        indexes = cards.get(statement.currency, [])
+        if len(indexes) != 1:
+            logger.info(
+                "BanChile: %s statement summary not applied (%d %s cards read)",
+                statement.currency,
+                len(indexes),
+                statement.currency,
+            )
+            continue
+        index = indexes[0]
+        product = result[index]
+        if product.metrics is None:
+            continue
+        metrics = product.metrics.model_dump()
+        attributes = product.attributes.model_dump() if product.attributes else {}
+        due = statement.payment_due_date
+        result[index] = product.model_copy(
+            update={
+                "metrics": CreditCardMetrics.model_validate(
+                    {
+                        **metrics,
+                        "statement_date": statement.statement_date,
+                        "next_statement_date": statement.next_statement_date,
+                        "payment_due_date": due,
+                        "billed_amount": statement.billed_amount,
+                        "minimum_payment": statement.minimum_payment,
+                    }
+                ),
+                "attributes": CreditCardAttributes.model_validate(
+                    {
+                        **attributes,
+                        "statement_day": statement.statement_date.day,
+                        "due_day": due.day if due is not None else None,
+                    }
+                ),
+            }
+        )
+    return result
+
+
 class BanChileScraper(BaseScraper):
     method = "web"
     institution = "banchile"
@@ -178,9 +264,11 @@ class BanChileScraper(BaseScraper):
         is when the bank posted it, NULL where the leg reports no posting date
         (both card legs). `scheduled_month` keeps the pre-#57 convention, the
         first of the movement's own month, and so now follows the occurrence
-        date. Neither date is part of any key.
+        date. Neither date is part of any key, and neither is the billing
+        status (`billing_of`).
         """
         tx_date = movement.transaction_date
+        billing_status, statement_date = billing_of(movement)
         return ScrapedTransaction(
             institution=self.institution,
             product_kind=movement.product_kind,
@@ -192,6 +280,8 @@ class BanChileScraper(BaseScraper):
             external_id=external_id_for(movement),
             scheduled_month=date(tx_date.year, tx_date.month, 1),
             location=movement.location,
+            billing_status=billing_status,
+            statement_date=statement_date,
         )
 
     def _superseded_for(
@@ -308,10 +398,12 @@ class BanChileScraper(BaseScraper):
         since one session read both) become warnings too, so the run records
         `partial` coverage instead of silently losing figures.
 
-        The USD card's exchange rate comes from the shared session only. The
-        balance-only fallback skips it: that path runs only after the
-        transactions leg already failed the run, and a rate missed for a day
-        just shows as stale on the dashboard.
+        The USD card's exchange rate and the cards' statement figures
+        (`with_statements`) come from the shared session only. The
+        balance-only fallback skips both: that path runs only after the
+        transactions leg already failed the run, and a rate or a statement
+        missed for a day just shows as stale (or without its statement) on the
+        dashboard.
         """
         session, self._session = self._session, None
         if session is None:
@@ -326,7 +418,8 @@ class BanChileScraper(BaseScraper):
             products, failed = result.products, result.failed_surfaces
             rates = []
         else:
-            products, failed = session.products, session.failed_surfaces
+            products = with_statements(session.products, session.statements)
+            failed = session.failed_surfaces
             rates = list(session.exchange_rates)
         warnings = [
             f"BanChile: {surface} surface failed after {_SURFACE_ATTEMPTS} attempts"
