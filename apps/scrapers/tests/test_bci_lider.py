@@ -78,11 +78,13 @@ class _ViewLocator:
 class _MovementsPage:
     """The Movimientos page: two period views behind their radios (synthetic)."""
 
-    def __init__(self, switches=True, radios=True, billed_text=BILLED_VIEW_TEXT):
+    def __init__(self, switches=True, radios=True, billed_text=BILLED_VIEW_TEXT, stale_reads=0):
         self.view = "unbilled"
         self.switches = switches
         self.radios = True if radios else None
         self.billed_text = billed_text
+        # Reads after the switch that still show the "Por facturar" table.
+        self.stale_reads = stale_reads
 
     def goto(self, url, **kwargs):
         pass
@@ -94,6 +96,9 @@ class _MovementsPage:
         return _ViewLocator(self, text)
 
     def text(self):
+        if self.view == "billed" and self.stale_reads:
+            self.stale_reads -= 1
+            return MOVEMENTS_TEXT
         return self.billed_text if self.view == "billed" else MOVEMENTS_TEXT
 
 
@@ -229,6 +234,20 @@ class TestPeriodViews:
 
         assert {m["billed"] for m in movements} == {False}
         assert len(movements) == 4
+
+    def test_a_radio_switched_over_a_stale_table_tags_nothing_billed(self):
+        """The radio reads checked but the "Por facturar" rows never left."""
+        movements = web._read_movements(_MovementsPage(stale_reads=10_000))
+
+        assert {m["billed"] for m in movements} == {False}
+        assert len(movements) == 4
+
+    def test_a_table_that_re_renders_late_is_still_billed(self):
+        """A few stale reads after the switch, then the billed rows show."""
+        tags = self._billed_by_description(_MovementsPage(stale_reads=3))
+
+        assert tags["SYNTHETIC STORE TWO"] is False
+        assert tags["SYNTHETIC STORE THREE"] is True
 
     def test_unconfirmed_radios_tag_nothing(self):
         """When the views' radios can't be read, no row gets a status."""

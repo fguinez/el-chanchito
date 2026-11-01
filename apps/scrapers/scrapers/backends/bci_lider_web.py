@@ -702,6 +702,22 @@ _VIEW_RADIO_CHECKED_JS = """
 """
 
 
+# After the billed view's radio reads checked, how many polls its table gets to
+# show rows other than the "Por facturar" ones before the view tags nothing.
+_VIEW_RENDER_POLLS = 10
+_VIEW_RENDER_POLL_MS = 500
+
+
+def _table_rerendered(page, before: list[dict]) -> bool:
+    """Whether the movements table shows rows other than `before` (bounded)."""
+    for _ in range(_VIEW_RENDER_POLLS):
+        rows = movements_from_text(_inner_text(page))
+        if rows and rows != before:
+            return True
+        page.wait_for_timeout(_VIEW_RENDER_POLL_MS)
+    return False
+
+
 def _view_checked(page, view: str) -> Optional[bool]:
     """Whether `view`'s period radio is checked; None when that can't be told."""
     try:
@@ -722,10 +738,12 @@ def _read_movements(page) -> list[dict]:
 
     Each movement's `billed` is the period view it was read from: False in "Por
     facturar", True in "Último periodo facturado", but only when that view's
-    radio reads as checked; otherwise None, so a view that did not switch (or a
-    page whose radios moved) never tags a row with the wrong status. A row
-    repeated within a read is kept once, and a sighting in the billed view
-    marks the kept one billed.
+    radio reads as checked and, for the billed view, once its table shows rows
+    other than the last "Por facturar" ones (`_table_rerendered`); otherwise
+    None, so a view that did not switch, a table that did not re-render, or a
+    page whose radios moved never tags a row with the wrong status (the writer
+    never turns a billed row back). A row repeated within a read is kept once,
+    and a sighting in the billed view marks the kept one billed.
     """
     page.goto(MOVEMENTS_URL, timeout=LOGIN_TIMEOUT, wait_until="domcontentloaded")
     _dismiss_popup(page)
@@ -765,10 +783,14 @@ def _read_movements(page) -> list[dict]:
                 break
 
     read_all_pages(False if _view_checked(page, _UNBILLED_VIEW) else None)
+    before = movements_from_text(_inner_text(page))
     try:  # the prior billed cycle adds history on the first run
         page.get_by_text(_BILLED_VIEW, exact=False).first.click(timeout=3000)
         page.wait_for_timeout(1500)
-        read_all_pages(True if _view_checked(page, _BILLED_VIEW) else None)
+        switched = bool(_view_checked(page, _BILLED_VIEW)) and _table_rerendered(page, before)
+        if not switched:
+            logger.info("BciLider: the billed view did not show; its rows are not tagged")
+        read_all_pages(True if switched else None)
     except Exception:
         logger.info("BciLider: no 'Último periodo facturado' view; skipping")
 
