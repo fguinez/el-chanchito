@@ -591,9 +591,12 @@ pages rename them and fill in what no scraper writes:
   imports create gets a proper name.
 - **Product** (`/institutions/{slug}/{product}`): name, the product it hangs from
   (a debit card under its checking account), display order and the active flag.
-  Renaming never changes the slug. The slug has its own **Cambiar slug** action,
-  since it moves the product page's URL; monitors are unaffected because they
-  store product ids.
+  A credit card also takes its **Día de facturación** and **Día de
+  vencimiento** (days of the month, empty when unknown) for cards whose bank
+  reports none; a scraper that does report them replaces them on its next
+  refresh. Renaming never changes the slug. The slug has its own **Cambiar
+  slug** action, since it moves the product page's URL; monitors are unaffected
+  because they store product ids.
 
 Kind and currency are read-only: together with the external reference they are
 how scrapers recognize a product, so changing them would split it in two on the
@@ -824,7 +827,7 @@ All API routes are under `/api/`:
 | DELETE | `/api/monitors/[id]/adjustments/[adjustmentId]` | Unlink one variación (the transaction stays) |
 | GET | `/api/institutions` | Institutions + nested products (balances included) + CLP subtotals |
 | GET/PATCH | `/api/institutions/[slug]` | One institution, same shape as a list item; edit `name`, `kind`, `country`, `url` |
-| GET/PATCH | `/api/institutions/[slug]/products/[product]` | One product (with its `defaultName`) plus its balance history, recent transactions (shown `description` and original `rawDescription`) and, for a stock, its daily closes (`prices`: `{date, price}` oldest first, empty without a ticker); edit `name` (`null` resets it to `defaultName`), `slug`, `parentProductId`, `isActive`, `displayOrder` |
+| GET/PATCH | `/api/institutions/[slug]/products/[product]` | One product (with its `defaultName`) plus its balance history, recent transactions (shown `description` and original `rawDescription`) and, for a stock, its daily closes (`prices`: `{date, price}` oldest first, empty without a ticker); edit `name` (`null` resets it to `defaultName`), `slug`, `parentProductId`, `isActive`, `displayOrder`, and for a credit card `statementDay` / `dueDay` (1 to 31, `null` clears; merged into `attributes`) |
 | PATCH | `/api/accounts/[id]` | Rename an account (`name`) |
 | POST | `/api/institutions/refresh` | Trigger a scrape (all, or `{institution}`) |
 | GET | `/api/scrapers` | Latest run per scraper |
