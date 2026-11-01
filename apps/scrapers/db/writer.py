@@ -433,6 +433,31 @@ _CARD_ADOPTION_WINDOW_DAYS = 3
 _FINGERPRINT_LIKE = "bch\\_fp\\_%"
 # Description tokens shorter than this are too generic to tie two rows.
 _MIN_SHARED_TOKEN = 4
+# Tokens that name a payment processor, a country or city, or a generic kind
+# of movement rather than a merchant: two unrelated charges share them freely
+# ("PAYU *UBER" and "PAYU *OTRO"), so they never tie two rows on their own.
+_GENERIC_TOKENS = frozenset(
+    {
+        "ABONO",
+        "CARGO",
+        "CHILE",
+        "COMPRA",
+        "COMPRAS",
+        "DLOCAL",
+        "LTDA",
+        "MERCADO",
+        "MERCADOPAGO",
+        "MPAGO",
+        "ONLINE",
+        "PAGO",
+        "PAGOS",
+        "PAYPAL",
+        "PAYU",
+        "SANTIAGO",
+        "STORE",
+        "TIENDA",
+    }
+)
 
 
 def _description_tokens(description: str | None) -> tuple[list[str], str]:
@@ -449,12 +474,15 @@ def _similar_descriptions(left: str | None, right: str | None) -> bool:
     The unbilled and billed legs spell a merchant differently (a processor
     prefix glued on, a suffix cut off), so this asks only that a token of
     four or more characters of one appears inside the other, spaces and
-    punctuation ignored.
+    punctuation ignored. Processor prefixes and other generic words
+    (`_GENERIC_TOKENS`) do not count.
     """
     left_tokens, left_joined = _description_tokens(left)
     right_tokens, right_joined = _description_tokens(right)
     return any(
-        len(token) >= _MIN_SHARED_TOKEN and token in other
+        len(token) >= _MIN_SHARED_TOKEN
+        and token not in _GENERIC_TOKENS
+        and token in other
         for tokens, other in ((left_tokens, right_joined), (right_tokens, left_joined))
         for token in tokens
     )
@@ -548,6 +576,11 @@ def _same_day_siblings(
     incoming dates, and exact occurrence-date matches are ordered first, so two
     movements a few days apart for the same amount cannot cross over. Adoption
     then corrects the row's dates (see `upsert_transactions`).
+
+    A row a scraper cleanup soft-deleted (`deleted_by = 'scraper'`, V045) is
+    never a candidate: adopting it would hide this movement under a deleted
+    row. A row the user deleted still is, so it stays deleted under its new
+    key, as V033 intends.
     """
     accounting_date = txn.accounting_date or txn.transaction_date
     return conn.execute(
@@ -556,6 +589,7 @@ def _same_day_siblings(
         WHERE product_id = %s AND amount = %s AND source = %s
           AND external_id IS NOT NULL AND external_id LIKE %s
           AND transaction_date IN (%s, %s)
+          AND deleted_by IS DISTINCT FROM 'scraper'
         ORDER BY (transaction_date = %s) DESC, created_at, id
         """,
         (
@@ -695,8 +729,23 @@ def _stored_row_id(conn, product_id: str, external_id: str):
     return row[0] if row else None
 
 
+def _restore_scraper_deleted(conn, row_id) -> None:
+    """Undelete a row a scraper cleanup removed, now that a scrape lists it again.
+
+    Only `deleted_by = 'scraper'` rows (V045): the cleanup guessed the source
+    had dropped the movement, and the source says otherwise. A row the user
+    deleted is never restored.
+    """
+    conn.execute(
+        "UPDATE transactions SET deleted_at = NULL, deleted_by = NULL, "
+        "updated_at = now() WHERE id = %s AND deleted_by = 'scraper'",
+        (row_id,),
+    )
+
+
 def _fill_stored_row(conn, row_id, txn: ScrapedTransaction) -> None:
     """Give a stored row what a later scrape may still add to it."""
+    _restore_scraper_deleted(conn, row_id)
     _fill_location(conn, row_id, txn.location)
     _fill_billing(conn, row_id, txn)
 
@@ -1218,8 +1267,9 @@ def soft_delete_vanished_transactions(
     A candidate the user touched is left in place and logged: categorised,
     annotated, given a custom description, located, flagged as an internal
     transfer, linked to a transfer or used by a monitor adjustment. The rest
-    get a `deleted_at` (V033), so they keep their key and a later scrape that
-    lists the movement again finds it instead of importing it twice. A window
+    get a `deleted_at` (V033) and `deleted_by = 'scraper'` (V045): they keep
+    their key, and a later scrape that lists the movement again restores the
+    row instead of importing it twice (`_restore_scraper_deleted`). A window
     with more candidates than `_MAX_VANISHED_PER_WINDOW` is skipped whole.
     """
     if not windows:
@@ -1298,7 +1348,8 @@ def soft_delete_vanished_transactions(
                     doomed.append(row_id)
                 if doomed:
                     conn.execute(
-                        "UPDATE transactions SET deleted_at = now(), updated_at = now() "
+                        "UPDATE transactions SET deleted_at = now(), "
+                        "deleted_by = 'scraper', updated_at = now() "
                         "WHERE id = ANY(%s) AND deleted_at IS NULL",
                         (doomed,),
                     )

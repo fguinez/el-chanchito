@@ -1478,6 +1478,114 @@ class TestVanishedTransactions:
         assert deleted == 0
         assert not any(self._deleted(db_conn).values())
 
+    def _deleted_by(self, conn):
+        return {
+            row["external_id"]: (row["deleted_at"] is not None, row["deleted_by"])
+            for row in conn.execute(
+                "SELECT external_id, deleted_at, deleted_by FROM transactions"
+            )
+        }
+
+    def test_the_cleanup_marks_its_own_deletes(self, db_conn):
+        """V045: a scraper delete is told apart from the user's."""
+        # Arrange
+        self._store()
+
+        # Act
+        soft_delete_vanished_transactions([self._window()], set())
+
+        # Assert
+        assert self._deleted_by(db_conn) == {self._STALE: (True, "scraper")}
+
+    def test_a_scraper_deleted_row_listed_again_is_restored(self, db_conn):
+        """The bank contradicted the cleanup's guess: the row comes back."""
+        # Arrange
+        self._store()
+        soft_delete_vanished_transactions([self._window()], set())
+
+        # Act
+        inserted = upsert_transactions(
+            [_card_txn(self._STALE, tx_date=date(2026, 9, 10), billing_status="unbilled")]
+        )
+
+        # Assert
+        assert inserted == 0
+        assert self._deleted_by(db_conn) == {self._STALE: (False, None)}
+
+    def test_a_user_deleted_row_listed_again_stays_deleted(self, db_conn):
+        """V033: the user's delete is final, whatever the scrape lists."""
+        # Arrange
+        self._store()
+        db_conn.execute("UPDATE transactions SET deleted_at = now()")
+
+        # Act
+        upsert_transactions(
+            [_card_txn(self._STALE, tx_date=date(2026, 9, 10), billing_status="unbilled")]
+        )
+
+        # Assert
+        assert self._deleted_by(db_conn) == {self._STALE: (True, None)}
+
+    def test_a_scraper_deleted_row_is_not_adopted_on_its_own_date(self, db_conn):
+        """The charge billed on the deleted row's date must stay visible.
+
+        The bank re-dated a pending charge (the cleanup removed the old row),
+        then billed it on the original date: adopting the deleted row would
+        hide the billed charge.
+        """
+        # Arrange
+        self._store(description="COMERCIO SINTETICO")
+        soft_delete_vanished_transactions([self._window()], set())
+
+        # Act
+        inserted = upsert_transactions(
+            [
+                _card_txn(
+                    tx_date=date(2026, 9, 10),
+                    billing_status="billed",
+                    statement_date=date(2026, 10, 5),
+                    description="COMERCIO SINTETICO",
+                )
+            ]
+        )
+
+        # Assert
+        assert inserted == 1
+        assert self._deleted_by(db_conn) == {
+            self._STALE: (True, "scraper"),
+            "bch_ref_200812345678": (False, None),
+        }
+
+    def test_a_user_deleted_row_is_still_adopted_and_stays_deleted(self, db_conn):
+        """V033 unchanged: the user's delete follows the movement to its new key."""
+        # Arrange
+        self._store()
+        db_conn.execute("UPDATE transactions SET deleted_at = now()")
+
+        # Act
+        inserted = upsert_transactions(
+            [
+                _card_txn(
+                    tx_date=date(2026, 9, 10),
+                    billing_status="billed",
+                    statement_date=date(2026, 10, 5),
+                )
+            ]
+        )
+
+        # Assert
+        assert inserted == 0
+        assert self._deleted_by(db_conn) == {"bch_ref_200812345678": (True, None)}
+
+    def test_the_schema_rejects_a_marker_on_a_visible_row(self, db_conn):
+        """`deleted_by` only ever qualifies a delete."""
+        # Arrange
+        self._store()
+
+        # Act / Assert
+        with pytest.raises(psycopg.errors.CheckViolation):
+            db_conn.execute("UPDATE transactions SET deleted_by = 'scraper'")
+
     def test_a_soft_deleted_row_is_not_adopted_by_a_nearby_billed_charge(self, db_conn):
         """Fix D must not hide a billed charge under a row fix C removed."""
         # Arrange

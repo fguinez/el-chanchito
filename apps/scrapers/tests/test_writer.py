@@ -1031,7 +1031,10 @@ class TestUpsertTransactionsAdoption:
         ).inserted
 
         assert (inserted, len(conn.rows)) == (0, 1)
-        assert conn.executed[-1][0].startswith("SELECT id FROM transactions")
+        assert not any(
+            query.startswith("UPDATE transactions SET external_id")
+            for query, _ in conn.executed
+        )
 
     def test_a_lost_operation_id_does_not_duplicate(self, monkeypatch):
         """A transient 503 falls back to a fingerprint key; keep the stored row."""
@@ -1676,13 +1679,17 @@ class TestSimilarDescriptions:
             pytest.param("DLCOMERCIO SINTETICO", "COMERCIO SINTETICO", True, id="glued-prefix"),
             pytest.param("COMERCIO SINTETICO", "comercio sintético s.a.", True, id="case-accents"),
             pytest.param("COMERCIO SINTETICO", "OTRO NEGOCIO", False, id="unrelated"),
-            pytest.param("PAGO", "PAGO", True, id="four-chars"),
+            pytest.param("TOTTUS", "TOTTUS", True, id="four-plus-chars"),
+            pytest.param("PAYU *COMERCIO A", "PAYU *OTRO B", False, id="shared-processor"),
+            pytest.param("MERCADOPAGO*TIENDA", "MERCADOPAGO*NEGOCIO", False, id="mercadopago"),
+            pytest.param("DLOCAL SINTETICO", "SINTETICO DLOCAL", True, id="merchant-beside-processor"),
+            pytest.param("COMPRA PAGO", "PAGO COMPRA", False, id="only-generic-words"),
             pytest.param("ABC", "ABC", False, id="too-short"),
             pytest.param(None, "COMERCIO", False, id="missing"),
         ],
     )
     def test_matching(self, left, right, expected):
-        """A token of four or more characters of one must appear in the other."""
+        """A non-generic token of four or more characters must appear in the other."""
         # Arrange / Act
         result = _similar_descriptions(left, right)
 

@@ -330,6 +330,7 @@ transactions ──────────┐
   location_is_manual
   billing_status (V044)       -- unbilled | billed | NULL (not reported)
   statement_date (V044)       -- statement that billed it (billed rows only)
+  deleted_by (V045)           -- scraper | NULL (visible or user-deleted)
 
 
 monitors                      monitor_adjustments
@@ -495,6 +496,7 @@ suggested category, cascading with the category.
 | `V042__category_suggestion_dismissals.sql` | dismissed_category_suggestions (normalised description + suggested category, unique pair, cascades with the category); new table only |
 | `V043__budget_item_kinds_and_income.sql` | `fixed_expenses.kind` (`fixed` default, `estimated`, `savings`; CHECK), backfilled by name: `Ahorro:` prefix becomes `savings` with the prefix stripped, `Gastos diarios...` becomes `estimated`; `budget_settings`, a single-row table with the monthly income (`monthly_income >= 0`) |
 | `V044__transactions_billing_status.sql` | transactions gain `billing_status` (`unbilled` / `billed`, NULL = not reported; CHECK) and `statement_date` (only on billed rows; CHECK); the writer only moves them forward (see "Card billing status"); no backfill |
+| `V045__transactions_deleted_by.sql` | transactions gain `deleted_by` (`scraper` when a scraper cleanup soft-deleted the row, NULL when visible or deleted by the user; CHECK): scraper-deleted rows are never adopted and are restored when a scrape lists their key again; scraper logic only, no backfill |
 
 ## Scraper Architecture
 
@@ -681,16 +683,20 @@ re-describes or moves to the other currency comes back under a new key, and a
 stale authorization just stops being listed. Two things keep those from
 lingering. A billed charge whose same-day adoption finds nothing adopts the
 single nearest unbilled (`bch_fp_`, not billed, not deleted) row of the same
-product and amount within three days whose description is similar
+product and amount within three days whose description is similar (a shared
+merchant token; processor prefixes and generic words do not count)
 (`db/writer.py::_nearby_card_sibling`). And each run the scraper names the
 windows it listed in full (`vanished_windows`, per currency: only when the
 unbilled list loaded and was not empty, that currency's statement loaded with
 every closing date confirmed, and its newest summary is not past the next
-closing date it prints): after the newest statement every unbilled or
+closing date it prints, which it must print): after the newest statement every unbilled or
 unreported `bch_fp_` row the scrape no longer carries is soft-deleted, and
 between the oldest and newest statement read only the ones still `unbilled`
 (`db/writer.py::soft_delete_vanished_transactions`, run only when every
-transaction of the scrape was written). A row the user edited (category,
+transaction of the scrape was written), marked `deleted_by = 'scraper'`
+(V045): such a row is never adopted onto another movement's key, and a scrape
+that lists its key again restores it, while a row the user deleted stays
+deleted. A row the user edited (category,
 notes, custom description, location, transfer flag or link, monitor
 adjustment) is left in place, and a window with more than 20 candidates is
 skipped as a likely partial listing.
