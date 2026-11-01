@@ -620,6 +620,19 @@ export const BILLING_STATUS_LABELS: Record<BillingStatus, string> = {
   unbilled: "No facturado",
 };
 
+/** The movement list's billing filter: every movement, or only the billed
+ *  or the unbilled ones. */
+export type BillingFilter = "all" | BillingStatus;
+
+/** The rows `filter` keeps, by their effective status (the one the badge and
+ *  the totals use). A row without a status shows only under "all". */
+export function filterByBilling<
+  T extends { billing: TransactionBilling | null },
+>(rows: readonly T[], filter: BillingFilter): readonly T[] {
+  if (filter === "all") return rows;
+  return rows.filter((row) => row.billing?.status === filter);
+}
+
 /** How the card page labels the billed debt: nothing billed on the last
  *  statement, still owed, paid since, or not known. */
 export type BilledDebtState = "none" | "pending" | "paid" | "unknown";

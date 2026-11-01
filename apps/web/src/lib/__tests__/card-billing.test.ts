@@ -4,6 +4,7 @@ import {
   dayInMonth,
   daysBetween,
   effectiveBillingStatus,
+  filterByBilling,
   isMinimumPaid,
   isPaymentOverdue,
   listedBillingCycle,
@@ -13,6 +14,7 @@ import {
   summarizeBilling,
   type BillingCycle,
   type BillingTransactionInput,
+  type TransactionBilling,
 } from "@/lib/card-billing";
 import type { CreditCardMetrics } from "@chanchito/product-model";
 
@@ -561,6 +563,70 @@ describe("listedBillingCycle", () => {
         today: TODAY,
       })
     ).toBeNull();
+  });
+});
+
+describe("filterByBilling", () => {
+  const billed: TransactionBilling = {
+    status: "billed",
+    estimated: false,
+    statementDate: "2026-10-15",
+  };
+  const rows = [
+    { id: "billed", billing: billed },
+    {
+      id: "unbilled-estimated",
+      billing: { status: "unbilled", estimated: true, statementDate: null },
+    },
+    { id: "unknown", billing: null },
+    {
+      id: "billed-estimated",
+      billing: { status: "billed", estimated: true, statementDate: null },
+    },
+  ] satisfies { id: string; billing: TransactionBilling | null }[];
+  const ids = (kept: readonly { id: string }[]) => kept.map((row) => row.id);
+
+  it("keeps every row under Todos, those without a status too", () => {
+    expect(filterByBilling(rows, "all")).toBe(rows);
+  });
+
+  it("keeps the rows of one status, reported or estimated", () => {
+    expect(ids(filterByBilling(rows, "billed"))).toEqual([
+      "billed",
+      "billed-estimated",
+    ]);
+    expect(ids(filterByBilling(rows, "unbilled"))).toEqual([
+      "unbilled-estimated",
+    ]);
+  });
+
+  it("keeps the very charges the No facturado total adds up", () => {
+    const transactions = [
+      txn("2026-10-10", -999999, "billed", "2026-10-15"),
+      txn("2026-10-12", -1000000),
+      txn("2026-10-20", -999999, "unbilled"),
+      txn("2026-10-21", -1000000),
+      txn("2026-10-22", 2500000, "unbilled"),
+    ];
+    const billing = summarizeBilling({
+      kind: "credit_card",
+      attributes: {},
+      metrics: null,
+      transactions,
+      truncated: false,
+      today: "2026-10-31",
+    })!;
+    const listed = transactions.map((t, i) => ({
+      ...t,
+      billing: billing.statuses[i],
+    }));
+    const unbilledCharges = filterByBilling(listed, "unbilled").filter(
+      (t) => t.amount < 0
+    );
+    expect(unbilledCharges).toHaveLength(billing.summary.unbilledCount);
+    expect(unbilledCharges.reduce((sum, t) => sum - t.amount, 0)).toBe(
+      billing.summary.unbilledCharges
+    );
   });
 });
 
