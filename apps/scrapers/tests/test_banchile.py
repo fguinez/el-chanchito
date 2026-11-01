@@ -22,9 +22,11 @@ from product_model import (
     LineOfCreditMetrics,
 )
 
+from db.writer import upsert_transactions
 from scrapers.backends.banchile_movements import (
     BanChileSessionResult,
     BanChileStatement,
+    billed_leg_from_statements,
     operation_id_from_detail,
     operation_id_from_glosa,
     parse_billed_movements,
@@ -366,6 +368,40 @@ class TestCardBilling:
     def test_the_billing_status_never_changes_the_key(self):
         """Keys are byte-identical to what they were before V044."""
         assert self._billed("2026-08-05").external_id == "bch_ref_200812345678"
+
+
+class TestBillingOnPostgres:
+    """End to end against the writer: scrape output -> stored billing columns."""
+
+    def _scrape(self, statements):
+        scraper = BanChileScraper()
+        read = billed_leg_from_statements(statements, parse_billed_movements, "CLP")
+        return [scraper._movement_to_transaction(m) for m in read.movements]
+
+    def _stored(self, conn):
+        return conn.execute(
+            "SELECT billing_status, statement_date, updated_at FROM transactions "
+            "WHERE external_id = 'bch_ref_200812345678'"
+        ).fetchall()
+
+    def test_an_installment_keeps_the_statement_that_billed_it_first(self, db_conn):
+        """Read newest first, as the SPA loads them; the older statement sticks."""
+        payload = _billed_payload([_billed_row(referencia="2008 12345678")])
+        statements = [("2026-08-05", payload), ("2026-07-05", payload)]
+
+        assert upsert_transactions(self._scrape(statements)) == 1
+
+        (row,) = self._stored(db_conn)
+        assert (row["billing_status"], row["statement_date"]) == ("billed", date(2026, 7, 5))
+
+    def test_a_second_run_changes_nothing(self, db_conn):
+        payload = _billed_payload([_billed_row(referencia="2008 12345678")])
+        statements = [("2026-08-05", payload), ("2026-07-05", payload)]
+        upsert_transactions(self._scrape(statements))
+        before = self._stored(db_conn)
+
+        assert upsert_transactions(self._scrape(statements)) == 0
+        assert self._stored(db_conn) == before
 
 
 class TestScrapeTransactions:
