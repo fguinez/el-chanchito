@@ -328,6 +328,8 @@ transactions ──────────┐
     _longitude (numeric(9,6),
     both or neither)
   location_is_manual
+  billing_status (V044)       -- unbilled | billed | NULL (not reported)
+  statement_date (V044)       -- statement that billed it (billed rows only)
 
 
 monitors                      monitor_adjustments
@@ -492,6 +494,7 @@ suggested category, cascading with the category.
 | `V041__category_rule_match_type.sql` | `category_rules.match_type` (`contains` default, or `exact`); `category_for_description()` matches exact rules by trimmed equality and ranks them before contains rules |
 | `V042__category_suggestion_dismissals.sql` | dismissed_category_suggestions (normalised description + suggested category, unique pair, cascades with the category); new table only |
 | `V043__budget_item_kinds_and_income.sql` | `fixed_expenses.kind` (`fixed` default, `estimated`, `savings`; CHECK), backfilled by name: `Ahorro:` prefix becomes `savings` with the prefix stripped, `Gastos diarios...` becomes `estimated`; `budget_settings`, a single-row table with the monthly income (`monthly_income >= 0`) |
+| `V044__transactions_billing_status.sql` | transactions gain `billing_status` (`unbilled` / `billed`, NULL = not reported; CHECK) and `statement_date` (only on billed rows; CHECK); the writer only moves them forward (see "Card billing status"); no backfill |
 
 ## Scraper Architecture
 
@@ -1199,6 +1202,29 @@ transfer link candidates and suggestions). The writer's lookups deliberately
 do not, so the re-key path above still sees the tombstoned row. A non-null
 `categoryId` set by hand also sets `is_manually_categorized`, so the choice
 survives the auto-categorization backfill.
+
+### Card billing status (V044)
+
+A credit card movement is either still "por facturar" or already billed on a
+statement ("facturado"). Scrapers report it on `ScrapedTransaction` as
+`billing_status` (`unbilled` / `billed`, None when the source does not say)
+plus an optional `statement_date`, the closing date of the statement that
+billed it, which the envelope (and a CHECK) only accepts on a billed movement.
+Neither is ever part of a dedup key, and neither is editable from the
+dashboard. The writer inserts both with a new row; on a row it already stored
+or re-keys in place it only moves them forward (`_fill_billing`, which locks
+the row while it decides): `unbilled` fills a status never reported, `billed`
+replaces an unreported or unbilled one, nothing turns `billed` back, and a
+stored `statement_date` is never overwritten, so an installment purchase stays
+on the statement that first billed it. A row with nothing to change is not
+written, so `updated_at` only moves on a real change. One batch that sees the
+same key in both views (unbilled first or billed first) therefore stores it
+billed. NULL means "not reported": manual rows, products without a billing
+cycle and rows imported before V044, which gain a status on the next scrape
+that still sees them. The latest statement's own figures (closing, next
+closing and due dates, billed amount, minimum payment) are `CreditCardMetrics`
+fields, and the cycle days are `CreditCardAttributes.statement_day` /
+`due_day`.
 
 ### On-demand refresh (control endpoint)
 

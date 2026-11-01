@@ -6,7 +6,8 @@ resolution chain, transaction dedup and issue #57's in-place re-key,
 transactions that name an existing product by its ref, snapshot
 history only on change, the roll-up guards, the exchange-rate upsert (V024),
 the price-history upsert (V038), the stock re-kind (V039), Banco Falabella's
-three singleton products and the scraper run log. Each test gets its own freshly migrated database (see conftest.py) and is
+three singleton products, the forward-only billing status (V044) and the
+scraper run log. Each test gets its own freshly migrated database (see conftest.py) and is
 skipped unless TEST_DATABASE_URL is set. Every figure and identifier is
 synthetic.
 """
@@ -108,6 +109,8 @@ def _txn(
     amount=-999999,
     currency="CLP",
     location=None,
+    billing_status=None,
+    statement_date=None,
 ):
     return ScrapedTransaction(
         institution=institution,
@@ -120,6 +123,8 @@ def _txn(
         currency=currency,
         scheduled_month=date(tx_date.year, tx_date.month, 1),
         location=location,
+        billing_status=billing_status,
+        statement_date=statement_date,
     )
 
 
@@ -533,6 +538,163 @@ class TestTransactionLocation:
     )
     def test_the_schema_rejects_bad_coordinates(self, db_conn, assignment):
         upsert_transactions([_txn("email_mach_0001")])
+
+        with pytest.raises(psycopg.errors.CheckViolation):
+            db_conn.execute(f"UPDATE transactions SET {assignment}")
+
+
+# Synthetic statement closing dates.
+_CLOSED = date(2026, 8, 25)
+_CLOSED_LATER = date(2026, 9, 25)
+
+
+def _card_txn(external_id="bch_ref_200812345678", **fields):
+    """A synthetic BanChile card charge."""
+    return _txn(external_id, institution="banchile", kind="credit_card", **fields)
+
+
+def _billing_of(conn, external_id="bch_ref_200812345678"):
+    return conn.execute(
+        "SELECT billing_status, statement_date, updated_at FROM transactions "
+        "WHERE external_id = %s",
+        (external_id,),
+    ).fetchone()
+
+
+class TestTransactionBillingStatus:
+    """V044: inserted with the row, then only ever moved forward."""
+
+    def test_a_new_row_stores_its_status_and_statement(self, db_conn):
+        upsert_transactions(
+            [
+                _card_txn(billing_status="billed", statement_date=_CLOSED),
+                _card_txn("bch_fp_a1b2c3d4e5f60718", billing_status="unbilled"),
+                _card_txn("bch_fp_0123456789abcdef"),
+            ]
+        )
+
+        assert {
+            row["external_id"]: (row["billing_status"], row["statement_date"])
+            for row in db_conn.execute(
+                "SELECT external_id, billing_status, statement_date FROM transactions"
+            )
+        } == {
+            "bch_ref_200812345678": ("billed", _CLOSED),
+            "bch_fp_a1b2c3d4e5f60718": ("unbilled", None),
+            "bch_fp_0123456789abcdef": (None, None),
+        }
+
+    def test_a_stored_unbilled_row_becomes_billed_with_its_statement(self, db_conn):
+        upsert_transactions([_card_txn(billing_status="unbilled")])
+        before = _billing_of(db_conn)
+
+        inserted = upsert_transactions(
+            [_card_txn(billing_status="billed", statement_date=_CLOSED)]
+        )
+
+        after = _billing_of(db_conn)
+        assert inserted == 0
+        assert (after["billing_status"], after["statement_date"]) == ("billed", _CLOSED)
+        assert after["updated_at"] > before["updated_at"]
+
+    def test_a_row_stored_without_a_status_gains_one(self, db_conn):
+        upsert_transactions([_card_txn()])
+
+        upsert_transactions([_card_txn(billing_status="unbilled")])
+
+        assert _billing_of(db_conn)["billing_status"] == "unbilled"
+
+    @pytest.mark.parametrize("later", [{"billing_status": "unbilled"}, {}])
+    def test_a_billed_row_is_never_downgraded(self, db_conn, later):
+        upsert_transactions([_card_txn(billing_status="billed", statement_date=_CLOSED)])
+        before = _billing_of(db_conn)
+
+        upsert_transactions([_card_txn(**later)])
+
+        assert _billing_of(db_conn) == before
+
+    def test_the_first_statement_date_is_never_overwritten(self, db_conn):
+        """An installment purchase keeps the statement that first billed it."""
+        upsert_transactions([_card_txn(billing_status="billed", statement_date=_CLOSED)])
+
+        upsert_transactions(
+            [_card_txn(billing_status="billed", statement_date=_CLOSED_LATER)]
+        )
+
+        assert _billing_of(db_conn)["statement_date"] == _CLOSED
+
+    def test_a_billed_row_without_a_statement_date_gains_one(self, db_conn):
+        upsert_transactions([_card_txn(billing_status="billed")])
+
+        upsert_transactions([_card_txn(billing_status="billed", statement_date=_CLOSED)])
+
+        row = _billing_of(db_conn)
+        assert (row["billing_status"], row["statement_date"]) == ("billed", _CLOSED)
+
+    def test_an_unchanged_row_keeps_its_updated_at(self, db_conn):
+        batch = [_card_txn(billing_status="billed", statement_date=_CLOSED)]
+        upsert_transactions(batch)
+        before = _billing_of(db_conn)
+
+        upsert_transactions(batch)
+
+        assert _billing_of(db_conn) == before
+
+    def test_banchile_adoption_carries_billed_and_its_statement(self, db_conn):
+        """Issue #56: the unbilled leg's fingerprint row is re-keyed onto the
+        billed reference, and takes the status and statement with the key."""
+        upsert_transactions(
+            [_card_txn("bch_fp_a1b2c3d4e5f60718", billing_status="unbilled")]
+        )
+        stored_id = db_conn.execute("SELECT id FROM transactions").fetchone()["id"]
+
+        inserted = upsert_transactions(
+            [_card_txn(billing_status="billed", statement_date=_CLOSED)]
+        )
+
+        rows = db_conn.execute(
+            "SELECT id, external_id, billing_status, statement_date FROM transactions"
+        ).fetchall()
+        assert inserted == 0
+        assert rows == [
+            {
+                "id": stored_id,
+                "external_id": "bch_ref_200812345678",
+                "billing_status": "billed",
+                "statement_date": _CLOSED,
+            }
+        ]
+
+    @pytest.mark.parametrize("billed_first", [False, True])
+    def test_one_batch_seeing_a_charge_in_both_views_stores_it_billed(
+        self, db_conn, billed_first
+    ):
+        """A source whose key survives billing sends the charge once per view;
+        whichever comes first, one row lands, billed on its statement."""
+        views = [
+            _card_txn(billing_status="unbilled"),
+            _card_txn(billing_status="billed", statement_date=_CLOSED),
+        ]
+        if billed_first:
+            views.reverse()
+
+        assert upsert_transactions(views) == 1
+
+        (row,) = db_conn.execute(
+            "SELECT billing_status, statement_date FROM transactions"
+        ).fetchall()
+        assert row == {"billing_status": "billed", "statement_date": _CLOSED}
+
+    @pytest.mark.parametrize(
+        "assignment",
+        [
+            "billing_status = 'unbilled', statement_date = '2026-08-25'",
+            "billing_status = NULL, statement_date = '2026-08-25'",
+            "billing_status = 'facturado'",
+        ],
+    )
+    def test_the_schema_rejects_what_the_envelope_rejects(self, db_conn, assignment):
+        upsert_transactions([_card_txn()])
 
         with pytest.raises(psycopg.errors.CheckViolation):
             db_conn.execute(f"UPDATE transactions SET {assignment}")
@@ -1349,6 +1511,91 @@ class TestAmountMigration:
             amount=-999999,
         )
         assert upsert_transactions([operation_id]) == 0
+
+
+class TestBillingStatusMigration:
+    """V044 adds the billing columns to a populated table without a backfill,
+    and is a no-op when applied again."""
+
+    _V044 = MIGRATIONS_DIR / "V044__transactions_billing_status.sql"
+
+    def test_rows_stored_before_v044_read_as_not_reported(self, unmigrated_db):
+        apply_migrations(unmigrated_db, before="V044")
+        # Staged with SQL of that era: the writer now also writes V044's
+        # columns, which this schema does not have yet.
+        with psycopg.connect(unmigrated_db) as conn:
+            (account_id,) = conn.execute(
+                "INSERT INTO accounts (user_id, institution_id) "
+                "SELECT %s, id FROM institutions WHERE slug = 'banchile' "
+                "RETURNING id",
+                (SEEDED_USER_ID,),
+            ).fetchone()
+            (product_id,) = conn.execute(
+                "INSERT INTO products (account_id, name, slug, kind, currency) "
+                "VALUES (%s, 'Banco de Chile - credit_card', "
+                "'banco-de-chile-credit-card', 'credit_card', 'CLP') RETURNING id",
+                (account_id,),
+            ).fetchone()
+            conn.execute(
+                "INSERT INTO transactions (product_id, description, amount, "
+                "transaction_date, source, external_id) "
+                "VALUES (%s, 'COMPRA SINTETICA', -999999, '2026-08-20', "
+                "'scraper_banchile', 'bch_fp_a1b2c3d4e5f60718')",
+                (product_id,),
+            )
+
+        apply_migrations(unmigrated_db)
+
+        with psycopg.connect(unmigrated_db, row_factory=dict_row) as conn:
+            stored = conn.execute(
+                "SELECT billing_status, statement_date FROM transactions"
+            ).fetchone()
+        assert stored == {"billing_status": None, "statement_date": None}
+        # The next scrape fills it: here the billed leg adopts the row.
+        inserted = upsert_transactions(
+            [_card_txn(billing_status="billed", statement_date=_CLOSED)]
+        )
+        assert inserted == 0
+        with psycopg.connect(unmigrated_db, row_factory=dict_row) as conn:
+            rows = conn.execute(
+                "SELECT external_id, billing_status, statement_date FROM transactions"
+            ).fetchall()
+        assert rows == [
+            {
+                "external_id": "bch_ref_200812345678",
+                "billing_status": "billed",
+                "statement_date": _CLOSED,
+            }
+        ]
+
+    def test_applying_v044_again_changes_nothing(self, db_conn):
+        def shape():
+            columns = db_conn.execute(
+                "SELECT column_name, data_type, is_nullable "
+                "FROM information_schema.columns WHERE table_name = 'transactions' "
+                "AND column_name IN ('billing_status', 'statement_date') "
+                "ORDER BY column_name"
+            ).fetchall()
+            checks = db_conn.execute(
+                "SELECT conname, pg_get_constraintdef(oid) AS definition "
+                "FROM pg_constraint WHERE conrelid = 'transactions'::regclass "
+                "AND conname IN ('chk_transactions_billing_status', "
+                "'chk_transactions_statement_date_billed') ORDER BY conname"
+            ).fetchall()
+            return columns, checks
+
+        upsert_transactions([_card_txn(billing_status="billed", statement_date=_CLOSED)])
+        before = shape(), _billing_of(db_conn)
+
+        db_conn.execute(self._V044.read_text(encoding="utf-8"))
+
+        assert (shape(), _billing_of(db_conn)) == before
+        columns, checks = before[0]
+        assert [(c["column_name"], c["is_nullable"]) for c in columns] == [
+            ("billing_status", "YES"),
+            ("statement_date", "YES"),
+        ]
+        assert len(checks) == 2
 
 
 class TestStockKindMigration:

@@ -338,6 +338,11 @@ export const descriptionAliases = pgTable(
   (table) => [index("idx_description_aliases_priority").on(table.priority)]
 );
 
+// A card movement's billing state (V044, CHECK chk_transactions_billing_status):
+// por facturar, facturado.
+export const BILLING_STATUSES = ["unbilled", "billed"] as const;
+export type BillingStatus = (typeof BILLING_STATUSES)[number];
+
 // Transactions: one money movement on a product
 export const transactions = pgTable(
   "transactions",
@@ -393,6 +398,13 @@ export const transactions = pgTable(
       mode: "number",
     }),
     locationIsManual: boolean("location_is_manual").notNull().default(false),
+    // Whether a card movement is on a statement yet (V044), as its source
+    // reported it; NULL when the source did not say. Scrapers only move it
+    // forward (never back from "billed") and keep the first statementDate, the
+    // closing date of the statement that billed it (billed rows only). Not
+    // editable from the dashboard.
+    billingStatus: text("billing_status").$type<BillingStatus>(),
+    statementDate: date("statement_date"),
     // Set when the user deletes an imported (external_id) row; NULL while
     // visible (V033). The row keeps its (product_id, external_id) key so
     // scrapers and CSV re-imports skip it instead of importing it again.

@@ -13,7 +13,8 @@ institution-unique slug (the slug helpers themselves live in test_slug.py).
 BanChile row is re-keyed in place when its movement comes back under the bank's
 operation id, instead of being imported a second time. `_FakeTxConn` also
 models Postgres's aborted-transaction state, so the per-row isolation tests
-fail if a bad row poisons the rows after it.
+fail if a bad row poisons the rows after it. `_billing_fill` is V044's
+forward-only billing status, which `_FakeTxConn` applies to stored rows.
 """
 
 from datetime import date
@@ -26,6 +27,7 @@ from db import writer
 from db.writer import (
     TransactionWriteResult,
     _adopts_stored_rows,
+    _billing_fill,
     _canonical_metrics,
     _claim_decision,
     _headline_decimal,
@@ -593,16 +595,20 @@ class _FakeTxConn:
     `fail_on` raises and, like Postgres, aborts the transaction: every statement after it fails
     until a `transaction()` block rolls back past it. An INSERT of an id in
     `drop_on` drops the connection once; each `pool.connection()` checkout is
-    a fresh connection over the same rows.
+    a fresh connection over the same rows. An INSERT of an id in `race_on`
+    loses to a concurrent writer: that writer's bare row (no location, no
+    billing status) lands and the INSERT inserts nothing.
     """
 
-    def __init__(self, rows=None, fail_on=(), drop_on=()):
+    def __init__(self, rows=None, fail_on=(), drop_on=(), race_on=()):
         self.rows = list(rows or [])
         self.executed = []
         self.location_fills = []
+        self.billing_fills = []
         self._clock = 100
         self.fail_on = set(fail_on)
         self.drop_on = set(drop_on)
+        self.race_on = set(race_on)
         self.aborted = False
         self.broken = False
 
@@ -677,6 +683,8 @@ class _FakeTxConn:
                 ext,
                 internal_transfer,
                 *location,
+                billing_status,
+                statement_date,
             ) = p
             if ext in self.fail_on:
                 self.aborted = True
@@ -685,6 +693,28 @@ class _FakeTxConn:
                 self.drop_on.discard(ext)
                 self.broken = True
                 raise psycopg.OperationalError("server closed the connection")
+            if ext in self.race_on:
+                self.race_on.discard(ext)
+                self._clock += 1
+                self.rows.append(
+                    {
+                        "id": "row-concurrent",
+                        "product_id": product_id,
+                        "external_id": ext,
+                        "description": description,
+                        "amount": amount,
+                        "transaction_date": tx_date,
+                        "accounting_date": accounting_date,
+                        "scheduled_month": month,
+                        "source": source,
+                        "is_internal_transfer": internal_transfer,
+                        "created_at": self._clock,
+                        "location": (None,) * 5,
+                        "billing_status": None,
+                        "statement_date": None,
+                    }
+                )
+                return _FakeCursor(rowcount=0)
             self._clock += 1
             self.rows.append(
                 {
@@ -700,11 +730,28 @@ class _FakeTxConn:
                     "is_internal_transfer": internal_transfer,
                     "created_at": self._clock,
                     "location": tuple(location),
+                    "billing_status": billing_status,
+                    "statement_date": statement_date,
                 }
             )
             return _FakeCursor(rowcount=1)
         if "UPDATE transactions SET location_" in q:
             self.location_fills.append(p)
+            return _FakeCursor(rowcount=1)
+        if "SELECT billing_status, statement_date FROM transactions" in q:
+            (row_id,) = p
+            for row in self.rows:
+                if row["id"] == row_id:
+                    return _FakeCursor(
+                        (row.get("billing_status"), row.get("statement_date"))
+                    )
+            return _FakeCursor(None)
+        if "UPDATE transactions SET billing_status" in q:
+            status, statement_date, row_id = p
+            self.billing_fills.append(p)
+            for row in self.rows:
+                if row["id"] == row_id:
+                    row.update(billing_status=status, statement_date=statement_date)
             return _FakeCursor(rowcount=1)
         return _FakeCursor()
 
@@ -745,6 +792,8 @@ def _txn(
     tx_date=date(2026, 8, 20),
     accounting_date=None,
     location=None,
+    billing_status=None,
+    statement_date=None,
 ):
     return ScrapedTransaction(
         institution="banchile",
@@ -756,6 +805,8 @@ def _txn(
         external_id=external_id,
         scheduled_month=date(tx_date.year, tx_date.month, 1),
         location=location,
+        billing_status=billing_status,
+        statement_date=statement_date,
     )
 
 
@@ -1402,3 +1453,212 @@ class TestTransactionLocation:
         (fill,) = [q for q, _ in conn.executed if "SET location_" in q]
         assert fill.count("WHEN location_latitude IS NULL") == 2
         assert conn.location_fills == [(-33.0, -70.0, "row-1")]
+
+
+# Synthetic statement closing dates.
+_CLOSED = date(2026, 8, 25)
+_CLOSED_LATER = date(2026, 9, 25)
+
+
+class TestBillingFill:
+    """V044: what a stored row's (billing_status, statement_date) becomes when
+    a scrape reports a status for it. None leaves the row untouched."""
+
+    @pytest.mark.parametrize(
+        "stored, incoming, expected",
+        [
+            # The source says nothing: never a change.
+            ((None, None), (None, None), None),
+            (("unbilled", None), (None, None), None),
+            (("billed", _CLOSED), (None, None), None),
+            # Unbilled only fills a status never reported.
+            ((None, None), ("unbilled", None), ("unbilled", None)),
+            (("unbilled", None), ("unbilled", None), None),
+            (("billed", None), ("unbilled", None), None),
+            (("billed", _CLOSED), ("unbilled", None), None),
+            # Billed replaces an unreported or unbilled status.
+            ((None, None), ("billed", _CLOSED), ("billed", _CLOSED)),
+            ((None, None), ("billed", None), ("billed", None)),
+            (("unbilled", None), ("billed", _CLOSED), ("billed", _CLOSED)),
+            (("unbilled", None), ("billed", None), ("billed", None)),
+            # A billed row only gains a statement date it lacks.
+            (("billed", None), ("billed", _CLOSED), ("billed", _CLOSED)),
+            (("billed", None), ("billed", None), None),
+            (("billed", _CLOSED), ("billed", None), None),
+            (("billed", _CLOSED), ("billed", _CLOSED), None),
+            (("billed", _CLOSED), ("billed", _CLOSED_LATER), None),
+        ],
+    )
+    def test_the_status_only_moves_forward(self, stored, incoming, expected):
+        assert _billing_fill(*stored, *incoming) == expected
+
+
+def _stored_card_row(billing_status=None, statement_date=None):
+    return dict(
+        _legacy_row("row-1", "bch_ref_200812345678", 1),
+        billing_status=billing_status,
+        statement_date=statement_date,
+    )
+
+
+class TestTransactionBillingStatus:
+    """V044: the status is inserted with the row, then only moves forward."""
+
+    def test_a_new_row_is_inserted_with_its_status_and_statement(self, monkeypatch):
+        conn = _FakeTxConn()
+        _use_tx_conn(monkeypatch, conn)
+
+        write_transactions(
+            [
+                _txn(
+                    "bch_ref_200812345678",
+                    kind="credit_card",
+                    billing_status="billed",
+                    statement_date=_CLOSED,
+                ),
+                _txn(
+                    "bch_fp_a1b2c3d4e5f60718",
+                    kind="credit_card",
+                    amount=-2500000,
+                    billing_status="unbilled",
+                ),
+                _txn("bch_op_12345678901", amount=-1000000),
+            ]
+        )
+
+        assert [(r["billing_status"], r["statement_date"]) for r in conn.rows] == [
+            ("billed", _CLOSED),
+            ("unbilled", None),
+            (None, None),
+        ]
+        assert conn.billing_fills == []
+
+    def test_a_stored_unbilled_row_becomes_billed(self, monkeypatch):
+        conn = _FakeTxConn([_stored_card_row("unbilled")])
+        _use_tx_conn(monkeypatch, conn)
+
+        inserted = write_transactions(
+            [
+                _txn(
+                    "bch_ref_200812345678",
+                    kind="credit_card",
+                    billing_status="billed",
+                    statement_date=_CLOSED,
+                )
+            ]
+        ).inserted
+
+        assert inserted == 0
+        assert len(conn.rows) == 1
+        assert (conn.rows[0]["billing_status"], conn.rows[0]["statement_date"]) == (
+            "billed",
+            _CLOSED,
+        )
+
+    def test_a_billed_row_is_never_written_back_to_unbilled(self, monkeypatch):
+        conn = _FakeTxConn([_stored_card_row("billed", _CLOSED)])
+        _use_tx_conn(monkeypatch, conn)
+
+        write_transactions(
+            [
+                _txn(
+                    "bch_ref_200812345678",
+                    kind="credit_card",
+                    billing_status="unbilled",
+                )
+            ]
+        )
+
+        assert conn.billing_fills == []
+        assert (conn.rows[0]["billing_status"], conn.rows[0]["statement_date"]) == (
+            "billed",
+            _CLOSED,
+        )
+
+    def test_a_movement_without_a_status_reads_and_writes_nothing(self, monkeypatch):
+        conn = _FakeTxConn([_stored_card_row("unbilled")])
+        _use_tx_conn(monkeypatch, conn)
+
+        write_transactions([_txn("bch_ref_200812345678", kind="credit_card")])
+
+        assert not [q for q, _ in conn.executed if "billing_status" in q]
+
+    def test_an_adopted_row_takes_the_billed_status(self, monkeypatch):
+        """Issue #56: the unbilled fingerprint row is re-keyed onto the billed
+        reference and carries the statement it was billed on."""
+        conn = _FakeTxConn(
+            [
+                dict(
+                    _legacy_row("row-1", "bch_fp_a1b2c3d4e5f60718", 1),
+                    billing_status="unbilled",
+                    statement_date=None,
+                )
+            ]
+        )
+        _use_tx_conn(monkeypatch, conn)
+
+        inserted = write_transactions(
+            [
+                _txn(
+                    "bch_ref_200812345678",
+                    kind="credit_card",
+                    billing_status="billed",
+                    statement_date=_CLOSED,
+                )
+            ]
+        ).inserted
+
+        assert inserted == 0
+        assert len(conn.rows) == 1
+        assert conn.rows[0]["external_id"] == "bch_ref_200812345678"
+        assert conn.billing_fills == [("billed", _CLOSED, "row-1")]
+
+    def test_one_batch_seeing_a_charge_in_both_views_stores_it_billed(
+        self, monkeypatch
+    ):
+        """A source whose key survives billing (one key, two views) folds onto
+        one row, billed, in either order."""
+        for order in (("unbilled", "billed"), ("billed", "unbilled")):
+            conn = _FakeTxConn()
+            _use_tx_conn(monkeypatch, conn)
+
+            write_transactions(
+                [
+                    _txn(
+                        "bch_ref_200812345678",
+                        kind="credit_card",
+                        billing_status=status,
+                    )
+                    for status in order
+                ]
+            )
+
+            assert [r["billing_status"] for r in conn.rows] == ["billed"]
+
+    def test_a_row_a_concurrent_writer_stored_first_is_filled(self, monkeypatch):
+        """The key was free at the lookup but taken by the INSERT: the row the
+        other writer stored still gets this scrape's status and location."""
+        conn = _FakeTxConn(race_on={"bch_ref_200812345678"})
+        _use_tx_conn(monkeypatch, conn)
+
+        result = write_transactions(
+            [
+                _txn(
+                    "bch_ref_200812345678",
+                    kind="credit_card",
+                    location=_LOCATION,
+                    billing_status="billed",
+                    statement_date=_CLOSED,
+                )
+            ]
+        )
+
+        assert (result.inserted, result.failed) == (0, 0)
+        assert result.persisted_external_ids == {"bch_ref_200812345678"}
+        (row,) = conn.rows
+        assert row["id"] == "row-concurrent"
+        assert (row["billing_status"], row["statement_date"]) == ("billed", _CLOSED)
+        assert conn.location_fills == [
+            ("CIUDAD FICTICIA", "PAIS FICTICIO", "row-concurrent")
+        ]
+

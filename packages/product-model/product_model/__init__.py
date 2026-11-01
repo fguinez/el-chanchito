@@ -36,6 +36,7 @@ from .display import (
 )
 from .envelopes import (
     LOCATION_TEXT_MAX_LENGTH,
+    BillingStatus,
     DailyPrice,
     ProductRef,
     ScrapedExchangeRate,
@@ -137,6 +138,7 @@ __all__ = [
     "validate_display_specs",
     "ScrapedProduct",
     "ScrapedTransaction",
+    "BillingStatus",
     "TransactionLocation",
     "LOCATION_TEXT_MAX_LENGTH",
     "ScrapedExchangeRate",

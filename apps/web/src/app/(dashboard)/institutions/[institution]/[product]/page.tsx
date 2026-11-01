@@ -53,6 +53,8 @@ import { BalanceHistorySheet } from "@/components/institutions/balance-history-s
 import { ExchangeRateCard } from "@/components/institutions/exchange-rate-card";
 import { ProductTransactionsCard } from "@/components/institutions/product-transactions";
 import { CategorySpendCard } from "@/components/institutions/category-spend-card";
+import { BillingCard } from "@/components/institutions/billing-card";
+import type { CardBillingSummary } from "@/lib/card-billing";
 import {
   productTicker,
   showsPriceHistory,
@@ -70,6 +72,8 @@ interface ProductDetailResponse {
   history: ProductHistoryPoint[];
   transactions: ProductTransaction[];
   transactionsTruncated: boolean;
+  /** A credit card's billing (facturación); null for any other kind. */
+  billing: CardBillingSummary | null;
   /** A stock's daily closes, oldest first; empty without a ticker. */
   prices: ProductPricePoint[];
 }
@@ -171,6 +175,7 @@ export default function ProductDetailPage() {
     history,
     transactions,
     transactionsTruncated,
+    billing,
     prices,
   } = data;
   const isLiability = KIND_INFO[product.kind].role === "liability";
@@ -314,6 +319,10 @@ export default function ProductDetailPage() {
           />
         )}
       </div>
+
+      {product.kind === "credit_card" && billing && (
+        <BillingCard currency={product.currency} billing={billing} />
+      )}
 
       {/* Per-kind insight graphs */}
       {isCreditKind && <CupoUtilizationCard product={product} history={history} />}
