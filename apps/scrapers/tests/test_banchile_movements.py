@@ -55,7 +55,7 @@ from scrapers.base import (
     ScrapedProduct,
     TransactionLocation,
 )
-from scrapers.institutions.banchile import external_id_for
+from scrapers.institutions.banchile import billing_of, external_id_for
 
 # --- Synthetic payload builders ------------------------------------------------
 
@@ -1364,6 +1364,26 @@ class TestStatementOrder:
             ]
         )
         assert [m.statement_date for m in read.movements] == ["2026-07-05", ""]
+
+    def test_a_replay_answered_with_another_statement_tags_nothing(self):
+        """Its rows keep their keys but report no billing status or date."""
+        wrong = _statement_payload([_billed_row()], actual="05/08/2026")
+        right = _statement_payload(
+            [_billed_row(referencia="0509 11111111")], actual="05/09/2026"
+        )
+
+        read = self._read([("2026-09-05", right), ("2026-07-05", wrong)])
+
+        untagged, tagged = read.movements
+        assert billing_of(untagged) == (None, None)
+        assert untagged.statement_date == ""
+        assert external_id_for(untagged) == "bch_ref_200812345678"
+        assert billing_of(tagged) == ("billed", datetime.date(2026, 9, 5))
+
+    def test_a_statement_without_a_resumen_date_is_trusted(self):
+        """Nothing contradicts the date it was asked for."""
+        read = self._read([("2026-07-05", _billed_payload([_billed_row()]))])
+        assert billing_of(read.movements[0]) == ("billed", datetime.date(2026, 7, 5))
 
     def test_no_usable_summary_is_none(self):
         read = self._read([("2026-08-05", _billed_payload([_billed_row()]))])

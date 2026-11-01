@@ -171,6 +171,11 @@ class BanChileMovement:
     `location` is the merchant's city and country where the card legs report
     them (None elsewhere). Like the dates, it is recorded data and never
     identity.
+
+    `billing_unknown` marks the rows of a statement whose `resumen` named
+    another closing date than the one it was requested for: which statement
+    billed them is unknown, so they report no billing status (and their
+    `statement_date` is blank). Never identity.
     """
 
     source: str
@@ -186,6 +191,7 @@ class BanChileMovement:
     legacy_amount: Optional[int] = None
     statement_date: str = ""
     location: Optional[TransactionLocation] = None
+    billing_unknown: bool = False
 
 
 @dataclass(frozen=True)
@@ -992,12 +998,16 @@ def parse_statement_summary(payload, currency: str) -> Optional[BanChileStatemen
     )
 
 
-def _statement_order(fecha: str) -> datetime.date:
-    """Sort key for a statement read: its ISO date, unknown ones last."""
+def _iso_date(fecha: str) -> Optional[datetime.date]:
     try:
         return datetime.date.fromisoformat(fecha)
     except ValueError:
-        return datetime.date.max
+        return None
+
+
+def _statement_order(fecha: str) -> datetime.date:
+    """Sort key for a statement read: its ISO date, unknown ones last."""
+    return _iso_date(fecha) or datetime.date.max
 
 
 def billed_leg_from_statements(
@@ -1012,14 +1022,29 @@ def billed_leg_from_statements(
     first; the writer never replaces a stored statement date. A payload with no
     known date sorts last: it is the SPA's own default load, the newest.
 
+    A statement whose `resumen` names another closing date than the one it was
+    requested with (a replay the portal answered with another period) keeps
+    its rows, keys unchanged, but tags none of them (`billing_unknown`): read
+    oldest first, a wrong date would otherwise be stored for good.
+
     The summary kept is the one with the latest closing date; None when no
     statement had a usable `resumen`.
     """
     movements: list[BanChileMovement] = []
     newest: Optional[BanChileStatement] = None
     for fecha, payload in sorted(statements, key=lambda read: _statement_order(read[0])):
-        movements.extend(parse(payload, fecha))
+        rows = parse(payload, fecha)
         summary = parse_statement_summary(payload, currency)
+        requested = _iso_date(fecha)
+        if summary is not None and requested is not None and summary.statement_date != requested:
+            logger.warning(
+                "BanChile: a %s statement asked for one closing date answered "
+                "another; its %d rows are not tagged",
+                currency,
+                len(rows),
+            )
+            rows = [replace(m, statement_date="", billing_unknown=True) for m in rows]
+        movements.extend(rows)
         if summary is not None and (
             newest is None or summary.statement_date > newest.statement_date
         ):

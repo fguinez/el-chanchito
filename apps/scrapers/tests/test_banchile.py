@@ -394,6 +394,17 @@ class TestBillingOnPostgres:
         (row,) = self._stored(db_conn)
         assert (row["billing_status"], row["statement_date"]) == ("billed", date(2026, 7, 5))
 
+    def test_a_wrong_replay_never_pins_its_date(self, db_conn):
+        """The older replay answered with the newer statement: the newer date sticks."""
+        row = _billed_row(referencia="2008 12345678")
+        newest = dict(_billed_payload([row]), resumen={"fechaFacturacionActual": "05/08/2026"})
+        statements = [("2026-08-05", newest), ("2026-07-05", newest)]
+
+        upsert_transactions(self._scrape(statements))
+
+        (row,) = self._stored(db_conn)
+        assert (row["billing_status"], row["statement_date"]) == ("billed", date(2026, 8, 5))
+
     def test_a_second_run_changes_nothing(self, db_conn):
         payload = _billed_payload([_billed_row(referencia="2008 12345678")])
         statements = [("2026-08-05", payload), ("2026-07-05", payload)]

@@ -678,8 +678,10 @@ Card billing (V044, see "Card billing status"): a movement of the unbilled leg
 is reported `unbilled`, one of a statement `billed`, with the statement's
 `fechaFacturacion` as its `statement_date`. Each statement leg parses the
 statements it read oldest first, so a movement printed on two of them (an
-installment) reaches the writer with the statement that billed it first. The
-statement payload it already captures also carries a `resumen` (closing, next
+installment) reaches the writer with the statement that billed it first, and
+a statement whose `resumen` names another closing date than the one it was
+requested for (a replay answered with another period) tags none of its rows.
+The statement payload it already captures also carries a `resumen` (closing, next
 closing and due dates, billed amount, minimum payment, the latter null on the
 USD statement): the newest one of each currency fills that card's
 `CreditCardMetrics` statement fields and its `statement_day` / `due_day`

@@ -170,8 +170,12 @@ def billing_of(movement: BanChileMovement) -> tuple[str | None, date | None]:
 
     The unbilled card leg is "unbilled"; the billed one is "billed" with its
     statement's ISO `fechaFacturacion` as the statement date (None when blank
-    or malformed). Checking movements have no billing cycle: (None, None).
+    or malformed). Checking movements have no billing cycle, and a statement
+    row whose statement could not be confirmed (`billing_unknown`) reports
+    nothing: (None, None).
     """
+    if movement.billing_unknown:
+        return None, None
     if movement.source == "card_unbilled":
         return "unbilled", None
     if movement.source != "card_billed":
