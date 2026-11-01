@@ -665,6 +665,26 @@ class TestTransactionBillingStatus:
             }
         ]
 
+    @pytest.mark.parametrize("billed_first", [False, True])
+    def test_one_batch_seeing_a_charge_in_both_views_stores_it_billed(
+        self, db_conn, billed_first
+    ):
+        """A source whose key survives billing sends the charge once per view;
+        whichever comes first, one row lands, billed on its statement."""
+        views = [
+            _card_txn(billing_status="unbilled"),
+            _card_txn(billing_status="billed", statement_date=_CLOSED),
+        ]
+        if billed_first:
+            views.reverse()
+
+        assert upsert_transactions(views) == 1
+
+        (row,) = db_conn.execute(
+            "SELECT billing_status, statement_date FROM transactions"
+        ).fetchall()
+        assert row == {"billing_status": "billed", "statement_date": _CLOSED}
+
     @pytest.mark.parametrize(
         "assignment",
         [

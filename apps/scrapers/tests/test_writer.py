@@ -1549,9 +1549,11 @@ class TestTransactionBillingStatus:
         ).inserted
 
         assert inserted == 0
-        (lock,) = [q for q, _ in conn.executed if "SELECT billing_status" in q]
-        assert lock.endswith("FOR UPDATE")
-        assert conn.billing_fills == [("billed", _CLOSED, "row-1")]
+        assert len(conn.rows) == 1
+        assert (conn.rows[0]["billing_status"], conn.rows[0]["statement_date"]) == (
+            "billed",
+            _CLOSED,
+        )
 
     def test_a_billed_row_is_never_written_back_to_unbilled(self, monkeypatch):
         conn = _FakeTxConn([_stored_card_row("billed", _CLOSED)])
