@@ -809,6 +809,8 @@ describe("olderStatementDate", () => {
   it("is null while the statement is the last closing's, or unknown", () => {
     expect(olderStatementDate(summary({ statement_date: "2026-10-15" }))).toBeNull();
     expect(olderStatementDate(summary({ billed_amount: 1000000 }))).toBeNull();
+    // A statement dated after today is ignored by the cycle, not older.
+    expect(olderStatementDate(summary({ statement_date: "2026-11-15" }))).toBeNull();
   });
 });
 

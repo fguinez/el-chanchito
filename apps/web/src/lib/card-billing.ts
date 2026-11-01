@@ -597,11 +597,12 @@ export function billedDebtState(summary: CardBillingSummary): BilledDebtState {
 }
 
 /** The closing date of the statement the metrics figures (monto facturado,
- *  pago mínimo) come from, when it is not the last closing's; else null. */
+ *  pago mínimo) come from, when it is older than the last closing; else
+ *  null (a statement dated after today never sets the cycle). */
 export function olderStatementDate(summary: CardBillingSummary): string | null {
   const { cycle, statement } = summary;
   if (!cycle || !statement.date) return null;
-  return statement.date !== cycle.lastClosing.date ? statement.date : null;
+  return statement.date < cycle.lastClosing.date ? statement.date : null;
 }
 
 /** Billed debt is still owed but the payments since the closing cover the
