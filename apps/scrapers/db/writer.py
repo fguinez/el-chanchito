@@ -2,9 +2,11 @@
 
 import json
 import logging
+import re
+import unicodedata
 from collections.abc import Collection
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import uuid4
 
@@ -396,8 +398,137 @@ def _claim_decision(
     return "insert", None
 
 
-def _sibling_rows(conn, product_id: str, txn: ScrapedTransaction, source: str) -> list[tuple]:
+def _sibling_rows(
+    conn,
+    product_id: str,
+    txn: ScrapedTransaction,
+    source: str,
+    claimed: Collection = frozenset(),
+    incoming_ids: Collection[str] = frozenset(),
+) -> list[tuple]:
     """Stored rows that could be `txn` under a superseded key, best first.
+
+    The rows on `txn`'s own dates (`_same_day_siblings`), then, for a billed
+    card charge only, at most one unbilled row a few days off
+    (`_nearby_card_sibling`).
+    """
+    siblings = _same_day_siblings(conn, product_id, txn, source)
+    if txn.product_kind == "credit_card" and txn.billing_status == "billed":
+        siblings += _nearby_card_sibling(
+            conn,
+            product_id,
+            txn,
+            source,
+            {row_id for row_id, _ in siblings} | set(claimed),
+            incoming_ids,
+        )
+    return siblings
+
+
+# How far a card charge's billed date may sit from the date its unbilled row
+# was stored under: the bank re-dates a charge by a day or so when it posts.
+_CARD_ADOPTION_WINDOW_DAYS = 3
+# The key prefix of the unbilled card leg (a fingerprint; it has no bank id).
+_FINGERPRINT_LIKE = "bch\\_fp\\_%"
+# Description tokens shorter than this are too generic to tie two rows.
+_MIN_SHARED_TOKEN = 4
+
+
+def _description_tokens(description: str | None) -> tuple[list[str], str]:
+    """`description`'s uppercase alphanumeric tokens and their concatenation."""
+    normalized = unicodedata.normalize("NFKD", description or "")
+    ascii_text = normalized.encode("ascii", "ignore").decode().upper()
+    tokens = re.findall(r"[A-Z0-9]+", ascii_text)
+    return tokens, "".join(tokens)
+
+
+def _similar_descriptions(left: str | None, right: str | None) -> bool:
+    """True when two card descriptions plausibly name the same merchant.
+
+    The unbilled and billed legs spell a merchant differently (a processor
+    prefix glued on, a suffix cut off), so this asks only that a token of
+    four or more characters of one appears inside the other, spaces and
+    punctuation ignored.
+    """
+    left_tokens, left_joined = _description_tokens(left)
+    right_tokens, right_joined = _description_tokens(right)
+    return any(
+        len(token) >= _MIN_SHARED_TOKEN and token in other
+        for tokens, other in ((left_tokens, right_joined), (right_tokens, left_joined))
+        for token in tokens
+    )
+
+
+def _closest_unique(candidates: list[tuple], target: date) -> list[tuple]:
+    """The one candidate nearest `target`, or none when that distance is shared.
+
+    `candidates` are (id, external_id, transaction_date) rows. Two rows equally
+    near are two charges the bank could have re-dated; picking either could
+    attach the wrong one, so neither is adopted.
+    """
+    if not candidates:
+        return []
+    distance = {row[0]: abs((row[2] - target).days) for row in candidates}
+    nearest = min(distance.values())
+    closest = [row for row in candidates if distance[row[0]] == nearest]
+    if len(closest) != 1:
+        return []
+    row_id, external_id, _ = closest[0]
+    return [(row_id, external_id)]
+
+
+def _nearby_card_sibling(
+    conn,
+    product_id: str,
+    txn: ScrapedTransaction,
+    source: str,
+    excluded: Collection,
+    incoming_ids: Collection[str],
+) -> list[tuple]:
+    """The unbilled row a billed card charge was stored as a few days earlier.
+
+    The bank re-dates a charge by a day or so between the unbilled list and
+    the statement, so an exact-date match misses it and the charge would be
+    stored twice. Only a billed charge looks this far, and only at rows of the
+    same product, amount and source still keyed by the unbilled leg's
+    fingerprint and not billed, within `_CARD_ADOPTION_WINDOW_DAYS`, whose
+    description is similar, that no movement of this scrape still carries and
+    no other movement claimed. Of those, the single nearest one is adopted
+    (`_closest_unique`); a tie adopts nothing.
+    """
+    window = timedelta(days=_CARD_ADOPTION_WINDOW_DAYS)
+    rows = conn.execute(
+        """
+        SELECT id, external_id, transaction_date, description FROM transactions
+        WHERE product_id = %s AND amount = %s AND source = %s
+          AND external_id LIKE %s
+          AND billing_status IS DISTINCT FROM 'billed'
+          AND transaction_date BETWEEN %s AND %s
+        ORDER BY created_at, id
+        """,
+        (
+            product_id,
+            txn.amount,
+            source,
+            _FINGERPRINT_LIKE,
+            txn.transaction_date - window,
+            txn.transaction_date + window,
+        ),
+    ).fetchall()
+    candidates = [
+        (row_id, external_id, tx_date)
+        for row_id, external_id, tx_date, description in rows
+        if row_id not in excluded
+        and external_id not in incoming_ids
+        and _similar_descriptions(description, txn.description)
+    ]
+    return _closest_unique(candidates, txn.transaction_date)
+
+
+def _same_day_siblings(
+    conn, product_id: str, txn: ScrapedTransaction, source: str
+) -> list[tuple]:
+    """Stored rows on `txn`'s own dates that could be it under an older key.
 
     Scoped as tightly as the identity allows: same product, same amount, same
     scraper source, and an `external_id` that belongs to the re-keying
@@ -602,7 +733,7 @@ def _write_transaction(
     if _adopts_stored_rows(txn.external_id):
         action, row_id = _claim_decision(
             txn.external_id,
-            _sibling_rows(conn, product_id, txn, source),
+            _sibling_rows(conn, product_id, txn, source, claimed, incoming_ids),
             claimed,
             incoming_ids,
         )

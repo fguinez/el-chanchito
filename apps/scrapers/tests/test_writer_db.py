@@ -111,11 +111,12 @@ def _txn(
     location=None,
     billing_status=None,
     statement_date=None,
+    description="COMPRA SINTETICA",
 ):
     return ScrapedTransaction(
         institution=institution,
         product_kind=kind,
-        description="COMPRA SINTETICA",
+        description=description,
         amount=amount,
         transaction_date=tx_date,
         accounting_date=accounting_date,
@@ -698,6 +699,171 @@ class TestTransactionBillingStatus:
 
         with pytest.raises(psycopg.errors.CheckViolation):
             db_conn.execute(f"UPDATE transactions SET {assignment}")
+
+
+class TestCardAdoptionWindow:
+    """A billed card charge adopts its unbilled row a few days off (fix D)."""
+
+    _UNBILLED_KEY = "bch_fp_a1b2c3d4e5f60718"
+
+    def _store_unbilled(self, tx_date, key=_UNBILLED_KEY, description="COMERCIO SINTETICO"):
+        upsert_transactions(
+            [
+                _card_txn(
+                    key,
+                    tx_date=tx_date,
+                    billing_status="unbilled",
+                    description=description,
+                )
+            ]
+        )
+
+    def _billed(self, tx_date=date(2026, 8, 21), description="COMERCIO SINTETICO"):
+        return _card_txn(
+            tx_date=tx_date,
+            billing_status="billed",
+            statement_date=_CLOSED,
+            description=description,
+        )
+
+    def _rows(self, conn):
+        return conn.execute(
+            "SELECT external_id, transaction_date, billing_status FROM transactions "
+            "ORDER BY created_at, id"
+        ).fetchall()
+
+    @pytest.mark.parametrize("days_off", [-3, -1, 1, 3])
+    def test_a_re_dated_charge_is_adopted_not_duplicated(self, db_conn, days_off):
+        """The bank moved the date by up to three days when it billed it."""
+        # Arrange
+        billed_date = date(2026, 8, 21)
+        self._store_unbilled(billed_date + timedelta(days=days_off))
+
+        # Act
+        inserted = upsert_transactions([self._billed(billed_date)])
+
+        # Assert
+        assert inserted == 0
+        assert self._rows(db_conn) == [
+            {
+                "external_id": "bch_ref_200812345678",
+                "transaction_date": billed_date,
+                "billing_status": "billed",
+            }
+        ]
+
+    def test_a_charge_four_days_off_is_a_different_charge(self, db_conn):
+        """Outside the window nothing is adopted."""
+        # Arrange
+        self._store_unbilled(date(2026, 8, 17))
+
+        # Act
+        inserted = upsert_transactions([self._billed(date(2026, 8, 21))])
+
+        # Assert
+        assert inserted == 1
+        assert len(self._rows(db_conn)) == 2
+
+    def test_an_unrelated_merchant_is_not_adopted(self, db_conn):
+        """Same amount a day off, but a different merchant: a different charge."""
+        # Arrange
+        self._store_unbilled(date(2026, 8, 20), description="OTRO NEGOCIO")
+
+        # Act
+        inserted = upsert_transactions([self._billed(date(2026, 8, 21))])
+
+        # Assert
+        assert inserted == 1
+
+    def test_a_reworded_merchant_still_matches(self, db_conn):
+        """The unbilled leg glues a processor prefix onto the merchant name."""
+        # Arrange
+        self._store_unbilled(date(2026, 8, 20), description="DLCOMERCIO SINTETICO")
+
+        # Act
+        inserted = upsert_transactions(
+            [self._billed(date(2026, 8, 21), description="COMERCIO SINTETICO SA")]
+        )
+
+        # Assert
+        assert inserted == 0
+
+    def test_the_closest_candidate_wins(self, db_conn):
+        """One day off beats two days off."""
+        # Arrange
+        self._store_unbilled(date(2026, 8, 19), key="bch_fp_00000000000000a1")
+        self._store_unbilled(date(2026, 8, 22), key="bch_fp_00000000000000a2")
+
+        # Act
+        upsert_transactions([self._billed(date(2026, 8, 21))])
+
+        # Assert
+        keys = {row["external_id"] for row in self._rows(db_conn)}
+        assert keys == {"bch_fp_00000000000000a1", "bch_ref_200812345678"}
+
+    def test_a_tie_adopts_nothing(self, db_conn):
+        """Two rows equally near could each be the charge: neither is guessed."""
+        # Arrange
+        self._store_unbilled(date(2026, 8, 20), key="bch_fp_00000000000000a1")
+        self._store_unbilled(date(2026, 8, 22), key="bch_fp_00000000000000a2")
+
+        # Act
+        inserted = upsert_transactions([self._billed(date(2026, 8, 21))])
+
+        # Assert
+        assert inserted == 1
+        assert len(self._rows(db_conn)) == 3
+
+    def test_an_exact_date_match_is_still_preferred(self, db_conn):
+        """The window only applies when the same-day match finds nothing."""
+        # Arrange
+        self._store_unbilled(date(2026, 8, 20), key="bch_fp_00000000000000a1")
+        self._store_unbilled(date(2026, 8, 21), key="bch_fp_00000000000000a2")
+
+        # Act
+        upsert_transactions([self._billed(date(2026, 8, 21))])
+
+        # Assert
+        keys = {row["external_id"] for row in self._rows(db_conn)}
+        assert keys == {"bch_fp_00000000000000a1", "bch_ref_200812345678"}
+
+    def test_a_row_this_scrape_still_lists_is_never_adopted(self, db_conn):
+        """An unbilled row the same scrape still carries is its own charge."""
+        # Arrange
+        self._store_unbilled(date(2026, 8, 20))
+        still_listed = _card_txn(
+            self._UNBILLED_KEY,
+            tx_date=date(2026, 8, 20),
+            billing_status="unbilled",
+            description="COMERCIO SINTETICO",
+        )
+
+        # Act
+        inserted = upsert_transactions([self._billed(date(2026, 8, 21)), still_listed])
+
+        # Assert
+        assert inserted == 1
+        assert len(self._rows(db_conn)) == 2
+
+    def test_an_unbilled_charge_never_looks_beyond_its_date(self, db_conn):
+        """Only a billed charge uses the window; an unbilled re-date is fix C's."""
+        # Arrange
+        self._store_unbilled(date(2026, 8, 20))
+
+        # Act
+        inserted = upsert_transactions(
+            [
+                _card_txn(
+                    "bch_fp_00000000000000b1",
+                    tx_date=date(2026, 8, 21),
+                    billing_status="unbilled",
+                    description="COMERCIO SINTETICO",
+                )
+            ]
+        )
+
+        # Assert
+        assert inserted == 1
 
 
 class TestTransferLinks:
