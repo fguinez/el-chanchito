@@ -303,8 +303,9 @@ function nextStatementDate(
  * today, it becomes the last closing, estimated. So the next closing is
  * always today or later.
  *
- * The cycle day is statement_day when known, else the last closing's own day;
- * a month shorter than it closes on its last day. A derived closing is the
+ * The cycle day is statement_day when known, else the day of the bank's next
+ * closing when the cycle comes from it, else the last closing's own day; a
+ * month shorter than it closes on its last day. A derived closing is the
  * first (or last) cycle day at least MIN_CYCLE_DAYS away, so a closing the
  * bank moved across a month boundary keeps its cycle's length. The due date
  * is the statement's when it belongs to the last closing, else the first
