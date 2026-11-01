@@ -550,6 +550,22 @@ def _fill_billing(conn, row_id, txn: ScrapedTransaction) -> None:
     )
 
 
+def _stored_row_id(conn, product_id: str, external_id: str):
+    """The id of the row already stored under this key, or None."""
+    row = conn.execute(
+        "SELECT id FROM transactions "
+        "WHERE product_id = %s AND external_id = %s",
+        (product_id, external_id),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def _fill_stored_row(conn, row_id, txn: ScrapedTransaction) -> None:
+    """Give a stored row what a later scrape may still add to it."""
+    _fill_location(conn, row_id, txn.location)
+    _fill_billing(conn, row_id, txn)
+
+
 def _write_transaction(
     conn,
     txn: ScrapedTransaction,
@@ -577,15 +593,10 @@ def _write_transaction(
     seen billed is never read back as unbilled.
     """
     source = f"scraper_{txn.institution}"
-    row = conn.execute(
-        "SELECT id FROM transactions "
-        "WHERE product_id = %s AND external_id = %s",
-        (product_id, txn.external_id),
-    ).fetchone()
-    if row:
-        _fill_location(conn, row[0], txn.location)
-        _fill_billing(conn, row[0], txn)
-        return "stored", row[0]
+    row_id = _stored_row_id(conn, product_id, txn.external_id)
+    if row_id is not None:
+        _fill_stored_row(conn, row_id, txn)
+        return "stored", row_id
 
     if _adopts_stored_rows(txn.external_id):
         action, row_id = _claim_decision(
@@ -611,8 +622,7 @@ def _write_transaction(
                     row_id,
                 ),
             )
-            _fill_location(conn, row_id, txn.location)
-            _fill_billing(conn, row_id, txn)
+            _fill_stored_row(conn, row_id, txn)
             logger.info(
                 "Adopted stored transaction %s onto %s",
                 row_id,
@@ -660,8 +670,14 @@ def _write_transaction(
             txn.statement_date,
         ),
     )
-    # A conflict means the row is already stored under this key.
-    return ("inserted" if cur.rowcount and cur.rowcount > 0 else "stored"), None
+    if cur.rowcount and cur.rowcount > 0:
+        return "inserted", None
+    # A conflict: a concurrent writer stored the key after the lookup above.
+    # Its row is committed by now, so it is filled like any stored row.
+    row_id = _stored_row_id(conn, product_id, txn.external_id)
+    if row_id is not None:
+        _fill_stored_row(conn, row_id, txn)
+    return "stored", row_id
 
 
 def _lookup_transaction_product(

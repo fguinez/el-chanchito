@@ -595,10 +595,12 @@ class _FakeTxConn:
     `fail_on` raises and, like Postgres, aborts the transaction: every statement after it fails
     until a `transaction()` block rolls back past it. An INSERT of an id in
     `drop_on` drops the connection once; each `pool.connection()` checkout is
-    a fresh connection over the same rows.
+    a fresh connection over the same rows. An INSERT of an id in `race_on`
+    loses to a concurrent writer: that writer's bare row (no location, no
+    billing status) lands and the INSERT inserts nothing.
     """
 
-    def __init__(self, rows=None, fail_on=(), drop_on=()):
+    def __init__(self, rows=None, fail_on=(), drop_on=(), race_on=()):
         self.rows = list(rows or [])
         self.executed = []
         self.location_fills = []
@@ -606,6 +608,7 @@ class _FakeTxConn:
         self._clock = 100
         self.fail_on = set(fail_on)
         self.drop_on = set(drop_on)
+        self.race_on = set(race_on)
         self.aborted = False
         self.broken = False
 
@@ -690,6 +693,28 @@ class _FakeTxConn:
                 self.drop_on.discard(ext)
                 self.broken = True
                 raise psycopg.OperationalError("server closed the connection")
+            if ext in self.race_on:
+                self.race_on.discard(ext)
+                self._clock += 1
+                self.rows.append(
+                    {
+                        "id": "row-concurrent",
+                        "product_id": product_id,
+                        "external_id": ext,
+                        "description": description,
+                        "amount": amount,
+                        "transaction_date": tx_date,
+                        "accounting_date": accounting_date,
+                        "scheduled_month": month,
+                        "source": source,
+                        "is_internal_transfer": internal_transfer,
+                        "created_at": self._clock,
+                        "location": (None,) * 5,
+                        "billing_status": None,
+                        "statement_date": None,
+                    }
+                )
+                return _FakeCursor(rowcount=0)
             self._clock += 1
             self.rows.append(
                 {
@@ -1607,4 +1632,31 @@ class TestTransactionBillingStatus:
             )
 
             assert [r["billing_status"] for r in conn.rows] == ["billed"]
+
+    def test_a_row_a_concurrent_writer_stored_first_is_filled(self, monkeypatch):
+        """The key was free at the lookup but taken by the INSERT: the row the
+        other writer stored still gets this scrape's status and location."""
+        conn = _FakeTxConn(race_on={"bch_ref_200812345678"})
+        _use_tx_conn(monkeypatch, conn)
+
+        result = write_transactions(
+            [
+                _txn(
+                    "bch_ref_200812345678",
+                    kind="credit_card",
+                    location=_LOCATION,
+                    billing_status="billed",
+                    statement_date=_CLOSED,
+                )
+            ]
+        )
+
+        assert (result.inserted, result.failed) == (0, 0)
+        assert result.persisted_external_ids == {"bch_ref_200812345678"}
+        (row,) = conn.rows
+        assert row["id"] == "row-concurrent"
+        assert (row["billing_status"], row["statement_date"]) == ("billed", _CLOSED)
+        assert conn.location_fills == [
+            ("CIUDAD FICTICIA", "PAIS FICTICIO", "row-concurrent")
+        ]
 
