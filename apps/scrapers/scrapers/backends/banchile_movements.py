@@ -855,6 +855,36 @@ def _national_sections(payload: dict) -> list[str]:
     return sorted(names, key=lambda name: name != _OPERATIONS_SECTION)
 
 
+def _disambiguated(
+    movement: BanChileMovement, raw_reference, seen: set[tuple]
+) -> BanChileMovement:
+    """`movement` with a fingerprint no earlier row of its statement holds.
+
+    Two reference-less rows can share every fallback field: two payments of
+    the same amount on the same day, whose `numReferencia` suffixes are both
+    all zeros ("0709 00000000" and "0809 00000000"). The first keeps its plain
+    fingerprint, the key it was always stored under, so no stored row re-keys;
+    only a repeat gets the raw `numReferencia` (its "DDMM" posting prefix
+    differs) appended, and an occurrence counter if even that is shared.
+    Statement rows come back in the same order on every read of a closed
+    statement, so the repeat is the same row every time.
+    """
+    fingerprint = movement.fingerprint
+    if fingerprint in seen:
+        fingerprint = movement.fingerprint + (_text(raw_reference),)
+        occurrence = 1
+        while fingerprint in seen:
+            occurrence += 1
+            fingerprint = movement.fingerprint + (
+                _text(raw_reference),
+                f"#{occurrence}",
+            )
+    seen.add(fingerprint)
+    if fingerprint == movement.fingerprint:
+        return movement
+    return replace(movement, fingerprint=fingerprint)
+
+
 def parse_billed_movements(payload, fecha_facturacion: str = "") -> list[BanChileMovement]:
     """Every real row of a national `resumen-por-fecha` response.
 
@@ -868,6 +898,7 @@ def parse_billed_movements(payload, fecha_facturacion: str = "") -> list[BanChil
     if not isinstance(payload, dict):
         return []
     movements = []
+    seen: set[tuple] = set()
     for section in _national_sections(payload):
         for raw in payload[section]["transaccionesTarjetas"]:
             if isinstance(raw, dict) and raw.get("totales"):
@@ -875,6 +906,8 @@ def parse_billed_movements(payload, fecha_facturacion: str = "") -> list[BanChil
             movement = parse_billed_movement(raw, fecha_facturacion, section)
             if movement is None:
                 continue
+            if movement.operation_id is None:
+                movement = _disambiguated(movement, raw.get("numReferencia"), seen)
             movements.append(movement)
     return movements
 
@@ -946,7 +979,11 @@ def parse_international_billed_movement(
 def parse_international_billed_movements(
     payload, fecha_facturacion: str = ""
 ) -> list[BanChileMovement]:
-    """Every real row of a USD `resumen-por-fecha` response, summaries dropped."""
+    """Every real row of a USD `resumen-por-fecha` response, summaries dropped.
+
+    Reference-less rows that share a fingerprint are told apart as on the
+    national leg (`_disambiguated`).
+    """
     if not isinstance(payload, dict):
         return []
     movements = []
@@ -955,12 +992,16 @@ def parse_international_billed_movements(
         rows = seccion.get("transaccionesTarjetas") if isinstance(seccion, dict) else None
         if not isinstance(rows, list):
             continue
+    seen: set[tuple] = set()
         for raw in rows:
             if isinstance(raw, dict) and raw.get("totales"):
                 continue  # a section total, not a movement
             movement = parse_international_billed_movement(raw, fecha_facturacion, name)
-            if movement is not None:
-                movements.append(movement)
+            if movement is None:
+                continue
+            if movement.operation_id is None:
+                movement = _disambiguated(movement, raw.get("numeroDocumento"), seen)
+            movements.append(movement)
     return movements
 
 

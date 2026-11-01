@@ -522,6 +522,80 @@ class TestParseBilledSections:
         assert movement.fingerprint[-1] == "seccionCargosImpuestosAbonos"
 
 
+class TestBilledFingerprintCollisions:
+    """Identical reference-less rows of one statement keep distinct keys (fix B)."""
+
+    def _payment(self, referencia):
+        return _billed_row(
+            referencia=referencia, monto=1000000, fecha="07/09/2026", grupo="pagos"
+        )
+
+    def test_two_identical_payments_both_survive(self):
+        """Same day, amount and card: only the all-zero reference differs."""
+        # Arrange
+        rows = [self._payment("0709 00000000"), self._payment("0809 00000000")]
+
+        # Act
+        parsed = parse_billed_movements(_billed_payload(rows), "2026-09-22")
+
+        # Assert
+        assert len(parsed) == 2
+        assert len({external_id_for(m) for m in parsed}) == 2
+
+    def test_the_first_keeps_its_stored_key(self):
+        """Only the repeat changes key, so the row already stored is not re-keyed."""
+        # Arrange
+        single = parse_billed_movements(
+            _billed_payload([self._payment("0709 00000000")]), "2026-09-22"
+        )
+        rows = [self._payment("0709 00000000"), self._payment("0809 00000000")]
+
+        # Act
+        first, second = parse_billed_movements(_billed_payload(rows), "2026-09-22")
+
+        # Assert
+        assert external_id_for(first) == external_id_for(single[0])
+        assert second.fingerprint == first.fingerprint + ("0809 00000000",)
+
+    def test_fully_identical_rows_get_an_occurrence_counter(self):
+        """Even the raw reference can repeat; a counter still separates them."""
+        # Arrange
+        rows = [self._payment("0709 00000000") for _ in range(3)]
+
+        # Act
+        parsed = parse_billed_movements(_billed_payload(rows), "2026-09-22")
+
+        # Assert
+        assert len({m.fingerprint for m in parsed}) == 3
+        assert parsed[2].fingerprint[-1] == "#2"
+
+    def test_keys_are_stable_across_reads(self):
+        """A second read of the same closed statement yields the same keys."""
+        # Arrange
+        rows = [self._payment("0709 00000000"), self._payment("0809 00000000")]
+
+        # Act
+        first_read = parse_billed_movements(_billed_payload(rows), "2026-09-22")
+        second_read = parse_billed_movements(_billed_payload(rows), "2026-09-22")
+
+        # Assert
+        assert [external_id_for(m) for m in first_read] == [
+            external_id_for(m) for m in second_read
+        ]
+
+    def test_dedupe_keeps_both(self):
+        """`dedupe_movements` no longer collapses the pair into one."""
+        # Arrange
+        rows = [self._payment("0709 00000000"), self._payment("0809 00000000")]
+        parsed = parse_billed_movements(_billed_payload(rows), "2026-09-22")
+
+        # Act
+        kept = dedupe_movements(parsed)
+
+        # Assert
+        assert len(kept) == 2
+
+
 class TestStatementDates:
     def test_newest_first_and_bounded(self):
         payload = {
@@ -1145,6 +1219,26 @@ class TestInternationalBilled:
         )
         amounts = [m.amount for m in parse_international_billed_movements(payload)]
         assert sorted(amounts) == [Decimal("-1.50"), Decimal("1.50")]
+
+    def test_two_identical_reference_less_rows_both_survive(self):
+        """Same section, day, amount and bare `numeroDocumento`: neither is dropped."""
+        # Arrange
+        payment = _intl_row(numero_documento="2008", monto=-12.5, grupo="pagos")
+        single = parse_international_billed_movements(
+            _intl_payload(pagos=[payment]), "2026-08-25"
+        )
+
+        # Act
+        parsed = dedupe_movements(
+            parse_international_billed_movements(
+                _intl_payload(pagos=[payment, dict(payment)]), "2026-08-25"
+            )
+        )
+
+        # Assert
+        assert len(parsed) == 2
+        assert len({external_id_for(m) for m in parsed}) == 2
+        assert external_id_for(parsed[0]) == external_id_for(single[0])
 
     def test_a_null_section_is_empty_not_an_error(self):
         payload = _intl_payload(compras=[_intl_row()])
