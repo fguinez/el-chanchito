@@ -332,8 +332,13 @@ export function resolveBillingCycle(
     last = rowsDate;
     basis = "transactions";
   } else if (bankNext) {
-    // The bank printed only the next closing: the last one is a cycle before.
-    last = closingBefore(bankNext, statementDay ?? parts(bankNext)[2]);
+    // The bank printed only the next closing: the last one is a cycle before,
+    // or as many as it takes to reach today.
+    const day = statementDay ?? parts(bankNext)[2];
+    last = closingBefore(bankNext, day);
+    for (let i = 0; last > today && i < 1200; i++) {
+      last = closingBefore(last, day);
+    }
     lastEstimated = true;
     basis = "next_statement";
   } else if (statementDay) {

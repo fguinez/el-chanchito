@@ -368,6 +368,21 @@ describe("resolveBillingCycle", () => {
     });
   });
 
+  it("keeps a closing worked back from a far next closing in the past", () => {
+    expect(
+      resolveBillingCycle({
+        attributes: {},
+        metrics: cardMetrics({ next_statement_date: "2026-12-15" }),
+        today: "2026-10-31",
+      })
+    ).toMatchObject({
+      lastClosing: { date: "2026-10-15", estimated: true },
+      previousClosing: "2026-09-15",
+      nextClosing: { date: "2026-12-15", estimated: false },
+      basis: "next_statement",
+    });
+  });
+
   it("ignores future, malformed and out-of-range values", () => {
     expect(
       resolveBillingCycle({
