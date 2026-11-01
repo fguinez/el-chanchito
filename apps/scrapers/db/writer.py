@@ -590,7 +590,8 @@ def _write_transaction(
 
     `billing_status` and `statement_date` are inserted as given; a stored or
     adopted row only has them moved forward (`_fill_billing`), so a charge
-    seen billed is never read back as unbilled.
+    seen billed is never read back as unbilled. A "kept" row is not filled at
+    all, location included: the movement is only presumed to be that row.
     """
     source = f"scraper_{txn.institution}"
     row_id = _stored_row_id(conn, product_id, txn.external_id)
