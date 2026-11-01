@@ -589,6 +589,14 @@ export function billedDebtState(summary: CardBillingSummary): BilledDebtState {
   return summary.billedPending > 0 ? "pending" : "paid";
 }
 
+/** The closing date of the statement the metrics figures (monto facturado,
+ *  pago mínimo) come from, when it is not the last closing's; else null. */
+export function olderStatementDate(summary: CardBillingSummary): string | null {
+  const { cycle, statement } = summary;
+  if (!cycle || !statement.date) return null;
+  return statement.date !== cycle.lastClosing.date ? statement.date : null;
+}
+
 /** Billed debt is still owed but the payments since the closing cover the
  *  statement's minimum payment. */
 export function isMinimumPaid(summary: CardBillingSummary): boolean {

@@ -18,6 +18,7 @@ import {
   daysBetween,
   isMinimumPaid,
   isPaymentOverdue,
+  olderStatementDate,
   type BillingDate,
   type CardBillingSummary,
 } from "@/lib/card-billing";
@@ -32,6 +33,11 @@ export function BillingCard({
   billing: CardBillingSummary;
 }) {
   const { cycle, statement } = billing;
+  // The statement figures are an older statement's: say whose.
+  const olderStatement = olderStatementDate(billing);
+  const statementNote = olderStatement
+    ? `Estado de cuenta del ${formatPlainDateEs(olderStatement)}`
+    : null;
   const nothingKnown =
     cycle == null &&
     billing.statusCount === 0 &&
@@ -81,17 +87,10 @@ export function BillingCard({
                   )}
                 </span>
               </Field>
-              <Field
-                label="Monto facturado"
-                note={
-                  cycle?.rolledOver && statement.date
-                    ? `Estado de cuenta del ${formatPlainDateEs(statement.date)}`
-                    : null
-                }
-              >
+              <Field label="Monto facturado" note={statementNote}>
                 <Amount currency={currency} value={statement.billedAmount} />
               </Field>
-              <Field label="Pago mínimo">
+              <Field label="Pago mínimo" note={statementNote}>
                 <Amount currency={currency} value={statement.minimumPayment} />
               </Field>
             </dl>
@@ -121,7 +120,7 @@ function BilledDebt({
     figure = <span className="text-lg">Sin deuda facturada</span>;
   } else if (state === "unknown") {
     figure = <Muted>sin dato</Muted>;
-    if (cycle?.rolledOver && cycle.basis === "statement") {
+    if (cycle && olderStatementDate(billing)) {
       const closed = formatPlainDateEs(cycle.lastClosing.date);
       note = `Falta leer el estado de cuenta del ${closed}.`;
     }

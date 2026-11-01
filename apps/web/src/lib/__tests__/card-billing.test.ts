@@ -6,6 +6,7 @@ import {
   effectiveBillingStatus,
   isMinimumPaid,
   isPaymentOverdue,
+  olderStatementDate,
   resolveBillingCycle,
   statementFigures,
   summarizeBilling,
@@ -742,6 +743,43 @@ describe("summarizeBilling", () => {
       })!.summary.complete
     ).toBe(false);
     expect(summarize(rows("2026-09-16"))!.summary.complete).toBe(true);
+  });
+});
+
+describe("olderStatementDate", () => {
+  const summary = (
+    metrics: Partial<CreditCardMetrics>,
+    transactions: BillingTransactionInput[] = []
+  ) =>
+    summarizeBilling({
+      kind: "credit_card",
+      attributes: cardAttributes(15, 5),
+      metrics: cardMetrics(metrics),
+      transactions,
+      truncated: false,
+      today: "2026-10-31",
+    })!.summary;
+
+  it("names the statement the figures belong to when it is not the last one", () => {
+    // A movement was billed on a newer statement than the metrics hold.
+    expect(
+      olderStatementDate(
+        summary({ statement_date: "2026-09-15", next_statement_date: "2026-11-15" }, [
+          txn("2026-10-10", -999999, "billed", "2026-10-15"),
+        ])
+      )
+    ).toBe("2026-09-15");
+    // A closing passed since the statement was read.
+    expect(
+      olderStatementDate(
+        summary({ statement_date: "2026-09-15", next_statement_date: "2026-10-15" })
+      )
+    ).toBe("2026-09-15");
+  });
+
+  it("is null while the statement is the last closing's, or unknown", () => {
+    expect(olderStatementDate(summary({ statement_date: "2026-10-15" }))).toBeNull();
+    expect(olderStatementDate(summary({ billed_amount: 1000000 }))).toBeNull();
   });
 });
 
