@@ -703,16 +703,26 @@ _VIEW_RADIO_CHECKED_JS = """
 
 
 # After the billed view's radio reads checked, how many polls its table gets to
-# show rows other than the "Por facturar" ones before the view tags nothing.
+# show a row the "Por facturar" read did not see before the view tags nothing.
 _VIEW_RENDER_POLLS = 10
 _VIEW_RENDER_POLL_MS = 500
 
 
-def _table_rerendered(page, before: list[dict]) -> bool:
-    """Whether the movements table shows rows other than `before` (bounded)."""
+def _movement_key(mov: dict) -> tuple:
+    """A row's identity within one read: date, description and amount."""
+    return (mov["date"], mov["description"], mov["amount"])
+
+
+def _table_rerendered(page, read: set[tuple]) -> bool:
+    """Whether the table shows a row not among `read` (bounded polls).
+
+    A row already read proves nothing: the click can briefly bring back
+    another "Por facturar" pager page, which differs from the last page read
+    but is still the unbilled view.
+    """
     for _ in range(_VIEW_RENDER_POLLS):
         rows = movements_from_text(_inner_text(page))
-        if rows and rows != before:
+        if any(_movement_key(mov) not in read for mov in rows):
             return True
         page.wait_for_timeout(_VIEW_RENDER_POLL_MS)
     return False
@@ -738,8 +748,8 @@ def _read_movements(page) -> list[dict]:
 
     Each movement's `billed` is the period view it was read from: False in "Por
     facturar", True in "Último periodo facturado", but only when that view's
-    radio reads as checked and, for the billed view, once its table shows rows
-    other than the last "Por facturar" ones (`_table_rerendered`); otherwise
+    radio reads as checked and, for the billed view, once its table shows a row
+    the "Por facturar" read did not see (`_table_rerendered`); otherwise
     None, so a view that did not switch, a table that did not re-render, or a
     page whose radios moved never tags a row with the wrong status (the writer
     never turns a billed row back). A row repeated within a read is kept once,
@@ -758,7 +768,7 @@ def _read_movements(page) -> list[dict]:
 
     def collect(billed: Optional[bool]) -> None:
         for mov in movements_from_text(_inner_text(page)):
-            key = (mov["date"], mov["description"], mov["amount"])
+            key = _movement_key(mov)
             kept = seen.get(key)
             if kept is None:
                 mov["billed"] = billed
@@ -783,11 +793,13 @@ def _read_movements(page) -> list[dict]:
                 break
 
     read_all_pages(False if _view_checked(page, _UNBILLED_VIEW) else None)
-    before = movements_from_text(_inner_text(page))
+    unbilled_read = set(seen)
     try:  # the prior billed cycle adds history on the first run
         page.get_by_text(_BILLED_VIEW, exact=False).first.click(timeout=3000)
         page.wait_for_timeout(1500)
-        switched = bool(_view_checked(page, _BILLED_VIEW)) and _table_rerendered(page, before)
+        switched = bool(_view_checked(page, _BILLED_VIEW)) and _table_rerendered(
+            page, unbilled_read
+        )
         if not switched:
             logger.info("BciLider: the billed view did not show; its rows are not tagged")
         read_all_pages(True if switched else None)

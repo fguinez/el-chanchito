@@ -47,6 +47,12 @@ Fecha Tienda / Descripción Cuotas Monto
 25/06/2026 SYNTHETIC STORE THREE $999.999
 Mostrando Página 1"""
 
+# A second "Por facturar" pager page (synthetic).
+PAGE_TWO_TEXT = """Detalle de tus movimientos
+Fecha Tienda / Descripción Cuotas Monto
+05/07/2026 SYNTHETIC STORE FOUR $999.999
+Mostrando Página 2"""
+
 
 class _ViewLocator:
     def __init__(self, page, text):
@@ -57,10 +63,21 @@ class _ViewLocator:
     def first(self):
         return self
 
+    def _pager_page(self):
+        """The 0-based pager page this text's button opens, if it is showing."""
+        if not self.text.isdigit() or self.page.view != "unbilled":
+            return None
+        index = int(self.text) - 1
+        return index if index < len(self.page.unbilled_pages) else None
+
     def wait_for(self, **kwargs):
-        raise TimeoutError("no such pager button")  # a one-page table
+        if self._pager_page() is None:
+            raise TimeoutError("no such pager button")
 
     def click(self, timeout=None):
+        if self._pager_page() is not None:
+            self.page.page_index = self._pager_page()
+            return
         if self.text != web._BILLED_VIEW:
             raise TimeoutError("not clickable")
         if self.page.switches:
@@ -78,13 +95,22 @@ class _ViewLocator:
 class _MovementsPage:
     """The Movimientos page: two period views behind their radios (synthetic)."""
 
-    def __init__(self, switches=True, radios=True, billed_text=BILLED_VIEW_TEXT, stale_reads=0):
+    def __init__(
+        self,
+        switches=True,
+        radios=True,
+        billed_text=BILLED_VIEW_TEXT,
+        stale_reads=0,
+        unbilled_pages=(MOVEMENTS_TEXT,),
+    ):
         self.view = "unbilled"
         self.switches = switches
         self.radios = True if radios else None
         self.billed_text = billed_text
-        # Reads after the switch that still show the "Por facturar" table.
+        # Reads after the switch that still show "Por facturar" page 1.
         self.stale_reads = stale_reads
+        self.unbilled_pages = list(unbilled_pages)
+        self.page_index = 0
 
     def goto(self, url, **kwargs):
         pass
@@ -98,8 +124,10 @@ class _MovementsPage:
     def text(self):
         if self.view == "billed" and self.stale_reads:
             self.stale_reads -= 1
-            return MOVEMENTS_TEXT
-        return self.billed_text if self.view == "billed" else MOVEMENTS_TEXT
+            return self.unbilled_pages[0]
+        if self.view == "billed":
+            return self.billed_text
+        return self.unbilled_pages[self.page_index]
 
 
 class TestAmountParsing:
@@ -247,6 +275,17 @@ class TestPeriodViews:
         tags = self._billed_by_description(_MovementsPage(stale_reads=3))
 
         assert tags["SYNTHETIC STORE TWO"] is False
+        assert tags["SYNTHETIC STORE THREE"] is True
+
+    def test_a_pager_reset_to_page_one_is_not_the_billed_view(self):
+        """The click briefly shows "Por facturar" page 1 again, which differs from
+        page 2 but holds only rows already read: no sign the view switched."""
+        page = _MovementsPage(stale_reads=3, unbilled_pages=(MOVEMENTS_TEXT, PAGE_TWO_TEXT))
+
+        tags = self._billed_by_description(page)
+
+        assert tags["SYNTHETIC STORE TWO"] is False
+        assert tags["SYNTHETIC STORE FOUR"] is False
         assert tags["SYNTHETIC STORE THREE"] is True
 
     def test_unconfirmed_radios_tag_nothing(self):

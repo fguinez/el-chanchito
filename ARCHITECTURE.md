@@ -719,7 +719,7 @@ both period views, the default "Por facturar" and then "Último periodo
 facturado", and each is reported `unbilled` or `billed` by its view (V044),
 with no statement date (the view prints none). A view only tags its rows when
 its radio reads as checked after the switch and, for the billed view, once its
-table shows rows other than the last "Por facturar" ones (polled, bounded), so
+table shows a row the "Por facturar" read did not see (polled, bounded), so
 a click that did not switch the view or a table that did not re-render tags
 nothing as billed; a charge seen in both views (its description
 rewritten on billing, the key the same) is written once, billed. No statement
