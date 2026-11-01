@@ -1,4 +1,4 @@
-import { and, isNull, or, sql, type SQL } from "drizzle-orm";
+import { and, desc, isNull, or, sql, type SQL } from "drizzle-orm";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
 import { searchTokens } from "@/lib/transaction-search";
 import { products, transactions } from "./schema";
@@ -6,6 +6,18 @@ import { products, transactions } from "./schema";
 /** A visible (not soft-deleted, V033) transaction. Centralizes the
  *  deleted_at IS NULL filter that every dashboard read applies. */
 export const notDeleted = isNull(transactions.deletedAt);
+
+/** How many of a product's newest movements its page lists. A credit card's
+ *  billing cycle reads the statement dates of these same rows, so whatever
+ *  shows one movement's billing status loads them too (lib/card-billing). */
+export const PRODUCT_TRANSACTIONS_LIMIT = 500;
+
+/** A product's movements newest first; createdAt breaks same-day ties so the
+ *  order (and so which rows PRODUCT_TRANSACTIONS_LIMIT keeps) is stable. */
+export const newestTransactionsFirst = [
+  desc(transactions.transactionDate),
+  desc(transactions.createdAt),
+];
 
 /** displayDescription over a given transactions table and the products table
  *  joined to it, either of them possibly an `alias()` (a query that joins

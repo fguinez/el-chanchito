@@ -6,6 +6,7 @@ import {
   effectiveBillingStatus,
   isMinimumPaid,
   isPaymentOverdue,
+  listedBillingCycle,
   olderStatementDate,
   resolveBillingCycle,
   statementFigures,
@@ -498,6 +499,68 @@ describe("effectiveBillingStatus", () => {
 
   it("is null with neither a reported status nor a cycle", () => {
     expect(effectiveBillingStatus(txn("2026-10-16", -999999), null)).toBeNull();
+  });
+});
+
+describe("listedBillingCycle", () => {
+  const TODAY = "2026-10-31";
+
+  it("falls back on the newest statement date among the listed movements", () => {
+    const listed = [
+      txn("2026-09-10", -999999, "billed", "2026-09-15"),
+      txn("2026-10-10", -999999, "billed", "2026-10-15"),
+      txn("2026-10-12", -1000000),
+      txn("2026-10-20", -1000000),
+    ];
+    const cycle = listedBillingCycle({
+      attributes: {},
+      metrics: null,
+      transactions: listed,
+      today: TODAY,
+    });
+    expect(cycle).toMatchObject({
+      basis: "transactions",
+      lastClosing: { date: "2026-10-15", estimated: false },
+    });
+    // summarizeBilling resolves the very same cycle, so a movement's status
+    // read on its own (the detail panel) matches the list's.
+    const billing = summarizeBilling({
+      kind: "credit_card",
+      attributes: {},
+      metrics: null,
+      transactions: listed,
+      truncated: false,
+      today: TODAY,
+    })!;
+    expect(cycle).toEqual(billing.summary.cycle);
+    expect(listed.map((t) => effectiveBillingStatus(t, cycle))).toEqual(
+      billing.statuses
+    );
+  });
+
+  it("keeps the latest statement over older statement dates on the movements", () => {
+    expect(
+      listedBillingCycle({
+        attributes: cardAttributes(15, 5),
+        metrics: cardMetrics({ statement_date: "2026-10-15" }),
+        transactions: [{ statementDate: "2026-09-15" }],
+        today: TODAY,
+      })
+    ).toMatchObject({
+      basis: "statement",
+      lastClosing: { date: "2026-10-15", estimated: false },
+    });
+  });
+
+  it("is null when no listed movement carries a valid statement date", () => {
+    expect(
+      listedBillingCycle({
+        attributes: {},
+        metrics: null,
+        transactions: [{ statementDate: "2026-02-30" }, { statementDate: null }],
+        today: TODAY,
+      })
+    ).toBeNull();
   });
 });
 
