@@ -387,6 +387,271 @@ class TestParseBilled:
         assert parse_billed_movements(None) == []
 
 
+def _section(rows):
+    return {
+        "totalTransacciones": len(rows),
+        "numeroDeTransacciones": len(rows),
+        "transaccionesTarjetas": rows,
+    }
+
+
+def _charge_row(monto, descripcion="COMISION SINTETICA", fecha="22/08/2026"):
+    """A `seccionCargosImpuestosAbonos` row: signed amount, no reference."""
+    return _billed_row(
+        referencia="2208 00000000",
+        monto=monto,
+        fecha=fecha,
+        descripcion=descripcion,
+        grupo="generico",
+    )
+
+
+class TestParseBilledSections:
+    """Every row-bearing section of the national statement is read (fix A)."""
+
+    def test_charges_and_credits_section_is_read(self):
+        """Commissions and merchant credits live outside `seccionOperaciones`."""
+        # Arrange
+        payload = _billed_payload([_billed_row()])
+        payload["seccionCargosImpuestosAbonos"] = _section([_charge_row(999999)])
+
+        # Act
+        parsed = parse_billed_movements(payload, "2026-08-25")
+
+        # Assert
+        assert [m.description for m in parsed] == [
+            "COMERCIO SINTETICO",
+            "COMISION SINTETICA",
+        ]
+
+    @pytest.mark.parametrize(
+        ("monto", "expected"),
+        [
+            pytest.param(999999, Decimal(-999999), id="commission-is-an-expense"),
+            pytest.param(-1000000, Decimal(1000000), id="credit-is-income"),
+        ],
+    )
+    def test_charges_section_amounts_are_signed(self, monto, expected):
+        """Outside operations the bank signs the amount; `grupo` says nothing."""
+        # Arrange
+        payload = {"seccionCargosImpuestosAbonos": _section([_charge_row(monto)])}
+
+        # Act
+        (movement,) = parse_billed_movements(payload, "2026-08-25")
+
+        # Assert
+        assert movement.amount == expected
+
+    def test_voluntary_products_section_is_read_signed(self):
+        """Any other row-bearing section follows the signed rule too."""
+        # Arrange
+        payload = {"seccionProductosServiciosVoluntarios": _section([_charge_row(999999)])}
+
+        # Act
+        (movement,) = parse_billed_movements(payload, "2026-08-25")
+
+        # Assert
+        assert movement.amount == Decimal(-999999)
+
+    def test_installment_report_section_is_skipped(self):
+        """`seccionComprasEnCuotas` repeats installments already in operations."""
+        # Arrange
+        payload = _billed_payload([_billed_row()])
+        payload["seccionComprasEnCuotas"] = _section(
+            [_billed_row(referencia="2008 12345679", grupo="cuotas")]
+        )
+
+        # Act
+        parsed = parse_billed_movements(payload)
+
+        # Assert
+        assert [m.operation_id for m in parsed] == ["2008 12345678"]
+
+    def test_undated_subtotal_rows_are_dropped(self):
+        """The "TOTAL TARJETA" line has no `totales` flag but no date either."""
+        # Arrange
+        subtotal = _billed_row(referencia="", descripcion="TOTAL TARJETA SINTETICA")
+        subtotal["fechaTransaccionString"] = None
+        payload = _billed_payload([_billed_row(), subtotal])
+
+        # Act
+        parsed = parse_billed_movements(payload)
+
+        # Assert
+        assert [m.operation_id for m in parsed] == ["2008 12345678"]
+
+    def test_empty_or_null_sections_are_ignored(self):
+        """An empty section carries `transaccionesTarjetas: null` instead."""
+        # Arrange
+        payload = _billed_payload([_billed_row()])
+        payload["seccionCargosImpuestosAbonos"] = {"transaccionesTarjetas": None}
+        payload["seccionProductosServiciosVoluntarios"] = {"mensajeSinTransacciones": "x"}
+
+        # Act
+        parsed = parse_billed_movements(payload)
+
+        # Assert
+        assert len(parsed) == 1
+
+    def test_operations_fingerprint_is_unchanged(self):
+        """Rows already stored under the four-field key must not re-key."""
+        # Arrange
+        rows = [_billed_row(referencia="2008 00000000", monto=2500000, grupo="pagos")]
+
+        # Act
+        (movement,) = parse_billed_movements(_billed_payload(rows), "2026-08-25")
+
+        # Assert
+        assert movement.fingerprint == (
+            "20/08/2026",
+            "2500000",
+            f"VISA ****{CARD_LAST4}",
+            "2026-08-25",
+        )
+
+    def test_charges_fingerprint_carries_the_section(self):
+        """A credit can never share a key with an operations row."""
+        # Arrange
+        payload = {"seccionCargosImpuestosAbonos": _section([_charge_row(-1000000)])}
+
+        # Act
+        (movement,) = parse_billed_movements(payload, "2026-08-25")
+
+        # Assert
+        assert movement.operation_id is None
+        assert movement.fingerprint[-1] == "seccionCargosImpuestosAbonos"
+
+
+class TestBilledFingerprintCollisions:
+    """Identical reference-less rows of one statement keep distinct keys (fix B)."""
+
+    def _payment(self, referencia):
+        return _billed_row(
+            referencia=referencia, monto=1000000, fecha="07/09/2026", grupo="pagos"
+        )
+
+    def test_two_identical_payments_both_survive(self):
+        """Same day, amount and card: only the all-zero reference differs."""
+        # Arrange
+        rows = [self._payment("0709 00000000"), self._payment("0809 00000000")]
+
+        # Act
+        parsed = parse_billed_movements(_billed_payload(rows), "2026-09-22")
+
+        # Assert
+        assert len(parsed) == 2
+        assert len({external_id_for(m) for m in parsed}) == 2
+
+    def test_the_first_keeps_its_stored_key(self):
+        """Only the repeat changes key, so the row already stored is not re-keyed."""
+        # Arrange
+        single = parse_billed_movements(
+            _billed_payload([self._payment("0709 00000000")]), "2026-09-22"
+        )
+        rows = [self._payment("0709 00000000"), self._payment("0809 00000000")]
+
+        # Act
+        first, second = parse_billed_movements(_billed_payload(rows), "2026-09-22")
+
+        # Assert
+        assert external_id_for(first) == external_id_for(single[0])
+        assert second.fingerprint == first.fingerprint + ("0809 00000000",)
+
+    def test_fully_identical_rows_get_an_occurrence_counter(self):
+        """Even the raw reference can repeat; a counter still separates them."""
+        # Arrange
+        rows = [self._payment("0709 00000000") for _ in range(3)]
+
+        # Act
+        parsed = parse_billed_movements(_billed_payload(rows), "2026-09-22")
+
+        # Assert
+        assert len({m.fingerprint for m in parsed}) == 3
+        assert parsed[2].fingerprint[-1] == "#2"
+
+    def test_keys_are_stable_across_reads(self):
+        """A second read of the same closed statement yields the same keys."""
+        # Arrange
+        rows = [self._payment("0709 00000000"), self._payment("0809 00000000")]
+
+        # Act
+        first_read = parse_billed_movements(_billed_payload(rows), "2026-09-22")
+        second_read = parse_billed_movements(_billed_payload(rows), "2026-09-22")
+
+        # Assert
+        assert [external_id_for(m) for m in first_read] == [
+            external_id_for(m) for m in second_read
+        ]
+
+    def test_dedupe_keeps_both(self):
+        """`dedupe_movements` no longer collapses the pair into one."""
+        # Arrange
+        rows = [self._payment("0709 00000000"), self._payment("0809 00000000")]
+        parsed = parse_billed_movements(_billed_payload(rows), "2026-09-22")
+
+        # Act
+        kept = dedupe_movements(parsed)
+
+        # Assert
+        assert len(kept) == 2
+
+
+class TestBilledStatementCount:
+    """`BANCHILE_BILLED_STATEMENTS` sets how far back the billed legs read (fix F)."""
+
+    def test_defaults_to_two(self, monkeypatch):
+        """Unset, every scrape reads the newest two statements as before."""
+        # Arrange
+        monkeypatch.delenv("BANCHILE_BILLED_STATEMENTS", raising=False)
+
+        # Act
+        count = movements_mod.billed_statement_count()
+
+        # Assert
+        assert count == 2
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            pytest.param("12", 12, id="backfill"),
+            pytest.param(" 1 ", 1, id="padded-minimum"),
+            pytest.param("", 2, id="blank"),
+            pytest.param("0", 2, id="zero"),
+            pytest.param("13", 2, id="over-the-portal-limit"),
+            pytest.param("-3", 2, id="negative"),
+            pytest.param("doce", 2, id="not-a-number"),
+            pytest.param("2.5", 2, id="fractional"),
+        ],
+    )
+    def test_reads_the_env_var(self, monkeypatch, raw, expected):
+        """Only a whole number from 1 to 12 is honoured; anything else is the default."""
+        # Arrange
+        monkeypatch.setenv("BANCHILE_BILLED_STATEMENTS", raw)
+
+        # Act
+        count = movements_mod.billed_statement_count()
+
+        # Assert
+        assert count == expected
+
+    def test_limits_the_statement_dates_read(self, monkeypatch):
+        """The count is what `statement_dates` is asked for."""
+        # Arrange
+        monkeypatch.setenv("BANCHILE_BILLED_STATEMENTS", "3")
+        payload = {
+            "listaNacional": [
+                {"fechaFacturacion": f"2026-0{month}-05", "existeEstadoCuentaNacional": True}
+                for month in (8, 7, 6, 5)
+            ]
+        }
+
+        # Act
+        dates = statement_dates(payload, movements_mod.billed_statement_count())
+
+        # Assert
+        assert dates == ["2026-08-05", "2026-07-05", "2026-06-05"]
+
+
 class TestStatementDates:
     def test_newest_first_and_bounded(self):
         payload = {
@@ -1011,6 +1276,26 @@ class TestInternationalBilled:
         amounts = [m.amount for m in parse_international_billed_movements(payload)]
         assert sorted(amounts) == [Decimal("-1.50"), Decimal("1.50")]
 
+    def test_two_identical_reference_less_rows_both_survive(self):
+        """Same section, day, amount and bare `numeroDocumento`: neither is dropped."""
+        # Arrange
+        payment = _intl_row(numero_documento="2008", monto=-12.5, grupo="pagos")
+        single = parse_international_billed_movements(
+            _intl_payload(pagos=[payment]), "2026-08-25"
+        )
+
+        # Act
+        parsed = dedupe_movements(
+            parse_international_billed_movements(
+                _intl_payload(pagos=[payment, dict(payment)]), "2026-08-25"
+            )
+        )
+
+        # Assert
+        assert len(parsed) == 2
+        assert len({external_id_for(m) for m in parsed}) == 2
+        assert external_id_for(parsed[0]) == external_id_for(single[0])
+
     def test_a_null_section_is_empty_not_an_error(self):
         payload = _intl_payload(compras=[_intl_row()])
         assert payload["seccionComisiones"]["transaccionesTarjetas"] is None
@@ -1384,6 +1669,43 @@ class TestStatementOrder:
         """Nothing contradicts the date it was asked for."""
         read = self._read([("2026-07-05", _billed_payload([_billed_row()]))])
         assert billing_of(read.movements[0]) == ("billed", datetime.date(2026, 7, 5))
+
+    def test_a_full_read_is_complete(self):
+        read = self._read(
+            [
+                ("2026-08-05", _statement_payload(actual="05/08/2026")),
+                ("2026-07-05", _statement_payload(actual="05/07/2026")),
+            ]
+        )
+        assert read.statement.leg_complete
+
+    def test_a_statement_that_never_answered_leaves_the_leg_incomplete(self):
+        """A replay that failed cannot vouch for the period it was asked for."""
+        read = billed_leg_from_statements(
+            [("2026-08-05", _statement_payload(actual="05/08/2026"))],
+            parse_billed_movements,
+            "CLP",
+            missing=1,
+        )
+        assert read.statement.statement_date == datetime.date(2026, 8, 5)
+        assert not read.statement.leg_complete
+
+    @pytest.mark.parametrize(
+        "older",
+        [
+            pytest.param(_billed_payload([_billed_row()]), id="no-resumen"),
+            pytest.param(_statement_payload(actual="05/08/2026"), id="another-date"),
+        ],
+    )
+    def test_an_unusable_older_statement_leaves_the_leg_incomplete(self, older):
+        read = self._read(
+            [
+                ("2026-09-05", _statement_payload(actual="05/09/2026")),
+                ("2026-07-05", older),
+            ]
+        )
+        assert read.statement.statement_date == datetime.date(2026, 9, 5)
+        assert not read.statement.leg_complete
 
     def test_no_usable_summary_is_none(self):
         read = self._read([("2026-08-05", _billed_payload([_billed_row()]))])

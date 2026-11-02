@@ -112,6 +112,28 @@ class SupersededTransaction:
     external_id: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class VanishedWindow:
+    """A stretch of one product's history that a scrape listed in full.
+
+    Every pending row of that stretch is in the scrape, so a stored pending row
+    the scrape no longer carries is one the source dropped: a stale card
+    authorization, a charge the bank re-dated or re-described, a reversed
+    pair. `db.writer.soft_delete_vanished_transactions` soft-deletes those
+    rows: on the institution's (kind, currency) product, written by its own
+    scraper, keyed under `external_id_prefix`, dated after `after`, with the
+    `unbilled` billing status (or none at all, when `include_unreported`), and
+    never one the user edited. Never part of the ingest contract.
+    """
+
+    institution: str
+    product_kind: str
+    currency: str
+    external_id_prefix: str
+    after: date
+    include_unreported: bool = False
+
+
 class BaseScraper(ABC):
     """Interface that all scrapers must implement.
 
@@ -149,5 +171,13 @@ class BaseScraper(ABC):
         """Stored rows the last `scrape_transactions` replaced; none by default.
 
         `run_scraper` deletes them after writing that scrape's transactions.
+        """
+        return []
+
+    def vanished_windows(self) -> list[VanishedWindow]:
+        """Windows the last `scrape_transactions` listed in full; none by default.
+
+        `run_scraper` soft-deletes the pending rows in them that scrape no
+        longer carried, once every one of its transactions was written.
         """
         return []

@@ -330,6 +330,7 @@ transactions ──────────┐
   location_is_manual
   billing_status (V044)       -- unbilled | billed | NULL (not reported)
   statement_date (V044)       -- statement that billed it (billed rows only)
+  deleted_by (V045)           -- scraper | NULL (visible or user-deleted)
 
 
 monitors                      monitor_adjustments
@@ -495,6 +496,7 @@ suggested category, cascading with the category.
 | `V042__category_suggestion_dismissals.sql` | dismissed_category_suggestions (normalised description + suggested category, unique pair, cascades with the category); new table only |
 | `V043__budget_item_kinds_and_income.sql` | `fixed_expenses.kind` (`fixed` default, `estimated`, `savings`; CHECK), backfilled by name: `Ahorro:` prefix becomes `savings` with the prefix stripped, `Gastos diarios...` becomes `estimated`; `budget_settings`, a single-row table with the monthly income (`monthly_income >= 0`) |
 | `V044__transactions_billing_status.sql` | transactions gain `billing_status` (`unbilled` / `billed`, NULL = not reported; CHECK) and `statement_date` (only on billed rows; CHECK); the writer only moves them forward (see "Card billing status"); no backfill |
+| `V045__transactions_deleted_by.sql` | transactions gain `deleted_by` (`scraper` when a scraper cleanup soft-deleted the row, NULL when visible or deleted by the user; CHECK): scraper-deleted rows are never adopted and are restored when a scrape lists their key again; scraper logic only, no backfill |
 
 ## Scraper Architecture
 
@@ -635,8 +637,10 @@ remembered account's automatic `getCartola`: a payload whose `moneda` or account
 is not the drive's is never read); the card's unbilled movements, which the SPA
 loads when the card page opens (from home it first waits, bounded, for the
 dashboard's checking row: a click on a dashboard still rendering is lost); and
-the card's billed statements, the newest two,
-read by replaying the SPA's own statement request with a different
+the card's billed statements, the newest two (`BANCHILE_BILLED_STATEMENTS`
+raises it, up to 12, for a one-off backfill), every row-bearing section of
+each (commissions, interest, taxes and merchant credits live outside
+`seccionOperaciones`, with signed amounts), read by replaying the SPA's own statement request with a different
 `fechaFacturacion`. Only calls whose body is fully known are composed (the
 per-movement `cartola/detalle-glosa` that carries the operation id, spaced and
 bounded); everything else is captured from the portal's own traffic, because the
@@ -673,6 +677,29 @@ in that scrape, with both CLP card legs loaded, since the two legs pick their
 statements independently), one row per USD charge, only among rows created
 before V023 was applied (`_migrations.applied_at`; V023 ships with the fix),
 and never a row the user categorised, annotated or paired.
+
+The unbilled card leg has no bank id, so a pending charge the bank re-dates,
+re-describes or moves to the other currency comes back under a new key, and a
+stale authorization just stops being listed. Two things keep those from
+lingering. A billed charge whose same-day adoption finds nothing adopts the
+single nearest unbilled (`bch_fp_`, not billed, not deleted) row of the same
+product and amount within three days whose description is similar (a shared
+merchant token; processor prefixes and generic words do not count)
+(`db/writer.py::_nearby_card_sibling`). And each run the scraper names the
+windows it listed in full (`vanished_windows`, per currency: only when the
+unbilled list loaded and was not empty, that currency's statement loaded with
+every closing date confirmed, and its newest summary is not past the next
+closing date it prints, which it must print): after the newest statement every unbilled or
+unreported `bch_fp_` row the scrape no longer carries is soft-deleted, and
+between the oldest and newest statement read only the ones still `unbilled`
+(`db/writer.py::soft_delete_vanished_transactions`, run only when every
+transaction of the scrape was written), marked `deleted_by = 'scraper'`
+(V045): such a row is never adopted onto another movement's key, and a scrape
+that lists its key again restores it, while a row the user deleted stays
+deleted. A row the user edited (category,
+notes, custom description, location, transfer flag or link, monitor
+adjustment) is left in place, and a window with more than 20 candidates is
+skipped as a likely partial listing.
 
 Card billing (V044, see "Card billing status"): a movement of the unbilled leg
 is reported `unbilled`, one of a statement `billed`, with the statement's
@@ -1326,6 +1353,7 @@ Browser → web POST /api/institutions/refresh {institution?}
 | `SCRAPER_CONTROL_HOST` | scrapers | Address the control server binds (default `127.0.0.1`; Compose sets `0.0.0.0`) |
 | `SCRAPER_CONTROL_URL` | web | Base URL the refresh proxy calls (e.g. `http://scrapers:8080`) |
 | `BANCHILE_LOGIN_COOLDOWN_MINUTES` | scrapers | Minimum minutes between full BanChile logins, which also gates manual refreshes (default `10`; `0` disables) |
+| `BANCHILE_BILLED_STATEMENTS` | scrapers | Card statements per currency each BanChile run reads, newest first (default `2`, at most `12`); raise it for a one-off backfill of older billed history |
 
 ## Dashboard authentication
 

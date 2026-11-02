@@ -411,6 +411,9 @@ export const transactions = pgTable(
     // Every dashboard read filters `deleted_at IS NULL`; the writer's lookups
     // deliberately do not. Manual rows (no external_id) are hard-deleted.
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    // "scraper" when a scraper cleanup set deleted_at (V045; a later scrape may
+    // restore it), NULL when visible or deleted by the user. Scraper logic only.
+    deletedBy: text("deleted_by"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

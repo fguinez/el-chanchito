@@ -27,6 +27,7 @@ from db.writer import (
     UnresolvedRateScope,
     delete_superseded_transactions,
     finish_scraper_run,
+    soft_delete_vanished_transactions,
     start_scraper_run,
     upsert_exchange_rate,
     upsert_price_history,
@@ -143,6 +144,18 @@ async def run_scraper(scraper: BaseScraper) -> None:
                 )
         except Exception as e:
             logger.exception("Scraper %s: superseded-row cleanup failed", scraper.name)
+            warnings.append(f"cleanup: {e}")
+        # Pending rows the source stopped listing. Only after a write where
+        # every transaction landed: a movement that failed to write would leave
+        # its stored row looking vanished.
+        try:
+            vanished = scraper.vanished_windows()
+            if vanished and not written.failed and not written.unresolved:
+                soft_delete_vanished_transactions(
+                    vanished, {t.external_id for t in transactions}
+                )
+        except Exception as e:
+            logger.exception("Scraper %s: vanished-row cleanup failed", scraper.name)
             warnings.append(f"cleanup: {e}")
 
     rates: list[ScrapedExchangeRate] = []

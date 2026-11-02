@@ -84,6 +84,7 @@ import asyncio
 import datetime
 import logging
 import math
+import os
 import re
 import time
 from dataclasses import dataclass, field, replace
@@ -210,6 +211,10 @@ class BanChileStatement:
     (`fechaVencimientoFacturacion`). Amounts are in the statement's currency:
     `montoFacturado` and `pagoMinimo`, whole pesos on the national statement
     and cents on the USD one, whose `pagoMinimo` is null.
+
+    `leg_complete` is False when another statement its leg requested did not
+    answer, or answered without a usable `resumen` for its own closing date:
+    the leg then cannot vouch for every period it meant to read.
     """
 
     currency: str
@@ -218,6 +223,7 @@ class BanChileStatement:
     payment_due_date: Optional[datetime.date] = None
     billed_amount: Optional[float] = None
     minimum_payment: Optional[float] = None
+    leg_complete: bool = True
 
 
 @dataclass(frozen=True)
@@ -722,6 +728,10 @@ def parse_unbilled_movements(payload) -> list[BanChileMovement]:
 
 
 _BARE_DDMM_RE = re.compile(r"^\d{4}$")
+# The national statement's section whose amounts are unsigned (`grupo` carries
+# the direction); every other section signs them (`parse_billed_movement`).
+_OPERATIONS_SECTION = "seccionOperaciones"
+_NATIONAL_SKIPPED_SECTIONS = frozenset({"seccionComprasEnCuotas"})
 # A statement row's installment counter, "NN/NN" (observed as "01/NN").
 _CUOTAS_RE = re.compile(r"^\s*(\d{1,3})\s*/\s*(\d{1,3})\s*$")
 
@@ -751,7 +761,9 @@ def billed_reference(raw_reference) -> Optional[str]:
     return reference
 
 
-def parse_billed_movement(raw, fecha_facturacion: str = ""):
+def parse_billed_movement(
+    raw, fecha_facturacion: str = "", section: str = _OPERATIONS_SECTION
+):
     """One `transaccionesTarjetas` row -> a BanChileMovement (or None).
 
     `totales: true` rows are the section summary lines the SPA prints under
@@ -773,9 +785,19 @@ def parse_billed_movement(raw, fecha_facturacion: str = ""):
     for the row, and `numReferencia`'s "DDMM" prefix carries no year, so nothing
     here is a trustworthy posting date and `accounting_date` stays NULL.
 
+    That holds for `seccionOperaciones` only. The other row-bearing sections
+    (`seccionCargosImpuestosAbonos`: commissions, interest, stamp tax, debt
+    transfers and merchant credits; `seccionProductosServiciosVoluntarios`)
+    SIGN `montoTransaccion` like the unbilled leg: a charge is positive and a
+    credit negative, and their `grupo` ("generico") says nothing about the
+    direction. So outside `seccionOperaciones` the sign is simply flipped.
+
     The fallback identity (for a row whose reference is absent or all zeros) is
-    date + amount + card + statement date; the merchant and the `grupo` section
-    name are deliberately excluded, since keying on either is the issue #56 bug.
+    date + amount + card + statement date; the merchant and the `grupo` name
+    are deliberately excluded, since keying on either is the issue #56 bug.
+    A row outside `seccionOperaciones` also carries its `section`, so a credit
+    there can never share a key with an operations row; operations rows keep
+    the four-field identity they were always stored under.
     """
     if not isinstance(raw, dict):
         return None
@@ -786,10 +808,20 @@ def parse_billed_movement(raw, fecha_facturacion: str = ""):
     if tx_date is None:
         return None
 
-    if _text(raw.get("grupo")).lower() == "pagos":
+    if section != _OPERATIONS_SECTION:
+        amount = Decimal(-int(round(monto)))
+    elif _text(raw.get("grupo")).lower() == "pagos":
         amount = Decimal(int(round(abs(monto))))
     else:
         amount = Decimal(-int(round(monto)))
+    fingerprint = (
+        _fingerprint_value(raw.get("fechaTransaccionString")),
+        _fingerprint_value(raw.get("montoTransaccion")),
+        _fingerprint_value(raw.get("nombreTarjeta")),
+        _text(fecha_facturacion),
+    )
+    if section != _OPERATIONS_SECTION:
+        fingerprint += (_text(section),)
 
     description = (
         _text(raw.get("descripcion")) or _text(raw.get("comercio")) or "Movimiento"
@@ -801,12 +833,7 @@ def parse_billed_movement(raw, fecha_facturacion: str = ""):
         amount=amount,
         transaction_date=tx_date,
         operation_id=billed_reference(raw.get("numReferencia")),
-        fingerprint=(
-            _fingerprint_value(raw.get("fechaTransaccionString")),
-            _fingerprint_value(raw.get("montoTransaccion")),
-            _fingerprint_value(raw.get("nombreTarjeta")),
-            _text(fecha_facturacion),
-        ),
+        fingerprint=fingerprint,
         statement_date=_text(fecha_facturacion),
         # The national statement reports the merchant's city, never a country.
         location=card_location(raw.get("ciudad"), None),
@@ -814,22 +841,79 @@ def parse_billed_movement(raw, fecha_facturacion: str = ""):
     )
 
 
+def _national_sections(payload: dict) -> list[str]:
+    """The national statement's row-bearing `seccion*` keys, operations first.
+
+    `seccionComprasEnCuotas` is left out: the SPA renders it as "Información
+    Compra en Cuotas en Período", a report on installment plans whose billed
+    installment is already a `seccionOperaciones` row (`grupo: "cuotas"`), so
+    reading it would count the installment twice.
+    """
+    names = [
+        name
+        for name, value in payload.items()
+        if isinstance(name, str)
+        and name.startswith("seccion")
+        and name not in _NATIONAL_SKIPPED_SECTIONS
+        and isinstance(value, dict)
+        and isinstance(value.get("transaccionesTarjetas"), list)
+    ]
+    return sorted(names, key=lambda name: name != _OPERATIONS_SECTION)
+
+
+def _disambiguated(
+    movement: BanChileMovement, raw_reference, seen: set[tuple]
+) -> BanChileMovement:
+    """`movement` with a fingerprint no earlier row of its statement holds.
+
+    Two reference-less rows can share every fallback field: two payments of
+    the same amount on the same day, whose `numReferencia` suffixes are both
+    all zeros ("0709 00000000" and "0809 00000000"). The first keeps its plain
+    fingerprint, the key it was always stored under, so no stored row re-keys;
+    only a repeat gets the raw `numReferencia` (its "DDMM" posting prefix
+    differs) appended, and an occurrence counter if even that is shared.
+    Statement rows come back in the same order on every read of a closed
+    statement, so the repeat is the same row every time.
+    """
+    fingerprint = movement.fingerprint
+    if fingerprint in seen:
+        fingerprint = movement.fingerprint + (_text(raw_reference),)
+        occurrence = 1
+        while fingerprint in seen:
+            occurrence += 1
+            fingerprint = movement.fingerprint + (
+                _text(raw_reference),
+                f"#{occurrence}",
+            )
+    seen.add(fingerprint)
+    if fingerprint == movement.fingerprint:
+        return movement
+    return replace(movement, fingerprint=fingerprint)
+
+
 def parse_billed_movements(payload, fecha_facturacion: str = "") -> list[BanChileMovement]:
-    """Every real row of a `resumen-por-fecha` response, summaries dropped."""
+    """Every real row of a national `resumen-por-fecha` response.
+
+    Every row-bearing section is read (see `_national_sections`), not only
+    `seccionOperaciones`: commissions, interest, taxes and merchant credits
+    live in `seccionCargosImpuestosAbonos`. Summary lines are dropped: the
+    `totales: true` group totals, and the per-card "TOTAL TARJETA" subtotal,
+    which has no `totales` flag but no transaction date either (and so is
+    dropped by `parse_billed_movement`).
+    """
     if not isinstance(payload, dict):
         return []
-    seccion = payload.get("seccionOperaciones")
-    if not isinstance(seccion, dict):
-        return []
-    rows = seccion.get("transaccionesTarjetas")
-    if not isinstance(rows, list):
-        return []
     movements = []
-    for raw in rows:
-        if isinstance(raw, dict) and raw.get("totales"):
-            continue  # a group summary line, not a movement
-        movement = parse_billed_movement(raw, fecha_facturacion)
-        if movement is not None:
+    seen: set[tuple] = set()
+    for section in _national_sections(payload):
+        for raw in payload[section]["transaccionesTarjetas"]:
+            if isinstance(raw, dict) and raw.get("totales"):
+                continue  # a group summary line, not a movement
+            movement = parse_billed_movement(raw, fecha_facturacion, section)
+            if movement is None:
+                continue
+            if movement.operation_id is None:
+                movement = _disambiguated(movement, raw.get("numReferencia"), seen)
             movements.append(movement)
     return movements
 
@@ -901,10 +985,15 @@ def parse_international_billed_movement(
 def parse_international_billed_movements(
     payload, fecha_facturacion: str = ""
 ) -> list[BanChileMovement]:
-    """Every real row of a USD `resumen-por-fecha` response, summaries dropped."""
+    """Every real row of a USD `resumen-por-fecha` response, summaries dropped.
+
+    Reference-less rows that share a fingerprint are told apart as on the
+    national leg (`_disambiguated`).
+    """
     if not isinstance(payload, dict):
         return []
     movements = []
+    seen: set[tuple] = set()
     for name in _INTERNATIONAL_SECTIONS:
         seccion = payload.get(name)
         rows = seccion.get("transaccionesTarjetas") if isinstance(seccion, dict) else None
@@ -914,8 +1003,11 @@ def parse_international_billed_movements(
             if isinstance(raw, dict) and raw.get("totales"):
                 continue  # a section total, not a movement
             movement = parse_international_billed_movement(raw, fecha_facturacion, name)
-            if movement is not None:
-                movements.append(movement)
+            if movement is None:
+                continue
+            if movement.operation_id is None:
+                movement = _disambiguated(movement, raw.get("numeroDocumento"), seen)
+            movements.append(movement)
     return movements
 
 
@@ -1026,7 +1118,7 @@ def _statement_order(fecha: str) -> datetime.date:
 
 
 def billed_leg_from_statements(
-    statements: list[tuple[str, dict]], parse: Callable, currency: str
+    statements: list[tuple[str, dict]], parse: Callable, currency: str, missing: int = 0
 ) -> BilledLegRead:
     """One statement leg's movements and newest summary, oldest statement first.
 
@@ -1043,15 +1135,21 @@ def billed_leg_from_statements(
     oldest first, a wrong date would otherwise be stored for good.
 
     The summary kept is the one with the latest closing date; None when no
-    statement had a usable `resumen`.
+    statement had a usable `resumen`. It is marked not `leg_complete` when
+    `missing` requested statements never answered, or any statement read had
+    no usable `resumen` or answered another closing date.
     """
     movements: list[BanChileMovement] = []
     newest: Optional[BanChileStatement] = None
+    complete = missing == 0
     for fecha, payload in sorted(statements, key=lambda read: _statement_order(read[0])):
         rows = parse(payload, fecha)
         summary = parse_statement_summary(payload, currency)
         requested = _iso_date(fecha)
+        if summary is None:
+            complete = False
         if summary is not None and requested is not None and summary.statement_date != requested:
+            complete = False
             logger.warning(
                 "BanChile: a %s statement asked for one closing date answered "
                 "another; its %d rows are not tagged",
@@ -1064,6 +1162,8 @@ def billed_leg_from_statements(
             newest is None or summary.statement_date > newest.statement_date
         ):
             newest = summary
+    if newest is not None and not complete:
+        newest = replace(newest, leg_complete=False)
     return BilledLegRead(dedupe_movements(movements), newest)
 
 
@@ -1304,8 +1404,37 @@ _MAX_CHECKING_ACCOUNTS = 4
 # How far back the billed leg reads. The unbilled leg only covers the current
 # cycle, so reading the newest two statements covers a charge that crossed the
 # billing boundary since the last run (the crossing is what issue #56 is about)
-# without walking the whole history on every scrape.
-_BILLED_STATEMENTS = 2
+# without walking the whole history on every scrape. A one-off backfill raises
+# it with BANCHILE_BILLED_STATEMENTS (the portal lists twelve periods).
+_BILLED_STATEMENTS_ENV = "BANCHILE_BILLED_STATEMENTS"
+_DEFAULT_BILLED_STATEMENTS = 2
+_MAX_BILLED_STATEMENTS = 12
+
+
+def billed_statement_count() -> int:
+    """How many statements per currency the billed legs read (default 2).
+
+    `BANCHILE_BILLED_STATEMENTS` overrides it, between 1 and 12; anything else
+    (blank, not a whole number, out of range) is logged and the default used,
+    so a typo can never stop the billed legs or walk an unbounded history.
+    """
+    raw = os.environ.get(_BILLED_STATEMENTS_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_BILLED_STATEMENTS
+    try:
+        count = int(raw)
+    except ValueError:
+        count = 0
+    if not 1 <= count <= _MAX_BILLED_STATEMENTS:
+        logger.warning(
+            "Ignoring %s=%r (expected 1 to %d); using %d",
+            _BILLED_STATEMENTS_ENV,
+            raw,
+            _MAX_BILLED_STATEMENTS,
+            _DEFAULT_BILLED_STATEMENTS,
+        )
+        return _DEFAULT_BILLED_STATEMENTS
+    return count
 
 # Two layers bound each in-page POST: `_evaluate_bounded` gives up on the
 # whole call after `_POST_JSON_CALL_TIMEOUT_MS`, even if the renderer stops
@@ -2194,18 +2323,21 @@ def _read_billed_leg(
 
         loaded = _text((requests[-1]["body"] if requests else {}).get("fechaFacturacion"))
         statements = [(loaded, payload)]
+        missing = 0
 
         dates = dates_of(
-            fechas_payloads[-1] if fechas_payloads else None, _BILLED_STATEMENTS
+            fechas_payloads[-1] if fechas_payloads else None, billed_statement_count()
         )
         for fecha in dates:
-            if not fecha or fecha == loaded or not requests:
+            if not fecha or fecha == loaded:
                 continue
-            older = _replay_statement(page, requests[-1], fecha)
-            if older is not None:
+            older = _replay_statement(page, requests[-1], fecha) if requests else None
+            if older is None:
+                missing += 1
+            else:
                 statements.append((fecha, older))
 
-    read = billed_leg_from_statements(statements, parse, currency)
+    read = billed_leg_from_statements(statements, parse, currency, missing)
     logger.info(
         "BanChile: %d %s (%s)",
         len(read.movements),

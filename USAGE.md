@@ -572,6 +572,11 @@ throttles logins. A refresh its cached session can serve goes through; one that
 would need a second login inside that window is refused, and the dashboard
 shows the minutes left instead.
 
+Each Banco de Chile run reads the newest two card statements per currency. To
+backfill older billed history (and its billing status) once, run a single
+scrape with `BANCHILE_BILLED_STATEMENTS=12` (the portal lists twelve periods),
+then unset it: the default keeps every regular run short.
+
 The server binds `SCRAPER_CONTROL_HOST`, which defaults to `127.0.0.1`, so on
 the host only local processes can trigger a scrape. Under Docker Compose this is
 wired automatically (`scrapers` sets `SCRAPER_CONTROL_HOST=0.0.0.0` inside its

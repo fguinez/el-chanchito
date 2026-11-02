@@ -9,6 +9,7 @@ personal-data policy).
 
 import asyncio
 import os
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 
@@ -946,3 +947,182 @@ class TestSupersededTransactions:
     def test_none_without_usd_card_movements(self, monkeypatch):
         movements = [parse_unbilled_movement(_unbilled_row())]
         assert self._scrape(monkeypatch, movements) == []
+
+
+class TestVanishedWindows:
+    """Which card history windows a scrape listed in full (fix C)."""
+
+    _NEWEST = "2026-09-05"
+    _OLDER = "2026-08-05"
+    _TODAY = date(2026, 9, 20)
+
+    def setup_method(self):
+        self.scraper = BanChileScraper()
+
+    def _statements(self, **overrides):
+        """Newest summaries of both currencies, current as of `_TODAY`."""
+        fields = {
+            "statement_date": date(2026, 9, 5),
+            "next_statement_date": date(2026, 10, 5),
+        }
+        fields.update(overrides)
+        return [_statement("CLP", **fields), _statement("USD", **fields)]
+
+    def _movements(self):
+        """Unbilled rows of both currencies plus two CLP statements and one USD."""
+        return [
+            parse_unbilled_movement(_unbilled_row()),
+            parse_unbilled_movement(_unbilled_row(monto=1234.56, origen="INT")),
+            *parse_billed_movements(_billed_payload([_billed_row()]), self._OLDER),
+            *parse_billed_movements(
+                _billed_payload([_billed_row(referencia="0509 12345679")]), self._NEWEST
+            ),
+            *parse_international_billed_movements(
+                _intl_payload([_intl_row(monto=12.5)]), self._NEWEST
+            ),
+        ]
+
+    def _windows(self, movements=None, failed=(), statements=None):
+        return self.scraper._vanished_for(
+            self._movements() if movements is None else movements,
+            failed,
+            self._statements() if statements is None else statements,
+            today=self._TODAY,
+        )
+
+    def _session(self, monkeypatch):
+        async def fake_fetch(rut, password):
+            return BanChileSessionResult(
+                movements=self._movements(),
+                statements=self._statements(next_statement_date=date(2099, 1, 5)),
+            )
+
+        monkeypatch.setattr(banchile_mod, "fetch_session", fake_fetch)
+
+    def test_a_full_read_offers_both_windows(self):
+        """After the newest statement anything pending; before it, only unbilled."""
+        # Arrange / Act
+        windows = self._windows()
+
+        # Assert
+        assert [(w.currency, w.after, w.include_unreported) for w in windows] == [
+            ("CLP", date(2026, 9, 5), True),
+            ("CLP", date(2026, 8, 5), False),
+            ("USD", date(2026, 9, 5), True),
+        ]
+        for window in windows:
+            assert (window.institution, window.product_kind) == ("banchile", "credit_card")
+            assert window.external_id_prefix == "bch_fp_"
+
+    @pytest.mark.parametrize(
+        ("failed", "currencies"),
+        [
+            pytest.param(("tarjeta no facturados",), [], id="unbilled-failed"),
+            pytest.param(("tarjeta facturados",), ["USD"], id="clp-statement-failed"),
+            pytest.param(("tarjeta facturados USD",), ["CLP", "CLP"], id="usd-statement-failed"),
+        ],
+    )
+    def test_a_failed_surface_withholds_its_windows(self, failed, currencies):
+        """A leg that did not load cannot vouch for what it would have listed."""
+        # Arrange / Act
+        windows = self._windows(failed=failed)
+
+        # Assert
+        assert [w.currency for w in windows] == currencies
+
+    def test_an_empty_unbilled_list_offers_nothing(self):
+        """An empty reading cannot be told from a portal that answered nothing."""
+        # Arrange
+        movements = [m for m in self._movements() if m.source != "card_unbilled"]
+
+        # Act
+        windows = self._windows(movements=movements)
+
+        # Assert
+        assert windows == []
+
+    def test_a_statement_past_its_next_closing_is_stale(self):
+        """A newer statement exists that this scrape did not read."""
+        # Arrange
+        statements = self._statements(next_statement_date=self._TODAY)
+
+        # Act
+        windows = self._windows(statements=statements)
+
+        # Assert
+        assert windows == []
+
+    def test_a_summary_without_a_next_closing_date_offers_nothing(self):
+        """Its currency cannot be checked for a newer, unread statement."""
+        # Arrange
+        statements = self._statements(next_statement_date=None)
+
+        # Act
+        windows = self._windows(statements=statements)
+
+        # Assert
+        assert windows == []
+
+    def test_no_statement_summary_offers_nothing(self):
+        """Without the summary the cycle boundary is unknown."""
+        # Arrange / Act
+        windows = self._windows(statements=[])
+
+        # Assert
+        assert windows == []
+
+    def test_an_unconfirmed_statement_withholds_its_currency(self):
+        """`billing_unknown` rows mean a statement answered for another period."""
+        # Arrange
+        movements = self._movements()
+        movements[2] = replace(movements[2], billing_unknown=True, statement_date="")
+
+        # Act
+        windows = self._windows(movements=movements)
+
+        # Assert
+        assert [w.currency for w in windows] == ["USD"]
+
+    def test_an_incomplete_statement_leg_withholds_its_currency(self):
+        """A requested statement that never answered leaves its period unverified."""
+        # Arrange
+        clp, usd = self._statements()
+        statements = [replace(clp, leg_complete=False), usd]
+
+        # Act
+        windows = self._windows(statements=statements)
+
+        # Assert
+        assert [w.currency for w in windows] == ["USD"]
+
+    def test_scrape_transactions_records_them(self, monkeypatch):
+        """The windows of the last scrape are what `vanished_windows` returns."""
+        # Arrange
+        self._session(monkeypatch)
+
+        # Act
+        asyncio.run(self.scraper.scrape_transactions())
+
+        # Assert
+        assert [w.currency for w in self.scraper.vanished_windows()] == ["CLP", "CLP", "USD"]
+
+    def test_a_movement_that_failed_to_convert_withholds_every_window(self, monkeypatch):
+        """Its stored row would look vanished though the bank still lists it."""
+        # Arrange
+        self._session(monkeypatch)
+        convert = self.scraper._movement_to_transaction
+        calls = []
+
+        def flaky(movement):
+            calls.append(movement)
+            if len(calls) == 1:
+                raise ValueError("synthetic conversion failure")
+            return convert(movement)
+
+        monkeypatch.setattr(self.scraper, "_movement_to_transaction", flaky)
+
+        # Act
+        asyncio.run(self.scraper.scrape_transactions())
+
+        # Assert
+        assert self.scraper.vanished_windows() == []

@@ -53,6 +53,7 @@ from scrapers.base import (
     ScrapedProduct,
     ScrapedTransaction,
     SupersededTransaction,
+    VanishedWindow,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,11 @@ logger = logging.getLogger(__name__)
 # Ships with the currency routing of issue #79 (USD rows need its cents), so a
 # CLP-card row created after it was applied was written by the fixed code.
 _CURRENCY_ROUTING_MIGRATION = "V023__transactions_amount_numeric.sql"
+
+# The unbilled card surface (both currencies' rows come in one list) and each
+# currency's statement surface: a vanished-row window needs both loaded.
+_UNBILLED_SURFACE = "tarjeta no facturados"
+_BILLED_SURFACES = {"CLP": "tarjeta facturados", "USD": "tarjeta facturados USD"}
 
 # An operation id is opaque, so it is normalised rather than interpreted: a
 # cosmetic change (padding, a separator, lower case) must not re-key a movement,
@@ -261,6 +267,7 @@ class BanChileScraper(BaseScraper):
         # products half here for `scrape_products` to serve.
         self._session: BanChileSessionResult | None = None
         self._superseded: list[SupersededTransaction] = []
+        self._vanished: list[VanishedWindow] = []
 
     def _movement_to_transaction(self, movement: BanChileMovement) -> ScrapedTransaction:
         """Convert a backend movement into our ScrapedTransaction.
@@ -349,6 +356,96 @@ class BanChileScraper(BaseScraper):
         """See `_superseded_for`; computed by the last `scrape_transactions`."""
         return list(self._superseded)
 
+    def _vanished_for(
+        self,
+        movements: list[BanChileMovement],
+        failed_surfaces: tuple[str, ...],
+        statements: list[BanChileStatement],
+        today: date | None = None,
+    ) -> list[VanishedWindow]:
+        """The card history windows this scrape listed in full, per currency.
+
+        The unbilled card leg has no bank id: a pending charge is keyed by its
+        fingerprint, so one the bank re-dates, re-describes or moves to the
+        other currency comes back under a new key, and a stale authorization
+        simply stops being listed, while the stored row stays forever. These
+        windows let the writer soft-delete such rows.
+
+        A currency gets windows only when the unbilled surface and its own
+        statement surface both loaded, the unbilled list was not empty (an
+        empty reading cannot be told from a portal that answered nothing, and
+        would clear the whole cycle), every statement it read confirmed its
+        closing date (no `billing_unknown` rows, and every statement it
+        requested answered with a usable summary), and its newest statement's
+        summary was read and is known to be current: once `today` reaches the
+        next closing date that summary prints, a newer statement exists that
+        this scrape did not read, and the charges it billed may already have
+        left the unbilled list. A summary that prints no next closing date
+        cannot be checked, so it offers nothing. Then:
+
+        * after the newest statement's closing date, the unbilled list is the
+          whole story: every unbilled or never-reported row not in this scrape
+          is gone (`include_unreported`; a billed row is never dated past the
+          statement that billed it);
+        * after the oldest statement read, up to the newest, every charge was
+          either billed (and adopted onto its billed row by the writer) or is
+          still listed as unbilled: a row still `unbilled` there and not in
+          this scrape is an authorization that never posted. Rows with no
+          status are left alone in that stretch, since older billed history
+          may carry none.
+        """
+        if _UNBILLED_SURFACE in failed_surfaces:
+            return []
+        if not any(m.source == "card_unbilled" for m in movements):
+            return []
+        today = today or date.today()
+        windows = []
+        for currency, surface in _BILLED_SURFACES.items():
+            if surface in failed_surfaces:
+                continue
+            billed = [
+                m for m in movements if m.source == "card_billed" and m.currency == currency
+            ]
+            if any(m.billing_unknown for m in billed):
+                continue
+            statement = next((s for s in statements if s.currency == currency), None)
+            if (
+                statement is None
+                or not statement.leg_complete
+                or statement.next_statement_date is None
+                or today >= statement.next_statement_date
+            ):
+                continue
+            newest = statement.statement_date
+            read_dates = sorted(
+                {
+                    statement_date
+                    for m in billed
+                    if (statement_date := billing_of(m)[1]) is not None
+                }
+            )
+            windows.append(self._vanished_window(currency, newest, include_unreported=True))
+            older = [d for d in read_dates if d < newest]
+            if older:
+                windows.append(self._vanished_window(currency, older[0]))
+        return windows
+
+    def _vanished_window(
+        self, currency: str, after: date, include_unreported: bool = False
+    ) -> VanishedWindow:
+        return VanishedWindow(
+            institution=self.institution,
+            product_kind="credit_card",
+            currency=currency,
+            external_id_prefix="bch_fp_",
+            after=after,
+            include_unreported=include_unreported,
+        )
+
+    def vanished_windows(self) -> list[VanishedWindow]:
+        """See `_vanished_for`; computed by the last `scrape_transactions`."""
+        return list(self._vanished)
+
     async def scrape_transactions(self) -> list[ScrapedTransaction]:
         """Open the shared session and convert its movements.
 
@@ -359,6 +456,7 @@ class BanChileScraper(BaseScraper):
         """
         self._session = None
         self._superseded = []
+        self._vanished = []
         try:
             session = await fetch_session(self.rut, self.password)
         except LoginCooldownError as e:
@@ -380,6 +478,12 @@ class BanChileScraper(BaseScraper):
 
         # Only movements that will be written can replace a stored row.
         self._superseded = self._superseded_for(converted, session.failed_surfaces)
+        # A movement that failed to convert is not written, so its stored row
+        # would look vanished: no window at all then.
+        if len(converted) == len(session.movements):
+            self._vanished = self._vanished_for(
+                converted, session.failed_surfaces, session.statements
+            )
 
         checking = sum(1 for t in transactions if t.product_kind == "checking")
         usd = sum(1 for t in transactions if t.currency == "USD")

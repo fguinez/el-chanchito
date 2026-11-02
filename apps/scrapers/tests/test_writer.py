@@ -30,8 +30,10 @@ from db.writer import (
     _billing_fill,
     _canonical_metrics,
     _claim_decision,
+    _closest_unique,
     _headline_decimal,
     _is_final_id,
+    _similar_descriptions,
     _write_decision,
     start_scraper_run,
     upsert_product,
@@ -1029,7 +1031,10 @@ class TestUpsertTransactionsAdoption:
         ).inserted
 
         assert (inserted, len(conn.rows)) == (0, 1)
-        assert conn.executed[-1][0].startswith("SELECT id FROM transactions")
+        assert not any(
+            query.startswith("UPDATE transactions SET external_id")
+            for query, _ in conn.executed
+        )
 
     def test_a_lost_operation_id_does_not_duplicate(self, monkeypatch):
         """A transient 503 falls back to a fingerprint key; keep the stored row."""
@@ -1662,3 +1667,73 @@ class TestTransactionBillingStatus:
             ("CIUDAD FICTICIA", "PAIS FICTICIO", "row-concurrent")
         ]
 
+
+
+class TestSimilarDescriptions:
+    """How the card adoption window tells one merchant from another (fix D)."""
+
+    @pytest.mark.parametrize(
+        ("left", "right", "expected"),
+        [
+            pytest.param("COMERCIO SINTETICO", "COMERCIO SINTETICO", True, id="identical"),
+            pytest.param("DLCOMERCIO SINTETICO", "COMERCIO SINTETICO", True, id="glued-prefix"),
+            pytest.param("COMERCIO SINTETICO", "comercio sintético s.a.", True, id="case-accents"),
+            pytest.param("COMERCIO SINTETICO", "OTRO NEGOCIO", False, id="unrelated"),
+            pytest.param("TOTTUS", "TOTTUS", True, id="four-plus-chars"),
+            pytest.param("PAYU *COMERCIO A", "PAYU *OTRO B", False, id="shared-processor"),
+            pytest.param("MERCADOPAGO*TIENDA", "MERCADOPAGO*NEGOCIO", False, id="mercadopago"),
+            pytest.param("DLOCAL SINTETICO", "SINTETICO DLOCAL", True, id="merchant-beside-processor"),
+            pytest.param("COMPRA PAGO", "PAGO COMPRA", False, id="only-generic-words"),
+            pytest.param("ABC", "ABC", False, id="too-short"),
+            pytest.param(None, "COMERCIO", False, id="missing"),
+        ],
+    )
+    def test_matching(self, left, right, expected):
+        """A non-generic token of four or more characters must appear in the other."""
+        # Arrange / Act
+        result = _similar_descriptions(left, right)
+
+        # Assert
+        assert result is expected
+
+
+class TestClosestUnique:
+    """The adoption window takes the single nearest candidate (fix D)."""
+
+    _TARGET = date(2026, 8, 21)
+
+    def test_the_nearest_wins(self):
+        """One day off beats three days off."""
+        # Arrange
+        rows = [
+            ("row-far", "bch_fp_a", date(2026, 8, 18)),
+            ("row-near", "bch_fp_b", date(2026, 8, 22)),
+        ]
+
+        # Act
+        picked = _closest_unique(rows, self._TARGET)
+
+        # Assert
+        assert picked == [("row-near", "bch_fp_b")]
+
+    def test_a_tie_picks_nothing(self):
+        """Equally near rows are ambiguous."""
+        # Arrange
+        rows = [
+            ("row-before", "bch_fp_a", date(2026, 8, 20)),
+            ("row-after", "bch_fp_b", date(2026, 8, 22)),
+        ]
+
+        # Act
+        picked = _closest_unique(rows, self._TARGET)
+
+        # Assert
+        assert picked == []
+
+    def test_no_candidates(self):
+        """Nothing to pick from is nothing picked."""
+        # Arrange / Act
+        picked = _closest_unique([], self._TARGET)
+
+        # Assert
+        assert picked == []

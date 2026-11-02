@@ -30,6 +30,7 @@ from db.writer import (
     UnresolvedRateScope,
     delete_superseded_transactions,
     finish_scraper_run,
+    soft_delete_vanished_transactions,
     start_scraper_run,
     upsert_exchange_rate,
     upsert_price_history,
@@ -56,7 +57,7 @@ from product_model import (
     TermDepositMetrics,
     TransactionLocation,
 )
-from scrapers.base import SupersededTransaction
+from scrapers.base import SupersededTransaction, VanishedWindow
 
 # The single user V009 seeds; `_resolve_product` attaches everything to it.
 SEEDED_USER_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -111,11 +112,12 @@ def _txn(
     location=None,
     billing_status=None,
     statement_date=None,
+    description="COMPRA SINTETICA",
 ):
     return ScrapedTransaction(
         institution=institution,
         product_kind=kind,
-        description="COMPRA SINTETICA",
+        description=description,
         amount=amount,
         transaction_date=tx_date,
         accounting_date=accounting_date,
@@ -700,6 +702,171 @@ class TestTransactionBillingStatus:
             db_conn.execute(f"UPDATE transactions SET {assignment}")
 
 
+class TestCardAdoptionWindow:
+    """A billed card charge adopts its unbilled row a few days off (fix D)."""
+
+    _UNBILLED_KEY = "bch_fp_a1b2c3d4e5f60718"
+
+    def _store_unbilled(self, tx_date, key=_UNBILLED_KEY, description="COMERCIO SINTETICO"):
+        upsert_transactions(
+            [
+                _card_txn(
+                    key,
+                    tx_date=tx_date,
+                    billing_status="unbilled",
+                    description=description,
+                )
+            ]
+        )
+
+    def _billed(self, tx_date=date(2026, 8, 21), description="COMERCIO SINTETICO"):
+        return _card_txn(
+            tx_date=tx_date,
+            billing_status="billed",
+            statement_date=_CLOSED,
+            description=description,
+        )
+
+    def _rows(self, conn):
+        return conn.execute(
+            "SELECT external_id, transaction_date, billing_status FROM transactions "
+            "ORDER BY created_at, id"
+        ).fetchall()
+
+    @pytest.mark.parametrize("days_off", [-3, -1, 1, 3])
+    def test_a_re_dated_charge_is_adopted_not_duplicated(self, db_conn, days_off):
+        """The bank moved the date by up to three days when it billed it."""
+        # Arrange
+        billed_date = date(2026, 8, 21)
+        self._store_unbilled(billed_date + timedelta(days=days_off))
+
+        # Act
+        inserted = upsert_transactions([self._billed(billed_date)])
+
+        # Assert
+        assert inserted == 0
+        assert self._rows(db_conn) == [
+            {
+                "external_id": "bch_ref_200812345678",
+                "transaction_date": billed_date,
+                "billing_status": "billed",
+            }
+        ]
+
+    def test_a_charge_four_days_off_is_a_different_charge(self, db_conn):
+        """Outside the window nothing is adopted."""
+        # Arrange
+        self._store_unbilled(date(2026, 8, 17))
+
+        # Act
+        inserted = upsert_transactions([self._billed(date(2026, 8, 21))])
+
+        # Assert
+        assert inserted == 1
+        assert len(self._rows(db_conn)) == 2
+
+    def test_an_unrelated_merchant_is_not_adopted(self, db_conn):
+        """Same amount a day off, but a different merchant: a different charge."""
+        # Arrange
+        self._store_unbilled(date(2026, 8, 20), description="OTRO NEGOCIO")
+
+        # Act
+        inserted = upsert_transactions([self._billed(date(2026, 8, 21))])
+
+        # Assert
+        assert inserted == 1
+
+    def test_a_reworded_merchant_still_matches(self, db_conn):
+        """The unbilled leg glues a processor prefix onto the merchant name."""
+        # Arrange
+        self._store_unbilled(date(2026, 8, 20), description="DLCOMERCIO SINTETICO")
+
+        # Act
+        inserted = upsert_transactions(
+            [self._billed(date(2026, 8, 21), description="COMERCIO SINTETICO SA")]
+        )
+
+        # Assert
+        assert inserted == 0
+
+    def test_the_closest_candidate_wins(self, db_conn):
+        """One day off beats two days off."""
+        # Arrange
+        self._store_unbilled(date(2026, 8, 19), key="bch_fp_00000000000000a1")
+        self._store_unbilled(date(2026, 8, 22), key="bch_fp_00000000000000a2")
+
+        # Act
+        upsert_transactions([self._billed(date(2026, 8, 21))])
+
+        # Assert
+        keys = {row["external_id"] for row in self._rows(db_conn)}
+        assert keys == {"bch_fp_00000000000000a1", "bch_ref_200812345678"}
+
+    def test_a_tie_adopts_nothing(self, db_conn):
+        """Two rows equally near could each be the charge: neither is guessed."""
+        # Arrange
+        self._store_unbilled(date(2026, 8, 20), key="bch_fp_00000000000000a1")
+        self._store_unbilled(date(2026, 8, 22), key="bch_fp_00000000000000a2")
+
+        # Act
+        inserted = upsert_transactions([self._billed(date(2026, 8, 21))])
+
+        # Assert
+        assert inserted == 1
+        assert len(self._rows(db_conn)) == 3
+
+    def test_an_exact_date_match_is_still_preferred(self, db_conn):
+        """The window only applies when the same-day match finds nothing."""
+        # Arrange
+        self._store_unbilled(date(2026, 8, 20), key="bch_fp_00000000000000a1")
+        self._store_unbilled(date(2026, 8, 21), key="bch_fp_00000000000000a2")
+
+        # Act
+        upsert_transactions([self._billed(date(2026, 8, 21))])
+
+        # Assert
+        keys = {row["external_id"] for row in self._rows(db_conn)}
+        assert keys == {"bch_fp_00000000000000a1", "bch_ref_200812345678"}
+
+    def test_a_row_this_scrape_still_lists_is_never_adopted(self, db_conn):
+        """An unbilled row the same scrape still carries is its own charge."""
+        # Arrange
+        self._store_unbilled(date(2026, 8, 20))
+        still_listed = _card_txn(
+            self._UNBILLED_KEY,
+            tx_date=date(2026, 8, 20),
+            billing_status="unbilled",
+            description="COMERCIO SINTETICO",
+        )
+
+        # Act
+        inserted = upsert_transactions([self._billed(date(2026, 8, 21)), still_listed])
+
+        # Assert
+        assert inserted == 1
+        assert len(self._rows(db_conn)) == 2
+
+    def test_an_unbilled_charge_never_looks_beyond_its_date(self, db_conn):
+        """Only a billed charge uses the window; an unbilled re-date is fix C's."""
+        # Arrange
+        self._store_unbilled(date(2026, 8, 20))
+
+        # Act
+        inserted = upsert_transactions(
+            [
+                _card_txn(
+                    "bch_fp_00000000000000b1",
+                    tx_date=date(2026, 8, 21),
+                    billing_status="unbilled",
+                    description="COMERCIO SINTETICO",
+                )
+            ]
+        )
+
+        # Assert
+        assert inserted == 1
+
+
 class TestTransferLinks:
     """V028: a transfer links the scraped rows that moved its money; scraping
     them again must keep the link and the is_internal_transfer flag.
@@ -1140,6 +1307,306 @@ class TestProductRefTransactions:
         result = write_transactions([self._txn("fintual_stock_sell_1001")])
 
         assert (result.inserted, result.unresolved) == (1, 0)
+
+
+class TestVanishedTransactions:
+    """Pending card rows the bank stopped listing are soft-deleted (fix C)."""
+
+    _AFTER = date(2026, 9, 5)
+    _STALE = "bch_fp_00000000000000c1"
+
+    def _window(self, include_unreported=True, currency="CLP", after=_AFTER):
+        return VanishedWindow(
+            institution="banchile",
+            product_kind="credit_card",
+            currency=currency,
+            external_id_prefix="bch_fp_",
+            after=after,
+            include_unreported=include_unreported,
+        )
+
+    def _store(self, external_id=_STALE, tx_date=date(2026, 9, 10), **fields):
+        fields.setdefault("billing_status", "unbilled")
+        upsert_transactions([_card_txn(external_id, tx_date=tx_date, **fields)])
+
+    def _deleted(self, conn):
+        return {
+            row["external_id"]: row["deleted_at"] is not None
+            for row in conn.execute("SELECT external_id, deleted_at FROM transactions")
+        }
+
+    def test_a_stale_unbilled_row_is_soft_deleted(self, db_conn):
+        """It keeps its key, so a later listing finds it instead of re-importing."""
+        # Arrange
+        self._store()
+
+        # Act
+        deleted = soft_delete_vanished_transactions([self._window()], set())
+
+        # Assert
+        assert deleted == 1
+        assert self._deleted(db_conn) == {self._STALE: True}
+
+    def test_a_row_the_scrape_still_lists_is_kept(self, db_conn):
+        """This scrape's own keys are never candidates."""
+        # Arrange
+        self._store()
+
+        # Act
+        deleted = soft_delete_vanished_transactions([self._window()], {self._STALE})
+
+        # Assert
+        assert deleted == 0
+        assert self._deleted(db_conn) == {self._STALE: False}
+
+    @pytest.mark.parametrize(
+        ("fields", "expected"),
+        [
+            pytest.param(
+                {"billing_status": "billed", "statement_date": date(2026, 9, 5)},
+                False,
+                id="billed-never",
+            ),
+            pytest.param({"billing_status": None}, True, id="unreported-when-included"),
+        ],
+    )
+    def test_only_pending_rows_qualify(self, db_conn, fields, expected):
+        """A billed row is the bank's record; an unreported one only when asked."""
+        # Arrange
+        self._store(**fields)
+
+        # Act
+        soft_delete_vanished_transactions([self._window()], set())
+
+        # Assert
+        assert self._deleted(db_conn) == {self._STALE: expected}
+
+    def test_an_unreported_row_is_kept_outside_the_cycle_window(self, db_conn):
+        """Older billed history may carry no status: only `unbilled` goes there."""
+        # Arrange
+        self._store(billing_status=None)
+
+        # Act
+        soft_delete_vanished_transactions([self._window(include_unreported=False)], set())
+
+        # Assert
+        assert self._deleted(db_conn) == {self._STALE: False}
+
+    @pytest.mark.parametrize(
+        ("external_id", "tx_date"),
+        [
+            pytest.param(_STALE, _AFTER, id="on-the-boundary"),
+            pytest.param("bch_ref_050912345678", date(2026, 9, 10), id="bank-reference-key"),
+            pytest.param("bch_0123456789abcdef", date(2026, 9, 10), id="legacy-key"),
+        ],
+    )
+    def test_rows_outside_the_window_are_kept(self, db_conn, external_id, tx_date):
+        """Only fingerprint-keyed rows dated strictly after the boundary qualify."""
+        # Arrange
+        self._store(external_id, tx_date=tx_date)
+
+        # Act
+        soft_delete_vanished_transactions([self._window()], set())
+
+        # Assert
+        assert self._deleted(db_conn) == {external_id: False}
+
+    def test_another_currency_is_untouched(self, db_conn):
+        """The window names one product."""
+        # Arrange
+        self._store(currency="USD", amount=Decimal("-12.34"))
+
+        # Act
+        soft_delete_vanished_transactions([self._window(currency="CLP")], set())
+
+        # Assert
+        assert self._deleted(db_conn) == {self._STALE: False}
+
+    @pytest.mark.parametrize(
+        "assignment",
+        [
+            "is_manually_categorized = true",
+            "is_internal_transfer = true",
+            "notes = 'nota sintetica'",
+            "custom_description = 'Descripcion sintetica'",
+            "location_is_manual = true",
+        ],
+    )
+    def test_a_row_the_user_edited_is_kept(self, db_conn, assignment):
+        """Anything the user put on the row outranks the bank's silence."""
+        # Arrange
+        self._store()
+        db_conn.execute(f"UPDATE transactions SET {assignment}")
+
+        # Act
+        deleted = soft_delete_vanished_transactions([self._window()], set())
+
+        # Assert
+        assert deleted == 0
+        assert self._deleted(db_conn) == {self._STALE: False}
+
+    def test_a_row_linked_to_a_transfer_is_kept(self, db_conn):
+        """A transfer link is a user edit too, even without the flag."""
+        # Arrange
+        self._store()
+        row = db_conn.execute("SELECT id, product_id FROM transactions").fetchone()
+        db_conn.execute(
+            """
+            INSERT INTO internal_transfers
+                (description, amount, from_product_id, transfer_date, from_transaction_id)
+            VALUES ('Traspaso sintetico', 1000000, %s, '2026-09-10', %s)
+            """,
+            (row["product_id"], row["id"]),
+        )
+
+        # Act
+        deleted = soft_delete_vanished_transactions([self._window()], set())
+
+        # Assert
+        assert deleted == 0
+
+    def test_a_suspiciously_large_window_is_skipped(self, db_conn):
+        """More vanished rows than the cap reads as a partial listing."""
+        # Arrange
+        for n in range(writer._MAX_VANISHED_PER_WINDOW + 1):
+            self._store(f"bch_fp_{n:016x}", amount=-(n + 1))
+
+        # Act
+        deleted = soft_delete_vanished_transactions([self._window()], set())
+
+        # Assert
+        assert deleted == 0
+        assert not any(self._deleted(db_conn).values())
+
+    def _deleted_by(self, conn):
+        return {
+            row["external_id"]: (row["deleted_at"] is not None, row["deleted_by"])
+            for row in conn.execute(
+                "SELECT external_id, deleted_at, deleted_by FROM transactions"
+            )
+        }
+
+    def test_the_cleanup_marks_its_own_deletes(self, db_conn):
+        """V045: a scraper delete is told apart from the user's."""
+        # Arrange
+        self._store()
+
+        # Act
+        soft_delete_vanished_transactions([self._window()], set())
+
+        # Assert
+        assert self._deleted_by(db_conn) == {self._STALE: (True, "scraper")}
+
+    def test_a_scraper_deleted_row_listed_again_is_restored(self, db_conn):
+        """The bank contradicted the cleanup's guess: the row comes back."""
+        # Arrange
+        self._store()
+        soft_delete_vanished_transactions([self._window()], set())
+
+        # Act
+        inserted = upsert_transactions(
+            [_card_txn(self._STALE, tx_date=date(2026, 9, 10), billing_status="unbilled")]
+        )
+
+        # Assert
+        assert inserted == 0
+        assert self._deleted_by(db_conn) == {self._STALE: (False, None)}
+
+    def test_a_user_deleted_row_listed_again_stays_deleted(self, db_conn):
+        """V033: the user's delete is final, whatever the scrape lists."""
+        # Arrange
+        self._store()
+        db_conn.execute("UPDATE transactions SET deleted_at = now()")
+
+        # Act
+        upsert_transactions(
+            [_card_txn(self._STALE, tx_date=date(2026, 9, 10), billing_status="unbilled")]
+        )
+
+        # Assert
+        assert self._deleted_by(db_conn) == {self._STALE: (True, None)}
+
+    def test_a_scraper_deleted_row_is_not_adopted_on_its_own_date(self, db_conn):
+        """The charge billed on the deleted row's date must stay visible.
+
+        The bank re-dated a pending charge (the cleanup removed the old row),
+        then billed it on the original date: adopting the deleted row would
+        hide the billed charge.
+        """
+        # Arrange
+        self._store(description="COMERCIO SINTETICO")
+        soft_delete_vanished_transactions([self._window()], set())
+
+        # Act
+        inserted = upsert_transactions(
+            [
+                _card_txn(
+                    tx_date=date(2026, 9, 10),
+                    billing_status="billed",
+                    statement_date=date(2026, 10, 5),
+                    description="COMERCIO SINTETICO",
+                )
+            ]
+        )
+
+        # Assert
+        assert inserted == 1
+        assert self._deleted_by(db_conn) == {
+            self._STALE: (True, "scraper"),
+            "bch_ref_200812345678": (False, None),
+        }
+
+    def test_a_user_deleted_row_is_still_adopted_and_stays_deleted(self, db_conn):
+        """V033 unchanged: the user's delete follows the movement to its new key."""
+        # Arrange
+        self._store()
+        db_conn.execute("UPDATE transactions SET deleted_at = now()")
+
+        # Act
+        inserted = upsert_transactions(
+            [
+                _card_txn(
+                    tx_date=date(2026, 9, 10),
+                    billing_status="billed",
+                    statement_date=date(2026, 10, 5),
+                )
+            ]
+        )
+
+        # Assert
+        assert inserted == 0
+        assert self._deleted_by(db_conn) == {"bch_ref_200812345678": (True, None)}
+
+    def test_the_schema_rejects_a_marker_on_a_visible_row(self, db_conn):
+        """`deleted_by` only ever qualifies a delete."""
+        # Arrange
+        self._store()
+
+        # Act / Assert
+        with pytest.raises(psycopg.errors.CheckViolation):
+            db_conn.execute("UPDATE transactions SET deleted_by = 'scraper'")
+
+    def test_a_soft_deleted_row_is_not_adopted_by_a_nearby_billed_charge(self, db_conn):
+        """Fix D must not hide a billed charge under a row fix C removed."""
+        # Arrange
+        self._store(description="COMERCIO SINTETICO")
+        soft_delete_vanished_transactions([self._window()], set())
+
+        # Act
+        inserted = upsert_transactions(
+            [
+                _card_txn(
+                    tx_date=date(2026, 9, 11),
+                    billing_status="billed",
+                    statement_date=date(2026, 10, 5),
+                    description="COMERCIO SINTETICO",
+                )
+            ]
+        )
+
+        # Assert
+        assert inserted == 1
+        assert self._deleted(db_conn) == {self._STALE: True, "bch_ref_200812345678": False}
 
 
 class TestSupersededTransactions:

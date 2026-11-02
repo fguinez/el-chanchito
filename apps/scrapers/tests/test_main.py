@@ -32,6 +32,7 @@ from scrapers.base import (
     ScrapedProduct,
     ScrapedTransaction,
     SupersededTransaction,
+    VanishedWindow,
 )
 
 
@@ -49,6 +50,7 @@ class _StubScraper(BaseScraper):
         prod_exc=None,
         transactions=None,
         superseded=(),
+        vanished=(),
         exchange_rates=(),
         price_histories=(),
     ):
@@ -58,11 +60,15 @@ class _StubScraper(BaseScraper):
         self._prod_exc = prod_exc
         self._transactions = transactions or []
         self._superseded = list(superseded)
+        self._vanished = list(vanished)
         self._exchange_rates = list(exchange_rates)
         self._price_histories = list(price_histories)
 
     def superseded_transactions(self):
         return self._superseded
+
+    def vanished_windows(self):
+        return self._vanished
 
     async def scrape_transactions(self):
         if self._tx_exc is not None:
@@ -116,6 +122,7 @@ def writer(monkeypatch):
         "upsert_exchange_rate": MagicMock(),
         "upsert_price_history": MagicMock(return_value=0),
         "delete_superseded_transactions": MagicMock(),
+        "soft_delete_vanished_transactions": MagicMock(),
         "finish_scraper_run": MagicMock(),
     }
     monkeypatch.setattr(main_mod, "start_scraper_run", MagicMock(return_value="run-1"))
@@ -396,6 +403,84 @@ class TestSupersededCleanup:
 
         asyncio.run(run_scraper(_StubScraper(superseded=[_TWIN])))
 
+        finish.assert_called_once_with(
+            "run-1", "partial", transactions_imported=0, error_message="cleanup: db down"
+        )
+
+
+_WINDOW = VanishedWindow(
+    institution="banchile",
+    product_kind="credit_card",
+    currency="CLP",
+    external_id_prefix="bch_fp_",
+    after=date(2026, 9, 5),
+    include_unreported=True,
+)
+
+
+class TestVanishedCleanup:
+    """Pending rows the source stopped listing are soft-deleted after the write (fix C)."""
+
+    def test_runs_after_the_write_with_the_scrape_keys(self, finish, monkeypatch):
+        """The scrape's own keys are protected; the write comes first."""
+        # Arrange
+        calls = []
+        monkeypatch.setattr(
+            main_mod,
+            "write_transactions",
+            lambda txns: calls.append("write") or TransactionWriteResult(),
+        )
+        monkeypatch.setattr(
+            main_mod,
+            "soft_delete_vanished_transactions",
+            lambda windows, keys: calls.append(("vanished", windows, keys)),
+        )
+        scraper = _StubScraper(transactions=[_transaction(1)], vanished=[_WINDOW])
+
+        # Act
+        asyncio.run(run_scraper(scraper))
+
+        # Assert
+        assert calls == ["write", ("vanished", [_WINDOW], {"bch_op_0000000001"})]
+
+    @pytest.mark.parametrize(
+        "written",
+        [
+            pytest.param(TransactionWriteResult(failed=1), id="a-row-failed"),
+            pytest.param(TransactionWriteResult(unresolved=1), id="a-row-unresolved"),
+        ],
+    )
+    def test_skipped_unless_every_row_landed(self, writer, written):
+        """A row that did not land would leave its stored twin looking vanished."""
+        # Arrange
+        writer["write_transactions"].return_value = written
+
+        # Act
+        asyncio.run(run_scraper(_StubScraper(transactions=[_transaction(1)], vanished=[_WINDOW])))
+
+        # Assert
+        writer["soft_delete_vanished_transactions"].assert_not_called()
+
+    def test_skipped_when_the_transactions_leg_failed(self, writer):
+        """No scrape, no windows to trust."""
+        # Arrange
+        scraper = _StubScraper(tx_exc=RuntimeError("login failed"), vanished=[_WINDOW])
+
+        # Act
+        asyncio.run(run_scraper(scraper))
+
+        # Assert
+        writer["soft_delete_vanished_transactions"].assert_not_called()
+
+    def test_a_cleanup_failure_is_a_warning(self, writer, finish):
+        """The scrape itself succeeded; a failed cleanup only makes it partial."""
+        # Arrange
+        writer["soft_delete_vanished_transactions"].side_effect = RuntimeError("db down")
+
+        # Act
+        asyncio.run(run_scraper(_StubScraper(vanished=[_WINDOW])))
+
+        # Assert
         finish.assert_called_once_with(
             "run-1", "partial", transactions_imported=0, error_message="cleanup: db down"
         )
