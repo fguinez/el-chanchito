@@ -8,7 +8,10 @@ figures are read off the post-login SPA (https://www.liderbciserviciosfinanciero
     cupos (Autorizado/Utilizado/Disponible), plus the card product name and the
     masked number's last4;
   * the "Mi Tarjeta -> Movimientos" page: the Nacionales (CLP) charges, read
-    per page across the pager.
+    per page across the pager;
+  * the portal's own read-only API, from inside the signed-in tab
+    (`bci_lider_billing`): the USD card's dollar rate, the last billed period's
+    figures and the past statements.
 
 Auth (why a real Chrome driven over CDP): the login sits behind a Cloudflare
 Turnstile that passes invisibly ONLY for a genuine browser. A Playwright-launched
@@ -36,7 +39,9 @@ its request payload and session token reverse-engineered. Reading the rendered
 text keeps every figure anchored on its own `$`/`US$` label (a drift records
 nothing rather than a wrong number) and mirrors `banchile_web.py`, with all the
 interpretation isolated in pure, unit-tested helpers so the source can be swapped
-for the XHR endpoint later without touching the mapping.
+for the XHR endpoint later without touching the mapping. The billing reads
+(rate, statements) do use the API, from inside the tab: see
+`bci_lider_billing`.
 """
 
 import datetime
@@ -56,7 +61,12 @@ from typing import Optional
 
 from product_model import CreditCardAttributes, CreditCardMetrics
 
-from scrapers.base import ScrapedProduct
+from scrapers.backends.bci_lider_billing import (
+    LiderStatement,
+    billing_metrics,
+    read_billing,
+)
+from scrapers.base import ScrapedExchangeRate, ScrapedProduct
 
 logger = logging.getLogger(__name__)
 
@@ -468,11 +478,16 @@ class BciLiderCardResult:
     the raw Nacionales charge dicts (the institution scraper converts them to
     `ScrapedTransaction`s), and `warnings` flag partial coverage (e.g. the Saldos
     page never rendered) so the run records `partial` instead of failing.
+    `exchange_rates` holds the USD card's rate and `statements` the statements
+    read off their PDFs (`bci_lider_billing`), whose figures also fill the CLP
+    card's statement metrics.
     """
 
     products: list[ScrapedProduct] = field(default_factory=list)
     movements: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    exchange_rates: list[ScrapedExchangeRate] = field(default_factory=list)
+    statements: list[LiderStatement] = field(default_factory=list)
 
 
 class BciLiderWebError(RuntimeError):
@@ -820,7 +835,7 @@ def _read_card(page, result: BciLiderCardResult) -> None:
 
     The balances leg doubles as a final auth check: a session that bounced to
     /login raises BciLiderSessionError (the caller re-logs-in and retries). The
-    movements leg is best-effort and degrades to a warning.
+    movements and billing legs are best-effort and degrade to warnings.
     """
     result.products = _read_balances(page)
     if not result.products:
@@ -830,6 +845,23 @@ def _read_card(page, result: BciLiderCardResult) -> None:
     except Exception as exc:
         logger.exception("BciLider: movements leg failed")
         result.warnings.append(f"BciLider: movements failed: {exc}")
+    _read_billing_into(page, result)
+
+
+def _read_billing_into(page, result: BciLiderCardResult) -> None:
+    """Add the USD rate, the statements and the CLP card's statement metrics."""
+    billing = read_billing(page)
+    result.exchange_rates = billing.exchange_rates
+    result.statements = billing.statements
+    result.warnings.extend(billing.warnings)
+    fields = billing_metrics(billing.current, billing.statements)
+    if not fields:
+        return
+    for index, product in enumerate(result.products):
+        if product.currency == "CLP" and isinstance(product.metrics, CreditCardMetrics):
+            result.products[index] = product.model_copy(
+                update={"metrics": product.metrics.model_copy(update=fields)}
+            )
 
 
 def _login_via_autofill(page, rut: Optional[str], password: Optional[str], deadline: float) -> None:

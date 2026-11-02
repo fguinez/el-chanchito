@@ -434,8 +434,12 @@ via autofill) and report `Could not reach the Chrome debug port…` when it isn'
 (Override the debug port with `LIDER_BCI_CDP_PORT`.)
 
 Each card movement is marked billed or not by the period view it was read in
-("Por facturar" or "Último periodo facturado"). No statement date, due date or
-billed amount is read for this card.
+("Por facturar" or "Último periodo facturado"), and the statements the portal
+lists (about 8 months, read from their PDFs) mark the movements they billed
+with the statement's closing date, older stored ones included. The card's
+"Facturación" figures (closing, next closing and due dates, total to pay,
+minimum payment) come from the last billed period, and the USD card is valued
+at the dollar the card applies ("Valor del dólar hoy").
 
 ### Skipo API key
 

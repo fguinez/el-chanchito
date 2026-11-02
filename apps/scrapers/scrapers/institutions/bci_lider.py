@@ -19,16 +19,22 @@ caches the result for the products leg (a session error is re-raised, not
 retried), so the Chrome is driven once.
 
 Card billing (V044): a charge read in the "Por facturar" view is `unbilled` and
-one read in "Último periodo facturado" is `billed`, without a statement date
-(the view prints none); a charge whose view could not be confirmed reports no
-status. One key seen in both views is emitted once, billed.
+one read in "Último periodo facturado" is `billed`; a charge whose view could
+not be confirmed reports no status. One key seen in both views is emitted once,
+billed. The past statements (`bci_lider_billing`) date the billing: a charge a
+statement lists is `billed` on that statement's closing date, and
+`billed_statements()` hands the same keys to `run_scraper`, which marks the
+stored rows of older cycles too (never inserting one). The products leg adds
+the USD card's dollar rate and the CLP card's latest statement figures.
 """
 
 import asyncio
+import datetime
 import hashlib
 import logging
 import os
 
+from scrapers.backends.bci_lider_billing import LiderStatement
 from scrapers.backends.bci_lider_web import (
     BciLiderCardResult,
     save_login_session,
@@ -37,12 +43,33 @@ from scrapers.backends.bci_lider_web import (
 from scrapers.base import (
     BILLING_STATUS_BY_FLAG,
     BaseScraper,
+    BilledStatement,
     ProductScrapeResult,
     ScrapedTransaction,
     one_per_key_billed_first,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def movement_external_id(tx_date: datetime.date, amount: int) -> str:
+    """A movement's key: a hash of its date and signed CLP amount (see
+    `BciLiderScraper._movement_to_transaction`)."""
+    raw_str = f"{tx_date.isoformat()}|{amount}|CLP"
+    return f"bcl_{hashlib.md5(raw_str.encode()).hexdigest()[:16]}"
+
+
+def statement_dates_by_key(statements: list[LiderStatement]) -> dict[str, datetime.date]:
+    """Each listed movement's key -> the closing date of the OLDEST statement
+    listing it (an installment purchase stays on its first statement)."""
+    dates: dict[str, datetime.date] = {}
+    for statement in sorted(
+        (s for s in statements if s.closing_date is not None),
+        key=lambda s: s.closing_date,
+    ):
+        for tx_date, amount in statement.movements:
+            dates.setdefault(movement_external_id(tx_date, amount), statement.closing_date)
+    return dates
 
 
 class BciLiderScraper(BaseScraper):
@@ -57,8 +84,11 @@ class BciLiderScraper(BaseScraper):
         # result or the error.
         self._cached: BciLiderCardResult | None = None
         self._error: Exception | None = None
+        self._statements: list[LiderStatement] = []
 
-    def _movement_to_transaction(self, movement: dict) -> ScrapedTransaction:
+    def _movement_to_transaction(
+        self, movement: dict, statement_date: datetime.date | None = None
+    ) -> ScrapedTransaction:
         """Convert a raw backend movement dict to a ScrapedTransaction.
 
         `external_id` is a stable hash of date + amount (the portal exposes no
@@ -72,7 +102,9 @@ class BciLiderScraper(BaseScraper):
         the same charge a second time and doubled the month's spend.
 
         `billing_status` is the period view the charge was read in (the
-        backend's `billed`: True, False or None when unconfirmed).
+        backend's `billed`: True, False or None when unconfirmed), unless
+        `statement_date` (the closing date of a statement listing it) is
+        given: then it is billed on that statement.
 
         Known limitation: two genuinely distinct charges sharing date and amount
         collapse to one row; without a per-movement id this is unavoidable, and it
@@ -83,9 +115,7 @@ class BciLiderScraper(BaseScraper):
         tx_date = movement["date"]
         description = movement["description"]
         amount = movement["amount"]
-
-        raw_str = f"{tx_date.isoformat()}|{amount}|CLP"
-        external_id = f"bcl_{hashlib.md5(raw_str.encode()).hexdigest()[:16]}"
+        external_id = movement_external_id(tx_date, amount)
 
         return ScrapedTransaction(
             institution=self.institution,
@@ -94,13 +124,19 @@ class BciLiderScraper(BaseScraper):
             amount=amount,
             transaction_date=tx_date,
             external_id=external_id,
-            billing_status=BILLING_STATUS_BY_FLAG.get(movement.get("billed")),
+            billing_status=(
+                "billed"
+                if statement_date is not None
+                else BILLING_STATUS_BY_FLAG.get(movement.get("billed"))
+            ),
+            statement_date=statement_date,
         )
 
     async def _scrape_once(self) -> BciLiderCardResult:
         """Drive the real Chrome once, caching the result (or error) per cycle."""
         self._cached = None
         self._error = None
+        self._statements = []
         try:
             result = await scrape_card(rut=self.rut, password=self.password)
         except ImportError as exc:
@@ -122,13 +158,17 @@ class BciLiderScraper(BaseScraper):
 
         The same charge read in both period views (its description rewritten on
         billing, so the backend kept both) is emitted once, as its billed copy
-        (`one_per_key_billed_first`).
+        (`one_per_key_billed_first`). A charge a statement lists carries that
+        statement's closing date.
         """
         result = await self._scrape_once()
+        self._statements = list(result.statements)
+        billed_on = statement_dates_by_key(self._statements)
         converted: list[ScrapedTransaction] = []
         for mov in result.movements:
             try:
-                converted.append(self._movement_to_transaction(mov))
+                key = movement_external_id(mov["date"], mov["amount"])
+                converted.append(self._movement_to_transaction(mov, billed_on.get(key)))
             except Exception:
                 logger.exception("Failed to convert movement: %s", mov.get("description", "?"))
         transactions = one_per_key_billed_first(converted)
@@ -145,12 +185,36 @@ class BciLiderScraper(BaseScraper):
         """
         if self._cached is not None:
             result, self._cached = self._cached, None
-            return ProductScrapeResult(result.products, result.warnings)
+            return self._products_result(result)
         if self._error is not None:
             error, self._error = self._error, None
             raise error
         result = await self._scrape_once()
-        return ProductScrapeResult(result.products, result.warnings)
+        return self._products_result(result)
+
+    @staticmethod
+    def _products_result(result: BciLiderCardResult) -> ProductScrapeResult:
+        return ProductScrapeResult(
+            result.products, result.warnings, exchange_rates=result.exchange_rates
+        )
+
+    def billed_statements(self) -> list[BilledStatement]:
+        """The statements the last transactions leg read, as keys per closing
+        date, for `run_scraper` to mark the stored rows they billed."""
+        return [
+            BilledStatement(
+                institution=self.institution,
+                product_kind="credit_card",
+                currency="CLP",
+                statement_date=statement.closing_date,
+                external_ids=frozenset(
+                    movement_external_id(tx_date, amount)
+                    for tx_date, amount in statement.movements
+                ),
+            )
+            for statement in self._statements
+            if statement.closing_date is not None and statement.movements
+        ]
 
     async def login(self) -> str:
         """Manual sign-in: launch a real Chrome, autofill the login, leave it running."""

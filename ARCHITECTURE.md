@@ -520,6 +520,7 @@ apps/scrapers/scrapers/
     banchile_movements.py  # BdC movements + the shared session -> fetch_session()
     banchile_fx.py         # BdC USD card exchange rate (fetch-only surface)
     bci_lider_web.py       # real Chrome over CDP -> scrape_card() / save_login_session()
+    bci_lider_billing.py   # Lider USD rate, last billed period, statement PDFs (in-page API)
     santander_web.py       # headless Santander login + the SPA's JSON -> fetch_session()
     banco_falabella_web.py # headless Banco Falabella login + the rendered DOM -> fetch_session()
     fintual_stocks.py      # Fintual's WalletMovements query + pure ledger parsers (no I/O)
@@ -749,8 +750,29 @@ its radio reads as checked after the switch and, for the billed view, once its
 table shows a row the "Por facturar" read did not see (polled, bounded), so
 a click that did not switch the view or a table that did not re-render tags
 nothing as billed; a charge seen in both views (its description
-rewritten on billing, the key the same) is written once, billed. No statement
-figure (closing or due date, billed amount) is read.
+rewritten on billing, the key the same) is written once, billed.
+
+After the movements, `backends/bci_lider_billing.py` runs one in-page script
+on the signed-in tab that GETs the portal's own read-only API
+(api-ssff.retailcard.cl, with the bearer token the SPA keeps in sessionStorage;
+the customer id and token never leave the page): `getTipoCambio` (the dollar
+the card applies, "Valor del dólar hoy" and its "Ver dólar histórico" table)
+becomes the USD card's product-scoped `exchange_rates` row (newest day only;
+the ~30-day history is not stored); `currentBilling` gives the last billed
+period's due date, "Total a pagar" (`billed_amount`) and minimum payment; and
+`informacionPeriodo` + `estadoCuentaPDF` give the listed statements (8 months)
+as PDFs, read with pypdf's layout text. A statement's closing date is the last
+day of its "Período Facturado", the day before the portal's "Fecha de
+facturación", and fills `statement_date` / `next_statement_date` on the CLP
+card. Every movement a statement lists is billed on it: a scraped charge
+carries that `statement_date`, and `billed_statements()` hands each
+statement's keys to `run_scraper`, whose `mark_billed_statements` moves the
+stored rows of older cycles forward the same way (`_billing_fill`, oldest
+statement first; it never inserts). A statement row that the bank re-dated
+from the movements list keys differently and stays unmarked. The payment
+gateway (pasarelapagos.retailcard.cl) is never opened: its "Facturado
+pendiente" needs the payment hand-off, and the dashboard derives the same
+figure (billed amount minus payments since the closing).
 
 Banco Santander has no API for individuals (Chile's Open Finance system is not
 operating yet), `fintself` reads its rendered DOM without movement ids, and its
@@ -1295,10 +1317,14 @@ or re-keys in place it only moves them forward (`_fill_billing`, which locks
 the row while it decides): `unbilled` fills a status never reported, `billed`
 replaces an unreported or unbilled one, nothing turns `billed` back, and a
 stored `statement_date` is never overwritten, so an installment purchase stays
-on the statement that first billed it. A row with nothing to change is not
-written, so `updated_at` only moves on a real change. One batch that sees the
-same key in both views (unbilled first or billed first) therefore stores it
-billed. NULL means "not reported": manual rows, products without a billing
+on the statement that first billed it. A scraper that reads whole statements
+can also hand them back as `BilledStatement`s (keys per closing date;
+`billed_statements()`, only BCI Lider today): after the write `run_scraper`
+calls `mark_billed_statements`, which fills the stored rows they list through
+the same forward-only rule and never inserts one. A row with nothing to change
+is not written, so `updated_at` only moves on a real change. One batch that
+sees the same key in both views (unbilled first or billed first) therefore
+stores it billed. NULL means "not reported": manual rows, products without a billing
 cycle and rows imported before V044, which gain a status on the next scrape
 that still sees them. The latest statement's own figures (closing, next
 closing and due dates, billed amount, minimum payment) are `CreditCardMetrics`

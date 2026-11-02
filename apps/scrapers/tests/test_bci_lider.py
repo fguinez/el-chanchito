@@ -16,8 +16,9 @@ os.environ.setdefault("LIDER_BCI_RUT", "00000000-0")
 os.environ.setdefault("LIDER_BCI_PASSWORD", "test")
 
 from scrapers.backends import bci_lider_web as web
+from scrapers.backends.bci_lider_billing import LiderStatement
 from scrapers.backends.bci_lider_web import BciLiderCardResult
-from scrapers.base import ScrapedProduct
+from scrapers.base import ProductRef, ScrapedExchangeRate, ScrapedProduct
 from scrapers.institutions import bci_lider as bci_lider_mod
 from scrapers.institutions.bci_lider import BciLiderScraper
 
@@ -422,6 +423,139 @@ class TestOneLoginCaching:
         prods = asyncio.run(self.scraper.scrape_products())
 
         assert prods.warnings == ["BciLider: no card balances parsed"]
+
+
+def _lider_statement(issued_on, period_end, movements):
+    return LiderStatement(
+        issued_on=issued_on,
+        period_start=None,
+        period_end=period_end,
+        payment_due_date=None,
+        billed_amount=None,
+        minimum_payment=None,
+        next_period_end=None,
+        movements=movements,
+    )
+
+
+class TestStatements:
+    """Past statements date the billing of the charges they list."""
+
+    # Synthetic: an installment charge on both statements, a newer charge and
+    # a payment on the newer one only.
+    OLDER = _lider_statement(
+        date(2026, 2, 11), date(2026, 2, 10), [(date(2026, 2, 3), -999999)]
+    )
+    NEWER = _lider_statement(
+        date(2026, 3, 11),
+        date(2026, 3, 10),
+        [(date(2026, 2, 3), -999999), (date(2026, 3, 1), -35000), (date(2026, 3, 5), 999999)],
+    )
+
+    def setup_method(self):
+        self.scraper = BciLiderScraper()
+
+    def _scrape(self, monkeypatch, movements, statements):
+        async def fake_scrape_card(rut=None, password=None, cdp_url=None):
+            return BciLiderCardResult(movements=movements, statements=statements)
+
+        monkeypatch.setattr(bci_lider_mod, "scrape_card", fake_scrape_card)
+        return asyncio.run(self.scraper.scrape_transactions())
+
+    def test_a_listed_charge_is_billed_on_its_oldest_statement(self, monkeypatch):
+        """Even one read in "Por facturar"; an unlisted one keeps its view."""
+        # Arrange
+        movements = [
+            {"date": date(2026, 2, 3), "description": "CUOTAS", "cuotas": "02/03",
+             "amount": -999999, "billed": False},
+            {"date": date(2026, 3, 1), "description": "STORE", "cuotas": None,
+             "amount": -35000, "billed": None},
+            {"date": date(2026, 3, 12), "description": "NEW", "cuotas": None,
+             "amount": -35000, "billed": False},
+        ]
+
+        # Act
+        installment, charge, new = self._scrape(
+            monkeypatch, movements, [self.NEWER, self.OLDER]
+        )
+
+        # Assert
+        assert (installment.billing_status, installment.statement_date) == (
+            "billed",
+            date(2026, 2, 10),
+        )
+        assert (charge.billing_status, charge.statement_date) == ("billed", date(2026, 3, 10))
+        assert (new.billing_status, new.statement_date) == ("unbilled", None)
+
+    def test_billed_statements_carry_every_listed_key(self, monkeypatch):
+        """Stored rows of older cycles are marked through them."""
+        # Arrange
+        self._scrape(monkeypatch, [], [self.OLDER, self.NEWER])
+
+        # Act
+        statements = self.scraper.billed_statements()
+
+        # Assert
+        by_date = {s.statement_date: s for s in statements}
+        assert set(by_date) == {date(2026, 2, 10), date(2026, 3, 10)}
+        newer = by_date[date(2026, 3, 10)]
+        assert (newer.institution, newer.product_kind, newer.currency) == (
+            "bci_lider",
+            "credit_card",
+            "CLP",
+        )
+        assert newer.external_ids == {
+            bci_lider_mod.movement_external_id(day, amount)
+            for day, amount in self.NEWER.movements
+        }
+
+    def test_the_key_matches_the_movement_key(self):
+        txn = self.scraper._movement_to_transaction(
+            {"date": date(2026, 3, 1), "description": "S", "cuotas": None, "amount": -35000}
+        )
+
+        assert txn.external_id == bci_lider_mod.movement_external_id(date(2026, 3, 1), -35000)
+
+    def test_no_statements_without_a_scrape(self):
+        assert self.scraper.billed_statements() == []
+
+    def test_a_failed_scrape_clears_the_statements(self, monkeypatch):
+        # Arrange
+        self._scrape(monkeypatch, [], [self.NEWER])
+
+        async def failing(rut=None, password=None, cdp_url=None):
+            raise RuntimeError("login failed")
+
+        monkeypatch.setattr(bci_lider_mod, "scrape_card", failing)
+
+        # Act
+        with pytest.raises(RuntimeError):
+            asyncio.run(self.scraper.scrape_transactions())
+
+        # Assert
+        assert self.scraper.billed_statements() == []
+
+    def test_the_products_leg_carries_the_rate(self, monkeypatch):
+        # Arrange
+        rate = ScrapedExchangeRate(
+            institution="bci_lider",
+            base_currency="USD",
+            rate="1000.0000",
+            product=ProductRef(kind="credit_card", currency="USD"),
+            source="Valor del dólar de la tarjeta",
+        )
+
+        async def fake_scrape_card(rut=None, password=None, cdp_url=None):
+            return BciLiderCardResult(exchange_rates=[rate])
+
+        monkeypatch.setattr(bci_lider_mod, "scrape_card", fake_scrape_card)
+
+        # Act
+        asyncio.run(self.scraper.scrape_transactions())
+        prods = asyncio.run(self.scraper.scrape_products())
+
+        # Assert
+        assert prods.exchange_rates == [rate]
 
 
 class _FakeChrome:
