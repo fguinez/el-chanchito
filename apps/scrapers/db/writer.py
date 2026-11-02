@@ -345,6 +345,23 @@ def _is_final_id(external_id: str | None) -> bool:
     return bool(external_id) and external_id.startswith(_FINAL_ID_PREFIXES)
 
 
+def _untagged_ref_key(external_id: str) -> str | None:
+    """The bare `bch_ref_` key a section-tagged one superseded, else None.
+
+    A billed BanChile row outside the statement's operations section is keyed
+    ``bch_ref_<REF>_<TAG>`` (see `external_id_for`); before the tag existed it
+    was stored as ``bch_ref_<REF>``, the key of the purchase whose reference
+    it may repeat. The normalised reference holds no "_", so the first one
+    after the prefix starts the tag.
+    """
+    if not external_id.startswith("bch_ref_"):
+        return None
+    reference, sep, _tag = external_id[len("bch_ref_"):].partition("_")
+    if not sep or not reference:
+        return None
+    return f"bch_ref_{reference}"
+
+
 def _claim_decision(
     external_id: str,
     siblings: list[tuple],
@@ -383,7 +400,20 @@ def _claim_decision(
     same amount where one is genuinely new *and* the other's operation id failed
     to load would be read as one movement ("keep"). It self-heals on the next
     run, when both ids load and the new one inserts.
+
+    One finally identified row IS re-keyed: the one stored under the bare
+    reference a section-tagged key superseded (`_untagged_ref_key`), checked
+    before any other sibling. Being a sibling it has the same date and amount,
+    so it is this movement as the pre-tag code stored it. When this scrape
+    also carries the bare key, the row belongs to that movement instead (the
+    purchase whose reference a stamp tax repeats) and is left alone; a tax the
+    old code folded into its purchase then simply inserts.
     """
+    superseded = _untagged_ref_key(external_id)
+    if superseded is not None and superseded not in incoming_ids:
+        for row_id, row_external_id in siblings:
+            if row_external_id == superseded and row_id not in claimed:
+                return "rekey", row_id
     incoming_is_final = _is_final_id(external_id)
     fallback = None
     for row_id, row_external_id in siblings:

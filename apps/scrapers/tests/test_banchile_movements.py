@@ -596,6 +596,123 @@ class TestBilledFingerprintCollisions:
         assert len(kept) == 2
 
 
+class TestBilledSectionReferenceKeys:
+    """A charge outside operations that repeats a purchase's reference keeps its own key."""
+
+    _REFERENCE = "2008 12345678"
+
+    def _purchase(self):
+        return _billed_row(referencia=self._REFERENCE, monto=2500000)
+
+    def _stamp_tax(self, monto=999999, descripcion="IMPUESTO SINTETICO"):
+        """A stamp-tax row carrying the reference of the purchase it taxes."""
+        return _billed_row(
+            referencia=self._REFERENCE,
+            monto=monto,
+            descripcion=descripcion,
+            grupo="generico",
+        )
+
+    def _payload(self, charges):
+        payload = _billed_payload([self._purchase()])
+        payload["seccionCargosImpuestosAbonos"] = _section(charges)
+        return payload
+
+    def test_a_tax_and_its_purchase_get_different_keys(self):
+        """The collision the writer used to fold the tax into the purchase over."""
+        # Arrange
+        payload = self._payload([self._stamp_tax()])
+
+        # Act
+        purchase, tax = parse_billed_movements(payload, "2026-08-25")
+
+        # Assert
+        assert purchase.operation_id == tax.operation_id == self._REFERENCE
+        assert external_id_for(purchase) == "bch_ref_200812345678"
+        assert external_id_for(tax) == "bch_ref_200812345678_CARGOSIMPUESTOSABONOS"
+
+    def test_operations_keys_are_unchanged(self):
+        """A purchase keys exactly as it did with no other section present."""
+        # Arrange
+        alone = parse_billed_movements(_billed_payload([self._purchase()]), "2026-08-25")
+
+        # Act
+        purchase, _ = parse_billed_movements(
+            self._payload([self._stamp_tax()]), "2026-08-25"
+        )
+
+        # Assert
+        assert purchase.reference_tag == ""
+        assert external_id_for(purchase) == external_id_for(alone[0])
+
+    def test_a_repeated_reference_within_a_section_gets_an_occurrence(self):
+        """Two charges of one section on the same purchase stay apart."""
+        # Arrange
+        payload = self._payload(
+            [self._stamp_tax(), self._stamp_tax(monto=1000000, descripcion="CARGO SINTETICO")]
+        )
+
+        # Act
+        _, first, second = parse_billed_movements(payload, "2026-08-25")
+
+        # Assert
+        assert external_id_for(first) == "bch_ref_200812345678_CARGOSIMPUESTOSABONOS"
+        assert external_id_for(second) == "bch_ref_200812345678_CARGOSIMPUESTOSABONOS_2"
+
+    def test_a_repeat_differing_only_in_spacing_still_gets_an_occurrence(self):
+        """Repeats are counted on the normalised reference the key is built from."""
+        # Arrange
+        respaced = self._stamp_tax(monto=1000000)
+        respaced["numReferencia"] = "2008  12345678"
+        payload = self._payload([self._stamp_tax(), respaced])
+
+        # Act
+        _, first, second = parse_billed_movements(payload, "2026-08-25")
+
+        # Assert
+        assert external_id_for(first) == "bch_ref_200812345678_CARGOSIMPUESTOSABONOS"
+        assert external_id_for(second) == "bch_ref_200812345678_CARGOSIMPUESTOSABONOS_2"
+
+    def test_tagged_keys_are_stable_across_reads(self):
+        """A second read of the same closed statement yields the same keys."""
+        # Arrange
+        payload = self._payload([self._stamp_tax(), self._stamp_tax(monto=1000000)])
+
+        # Act
+        first_read = parse_billed_movements(payload, "2026-08-25")
+        second_read = parse_billed_movements(payload, "2026-08-25")
+
+        # Assert
+        assert [external_id_for(m) for m in first_read] == [
+            external_id_for(m) for m in second_read
+        ]
+
+    def test_dedupe_keeps_every_tagged_row_and_drops_a_replay(self):
+        """Repeats within a statement survive; the statement read twice does not."""
+        # Arrange
+        payload = self._payload([self._stamp_tax(), self._stamp_tax()])
+        parsed = parse_billed_movements(payload, "2026-08-25")
+
+        # Act
+        kept = dedupe_movements(parsed + parse_billed_movements(payload, "2026-08-25"))
+
+        # Assert
+        assert len(kept) == 3
+
+    def test_a_reference_less_charge_keeps_its_fingerprint_key(self):
+        """No reference, no tag: the section already sits in the fingerprint."""
+        # Arrange
+        payload = self._payload([_charge_row(999999)])
+
+        # Act
+        _, charge = parse_billed_movements(payload, "2026-08-25")
+
+        # Assert
+        assert charge.operation_id is None
+        assert charge.reference_tag == ""
+        assert external_id_for(charge).startswith("bch_fp_")
+
+
 class TestBilledStatementCount:
     """`BANCHILE_BILLED_STATEMENTS` sets how far back the billed legs read (fix F)."""
 
