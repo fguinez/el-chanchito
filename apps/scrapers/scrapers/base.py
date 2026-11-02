@@ -25,6 +25,7 @@ from product_model import (
 __all__ = [
     "BILLING_STATUS_BY_FLAG",
     "BaseScraper",
+    "BilledStatement",
     "DailyPrice",
     "ProductRef",
     "ProductScrapeResult",
@@ -134,6 +135,18 @@ class VanishedWindow:
     include_unreported: bool = False
 
 
+@dataclass(frozen=True)
+class BilledStatement:
+    """One card statement and the keys of the movements it billed, for
+    `db.writer.mark_billed_statements`. Never part of the ingest contract."""
+
+    institution: str
+    product_kind: str
+    currency: str
+    statement_date: date
+    external_ids: frozenset[str]
+
+
 class BaseScraper(ABC):
     """Interface that all scrapers must implement.
 
@@ -179,5 +192,13 @@ class BaseScraper(ABC):
 
         `run_scraper` soft-deletes the pending rows in them that scrape no
         longer carried, once every one of its transactions was written.
+        """
+        return []
+
+    def billed_statements(self) -> list[BilledStatement]:
+        """Statements the last `scrape_transactions` read; none by default.
+
+        `run_scraper` marks the stored rows each one lists as billed on it,
+        after writing that scrape's transactions.
         """
         return []
