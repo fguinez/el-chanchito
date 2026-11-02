@@ -30,6 +30,7 @@ from db.writer import (
     UnresolvedRateScope,
     delete_superseded_transactions,
     finish_scraper_run,
+    mark_billed_statements,
     soft_delete_vanished_transactions,
     start_scraper_run,
     upsert_exchange_rate,
@@ -57,7 +58,7 @@ from product_model import (
     TermDepositMetrics,
     TransactionLocation,
 )
-from scrapers.base import SupersededTransaction, VanishedWindow
+from scrapers.base import BilledStatement, SupersededTransaction, VanishedWindow
 
 # The single user V009 seeds; `_resolve_product` attaches everything to it.
 SEEDED_USER_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -1410,6 +1411,115 @@ class TestProductRefTransactions:
         result = write_transactions([self._txn("fintual_stock_sell_1001")])
 
         assert (result.inserted, result.unresolved) == (1, 0)
+
+
+class TestBilledStatements:
+    """Statements mark stored card rows billed, forward-only, never inserting."""
+
+    _KEY = "bcl_00000000000000a1"
+    _OTHER = "bcl_00000000000000b2"
+
+    def _store(self, external_id=_KEY, institution="bci_lider", **fields):
+        upsert_transactions(
+            [_txn(external_id, institution=institution, kind="credit_card", **fields)]
+        )
+
+    def _statement(self, statement_date=_CLOSED, keys=(_KEY,), currency="CLP"):
+        return BilledStatement(
+            institution="bci_lider",
+            product_kind="credit_card",
+            currency=currency,
+            statement_date=statement_date,
+            external_ids=frozenset(keys),
+        )
+
+    def test_an_unbilled_or_unreported_row_becomes_billed(self, db_conn):
+        # Arrange
+        self._store(billing_status="unbilled")
+        self._store(self._OTHER)
+
+        # Act
+        changed = mark_billed_statements([self._statement(keys=(self._KEY, self._OTHER))])
+
+        # Assert
+        assert changed == 2
+        for key in (self._KEY, self._OTHER):
+            row = _billing_of(db_conn, key)
+            assert (row["billing_status"], row["statement_date"]) == ("billed", _CLOSED)
+
+    def test_the_oldest_statement_wins_whatever_the_order(self, db_conn):
+        """An installment purchase listed on two statements keeps the first."""
+        # Arrange
+        self._store()
+
+        # Act
+        mark_billed_statements(
+            [self._statement(_CLOSED_LATER), self._statement(_CLOSED)]
+        )
+
+        # Assert
+        assert _billing_of(db_conn, self._KEY)["statement_date"] == _CLOSED
+
+    def test_a_stored_statement_date_is_kept(self, db_conn):
+        # Arrange
+        self._store(billing_status="billed", statement_date=_CLOSED)
+        before = _billing_of(db_conn, self._KEY)
+
+        # Act
+        changed = mark_billed_statements([self._statement(_CLOSED_LATER)])
+
+        # Assert
+        assert changed == 0
+        assert _billing_of(db_conn, self._KEY) == before
+
+    def test_a_billed_row_without_a_date_gains_one(self, db_conn):
+        self._store(billing_status="billed")
+
+        mark_billed_statements([self._statement()])
+
+        assert _billing_of(db_conn, self._KEY)["statement_date"] == _CLOSED
+
+    def test_never_inserts(self, db_conn):
+        self._store()
+
+        mark_billed_statements([self._statement(keys=(self._KEY, self._OTHER))])
+
+        assert _count(db_conn, "transactions") == 1
+
+    def test_only_its_own_product_and_scraper(self, db_conn):
+        """Another institution's row under the same key, a USD statement, or a
+        missing product leave everything alone."""
+        # Arrange
+        self._store(institution="banchile")
+
+        # Act
+        changed = mark_billed_statements(
+            [self._statement(), self._statement(currency="USD")]
+        )
+
+        # Assert
+        assert changed == 0
+        row = _billing_of(db_conn, self._KEY)
+        assert (row["billing_status"], row["statement_date"]) == (None, None)
+
+    def test_a_deleted_row_is_left_alone(self, db_conn):
+        # Arrange
+        self._store(billing_status="unbilled")
+        db_conn.execute("UPDATE transactions SET deleted_at = now()")
+
+        # Act
+        changed = mark_billed_statements([self._statement()])
+
+        # Assert
+        assert changed == 0
+        row = _billing_of(db_conn, self._KEY)
+        assert (row["billing_status"], row["statement_date"]) == ("unbilled", None)
+
+    def test_running_twice_changes_nothing_more(self, db_conn):
+        self._store(billing_status="unbilled")
+        mark_billed_statements([self._statement()])
+
+        assert mark_billed_statements([self._statement()]) == 0
 
 
 class TestVanishedTransactions:

@@ -15,6 +15,7 @@ from psycopg.types.json import Jsonb
 from db.connection import get_pool, with_db_retry
 from db.slug import slugify, unique_slug
 from scrapers.base import (
+    BilledStatement,
     ScrapedExchangeRate,
     ScrapedPriceHistory,
     ScrapedProduct,
@@ -1394,6 +1395,69 @@ def soft_delete_vanished_transactions(
                         window.after,
                     )
     return deleted
+
+
+@with_db_retry
+def mark_billed_statements(statements: list[BilledStatement]) -> int:
+    """Mark the stored rows each statement lists as billed on it; returns how
+    many rows changed.
+
+    A row qualifies when it sits on the institution's (kind, currency) product
+    with no external_ref, its own scraper wrote it and its key is one of the
+    statement's `external_ids`. Its billing moves forward exactly like a
+    scraped row's (`_billing_fill`): `billed` replaces NULL or `unbilled`, a
+    stored statement date is kept. Statements are applied oldest first, so a
+    key two statements list (an installment purchase) keeps the first one.
+    Nothing is inserted, a deleted row is left alone, and a missing product
+    is skipped (lookup only). A row with nothing to change is not written.
+    Each statement commits on its own.
+    """
+    changed = 0
+    if not statements:
+        return changed
+    pool = get_pool()
+    with pool.connection() as conn:
+        for statement in sorted(statements, key=lambda s: s.statement_date):
+            if not statement.external_ids:
+                continue
+            with conn.transaction():
+                product_ids = _null_ref_products(
+                    conn,
+                    statement.institution,
+                    statement.product_kind,
+                    statement.currency,
+                )
+                if not product_ids:
+                    continue
+                rows = conn.execute(
+                    """
+                    SELECT id, billing_status, statement_date FROM transactions
+                    WHERE product_id = ANY(%s) AND source = %s
+                      AND external_id = ANY(%s) AND deleted_at IS NULL
+                    ORDER BY id
+                    FOR UPDATE
+                    """,
+                    (
+                        product_ids,
+                        f"scraper_{statement.institution}",
+                        sorted(statement.external_ids),
+                    ),
+                ).fetchall()
+                for row_id, stored_status, stored_date in rows:
+                    fill = _billing_fill(
+                        stored_status, stored_date, "billed", statement.statement_date
+                    )
+                    if fill is None:
+                        continue
+                    conn.execute(
+                        "UPDATE transactions SET billing_status = %s, "
+                        "statement_date = %s, updated_at = now() WHERE id = %s",
+                        (*fill, row_id),
+                    )
+                    changed += 1
+    if changed:
+        logger.info("Marked %d stored transaction(s) billed from statements", changed)
+    return changed
 
 
 @with_db_retry

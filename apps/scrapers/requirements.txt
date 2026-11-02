@@ -10,6 +10,9 @@ httpx>=0.27,<1
 # banchile_web relies on needs Playwright >= 1.49.
 playwright>=1.49,<2
 pydantic>=2.7,<3
+# Pure-Python PDF text extraction: the Tarjeta Lider Bci statements
+# (estado de cuenta) are only served as PDFs.
+pypdf>=6.21.4,<7
 # zoneinfo reads the OS time zone database, which Windows doesn't ship; without
 # this, ZoneInfo("America/Santiago") fails at import there. Linux and macOS
 # (and the Docker image) use the system one.

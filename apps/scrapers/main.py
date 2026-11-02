@@ -27,6 +27,7 @@ from db.writer import (
     UnresolvedRateScope,
     delete_superseded_transactions,
     finish_scraper_run,
+    mark_billed_statements,
     soft_delete_vanished_transactions,
     start_scraper_run,
     upsert_exchange_rate,
@@ -157,6 +158,15 @@ async def run_scraper(scraper: BaseScraper) -> None:
         except Exception as e:
             logger.exception("Scraper %s: vanished-row cleanup failed", scraper.name)
             warnings.append(f"cleanup: {e}")
+        # Statements the scrape read mark the stored rows they billed, the
+        # ones this write stored included; a failure is a warning.
+        try:
+            statements = scraper.billed_statements()
+            if statements:
+                mark_billed_statements(statements)
+        except Exception as e:
+            logger.exception("Scraper %s: statement billing failed", scraper.name)
+            warnings.append(f"statements: {e}")
 
     rates: list[ScrapedExchangeRate] = []
     histories: list[ScrapedPriceHistory] = []

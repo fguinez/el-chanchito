@@ -24,6 +24,7 @@ from db.writer import (
 from main import run_outcome, run_scraper
 from scrapers.base import (
     BaseScraper,
+    BilledStatement,
     DailyPrice,
     ProductRef,
     ProductScrapeResult,
@@ -51,6 +52,7 @@ class _StubScraper(BaseScraper):
         transactions=None,
         superseded=(),
         vanished=(),
+        statements=(),
         exchange_rates=(),
         price_histories=(),
     ):
@@ -61,6 +63,7 @@ class _StubScraper(BaseScraper):
         self._transactions = transactions or []
         self._superseded = list(superseded)
         self._vanished = list(vanished)
+        self._statements = list(statements)
         self._exchange_rates = list(exchange_rates)
         self._price_histories = list(price_histories)
 
@@ -69,6 +72,9 @@ class _StubScraper(BaseScraper):
 
     def vanished_windows(self):
         return self._vanished
+
+    def billed_statements(self):
+        return self._statements
 
     async def scrape_transactions(self):
         if self._tx_exc is not None:
@@ -123,6 +129,7 @@ def writer(monkeypatch):
         "upsert_price_history": MagicMock(return_value=0),
         "delete_superseded_transactions": MagicMock(),
         "soft_delete_vanished_transactions": MagicMock(),
+        "mark_billed_statements": MagicMock(return_value=0),
         "finish_scraper_run": MagicMock(),
     }
     monkeypatch.setattr(main_mod, "start_scraper_run", MagicMock(return_value="run-1"))
@@ -483,6 +490,70 @@ class TestVanishedCleanup:
         # Assert
         finish.assert_called_once_with(
             "run-1", "partial", transactions_imported=0, error_message="cleanup: db down"
+        )
+
+
+_STATEMENT = BilledStatement(
+    institution="bci_lider",
+    product_kind="credit_card",
+    currency="CLP",
+    statement_date=date(2026, 3, 10),
+    external_ids=frozenset({"bcl_00000000000000a1"}),
+)
+
+
+class TestBilledStatements:
+    """The statements a scrape read mark the stored rows they billed."""
+
+    def test_marks_after_the_write(self, finish, monkeypatch):
+        """The write comes first, so this scrape's new rows are marked too."""
+        # Arrange
+        calls = []
+        monkeypatch.setattr(
+            main_mod,
+            "write_transactions",
+            lambda txns: calls.append("write") or TransactionWriteResult(),
+        )
+        monkeypatch.setattr(
+            main_mod,
+            "mark_billed_statements",
+            lambda statements: calls.append(("mark", statements)) or 1,
+        )
+        scraper = _StubScraper(transactions=[_transaction(1)], statements=[_STATEMENT])
+
+        # Act
+        asyncio.run(run_scraper(scraper))
+
+        # Assert
+        assert calls == ["write", ("mark", [_STATEMENT])]
+
+    def test_skipped_when_the_transactions_leg_failed(self, writer):
+        # Arrange
+        scraper = _StubScraper(tx_exc=RuntimeError("login failed"), statements=[_STATEMENT])
+
+        # Act
+        asyncio.run(run_scraper(scraper))
+
+        # Assert
+        writer["mark_billed_statements"].assert_not_called()
+
+    def test_not_called_without_statements(self, writer):
+        # Act
+        asyncio.run(run_scraper(_StubScraper(transactions=[_transaction(1)])))
+
+        # Assert
+        writer["mark_billed_statements"].assert_not_called()
+
+    def test_a_marking_failure_is_a_warning(self, writer, finish):
+        # Arrange
+        writer["mark_billed_statements"].side_effect = RuntimeError("db down")
+
+        # Act
+        asyncio.run(run_scraper(_StubScraper(statements=[_STATEMENT])))
+
+        # Assert
+        finish.assert_called_once_with(
+            "run-1", "partial", transactions_imported=0, error_message="statements: db down"
         )
 
 
