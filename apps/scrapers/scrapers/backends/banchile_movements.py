@@ -182,6 +182,15 @@ class BanChileMovement:
     another closing date than the one it was requested for: which statement
     billed them is unknown, so they report no billing status (and their
     `statement_date` is blank). Never identity.
+
+    `reference_tag` qualifies a billed `operation_id` that is not unique on its
+    own: a national statement row outside `seccionOperaciones` (a stamp tax,
+    say) carries the `numReferencia` of the purchase it applies to, so the
+    reference alone would give both rows one key. It is the section's tag
+    (`section_tag`), plus an occurrence suffix when one section repeats a
+    reference, and "" on every operations row and on every other leg, whose
+    keys are therefore unchanged. It is part of the identity together with
+    `operation_id` (see `external_id_for`).
     """
 
     source: str
@@ -199,6 +208,7 @@ class BanChileMovement:
     location: Optional[TransactionLocation] = None
     later_installment: bool = False
     billing_unknown: bool = False
+    reference_tag: str = ""
 
 
 @dataclass(frozen=True)
@@ -742,6 +752,18 @@ def is_later_installment(raw_cuotas) -> bool:
     return match is not None and int(match.group(1)) > 1
 
 
+def section_tag(section: str) -> str:
+    """A national statement section's key tag: "seccionFooBar" -> "FOOBAR".
+
+    Derived from the section name rather than looked up, so a section the bank
+    adds later is tagged too, and always the same way.
+    """
+    name = _text(section)
+    if name.startswith("seccion"):
+        name = name[len("seccion"):]
+    return _ID_NOISE_RE.sub("", name).upper()
+
+
 def billed_reference(raw_reference) -> Optional[str]:
     """A billed row's reference, or None when it isn't one.
 
@@ -798,6 +820,11 @@ def parse_billed_movement(
     A row outside `seccionOperaciones` also carries its `section`, so a credit
     there can never share a key with an operations row; operations rows keep
     the four-field identity they were always stored under.
+
+    The same goes for the reference: outside `seccionOperaciones` a row can
+    carry the `numReferencia` of the purchase it applies to (the stamp tax
+    "IMPUESTO DL 3475" does), so such a row's reference is qualified by its
+    section's `reference_tag`. Operations rows keep the bare reference.
     """
     if not isinstance(raw, dict):
         return None
@@ -826,18 +853,21 @@ def parse_billed_movement(
     description = (
         _text(raw.get("descripcion")) or _text(raw.get("comercio")) or "Movimiento"
     )
+    reference = billed_reference(raw.get("numReferencia"))
+    tagged = reference is not None and section != _OPERATIONS_SECTION
     return BanChileMovement(
         source="card_billed",
         product_kind="credit_card",
         description=description,
         amount=amount,
         transaction_date=tx_date,
-        operation_id=billed_reference(raw.get("numReferencia")),
+        operation_id=reference,
         fingerprint=fingerprint,
         statement_date=_text(fecha_facturacion),
         # The national statement reports the merchant's city, never a country.
         location=card_location(raw.get("ciudad"), None),
         later_installment=is_later_installment(raw.get("cuotas")),
+        reference_tag=section_tag(section) if tagged else "",
     )
 
 
@@ -891,6 +921,29 @@ def _disambiguated(
     return replace(movement, fingerprint=fingerprint)
 
 
+def _tagged_uniquely(movement: BanChileMovement, seen: set[tuple]) -> BanChileMovement:
+    """`movement` with a `reference_tag` no earlier row of its statement holds.
+
+    Only a row outside `seccionOperaciones` with a reference gets here. The
+    first row of a section with a given reference keeps the plain section tag;
+    a repeat (two charges of one section applying to the same purchase) gets
+    an occurrence suffix. Statement rows come back in the same order on every
+    read of a closed statement, so the repeat is the same row every time.
+    References are compared as `external_id_for` normalises them, so two that
+    differ only in spacing or punctuation still count as a repeat.
+    """
+    reference = _ID_NOISE_RE.sub("", movement.operation_id or "").upper()
+    tag = movement.reference_tag
+    occurrence = 1
+    while (reference, tag) in seen:
+        occurrence += 1
+        tag = f"{movement.reference_tag}_{occurrence}"
+    seen.add((reference, tag))
+    if tag == movement.reference_tag:
+        return movement
+    return replace(movement, reference_tag=tag)
+
+
 def parse_billed_movements(payload, fecha_facturacion: str = "") -> list[BanChileMovement]:
     """Every real row of a national `resumen-por-fecha` response.
 
@@ -900,11 +953,17 @@ def parse_billed_movements(payload, fecha_facturacion: str = "") -> list[BanChil
     `totales: true` group totals, and the per-card "TOTAL TARJETA" subtotal,
     which has no `totales` flag but no transaction date either (and so is
     dropped by `parse_billed_movement`).
+
+    A row outside `seccionOperaciones` that carries a reference gets a
+    `reference_tag`, unique per (reference, tag) within the statement
+    (`_tagged_uniquely`), so it never shares a key with the purchase whose
+    `numReferencia` it repeats.
     """
     if not isinstance(payload, dict):
         return []
     movements = []
     seen: set[tuple] = set()
+    tagged: set[tuple] = set()
     for section in _national_sections(payload):
         for raw in payload[section]["transaccionesTarjetas"]:
             if isinstance(raw, dict) and raw.get("totales"):
@@ -914,6 +973,8 @@ def parse_billed_movements(payload, fecha_facturacion: str = "") -> list[BanChil
                 continue
             if movement.operation_id is None:
                 movement = _disambiguated(movement, raw.get("numReferencia"), seen)
+            elif movement.reference_tag:
+                movement = _tagged_uniquely(movement, tagged)
             movements.append(movement)
     return movements
 
@@ -1315,6 +1376,7 @@ def dedupe_movements(movements: list[BanChileMovement]) -> list[BanChileMovement
             movement.source,
             movement.currency,
             movement.operation_id,
+            movement.reference_tag,
             movement.fingerprint,
         )
         if key in seen:

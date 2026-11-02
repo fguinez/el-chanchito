@@ -89,8 +89,8 @@ def external_id_for(movement: BanChileMovement) -> str:
     """The `external_id` of one BanChile movement.
 
     Three forms, each greppable by its prefix, and none of them derived from the
-    description, the section, or the movement's position or multiplicity within
-    a scrape:
+    description or the movement's position within a scrape (a billed national
+    row outside `seccionOperaciones` is the one key that names its section):
 
     ``bch_op_<TRANSACCIONID>``
         A checking movement the bank gave an operation id for: the "ID
@@ -104,10 +104,19 @@ def external_id_for(movement: BanChileMovement) -> str:
 
     ``bch_ref_<NUMREFERENCIA>``
         A billed card row's `numReferencia` ("DDMM NNNNNNNN"), unique across a
-        statement and byte-identical across two separate logins. An all-zero
-        suffix means the bank has no reference for that row (observed on a
-        payment) and is treated as absent by `billed_reference`, never as a
-        value.
+        statement's `seccionOperaciones` and byte-identical across two separate
+        logins. An all-zero suffix means the bank has no reference for that row
+        (observed on a payment) and is treated as absent by `billed_reference`,
+        never as a value.
+
+    ``bch_ref_<NUMREFERENCIA>_<TAG>``
+        A billed national row from any other section, which may repeat the
+        reference of the purchase it applies to (a stamp tax does), qualified
+        by its `reference_tag`: the section's tag ("CARGOSIMPUESTOSABONOS"),
+        plus "_N" for the Nth row of one section with that reference. The
+        normalised reference holds no "_", so the first "_" after the prefix
+        always starts the tag. Rows stored under the bare reference before the
+        tag existed are adopted onto the tagged key by `db/writer.py`.
 
     ``bch_fp_<md5(fingerprint)[:16]>``
         The description-free fallback for everything else, hashing the leg's
@@ -148,6 +157,8 @@ def external_id_for(movement: BanChileMovement) -> str:
     operation_id = _normalized_id(movement.operation_id)
     if operation_id is not None:
         prefix = "bch_ref_" if movement.source == "card_billed" else "bch_op_"
+        if movement.reference_tag:
+            return f"{prefix}{operation_id}_{movement.reference_tag}"
         return f"{prefix}{operation_id}"
     parts = movement.fingerprint
     if movement.currency != "CLP":

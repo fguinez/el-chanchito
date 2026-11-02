@@ -867,6 +867,109 @@ class TestCardAdoptionWindow:
         assert inserted == 1
 
 
+class TestSectionTaggedReferences:
+    """A billed charge outside the operations section keys by reference + section.
+
+    Before the tag, such a row shared the bare `bch_ref_` key of the purchase
+    whose reference it repeats (a stamp tax) and was folded into it, or, with
+    a reference of its own (a merchant credit), was stored under the bare key.
+    """
+
+    _BARE = "bch_ref_200812345678"
+    _TAGGED = "bch_ref_200812345678_CARGOSIMPUESTOSABONOS"
+
+    def _purchase(self):
+        return _card_txn(
+            self._BARE,
+            amount=-2500000,
+            billing_status="billed",
+            statement_date=_CLOSED,
+        )
+
+    def _charge(self, key=_TAGGED, amount=-999999, description="IMPUESTO SINTETICO"):
+        return _card_txn(
+            key,
+            amount=amount,
+            billing_status="billed",
+            statement_date=_CLOSED,
+            description=description,
+        )
+
+    def _rows(self, conn):
+        return [
+            (row["external_id"], row["amount"])
+            for row in conn.execute(
+                "SELECT external_id, amount FROM transactions ORDER BY external_id"
+            )
+        ]
+
+    def test_a_tax_folded_into_its_purchase_is_inserted(self, db_conn):
+        """The purchase keeps its row; the tax lands as a row of its own."""
+        # Arrange
+        upsert_transactions([self._purchase()])
+
+        # Act
+        inserted = upsert_transactions([self._purchase(), self._charge()])
+
+        # Assert
+        assert inserted == 1
+        assert self._rows(db_conn) == [
+            (self._BARE, Decimal("-2500000.00")),
+            (self._TAGGED, Decimal("-999999.00")),
+        ]
+
+    def test_a_charge_stored_under_the_bare_key_is_adopted(self, db_conn):
+        """No duplicate: the stored row is re-keyed onto the tagged key in place."""
+        # Arrange
+        upsert_transactions([self._charge(self._BARE, amount=1000000)])
+        (row_id,) = db_conn.execute("SELECT id FROM transactions").fetchone().values()
+
+        # Act
+        inserted = upsert_transactions([self._charge(amount=1000000)])
+
+        # Assert
+        assert inserted == 0
+        assert db_conn.execute("SELECT id, external_id FROM transactions").fetchall() == [
+            {"id": row_id, "external_id": self._TAGGED}
+        ]
+
+    def test_a_section_repeat_adopts_once_and_inserts_the_other(self, db_conn):
+        """The first tagged row takes the stored row; the repeat is new."""
+        # Arrange
+        upsert_transactions([self._charge(self._BARE)])
+
+        # Act
+        inserted = upsert_transactions(
+            [
+                self._charge(),
+                self._charge(f"{self._TAGGED}_2", description="CARGO SINTETICO"),
+            ]
+        )
+
+        # Assert
+        assert inserted == 1
+        assert self._rows(db_conn) == [
+            (self._TAGGED, Decimal("-999999.00")),
+            (f"{self._TAGGED}_2", Decimal("-999999.00")),
+        ]
+
+    def test_a_re_scrape_is_idempotent(self, db_conn):
+        """Once re-keyed, the same statement read again stores nothing new."""
+        # Arrange
+        upsert_transactions([self._purchase()])
+        scrape = [self._purchase(), self._charge(), self._charge(f"{self._TAGGED}_2")]
+        upsert_transactions(scrape)
+        before = self._rows(db_conn)
+
+        # Act
+        inserted = upsert_transactions(scrape)
+
+        # Assert
+        assert inserted == 0
+        assert self._rows(db_conn) == before
+        assert len(before) == 3
+
+
 class TestTransferLinks:
     """V028: a transfer links the scraped rows that moved its money; scraping
     them again must keep the link and the is_internal_transfer flag.

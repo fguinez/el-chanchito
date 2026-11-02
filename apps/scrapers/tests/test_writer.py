@@ -34,6 +34,7 @@ from db.writer import (
     _headline_decimal,
     _is_final_id,
     _similar_descriptions,
+    _untagged_ref_key,
     _write_decision,
     start_scraper_run,
     upsert_product,
@@ -552,6 +553,102 @@ class TestClaimDecision:
 
     def test_no_siblings_inserts(self):
         assert _claim_decision("bch_op_1", [], set(), set()) == ("insert", None)
+
+    def test_a_section_tagged_key_adopts_its_bare_reference_row(self):
+        """A charge stored under the purchase-style key before the tag existed."""
+        # Arrange
+        siblings = [("row-1", "bch_ref_200812345678")]
+
+        # Act
+        decision = _claim_decision(
+            "bch_ref_200812345678_CARGOSIMPUESTOSABONOS", siblings, set(), set()
+        )
+
+        # Assert
+        assert decision == ("rekey", "row-1")
+
+    def test_the_bare_reference_row_is_preferred_over_a_legacy_sibling(self):
+        """The exact superseded key is this movement; a hash row only might be."""
+        # Arrange
+        siblings = [("row-1", "bch_aaa"), ("row-2", "bch_ref_200812345678")]
+
+        # Act
+        decision = _claim_decision(
+            "bch_ref_200812345678_CARGOSIMPUESTOSABONOS", siblings, set(), set()
+        )
+
+        # Assert
+        assert decision == ("rekey", "row-2")
+
+    def test_a_bare_reference_this_scrape_carries_is_never_adopted(self):
+        """The row belongs to the purchase whose reference the charge repeats."""
+        # Arrange
+        siblings = [("row-1", "bch_ref_200812345678")]
+
+        # Act
+        decision = _claim_decision(
+            "bch_ref_200812345678_CARGOSIMPUESTOSABONOS",
+            siblings,
+            set(),
+            {"bch_ref_200812345678"},
+        )
+
+        # Assert
+        assert decision == ("insert", None)
+
+    def test_another_reference_row_is_not_adopted(self):
+        """Only the exact bare key is superseded, never another final row."""
+        # Arrange
+        siblings = [("row-1", "bch_ref_200812345679")]
+
+        # Act
+        decision = _claim_decision(
+            "bch_ref_200812345678_CARGOSIMPUESTOSABONOS", siblings, set(), set()
+        )
+
+        # Assert
+        assert decision == ("insert", None)
+
+    def test_a_claimed_bare_reference_row_is_not_adopted_twice(self):
+        """The section's repeat inserts instead of stealing the first one's row."""
+        # Arrange
+        siblings = [("row-1", "bch_ref_200812345678")]
+
+        # Act
+        decision = _claim_decision(
+            "bch_ref_200812345678_CARGOSIMPUESTOSABONOS_2", siblings, {"row-1"}, set()
+        )
+
+        # Assert
+        assert decision == ("insert", None)
+
+
+class TestUntaggedRefKey:
+    @pytest.mark.parametrize(
+        ("external_id", "expected"),
+        [
+            pytest.param(
+                "bch_ref_200812345678_CARGOSIMPUESTOSABONOS",
+                "bch_ref_200812345678",
+                id="tagged",
+            ),
+            pytest.param(
+                "bch_ref_200812345678_CARGOSIMPUESTOSABONOS_2",
+                "bch_ref_200812345678",
+                id="tagged-repeat",
+            ),
+            pytest.param("bch_ref_200812345678", None, id="bare-reference"),
+            pytest.param("bch_op_12345678901", None, id="operation-id"),
+            pytest.param("bch_fp_a1b2c3d4e5f60718", None, id="fingerprint"),
+        ],
+    )
+    def test_only_a_tagged_reference_has_a_superseded_key(self, external_id, expected):
+        """The bare key is everything before the first "_" after the prefix."""
+        # Act
+        result = _untagged_ref_key(external_id)
+
+        # Assert
+        assert result == expected
 
 
 class TestAdoptsStoredRows:

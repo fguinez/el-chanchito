@@ -1199,6 +1199,14 @@ Transactions are deduplicated via `UNIQUE(product_id, external_id)`:
   - `bch_ref_{numReferencia}`: a billed card row's reference ("DDMM
     NNNNNNNN"; a USD row's `numeroDocumento` is "DDMM" + 23 digits); an
     all-zero suffix or a bare "DDMM" means the bank has none, not a value.
+    A national row outside `seccionOperaciones` can repeat the reference of
+    the purchase it applies to (the stamp tax "IMPUESTO DL 3475" does), so it
+    is keyed `bch_ref_{numReferencia}_{SECTIONTAG}` (for example
+    `_CARGOSIMPUESTOSABONOS`, plus `_N` for the Nth row of one section with
+    that reference); operations rows keep the bare form. A row stored under
+    the bare form before the tag existed is adopted onto the tagged key when
+    it has the same date and amount and the scrape does not carry the bare key
+    itself (then it is the purchase's row).
   - `bch_fp_{md5(fingerprint)[:16]}`: the fallback: checking uses the bank's
     composite `id` plus the running `saldo` (unique and stable together, where
     the composite `id` alone collides for same-second batch credits); the
