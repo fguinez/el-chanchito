@@ -6,6 +6,11 @@
 // window, and its latest transactions (searchable), each opening the
 // transaction panel on top without closing this one. Needs a Suspense
 // boundary (useSearchParams).
+//
+// A category with income in the 12 months gets a Gastos / Ingresos / Neto
+// toggle (Neto by default) over the bars and the splits; one without it shows
+// expenses alone. Neto is expenses minus income: net spending in
+// the category's color above zero, net income in green below.
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
@@ -32,7 +37,9 @@ import {
   UNCATEGORIZED_COLOR,
   UNCATEGORIZED_NAME,
   UNCATEGORIZED_PARAM,
+  type CategorySpendGroup,
   type CategorySpendResponse,
+  type SpendFlows,
 } from "@/lib/category-spend";
 import { monthOf, trailingMonthsWindow } from "@/lib/category-trends";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
@@ -54,6 +61,75 @@ const WINDOW_OPTIONS = [3, 6, 12] as const;
 type WindowMonths = (typeof WINDOW_OPTIONS)[number];
 /** Transactions listed before the "Ver todas en Gastos" link. */
 const TXN_CAP = 20;
+
+type Measure = "expenses" | "income" | "net";
+const MEASURES: { value: Measure; label: string }[] = [
+  { value: "expenses", label: "Gastos" },
+  { value: "income", label: "Ingresos" },
+  { value: "net", label: "Neto" },
+];
+const INCOME_COLOR = "#16a34a";
+/** Bar series key of income (never a category id, so it never collides). */
+const INCOME_SERIES = "__income";
+/** What an empty chart or split has none of, per measure. */
+const MEASURE_NOUNS: Record<Measure, string> = {
+  expenses: "gastos",
+  income: "ingresos",
+  net: "movimientos",
+};
+
+/** A flow in the measure: gross expenses, gross income or signed net. */
+function measureValue(flows: SpendFlows, measure: Measure): number {
+  return measure === "expenses"
+    ? flows.expenses
+    : measure === "income"
+      ? flows.income
+      : flows.net;
+}
+
+/** The month groups as one series in the measure, for CategoryStackedBars.
+ *  Spending (gross or net) keeps the category's key and color, income (gross
+ *  or net) gets INCOME_SERIES in green, so switching measures tweens the bars
+ *  instead of remounting them. Net income is negative, drawn below zero. */
+function measureGroups(
+  groups: readonly CategorySpendGroup[],
+  measure: Measure,
+  categoryId: string | null,
+  name: string,
+  color: string
+): CategorySpendGroup[] {
+  return groups.map((group) => {
+    const value = measureValue(group, measure);
+    const spending = measure === "expenses" || (measure === "net" && value > 0);
+    const flows = { expenses: group.expenses, income: group.income, net: group.net };
+    const series = {
+      categoryId: spending ? categoryId : INCOME_SERIES,
+      name:
+        measure === "expenses"
+          ? "Gastos"
+          : measure === "income"
+            ? "Ingresos"
+            : spending
+              ? "Gasto neto"
+              : "Ingreso neto",
+      color: spending ? color : INCOME_COLOR,
+      amount: value,
+      percent: 100,
+      ...flows,
+    };
+    return {
+      key: group.key,
+      total: Math.abs(value),
+      ...flows,
+      categories: value !== 0 ? [series] : [],
+    };
+  });
+}
+
+/** A net figure signed for display: net income as "+X". */
+function formatNet(currency: string, net: number): string {
+  return net < 0 ? `+${formatAmount(currency, -net)}` : formatAmount(currency, net);
+}
 
 interface ListedTransaction {
   id: string;
@@ -175,6 +251,8 @@ function CategoryDetail({
   // Fixed at mount, so a panel left open past midnight keeps one window.
   const [currentMonth] = useState(() => monthOf(new Date()));
   const [windowMonths, setWindowMonths] = useState<WindowMonths>(12);
+  // Null until the user picks one, so the default follows the data.
+  const [chosenMeasure, setChosenMeasure] = useState<Measure | null>(null);
 
   const bars = trailingMonthsWindow(currentMonth, BAR_MONTHS);
   const barsSpend = useCategorySpend(
@@ -202,9 +280,20 @@ function CategoryDetail({
   if (q) txnsQuery.set("q", q);
   const txns = useCategoryTransactions(txnsQuery.toString(), refreshKey);
 
-  const thisMonth = barsSpend.data?.groups?.find((g) => g.key === currentMonth)?.total;
+  // Income anywhere in the 12 months turns on the toggle; without it the
+  // panel shows expenses alone.
+  const hasIncome = (barsSpend.data?.income ?? 0) > 0;
+  const measure: Measure = hasIncome ? (chosenMeasure ?? "net") : "expenses";
+  const currency = barsSpend.data?.currency ?? "CLP";
+  const thisMonth = barsSpend.data?.groups?.find((g) => g.key === currentMonth);
+  const monthNet = thisMonth?.net ?? 0;
   const monthHrefFor = (_: string | null, month: string) =>
     categoryExpensesHref({ categoryId, ...monthWindow(month) });
+  const figure = (value: string, className?: string) => (
+    <span className={cn("font-medium tabular-nums text-foreground", className)}>
+      {value}
+    </span>
+  );
 
   return (
     <>
@@ -216,31 +305,67 @@ function CategoryDetail({
         </SheetTitle>
         <SheetDescription>
           Este mes:{" "}
-          <span className="font-medium text-foreground tabular-nums">
-            {barsSpend.error
-              ? "sin datos"
-              : !barsSpend.data
-                ? "..."
-                : formatAmount(barsSpend.data.currency, thisMonth ?? 0)}
-          </span>
-          . Gasto en CLP sin transferencias internas.
+          {barsSpend.error ? (
+            figure("sin datos")
+          ) : !barsSpend.data ? (
+            figure("...")
+          ) : (
+            <>
+              gastos {figure(formatAmount(currency, thisMonth?.expenses ?? 0))}
+              {hasIncome && (
+                <>
+                  , ingresos{" "}
+                  {figure(formatAmount(currency, thisMonth?.income ?? 0), "text-green-600")}
+                  , neto{" "}
+                  {figure(
+                    formatNet(currency, monthNet),
+                    monthNet < 0 ? "text-green-600" : undefined
+                  )}
+                </>
+              )}
+            </>
+          )}
+          . En CLP, sin transferencias internas.
         </SheetDescription>
       </SheetHeader>
 
       <div className="flex-1 space-y-6 overflow-y-auto p-4">
         <section className="space-y-2">
-          <h3 className="text-sm font-semibold">Últimos {BAR_MONTHS} meses</h3>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-sm font-semibold">Últimos {BAR_MONTHS} meses</h3>
+            {hasIncome && (
+              <div className="flex items-center gap-1" role="group" aria-label="Medida">
+                {MEASURES.map((m) => (
+                  <Button
+                    key={m.value}
+                    variant={measure === m.value ? "secondary" : "ghost"}
+                    size="xs"
+                    aria-pressed={measure === m.value}
+                    onClick={() => setChosenMeasure(m.value)}
+                  >
+                    {m.label}
+                  </Button>
+                ))}
+              </div>
+            )}
+          </div>
           {barsSpend.error ? (
             <ErrorNote />
           ) : !barsSpend.data ? (
             <Loading />
           ) : (
             <CategoryStackedBars
-              groups={barsSpend.data.groups ?? []}
-              currency={barsSpend.data.currency}
+              groups={measureGroups(
+                barsSpend.data.groups ?? [],
+                measure,
+                categoryId,
+                name,
+                color
+              )}
+              currency={currency}
               height={180}
               hrefFor={monthHrefFor}
-              emptyMessage={`Sin gastos en los últimos ${BAR_MONTHS} meses.`}
+              emptyMessage={`Sin ${MEASURE_NOUNS[measure]} en los últimos ${BAR_MONTHS} meses.`}
             />
           )}
         </section>
@@ -261,8 +386,18 @@ function CategoryDetail({
           </div>
         </div>
 
-        <SpendSplit title="Por producto" spend={byProduct} color={color} />
-        <SpendSplit title="Por institución" spend={byInstitution} color={color} />
+        <SpendSplit
+          title="Por producto"
+          spend={byProduct}
+          color={color}
+          measure={measure}
+        />
+        <SpendSplit
+          title="Por institución"
+          spend={byInstitution}
+          color={color}
+          measure={measure}
+        />
 
         <section className="space-y-2">
           <h3 className="text-sm font-semibold">Transacciones</h3>
@@ -335,20 +470,26 @@ function CategoryDetail({
   );
 }
 
-/** Spend split by product or institution: share and amount per group. */
+/** The category's flows split by product or institution in the measure:
+ *  share and amount per group for Gastos and Ingresos; for Neto, signed
+ *  amounts (net income as a green "+X") with bars sized by magnitude. */
 function SpendSplit({
   title,
   spend,
   color,
+  measure,
 }: {
   title: string;
   spend: { data: CategorySpendResponse | null; error: boolean };
   color: string;
+  measure: Measure;
 }) {
-  const groups = spend.data?.groups ?? [];
-  // Shares of the listed groups: a group whose refunds outweigh its spend is
-  // left out, so the overall total could be smaller than their sum.
-  const sum = groups.reduce((s, g) => s + g.total, 0);
+  const groups = (spend.data?.groups ?? [])
+    .map((g) => ({ ...g, value: measureValue(g, measure) }))
+    .filter((g) => g.value !== 0)
+    .sort((a, b) => b.value - a.value || a.label.localeCompare(b.label, "es"));
+  // Shares of the listed groups' magnitudes.
+  const sum = groups.reduce((s, g) => s + Math.abs(g.value), 0);
   return (
     <section className="space-y-2">
       <h3 className="text-sm font-semibold">{title}</h3>
@@ -357,26 +498,42 @@ function SpendSplit({
       ) : !spend.data ? (
         <Loading />
       ) : groups.length === 0 ? (
-        <p className="text-sm text-muted-foreground">Sin gastos en este período.</p>
+        <p className="text-sm text-muted-foreground">
+          Sin {MEASURE_NOUNS[measure]} en este período.
+        </p>
       ) : (
         <ol className="space-y-2 text-sm">
           {groups.map((g) => {
-            const percent = sum > 0 ? (g.total / sum) * 100 : 0;
+            const percent = sum > 0 ? (Math.abs(g.value) / sum) * 100 : 0;
+            const incoming = measure === "income" || g.value < 0;
+            const currency = spend.data!.currency;
             return (
               <li key={g.key} className="space-y-1">
                 <div className="flex items-center gap-2">
                   <span className="min-w-0 flex-1 truncate">{g.label}</span>
-                  <span className="w-14 text-right tabular-nums text-muted-foreground">
-                    {formatPercent(percent)}
-                  </span>
-                  <span className="w-28 text-right font-medium tabular-nums">
-                    {formatAmount(spend.data!.currency, g.total)}
+                  {measure !== "net" && (
+                    <span className="w-14 text-right tabular-nums text-muted-foreground">
+                      {formatPercent(percent)}
+                    </span>
+                  )}
+                  <span
+                    className={cn(
+                      "w-28 text-right font-medium tabular-nums",
+                      measure === "net" && incoming && "text-green-600"
+                    )}
+                  >
+                    {measure === "net"
+                      ? formatNet(currency, g.value)
+                      : formatAmount(currency, g.value)}
                   </span>
                 </div>
                 <div className="h-1.5 rounded-full bg-muted">
                   <div
                     className="h-full rounded-full"
-                    style={{ width: `${percent}%`, backgroundColor: color }}
+                    style={{
+                      width: `${percent}%`,
+                      backgroundColor: incoming ? INCOME_COLOR : color,
+                    }}
                   />
                 </div>
               </li>

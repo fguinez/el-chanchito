@@ -11,6 +11,9 @@
 // slide and resize into their new slot, months entering fade in whole as they
 // come into view, and months leaving fade out whole as they go. In the auto Y
 // range the axis bounds tween along with them.
+//
+// A negative amount draws below zero (the category panel's net view); the
+// tooltip shows magnitudes, so the series name must carry the sign.
 
 import { useId } from "react";
 import { useRouter } from "next/navigation";
@@ -310,7 +313,10 @@ export function CategoryStackedBars({
         <YAxis tickFormatter={formatAxisValue} fontSize={12} {...yAxisProps} />
         <Tooltip
           labelFormatter={labelAt}
-          formatter={(value, name) => [formatAmount(currency, Number(value)), name]}
+          formatter={(value, name) => [
+            formatAmount(currency, Math.abs(Number(value))),
+            name,
+          ]}
         />
         {series.map((c) => (
           <Bar
