@@ -281,8 +281,18 @@ function CategoryDetail({
   const txns = useCategoryTransactions(txnsQuery.toString(), refreshKey);
 
   // Income anywhere in the 12 months turns on the toggle; without it the
-  // panel shows expenses alone.
-  const hasIncome = (barsSpend.data?.income ?? 0) > 0;
+  // panel shows expenses alone. If the bars fail, the splits' income decides,
+  // so the toggle still works for them.
+  const hasIncome = barsSpend.data
+    ? barsSpend.data.income > 0
+    : barsSpend.error &&
+      ((byProduct.data?.income ?? 0) > 0 || (byInstitution.data?.income ?? 0) > 0);
+  // The splits wait for the bars, so they never render in one measure and
+  // flip to another once the default is known.
+  const measureKnown = barsSpend.data != null || barsSpend.error;
+  const unconverted =
+    (barsSpend.data?.unconvertedCount ?? 0) +
+    (barsSpend.data?.unconvertedIncomeCount ?? 0);
   const measure: Measure = hasIncome ? (chosenMeasure ?? "net") : "expenses";
   const currency = barsSpend.data?.currency ?? "CLP";
   const thisMonth = barsSpend.data?.groups?.find((g) => g.key === currentMonth);
@@ -368,6 +378,13 @@ function CategoryDetail({
               emptyMessage={`Sin ${MEASURE_NOUNS[measure]} en los últimos ${BAR_MONTHS} meses.`}
             />
           )}
+          {unconverted > 0 && (
+            <p className="text-xs text-muted-foreground">
+              {unconverted === 1
+                ? "1 movimiento en una moneda sin tipo de cambio no se incluye."
+                : `${unconverted} movimientos en monedas sin tipo de cambio no se incluyen.`}
+            </p>
+          )}
         </section>
 
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -391,12 +408,14 @@ function CategoryDetail({
           spend={byProduct}
           color={color}
           measure={measure}
+          ready={measureKnown}
         />
         <SpendSplit
           title="Por institución"
           spend={byInstitution}
           color={color}
           measure={measure}
+          ready={measureKnown}
         />
 
         <section className="space-y-2">
@@ -478,16 +497,20 @@ function SpendSplit({
   spend,
   color,
   measure,
+  ready,
 }: {
   title: string;
   spend: { data: CategorySpendResponse | null; error: boolean };
   color: string;
   measure: Measure;
+  /** False while the measure still depends on data in flight. */
+  ready: boolean;
 }) {
   const groups = (spend.data?.groups ?? [])
     .map((g) => ({ ...g, value: measureValue(g, measure) }))
     .filter((g) => g.value !== 0)
-    .sort((a, b) => b.value - a.value || a.label.localeCompare(b.label, "es"));
+    // Ties by key, like the server, so expense-only panels keep its order.
+    .sort((a, b) => b.value - a.value || a.key.localeCompare(b.key));
   // Shares of the listed groups' magnitudes.
   const sum = groups.reduce((s, g) => s + Math.abs(g.value), 0);
   return (
@@ -495,7 +518,7 @@ function SpendSplit({
       <h3 className="text-sm font-semibold">{title}</h3>
       {spend.error ? (
         <ErrorNote />
-      ) : !spend.data ? (
+      ) : !spend.data || !ready ? (
         <Loading />
       ) : groups.length === 0 ? (
         <p className="text-sm text-muted-foreground">

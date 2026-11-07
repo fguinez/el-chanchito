@@ -148,7 +148,7 @@ export async function GET(request: NextRequest) {
       if (amount == null) {
         // Sums split by sign, so a negative one holds only expense rows.
         if (native < 0) unconvertedCount += Number(sum.rows);
-        else unconvertedIncomeCount += Number(sum.rows);
+        else if (native > 0) unconvertedIncomeCount += Number(sum.rows);
         continue;
       }
       rows.push({
