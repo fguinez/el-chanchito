@@ -143,12 +143,47 @@ describe("GET /api/categories/spend", () => {
     expect(getRateBook).toHaveBeenCalledOnce();
     expect(body.currency).toBe("CLP");
     expect(body.unconvertedCount).toBe(2);
+    expect(body.unconvertedIncomeCount).toBe(4);
     expect(body.groups).toBeUndefined();
     expect(body.categories).toEqual([
       expect.objectContaining({ categoryId: FOOD, name: "Comida", amount: 2_500_000 }),
       expect.objectContaining({ categoryId: FUN, amount: 1_234_560 }),
     ]);
     expect(body.total).toBe(3_734_560);
+    expect(body).toMatchObject({
+      expenses: 3_734_560,
+      income: 0,
+      net: 3_734_560,
+    });
+  });
+
+  it("lists income-only groups and flows for one category", async () => {
+    world.sums = [
+      sum({ productId: CARD, amount: "-1000000.00" }),
+      sum({ productId: USD_CARD, productName: "Cuenta de prueba", amount: "2500000.00" }),
+    ];
+    const scoped = await (
+      await get(`from=2026-01-01&to=2026-01-31&categoryId=${FOOD}&groupBy=product`)
+    ).json();
+    // Nets to income over the scope, so no spend, but the flows stay.
+    expect(scoped).toMatchObject({
+      total: 0,
+      categories: [],
+      expenses: 1_000_000,
+      income: 2_500_000,
+      net: -1_500_000,
+    });
+    expect(
+      scoped.groups.map((g: { key: string; net: number }) => [g.key, g.net])
+    ).toEqual([
+      [CARD, 1_000_000],
+      [USD_CARD, -2_500_000],
+    ]);
+
+    const unscoped = await (
+      await get("from=2026-01-01&to=2026-01-31&groupBy=product")
+    ).json();
+    expect(unscoped.groups.map((g: { key: string }) => g.key)).toEqual([CARD]);
   });
 
   it("keeps a product's own currency", async () => {
