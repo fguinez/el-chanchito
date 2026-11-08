@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   CATEGORY_ICON_NAMES,
   UUID_RE,
+  checkParentPlacement,
   isUuid,
   normalizeKeyword,
   validateCategoryInput,
@@ -67,6 +68,7 @@ describe("validateCategoryInput (create)", () => {
       name: "Categoria Ejemplo",
       color: null,
       icon: null,
+      parentId: null,
     });
   });
 
@@ -93,7 +95,28 @@ describe("validateCategoryInput (create)", () => {
     const value = expectValue(
       validateCategoryInput({ name: "Ejemplo", color: null, icon: null })
     );
-    expect(value).toEqual({ name: "Ejemplo", color: null, icon: null });
+    expect(value).toEqual({
+      name: "Ejemplo",
+      color: null,
+      icon: null,
+      parentId: null,
+    });
+  });
+
+  it("keeps a parentId, lowercased", () => {
+    const value = expectValue(
+      validateCategoryInput({ name: "Ejemplo", parentId: CATEGORY_ID.toUpperCase() })
+    );
+    expect(value.parentId).toBe(CATEGORY_ID);
+  });
+
+  it("rejects a parentId that is not a uuid", () => {
+    for (const parentId of ["viajes", 7, "", {}]) {
+      const failure = expectFailure(
+        validateCategoryInput({ name: "Ejemplo", parentId })
+      );
+      expect(failure.field).toBe("parentId");
+    }
   });
 
   it("rejects a non-object body", () => {
@@ -171,14 +194,77 @@ describe("validateCategoryInput (partial)", () => {
     expect(failure.field).toBe("name");
   });
 
+  it("moves or detaches with parentId alone", () => {
+    expect(
+      expectValue(validateCategoryInput({ parentId: CATEGORY_ID }, { partial: true }))
+    ).toEqual({ parentId: CATEGORY_ID });
+    expect(
+      expectValue(validateCategoryInput({ parentId: null }, { partial: true }))
+    ).toEqual({ parentId: null });
+  });
+
   it("rejects a body with no known fields", () => {
-    for (const body of [{}, { parentId: CATEGORY_ID }]) {
+    for (const body of [{}, { parent: CATEGORY_ID }]) {
       const failure = expectFailure(
         validateCategoryInput(body, { partial: true })
       );
       expect(failure.status).toBe(400);
       expect(failure.field).toBeUndefined();
     }
+  });
+});
+
+describe("checkParentPlacement", () => {
+  const PARENT_ID = "22222222-2222-4222-8222-222222222222";
+  const topLevel = { id: PARENT_ID, parentId: null };
+
+  it("accepts an existing top-level parent", () => {
+    expect(
+      checkParentPlacement({ parentId: PARENT_ID, parent: topLevel, hasChildren: false })
+    ).toEqual({ ok: true, value: PARENT_ID });
+  });
+
+  it("rejects the category as its own parent", () => {
+    const failure = expectFailure(
+      checkParentPlacement({
+        id: PARENT_ID.toUpperCase(),
+        parentId: PARENT_ID,
+        parent: topLevel,
+        hasChildren: false,
+      })
+    );
+    expect(failure.field).toBe("parentId");
+  });
+
+  it("rejects a missing parent", () => {
+    const failure = expectFailure(
+      checkParentPlacement({ parentId: PARENT_ID, parent: undefined, hasChildren: false })
+    );
+    expect(failure.error).toBe("La categoría padre no existe");
+  });
+
+  it("rejects a parent that is itself a subcategory", () => {
+    const failure = expectFailure(
+      checkParentPlacement({
+        parentId: PARENT_ID,
+        parent: { id: PARENT_ID, parentId: CATEGORY_ID },
+        hasChildren: false,
+      })
+    );
+    expect(failure.field).toBe("parentId");
+    expect(failure.status).toBe(400);
+  });
+
+  it("rejects moving a category that has subcategories", () => {
+    const failure = expectFailure(
+      checkParentPlacement({
+        id: CATEGORY_ID,
+        parentId: PARENT_ID,
+        parent: topLevel,
+        hasChildren: true,
+      })
+    );
+    expect(failure.field).toBe("parentId");
   });
 });
 

@@ -1,11 +1,18 @@
 import { and, desc, isNull, or, sql, type SQL } from "drizzle-orm";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
 import { searchTokens } from "@/lib/transaction-search";
-import { products, transactions } from "./schema";
+import { categories, products, transactions } from "./schema";
 
 /** A visible (not soft-deleted, V033) transaction. Centralizes the
  *  deleted_at IS NULL filter that every dashboard read applies. */
 export const notDeleted = isNull(transactions.deletedAt);
+
+/** The rows a `categoryId` filter keeps (V046): those assigned to the
+ *  category or to one of its subcategories. A subcategory has none of its
+ *  own, so filtering on one keeps only its rows. */
+export function inCategoryScope(categoryId: string): SQL {
+  return sql`${transactions.categoryId} IN (SELECT ${categories.id} FROM ${categories} WHERE ${categories.id} = ${categoryId} OR ${categories.parentId} = ${categoryId})`;
+}
 
 /** How many of a product's newest movements its page lists. A credit card's
  *  billing cycle reads the statement dates of these same rows, so whatever

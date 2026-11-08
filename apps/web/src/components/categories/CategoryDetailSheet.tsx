@@ -11,6 +11,13 @@
 // toggle (Neto by default) over the bars and the splits; one without it shows
 // expenses alone. Neto is expenses minus income: net spending in
 // the category's color above zero, net income in green below.
+//
+// Subcategories (V046): a parent's figures include its subcategories, and a
+// "Por subcategoría" split lists each one (plus the rows assigned to the
+// parent itself), each opening its own panel; a subcategory with nothing in
+// the period is listed at $0, so a new one is reachable from here too. The
+// parent's transaction list tags each subcategory row with its name. A subcategory's panel is the
+// same one scoped to its rows, with a "Padre › Sub" breadcrumb back.
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
@@ -32,6 +39,7 @@ import { useSelectedTransaction } from "@/components/transactions/use-selected-t
 import { hrefWithSearchParam } from "@/lib/transaction-selection";
 import {
   CATEGORY_PARAM,
+  categoryDetailHref,
   categoryExpensesHref,
   monthWindow,
   UNCATEGORIZED_COLOR,
@@ -50,6 +58,7 @@ import {
   formatPlainDateEs,
 } from "@/lib/utils";
 import { CategoryIcon } from "./CategoryIcon";
+import { ChevronRight } from "lucide-react";
 import { CategorySwatch, DEFAULT_CATEGORY_COLOR, type ApiCategory } from "./shared";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -138,6 +147,15 @@ interface ListedTransaction {
   transactionDate: string;
   currency: string;
   isInternalTransfer: boolean;
+  categoryId: string | null;
+}
+
+/** A subcategory as a parent's panel lists it. */
+interface PanelSubcategory {
+  id: string;
+  name: string;
+  /** Its own color, else the parent's. */
+  color: string;
 }
 
 export function CategoryDetailSheet({
@@ -218,14 +236,26 @@ function CategoryDetailBody({
       </SheetHeader>
     );
   }
+  const parent = category?.parentId
+    ? categories.find((c) => c.id === category.parentId)
+    : undefined;
+  const color = category
+    ? (category.color ?? parent?.color ?? DEFAULT_CATEGORY_COLOR)
+    : UNCATEGORIZED_COLOR;
+  const subcategories: PanelSubcategory[] = category
+    ? categories
+        .filter((c) => c.parentId === category.id)
+        .sort((a, b) => a.name.localeCompare(b.name, "es"))
+        .map((c) => ({ id: c.id, name: c.name, color: c.color ?? color }))
+    : [];
   return (
     <CategoryDetail
       categoryId={category?.id ?? null}
       name={category?.name ?? UNCATEGORIZED_NAME}
-      color={
-        category ? (category.color ?? DEFAULT_CATEGORY_COLOR) : UNCATEGORIZED_COLOR
-      }
+      color={color}
       icon={category?.icon ?? null}
+      parent={parent ? { id: parent.id, name: parent.name } : null}
+      subcategories={subcategories}
       refreshKey={refreshKey}
       rowProps={rowProps}
     />
@@ -237,6 +267,8 @@ function CategoryDetail({
   name,
   color,
   icon,
+  parent,
+  subcategories,
   refreshKey,
   rowProps,
 }: {
@@ -244,10 +276,17 @@ function CategoryDetail({
   name: string;
   color: string;
   icon: string | null;
+  /** The parent of a subcategory, for the breadcrumb. */
+  parent: { id: string; name: string } | null;
+  /** A parent's subcategories, by name: the "Por subcategoría" split and
+   *  the tags on the transaction list. Empty for any other category. */
+  subcategories: PanelSubcategory[];
   refreshKey: number;
   rowProps: ReturnType<typeof useSelectedTransaction>["rowProps"];
 }) {
   const categoryParam = categoryId ?? UNCATEGORIZED_PARAM;
+  const hasChildren = subcategories.length > 0;
+  const subcategoryNames = new Map(subcategories.map((s) => [s.id, s.name]));
   // Fixed at mount, so a panel left open past midnight keeps one window.
   const [currentMonth] = useState(() => monthOf(new Date()));
   const [windowMonths, setWindowMonths] = useState<WindowMonths>(12);
@@ -268,6 +307,11 @@ function CategoryDetail({
     new URLSearchParams({ ...period, categoryId: categoryParam, groupBy }).toString();
   const byProduct = useCategorySpend(splitQuery("product"), refreshKey);
   const byInstitution = useCategorySpend(splitQuery("institution"), refreshKey);
+  // Asked for (and shown) only for a parent with subcategories.
+  const bySubcategory = useCategorySpend(
+    hasChildren ? `${splitQuery("category")}&split=1` : "",
+    refreshKey
+  );
   // The list's search: local to this category (the panel remounts per
   // category), queried once typing pauses.
   const [search, setSearch] = useState("");
@@ -311,7 +355,26 @@ function CategoryDetail({
         <SheetTitle className="flex items-center gap-2">
           <CategorySwatch color={color} />
           <CategoryIcon icon={icon} className="size-4 shrink-0 text-muted-foreground" />
-          {name}
+          {parent ? (
+            <span className="flex min-w-0 items-center gap-1">
+              <Link
+                href={categoryDetailHref(parent.id)}
+                replace
+                scroll={false}
+                className="truncate font-normal text-muted-foreground hover:text-foreground hover:underline"
+              >
+                {parent.name}
+              </Link>
+              <ChevronRight
+                aria-hidden
+                className="size-4 shrink-0 text-muted-foreground"
+              />
+              <span className="sr-only">›</span>
+              <span className="truncate">{name}</span>
+            </span>
+          ) : (
+            name
+          )}
         </SheetTitle>
         <SheetDescription>
           Este mes:{" "}
@@ -335,7 +398,8 @@ function CategoryDetail({
               )}
             </>
           )}
-          . En CLP, sin transferencias internas.
+          . En CLP, sin transferencias internas
+          {hasChildren && ", con sus subcategorías"}.
         </SheetDescription>
       </SheetHeader>
 
@@ -403,6 +467,21 @@ function CategoryDetail({
           </div>
         </div>
 
+        {hasChildren && (
+          <SpendSplit
+            title="Por subcategoría"
+            spend={bySubcategory}
+            color={color}
+            measure={measure}
+            ready={measureKnown}
+            hrefFor={(key) => (key !== categoryId ? categoryDetailHref(key) : null)}
+            emptyGroups={subcategories.map((s) => ({
+              key: s.id,
+              label: s.name,
+              color: s.color,
+            }))}
+          />
+        )}
         <SpendSplit
           title="Por producto"
           spend={byProduct}
@@ -453,6 +532,11 @@ function CategoryDetail({
                     </TableCell>
                     <TableCell className="max-w-56 truncate">
                       {txn.description}
+                      {txn.categoryId && subcategoryNames.has(txn.categoryId) && (
+                        <span className="ml-2 text-xs text-muted-foreground">
+                          {subcategoryNames.get(txn.categoryId)}
+                        </span>
+                      )}
                       {txn.isInternalTransfer && (
                         <Badge variant="secondary" className="ml-2 text-xs">
                           Transferencia interna
@@ -489,15 +573,20 @@ function CategoryDetail({
   );
 }
 
-/** The category's flows split by product or institution in the measure:
- *  share and amount per group for Gastos and Ingresos; for Neto, signed
- *  amounts (net income as a green "+X") with bars sized by magnitude. */
+/** The category's flows split by product, institution or subcategory in the
+ *  measure: share and amount per group for Gastos and Ingresos; for Neto,
+ *  signed amounts (net income as a green "+X") with bars sized by magnitude.
+ *  Groups that carry a color (subcategories) draw their spending in it,
+ *  `hrefFor` turns a group's label into a link, and `emptyGroups` missing
+ *  from the figures are listed last at zero. */
 function SpendSplit({
   title,
   spend,
   color,
   measure,
   ready,
+  hrefFor,
+  emptyGroups,
 }: {
   title: string;
   spend: { data: CategorySpendResponse | null; error: boolean };
@@ -505,12 +594,23 @@ function SpendSplit({
   measure: Measure;
   /** False while the measure still depends on data in flight. */
   ready: boolean;
+  hrefFor?: (key: string) => string | null;
+  emptyGroups?: { key: string; label: string; color: string }[];
 }) {
-  const groups = (spend.data?.groups ?? [])
-    .map((g) => ({ ...g, value: measureValue(g, measure) }))
-    .filter((g) => g.value !== 0)
-    // Ties by key, like the server, so expense-only panels keep its order.
-    .sort((a, b) => b.value - a.value || a.key.localeCompare(b.key));
+  const listed: { key: string; label: string; color?: string; value: number }[] =
+    (spend.data?.groups ?? [])
+      .map((g) => ({ ...g, value: measureValue(g, measure) }))
+      .filter((g) => g.value !== 0)
+      // Ties by key, like the server, so expense-only panels keep its order.
+      .sort((a, b) => b.value - a.value || a.key.localeCompare(b.key));
+  const listedKeys = new Set(listed.map((g) => g.key));
+  // Padding an all-zero split would hide the empty state.
+  const groups = [
+    ...listed,
+    ...(listed.length === 0 ? [] : (emptyGroups ?? []))
+      .filter((g) => !listedKeys.has(g.key))
+      .map((g) => ({ ...g, value: 0 })),
+  ];
   // Shares of the listed groups' magnitudes.
   const sum = groups.reduce((s, g) => s + Math.abs(g.value), 0);
   return (
@@ -530,10 +630,22 @@ function SpendSplit({
             const percent = sum > 0 ? (Math.abs(g.value) / sum) * 100 : 0;
             const incoming = measure === "income" || g.value < 0;
             const currency = spend.data!.currency;
+            const href = hrefFor?.(g.key) ?? null;
             return (
               <li key={g.key} className="space-y-1">
                 <div className="flex items-center gap-2">
-                  <span className="min-w-0 flex-1 truncate">{g.label}</span>
+                  {href ? (
+                    <Link
+                      href={href}
+                      replace
+                      scroll={false}
+                      className="min-w-0 flex-1 truncate hover:underline"
+                    >
+                      {g.label}
+                    </Link>
+                  ) : (
+                    <span className="min-w-0 flex-1 truncate">{g.label}</span>
+                  )}
                   {measure !== "net" && (
                     <span className="w-14 text-right tabular-nums text-muted-foreground">
                       {formatPercent(percent)}
@@ -555,7 +667,7 @@ function SpendSplit({
                     className="h-full rounded-full"
                     style={{
                       width: `${percent}%`,
-                      backgroundColor: incoming ? INCOME_COLOR : color,
+                      backgroundColor: incoming ? INCOME_COLOR : (g.color ?? color),
                     }}
                   />
                 </div>

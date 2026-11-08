@@ -201,7 +201,7 @@ export function SuggestionsCard({
                     </TableCell>
                     <TableCell className="whitespace-normal">
                       {category ? (
-                        <CategoryLabel category={category} />
+                        <CategoryLabel category={category} byId={categoriesById} />
                       ) : (
                         group.categoryName
                       )}

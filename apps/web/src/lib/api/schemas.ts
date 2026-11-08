@@ -414,7 +414,8 @@ export const dismissSuggestionSchema = z
  *  transaction_date window, either side open, and/or a budget `month`, as
  *  GET /api/transactions takes them; at least one is required), the optional
  *  scope filters (a product, an institution slug, one category or `none` for
- *  the uncategorized rows) and how to split the result. Ids come out
+ *  the uncategorized rows) and how to split the result (`groupBy`, and
+ *  `split` to keep subcategories out of their parent). Ids come out
  *  lowercased, as Postgres returns them. */
 export const categorySpendQuerySchema = z
   .object({
@@ -425,6 +426,9 @@ export const categorySpendQuerySchema = z
     institution: institutionSlug.optional(),
     categoryId: categoryFilter.optional(),
     groupBy: z.enum(SPEND_GROUP_BYS).default("none"),
+    /** "1" keeps subcategories apart instead of rolling them into their
+     *  parent (a parent's breakdown in its detail panel). */
+    split: z.enum(["0", "1"]).default("0").transform((v) => v === "1"),
   })
   .refine((query) => query.from || query.to || query.month, {
     error: "Expected from, to or month",

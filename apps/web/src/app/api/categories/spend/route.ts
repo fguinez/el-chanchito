@@ -8,17 +8,22 @@ import {
   products,
   transactions,
 } from "@/lib/db/schema";
-import { notDeleted } from "@/lib/db/transactions";
+import { inCategoryScope, notDeleted } from "@/lib/db/transactions";
 import { failureBody, parseSearchParams } from "@/lib/api/validation";
 import { categorySpendQuerySchema } from "@/lib/api/schemas";
 import {
+  categoryInfoFor,
   groupSpend,
+  rollUpToParents,
   summarizeSpend,
+  UNCATEGORIZED_COLOR,
+  UNCATEGORIZED_NAME,
   UNCATEGORIZED_PARAM,
   type CategorySpendResponse,
   type SpendRow,
 } from "@/lib/category-spend";
 import { getRateBook } from "@/lib/rate-book";
+import { DEFAULT_CATEGORY_COLOR } from "@/lib/categories";
 import { ratesFor, toClp } from "@/lib/rates";
 import { displayProductName } from "@/lib/product-names";
 
@@ -32,7 +37,13 @@ const txnMonth = sql<string>`to_char(${transactions.transactionDate}, 'YYYY-MM')
  * `productId` (amounts then stay in the product's currency), `institution`
  * (slug), `categoryId` (a uuid, or `none` for uncategorized rows); outside a
  * product, amounts are CLP converted with each product's rates. `groupBy`
- * month|product|institution adds `groups`, each summarized on its own.
+ * month|product|institution|category adds `groups`, each summarized on its
+ * own (category groups carry the category's color too).
+ * Subcategories (V046) roll into their parent: one entry per top-level
+ * category, and a parent's `categoryId` takes in its subcategories' rows.
+ * `split=1` keeps them apart instead; scoped to a parent, the parent's own
+ * rows then read "Sin subcategoría". Scoped to a subcategory, only its rows
+ * count, under its own name.
  * Beside the spend, every category, group and the whole scope carry their
  * gross `expenses`, `income` and `net`; with a `categoryId`, product and
  * institution groups with income alone are listed too.
@@ -44,7 +55,7 @@ export async function GET(request: NextRequest) {
     categorySpendQuerySchema
   );
   if (!query.ok) return query.response;
-  const { productId, institution, categoryId, groupBy } = query.data;
+  const { productId, institution, categoryId, groupBy, split } = query.data;
   const from = query.data.from ?? null;
   const to = query.data.to ?? null;
   const month = query.data.month ?? null;
@@ -92,7 +103,7 @@ export async function GET(request: NextRequest) {
     if (categoryId === UNCATEGORIZED_PARAM) {
       conditions.push(isNull(transactions.categoryId));
     } else if (categoryId) {
-      conditions.push(eq(transactions.categoryId, categoryId));
+      conditions.push(inCategoryScope(categoryId));
     }
 
     // Partial sums per category, product and month, split by sign so the
@@ -125,12 +136,27 @@ export async function GET(request: NextRequest) {
           sql`${transactions.amount} < 0`
         ),
       db
-        .select({ id: categories.id, name: categories.name, color: categories.color })
+        .select({
+          id: categories.id,
+          name: categories.name,
+          color: categories.color,
+          parentId: categories.parentId,
+        })
         .from(categories),
       productId ? null : getRateBook(),
     ]);
 
-    const rows: SpendRow[] = [];
+    const scoped = categoryId && categoryId !== UNCATEGORIZED_PARAM
+      ? cats.find((c) => c.id === categoryId)
+      : undefined;
+    // A subcategory's own scope keeps its name; rolling it up would show the
+    // parent's.
+    const rollUp = !split && !scoped?.parentId;
+    const categoryInfo = categoryInfoFor(cats, {
+      splitParentId: split && scoped && !scoped.parentId ? scoped.id : undefined,
+    });
+
+    const converted: SpendRow[] = [];
     let unconvertedCount = 0;
     let unconvertedIncomeCount = 0;
     for (const sum of sums) {
@@ -151,7 +177,7 @@ export async function GET(request: NextRequest) {
         else if (native > 0) unconvertedIncomeCount += Number(sum.rows);
         continue;
       }
-      rows.push({
+      converted.push({
         categoryId: sum.categoryId,
         amount,
         month: sum.month,
@@ -160,7 +186,7 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    const categoryInfo = new Map(cats.map((c) => [c.id, c]));
+    const rows = rollUp ? rollUpToParents(converted, categoryInfo) : converted;
     const body: CategorySpendResponse = {
       from,
       to,
@@ -198,9 +224,17 @@ export async function GET(request: NextRequest) {
         from && to ? { from, to } : undefined,
         // One category's panel shows where its income lands too.
         { keepIncomeGroups: categoryId != null }
-      ).map(
-        (group) => ({ ...group, label: labels.get(group.key) ?? group.key })
-      );
+      ).map((group) => {
+        if (groupBy !== "category") {
+          return { ...group, label: labels.get(group.key) ?? group.key };
+        }
+        const info = categoryInfo.get(group.key);
+        return {
+          ...group,
+          label: info?.name ?? UNCATEGORIZED_NAME,
+          color: info ? (info.color ?? DEFAULT_CATEGORY_COLOR) : UNCATEGORIZED_COLOR,
+        };
+      });
     }
     return NextResponse.json(body);
   } catch (error) {

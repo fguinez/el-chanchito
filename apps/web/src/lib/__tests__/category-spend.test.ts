@@ -2,7 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   categoryDetailHref,
   categoryExpensesHref,
+  categoryInfoFor,
   groupSpend,
+  lightenColor,
+  rollUpToParents,
+  SPLIT_DIRECT_NAME,
   monthWindow,
   monthsBetween,
   summarizeSpend,
@@ -345,6 +349,76 @@ describe("categoryExpensesHref", () => {
     expect(
       categoryExpensesHref({ categoryId: FOOD, from: "2026-01-01", to: "2026-01-31", q: "  " })
     ).toBe(`/expenses?category=${FOOD}&from=2026-01-01&to=2026-01-31`);
+  });
+});
+
+describe("subcategories", () => {
+  const TRAVEL = "55555555-5555-4555-8555-555555555555";
+  const TRIP_A = "66666666-6666-4666-8666-666666666666";
+  const TRIP_B = "77777777-7777-4777-8777-777777777777";
+  const tree: SpendCategoryInfo[] = [
+    { id: TRAVEL, name: "Viajes", color: "#336699", parentId: null },
+    { id: TRIP_A, name: "Viaje A", color: null, parentId: TRAVEL },
+    { id: TRIP_B, name: "Viaje B", color: "#00ff00", parentId: TRAVEL },
+    { id: FOOD, name: "Comida", color: "#ff0000", parentId: null },
+  ];
+  const rows = [
+    row({ categoryId: TRAVEL, amount: -1_000_000 }),
+    row({ categoryId: TRIP_A, amount: -2_500_000 }),
+    row({ categoryId: TRIP_A, amount: 999_999 }),
+    row({ categoryId: TRIP_B, amount: -1_000_000 }),
+    row({ categoryId: FOOD, amount: -999_999 }),
+    row({ categoryId: null, amount: -1_000_000 }),
+  ];
+
+  it("rolls subcategories into one slice per top-level category", () => {
+    const lookup = categoryInfoFor(tree);
+    const result = summarizeSpend(rollUpToParents(rows, lookup), lookup);
+    expect(result.categories.map((c) => [c.categoryId, c.name, c.amount])).toEqual([
+      [TRAVEL, "Viajes", 3_500_001],
+      [FOOD, "Comida", 999_999],
+      [null, UNCATEGORIZED_NAME, 1_000_000],
+    ]);
+    const travel = result.categories[0];
+    expect(travel).toMatchObject({ expenses: 4_500_000, income: 999_999 });
+    expect(result.total).toBe(5_500_000);
+  });
+
+  it("leaves rows of unknown or top-level categories alone", () => {
+    const lookup = categoryInfoFor(tree);
+    const unknown = row({ categoryId: NO_COLOR });
+    const [rolled] = rollUpToParents([unknown], lookup);
+    expect(rolled).toBe(unknown);
+  });
+
+  it("splits a parent into its subcategories and its own rows", () => {
+    const lookup = categoryInfoFor(tree, { splitParentId: TRAVEL });
+    const scoped = rows.filter((r) =>
+      [TRAVEL, TRIP_A, TRIP_B].includes(r.categoryId ?? "")
+    );
+    const result = summarizeSpend(scoped, lookup);
+    expect(result.categories.map((c) => [c.categoryId, c.name, c.amount])).toEqual([
+      [TRIP_A, "Viaje A", 1_500_001],
+      [TRAVEL, SPLIT_DIRECT_NAME, 1_000_000],
+      [TRIP_B, "Viaje B", 1_000_000],
+    ]);
+    // The colorless subcategory gets a shade of the parent, not its exact color.
+    const tripA = result.categories[0];
+    expect(tripA.color).not.toBe("#336699");
+    expect(tripA.color).toMatch(/^#[0-9a-f]{6}$/);
+    expect(result.categories[2].color).toBe("#00ff00");
+  });
+
+  it("gives a colorless subcategory its parent's color outside a split", () => {
+    const lookup = categoryInfoFor(tree);
+    expect(lookup.get(TRIP_A)?.color).toBe("#336699");
+    expect(lookup.get(TRAVEL)?.name).toBe("Viajes");
+  });
+
+  it("lightens a color toward white", () => {
+    expect(lightenColor("#000000", 0.5)).toBe("#808080");
+    expect(lightenColor("#336699", 0)).toBe("#336699");
+    expect(lightenColor("#336699", 1)).toBe("#ffffff");
   });
 });
 

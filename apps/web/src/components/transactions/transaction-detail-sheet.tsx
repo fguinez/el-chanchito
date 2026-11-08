@@ -34,6 +34,7 @@ import { TransactionLocationField } from "@/components/transactions/transaction-
 import { TransactionEditForm } from "@/components/transactions/transaction-edit-form";
 import { TransactionNotesField } from "@/components/transactions/transaction-notes-field";
 import { CategorySuggestionHint } from "@/components/transactions/category-suggestion-hint";
+import { CATEGORY_PATH_SEPARATOR } from "@/lib/category-tree";
 import { SUGGESTIONS_ANCHOR } from "@/lib/transfer-suggestions";
 import { BILLING_STATUS_LABELS } from "@/lib/card-billing";
 
@@ -326,7 +327,19 @@ function TransactionDetailBody({
           )}
           <Field label="Categoría">
             <span className="inline-flex flex-wrap items-center gap-2">
-              {txn.category ? txn.category.name : <Muted>Sin categoría</Muted>}
+              {txn.category ? (
+                <span>
+                  {txn.category.parentName && (
+                    <span className="text-muted-foreground">
+                      {txn.category.parentName}
+                      {CATEGORY_PATH_SEPARATOR}
+                    </span>
+                  )}
+                  {txn.category.name}
+                </span>
+              ) : (
+                <Muted>Sin categoría</Muted>
+              )}
               {txn.isManuallyCategorized && (
                 <Badge variant="secondary">manual</Badge>
               )}

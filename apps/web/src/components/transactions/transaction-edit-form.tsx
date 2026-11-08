@@ -10,7 +10,7 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { SELECT_CLASS } from "@/components/ui/native-select";
+import { CategoryPicker } from "@/components/categories/CategoryPicker";
 import { parseNumberInput } from "@/lib/utils";
 import { RULE_KEYWORD_MAX_LENGTH, trimKeyword } from "@/lib/categories";
 import type { TransactionDetail } from "@/app/api/transactions/[id]/route";
@@ -236,18 +236,13 @@ export function TransactionEditForm({
         <label className="mb-1 block text-sm text-muted-foreground">
           Categoría
         </label>
-        <select
-          className={SELECT_CLASS}
+        <CategoryPicker
+          aria-label="Categoría"
+          categories={categories}
           value={categoryId}
-          onChange={(e) => setCategoryId(e.target.value)}
-        >
-          <option value="">Sin categoría</option>
-          {categories.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name}
-            </option>
-          ))}
-        </select>
+          onChange={setCategoryId}
+          emptyLabel="Sin categoría"
+        />
         {categoryId !== "" && (
           <label className="mt-2 flex items-start gap-2 text-sm">
             <input

@@ -183,7 +183,7 @@ export function RulePreview({
                     <TableCell>
                       <span className="inline-flex items-center gap-2">
                         {category ? (
-                          <CategoryLabel category={category} />
+                          <CategoryLabel category={category} byId={categoriesById} />
                         ) : (
                           <span className="text-muted-foreground">
                             Sin categoría

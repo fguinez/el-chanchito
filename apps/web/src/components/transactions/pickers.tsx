@@ -10,9 +10,13 @@ import { SELECT_CLASS } from "@/components/ui/native-select";
 export interface CategoryOption {
   id: string;
   name: string;
+  /** The top-level category a subcategory belongs to (V046). */
+  parentId: string | null;
+  color: string | null;
 }
 
-/** Every category, by name, for a recategorize <select>. Empty on failure. */
+/** Every category, for a recategorize picker (CategoryPicker). Empty on
+ *  failure. */
 export function useCategories(): CategoryOption[] {
   const [categories, setCategories] = useState<CategoryOption[]>([]);
   useEffect(() => {
@@ -20,7 +24,14 @@ export function useCategories(): CategoryOption[] {
     fetch("/api/categories", { signal: controller.signal })
       .then((res) => (res.ok ? res.json() : []))
       .then((rows: CategoryOption[]) =>
-        setCategories(rows.map((c) => ({ id: c.id, name: c.name })))
+        setCategories(
+          rows.map((c) => ({
+            id: c.id,
+            name: c.name,
+            parentId: c.parentId,
+            color: c.color,
+          }))
+        )
       )
       .catch(() => {});
     return () => controller.abort();
