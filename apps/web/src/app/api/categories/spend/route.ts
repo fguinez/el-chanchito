@@ -33,6 +33,9 @@ const txnMonth = sql<string>`to_char(${transactions.transactionDate}, 'YYYY-MM')
  * (slug), `categoryId` (a uuid, or `none` for uncategorized rows); outside a
  * product, amounts are CLP converted with each product's rates. `groupBy`
  * month|product|institution adds `groups`, each summarized on its own.
+ * Beside the spend, every category, group and the whole scope carry their
+ * gross `expenses`, `income` and `net`; with a `categoryId`, product and
+ * institution groups with income alone are listed too.
  * 400 for a bad query, 404 for an unknown product or institution.
  */
 export async function GET(request: NextRequest) {
@@ -129,6 +132,7 @@ export async function GET(request: NextRequest) {
 
     const rows: SpendRow[] = [];
     let unconvertedCount = 0;
+    let unconvertedIncomeCount = 0;
     for (const sum of sums) {
       const native = Number(sum.amount);
       const amount = book
@@ -144,6 +148,7 @@ export async function GET(request: NextRequest) {
       if (amount == null) {
         // Sums split by sign, so a negative one holds only expense rows.
         if (native < 0) unconvertedCount += Number(sum.rows);
+        else if (native > 0) unconvertedIncomeCount += Number(sum.rows);
         continue;
       }
       rows.push({
@@ -164,6 +169,7 @@ export async function GET(request: NextRequest) {
       groupBy,
       ...summarizeSpend(rows, categoryInfo),
       unconvertedCount,
+      unconvertedIncomeCount,
     };
     if (groupBy !== "none") {
       const labels = new Map<string, string>();
@@ -189,7 +195,9 @@ export async function GET(request: NextRequest) {
         categoryInfo,
         groupBy,
         // Empty months are filled in only over a closed window.
-        from && to ? { from, to } : undefined
+        from && to ? { from, to } : undefined,
+        // One category's panel shows where its income lands too.
+        { keepIncomeGroups: categoryId != null }
       ).map(
         (group) => ({ ...group, label: labels.get(group.key) ?? group.key })
       );

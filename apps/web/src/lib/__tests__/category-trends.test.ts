@@ -25,15 +25,15 @@ function spend(categoryId: string | null, amount: number): CategorySpend {
     color: "#ff0000",
     amount,
     percent: 0,
+    expenses: amount,
+    income: 0,
+    net: amount,
   };
 }
 
 function group(key: string, categories: CategorySpend[]): CategorySpendGroup {
-  return {
-    key,
-    total: categories.reduce((s, c) => s + c.amount, 0),
-    categories,
-  };
+  const total = categories.reduce((s, c) => s + c.amount, 0);
+  return { key, total, expenses: total, income: 0, net: total, categories };
 }
 
 describe("month helpers", () => {

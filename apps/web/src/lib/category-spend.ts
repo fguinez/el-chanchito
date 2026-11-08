@@ -7,6 +7,18 @@
 // it, and a category that nets to zero or income drops out. "Sin categoría"
 // counts only its expenses: income has no category to offset, so it must not
 // shrink the uncategorized slice. Percents are shares of the scope's total.
+//
+// Flows: beside `amount`/`total` (the spend the donuts and stacked bars draw),
+// every category, summary and group carries `expenses` and `income` (gross
+// sums of its negative and positive rows, both positive) and `net` (expenses
+// minus income: positive is net spending, negative net income). Category
+// flows cover "Sin categoría" income too. Summary and group flows run over
+// every counted row of the part, so a category that nets to income is missing
+// from `categories` but still in its part's flows: a request scoped to one
+// `categoryId` reads that category's flows there, whatever their sign.
+// Product and institution groups with no spend are left out unless
+// `keepIncomeGroups` is set (the route sets it for a `categoryId` scope), in
+// which case a group with income alone stays.
 
 import { DEFAULT_CATEGORY_COLOR } from "@/lib/categories";
 import { countsTowardFlow } from "@/lib/transactions";
@@ -39,7 +51,17 @@ export interface SpendCategoryInfo {
   color: string | null;
 }
 
-export interface CategorySpend {
+/** Gross flows of a set of counted rows, in the scope's currency. */
+export interface SpendFlows {
+  /** Sum of the negative rows, as a positive number. */
+  expenses: number;
+  /** Sum of the positive rows. */
+  income: number;
+  /** expenses - income: positive is net spending, negative net income. */
+  net: number;
+}
+
+export interface CategorySpend extends SpendFlows {
   /** Null for "Sin categoría". */
   categoryId: string | null;
   name: string;
@@ -50,7 +72,8 @@ export interface CategorySpend {
   percent: number;
 }
 
-export interface CategorySpendSummary {
+export interface CategorySpendSummary extends SpendFlows {
+  /** Sum of `categories`' amounts: spend only (see the header). */
   total: number;
   /** Largest first; "Sin categoría" always last. */
   categories: CategorySpend[];
@@ -77,6 +100,12 @@ export interface CategorySpendResponse extends CategorySpendSummary {
   /** Expense rows (amount < 0) left out because their currency has no CLP
    *  rate; unconvertible income never counts as spend, so it is not here. */
   unconvertedCount: number;
+  /** Income rows (amount > 0) left out of every flow for the same reason. */
+  unconvertedIncomeCount: number;
+}
+
+function flowsOf(expenses: number, income: number): SpendFlows {
+  return { expenses, income, net: expenses - income };
 }
 
 /** Spend per category over `rows`, ranked, with shares of the total. */
@@ -84,41 +113,57 @@ export function summarizeSpend(
   rows: readonly SpendRow[],
   categoryInfo: ReadonlyMap<string, SpendCategoryInfo>
 ): CategorySpendSummary {
-  const net = new Map<string, number>();
-  let uncategorized = 0;
+  // Gross expenses and income per category id ("" = uncategorized).
+  const gross = new Map<string, { expenses: number; income: number }>();
+  let expenses = 0;
+  let income = 0;
   for (const row of rows) {
     if (!countsTowardFlow(row)) continue;
-    if (row.categoryId == null) {
-      if (row.amount < 0) uncategorized -= row.amount;
-      continue;
+    const key = row.categoryId ?? "";
+    const entry = gross.get(key) ?? { expenses: 0, income: 0 };
+    if (row.amount < 0) {
+      entry.expenses -= row.amount;
+      expenses -= row.amount;
+    } else {
+      entry.income += row.amount;
+      income += row.amount;
     }
-    net.set(row.categoryId, (net.get(row.categoryId) ?? 0) - row.amount);
+    gross.set(key, entry);
   }
 
   const ranked: Omit<CategorySpend, "percent">[] = [];
-  for (const [id, amount] of net) {
-    if (!(amount > 0)) continue;
-    const info = categoryInfo.get(id);
+  let uncategorized: Omit<CategorySpend, "percent"> | null = null;
+  for (const [key, entry] of gross) {
+    const flows = flowsOf(entry.expenses, entry.income);
+    if (key === "") {
+      if (entry.expenses > 0) {
+        uncategorized = {
+          categoryId: null,
+          name: UNCATEGORIZED_NAME,
+          color: UNCATEGORIZED_COLOR,
+          amount: entry.expenses,
+          ...flows,
+        };
+      }
+      continue;
+    }
+    if (!(flows.net > 0)) continue;
+    const info = categoryInfo.get(key);
     ranked.push({
-      categoryId: id,
+      categoryId: key,
       name: info?.name ?? "Categoría",
       color: info?.color ?? DEFAULT_CATEGORY_COLOR,
-      amount,
+      amount: flows.net,
+      ...flows,
     });
   }
   ranked.sort((a, b) => b.amount - a.amount || a.name.localeCompare(b.name, "es"));
-  if (uncategorized > 0) {
-    ranked.push({
-      categoryId: null,
-      name: UNCATEGORIZED_NAME,
-      color: UNCATEGORIZED_COLOR,
-      amount: uncategorized,
-    });
-  }
+  if (uncategorized) ranked.push(uncategorized);
 
   const total = ranked.reduce((sum, c) => sum + c.amount, 0);
   return {
     total,
+    ...flowsOf(expenses, income),
     categories: ranked.map((c) => ({
       ...c,
       percent: total > 0 ? (c.amount / total) * 100 : 0,
@@ -155,13 +200,15 @@ export function monthsBetween(from: string, to: string): string[] {
  * own (shares are of the part's total). Month groups run oldest first and
  * cover every month of `window` when given, empty ones included, so a bar
  * chart keeps its gaps; product and institution groups run largest first and
- * leave out those with no spend.
+ * leave out those with no spend, unless `keepIncomeGroups` keeps those with
+ * income (ranked after the spenders, by income).
  */
 export function groupSpend(
   rows: readonly SpendRow[],
   categoryInfo: ReadonlyMap<string, SpendCategoryInfo>,
   groupBy: Exclude<SpendGroupBy, "none">,
-  window?: { from: string; to: string }
+  window?: { from: string; to: string },
+  { keepIncomeGroups = false }: { keepIncomeGroups?: boolean } = {}
 ): CategorySpendGroup[] {
   const parts = new Map<string, SpendRow[]>();
   if (groupBy === "month" && window) {
@@ -180,8 +227,11 @@ export function groupSpend(
   }));
   if (groupBy === "month") return groups.sort((a, b) => a.key.localeCompare(b.key));
   return groups
-    .filter((g) => g.total > 0)
-    .sort((a, b) => b.total - a.total || a.key.localeCompare(b.key));
+    .filter((g) => g.total > 0 || (keepIncomeGroups && g.income > 0))
+    .sort(
+      (a, b) =>
+        b.total - a.total || b.income - a.income || a.key.localeCompare(b.key)
+    );
 }
 
 /** The first and last YYYY-MM-DD of a YYYY-MM month. */

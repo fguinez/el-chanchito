@@ -114,7 +114,99 @@ describe("summarizeSpend", () => {
       ],
       info
     );
-    expect(result).toEqual({ total: 0, categories: [] });
+    expect(result).toEqual({
+      total: 0,
+      expenses: 0,
+      income: 0,
+      net: 0,
+      categories: [],
+    });
+  });
+
+  it("reports gross flows of a category that nets to spending", () => {
+    const result = summarizeSpend(
+      [
+        row({ categoryId: FOOD, amount: -2_500_000 }),
+        row({ categoryId: FOOD, amount: 1_000_000 }),
+      ],
+      info
+    );
+    expect(result.categories[0]).toMatchObject({
+      amount: 1_500_000,
+      expenses: 2_500_000,
+      income: 1_000_000,
+      net: 1_500_000,
+    });
+    expect(result).toMatchObject({
+      total: 1_500_000,
+      expenses: 2_500_000,
+      income: 1_000_000,
+      net: 1_500_000,
+    });
+  });
+
+  it("keeps the flows of categories that net to income or zero in the summary", () => {
+    const result = summarizeSpend(
+      [
+        // Nets to income.
+        row({ categoryId: SALARY, amount: -1_000_000 }),
+        row({ categoryId: SALARY, amount: 2_500_000 }),
+        // Nets to exactly zero.
+        row({ categoryId: FUN, amount: -999_999 }),
+        row({ categoryId: FUN, amount: 999_999 }),
+      ],
+      info
+    );
+    expect(result.categories).toEqual([]);
+    expect(result.total).toBe(0);
+    expect(result).toMatchObject({
+      expenses: 1_999_999,
+      income: 3_499_999,
+      net: -1_500_000,
+    });
+  });
+
+  it("reports uncategorized income in flows but not in the spend", () => {
+    const result = summarizeSpend(
+      [
+        row({ categoryId: null, amount: -1_000_000 }),
+        row({ categoryId: null, amount: 2_500_000 }),
+      ],
+      info
+    );
+    expect(result.categories).toEqual([
+      expect.objectContaining({
+        categoryId: null,
+        amount: 1_000_000,
+        expenses: 1_000_000,
+        income: 2_500_000,
+        net: -1_500_000,
+        percent: 100,
+      }),
+    ]);
+    expect(result).toMatchObject({
+      total: 1_000_000,
+      expenses: 1_000_000,
+      income: 2_500_000,
+      net: -1_500_000,
+    });
+  });
+
+  it("leaves internal transfers out of the flows", () => {
+    const result = summarizeSpend(
+      [
+        row({ categoryId: FOOD, amount: -1_000_000 }),
+        row({ categoryId: FOOD, amount: 2_500_000, isInternalTransfer: true }),
+        row({ categoryId: null, amount: 999_999, isInternalTransfer: true }),
+      ],
+      info
+    );
+    expect(result).toMatchObject({
+      total: 1_000_000,
+      expenses: 1_000_000,
+      income: 0,
+      net: 1_000_000,
+    });
   });
 
   it("falls back to the default color", () => {
@@ -170,6 +262,43 @@ describe("groupSpend", () => {
     expect(groups.map((g) => g.key)).toEqual([PRODUCT_B, PRODUCT_A]);
     expect(groups[0].categories.map((c) => c.categoryId)).toEqual([FUN, FOOD]);
     expect(groups[1].categories[0].percent).toBe(100);
+  });
+
+  it("carries flows per month, including a month that nets to income", () => {
+    const groups = groupSpend(
+      [
+        row({ month: "2026-01", categoryId: FOOD, amount: -2_500_000 }),
+        row({ month: "2026-01", categoryId: FOOD, amount: 1_000_000 }),
+        row({ month: "2026-02", categoryId: FOOD, amount: -1_000_000 }),
+        row({ month: "2026-02", categoryId: FOOD, amount: 2_500_000 }),
+      ],
+      info,
+      "month",
+      { from: "2026-01-01", to: "2026-03-31" }
+    );
+    expect(
+      groups.map((g) => [g.key, g.total, g.expenses, g.income, g.net, g.categories.length])
+    ).toEqual([
+      ["2026-01", 1_500_000, 2_500_000, 1_000_000, 1_500_000, 1],
+      ["2026-02", 0, 1_000_000, 2_500_000, -1_500_000, 0],
+      ["2026-03", 0, 0, 0, 0, 0],
+    ]);
+  });
+
+  it("keeps groups with income alone when asked", () => {
+    const rows = [
+      row({ institutionSlug: "banco-uno", amount: -1_000_000 }),
+      row({ institutionSlug: "banco-dos", amount: 2_500_000 }),
+      row({ institutionSlug: "banco-tres", amount: 999_999 }),
+    ];
+    const groups = groupSpend(rows, info, "institution", undefined, {
+      keepIncomeGroups: true,
+    });
+    expect(groups.map((g) => [g.key, g.total, g.net])).toEqual([
+      ["banco-uno", 1_000_000, 1_000_000],
+      ["banco-dos", 0, -2_500_000],
+      ["banco-tres", 0, -999_999],
+    ]);
   });
 
   it("leaves out institutions with no spend", () => {
