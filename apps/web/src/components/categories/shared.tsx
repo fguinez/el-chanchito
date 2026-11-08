@@ -7,6 +7,7 @@ import {
   RULE_PRIORITY_MIN,
   type RuleMatchType,
 } from "@/lib/categories";
+import { CATEGORY_PATH_SEPARATOR } from "@/lib/category-tree";
 import { CategoryIcon } from "./CategoryIcon";
 
 export interface ApiCategoryRule {
@@ -26,7 +27,11 @@ export interface ApiCategory {
   icon: string | null;
   createdAt: string;
   rules: ApiCategoryRule[];
+  /** Rows assigned to the category, its subcategories included for a
+   *  top-level category (V046). */
   transactionCount: number;
+  /** Rows assigned to the category itself. */
+  directTransactionCount: number;
 }
 
 export interface RulePreviewTransaction {
@@ -124,20 +129,36 @@ export function CategorySwatch({
   );
 }
 
-/** Swatch, icon, and name of a category. */
+/** Swatch, icon, and name of a category. With `byId`, a subcategory reads
+ *  "Padre / Sub" (the parent muted) and shows its parent's color when it has
+ *  none of its own. */
 export function CategoryLabel({
   category,
+  byId,
 }: {
-  category: Pick<ApiCategory, "name" | "color" | "icon">;
+  category: Pick<ApiCategory, "name" | "color" | "icon"> & {
+    parentId?: string | null;
+  };
+  byId?: ReadonlyMap<string, Pick<ApiCategory, "name" | "color">>;
 }) {
+  const parent =
+    byId && category.parentId ? byId.get(category.parentId) : undefined;
   return (
     <span className="inline-flex items-center gap-2">
-      <CategorySwatch color={category.color} />
+      <CategorySwatch color={category.color ?? parent?.color ?? null} />
       <CategoryIcon
         icon={category.icon}
         className="size-4 shrink-0 text-muted-foreground"
       />
-      <span>{category.name}</span>
+      <span>
+        {parent && (
+          <span className="text-muted-foreground">
+            {parent.name}
+            {CATEGORY_PATH_SEPARATOR}
+          </span>
+        )}
+        {category.name}
+      </span>
     </span>
   );
 }

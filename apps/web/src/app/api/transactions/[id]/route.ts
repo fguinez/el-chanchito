@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { and, eq, or } from "drizzle-orm";
+import { and, eq, or, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   accounts,
@@ -75,7 +75,8 @@ export interface TransactionDetail {
     currency: string;
   };
   institution: { id: string; name: string; slug: string };
-  category: { id: string; name: string } | null;
+  /** `parentName` is the top-level category of a subcategory (V046). */
+  category: { id: string; name: string; parentName: string | null } | null;
   /** The internal transfer that links this row (V028), and on which side:
    *  "from" = its outgoing leg, "to" = its incoming leg. `autoLinked`: the
    *  suggestions linked it on their own (V032). */
@@ -130,6 +131,7 @@ const detailColumns = {
   institutionName: institutions.name,
   institutionSlug: institutions.slug,
   categoryName: categories.name,
+  categoryParentName: sql<string | null>`(SELECT p.name FROM categories p WHERE p.id = ${categories.parentId})`,
 };
 
 /**
@@ -232,7 +234,11 @@ async function loadTransactionDetail(id: string) {
     // Left join: a missing category comes back as a null name.
     category:
       row.categoryId && row.categoryName !== null
-        ? { id: row.categoryId, name: row.categoryName }
+        ? {
+            id: row.categoryId,
+            name: row.categoryName,
+            parentName: row.categoryParentName ?? null,
+          }
         : null,
     transfer: link
       ? {

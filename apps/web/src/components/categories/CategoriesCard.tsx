@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Plus } from "lucide-react";
 import {
   Card,
@@ -24,7 +24,8 @@ import {
   CATEGORY_NAME_MAX_LENGTH,
   type CategoryIconName,
 } from "@/lib/categories";
-import { CategoryRow } from "./CategoryRow";
+import { categoryTree, childrenByParent } from "@/lib/category-tree";
+import { AddSubcategoryRow, CategoryRow } from "./CategoryRow";
 import {
   CategoryTrendHeads,
   TREND_MONTHS,
@@ -38,6 +39,7 @@ import {
   COLOR_INPUT_CLASS,
   DEFAULT_CATEGORY_COLOR,
   NAME_CLASH_MESSAGE,
+  SELECT_CLASS,
   plural,
   readApiError,
   type ApiCategory,
@@ -45,12 +47,50 @@ import {
 
 type CategorySortKey = "nombre" | "transacciones" | "reglas" | TrendSortKey;
 
-function AddCategoryForm({ onCreated }: { onCreated: () => void }) {
+/** localStorage key of the parents whose subcategories are collapsed. */
+const COLLAPSED_KEY = "categorias:colapsadas";
+
+function readCollapsed(): Set<string> {
+  if (typeof window === "undefined") return new Set();
+  try {
+    const raw = window.localStorage.getItem(COLLAPSED_KEY);
+    const ids: unknown = raw ? JSON.parse(raw) : [];
+    return new Set(
+      Array.isArray(ids) ? ids.filter((id) => typeof id === "string") : []
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+function writeCollapsed(ids: Set<string>) {
+  try {
+    window.localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...ids]));
+  } catch {
+    // Storage blocked: the state lasts until the page closes.
+  }
+}
+
+function AddCategoryForm({
+  topLevel,
+  onCreated,
+}: {
+  /** The categories a new one may go under. */
+  topLevel: ApiCategory[];
+  onCreated: () => void;
+}) {
   const [name, setName] = useState("");
   const [color, setColor] = useState(DEFAULT_CATEGORY_COLOR);
+  // A subcategory keeps no color of its own (it shows its parent's) unless
+  // one is picked.
+  const [colorTouched, setColorTouched] = useState(false);
   const [icon, setIcon] = useState<CategoryIconName | null>(null);
+  const [parentId, setParentId] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const parent = topLevel.find((c) => c.id === parentId);
+  const shownColor =
+    parent && !colorTouched ? (parent.color ?? DEFAULT_CATEGORY_COLOR) : color;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -64,7 +104,12 @@ function AddCategoryForm({ onCreated }: { onCreated: () => void }) {
       const res = await fetch("/api/categories", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, color, icon }),
+        body: JSON.stringify({
+          name,
+          color: parent && !colorTouched ? null : color,
+          icon,
+          parentId: parent ? parent.id : null,
+        }),
       });
       if (!res.ok) {
         setError(
@@ -76,7 +121,9 @@ function AddCategoryForm({ onCreated }: { onCreated: () => void }) {
       }
       setName("");
       setColor(DEFAULT_CATEGORY_COLOR);
+      setColorTouched(false);
       setIcon(null);
+      setParentId("");
       onCreated();
     } catch {
       setError("No se pudo crear la categoría");
@@ -107,6 +154,27 @@ function AddCategoryForm({ onCreated }: { onCreated: () => void }) {
             aria-invalid={error != null}
           />
         </div>
+        <div className="w-48">
+          <label
+            htmlFor="new-category-parent"
+            className="mb-1 block text-sm text-muted-foreground"
+          >
+            Categoría padre
+          </label>
+          <select
+            id="new-category-parent"
+            value={parentId}
+            onChange={(e) => setParentId(e.target.value)}
+            className={SELECT_CLASS}
+          >
+            <option value="">Ninguna</option>
+            {topLevel.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+        </div>
         <div>
           <label
             htmlFor="new-category-color"
@@ -117,8 +185,11 @@ function AddCategoryForm({ onCreated }: { onCreated: () => void }) {
           <input
             id="new-category-color"
             type="color"
-            value={color}
-            onChange={(e) => setColor(e.target.value)}
+            value={shownColor}
+            onChange={(e) => {
+              setColor(e.target.value);
+              setColorTouched(true);
+            }}
             className={COLOR_INPUT_CLASS}
           />
         </div>
@@ -148,7 +219,23 @@ export function CategoriesCard({
   /** Bumped on every reload, so the spend columns refetch too. */
   version?: number;
 }) {
+  // Top-level rows show their subcategories rolled in; subcategory rows read
+  // the split figures.
   const { trends, error: trendsError } = useCategoryTrends(TREND_MONTHS, version);
+  const { trends: splitTrends, error: splitTrendsError } = useCategoryTrends(
+    TREND_MONTHS,
+    version,
+    { split: true }
+  );
+  const byId = useMemo(
+    () => new Map(categories.map((c) => [c.id, c])),
+    [categories]
+  );
+  const isChild = useCallback(
+    (category: ApiCategory) =>
+      category.parentId !== null && byId.has(category.parentId),
+    [byId]
+  );
   const getValue = useCallback(
     (category: ApiCategory, key: CategorySortKey): string | number | null => {
       switch (key) {
@@ -159,10 +246,14 @@ export function CategoriesCard({
         case "reglas":
           return category.rules.length;
         default:
-          return trendSortValue(trends, category.id, key);
+          return trendSortValue(
+            isChild(category) ? splitTrends : trends,
+            category.id,
+            key
+          );
       }
     },
-    [trends]
+    [trends, splitTrends, isChild]
   );
   const { sorted, sort, toggleSort } = useSortableData(categories, getValue);
   // Bridge the generic header's string key to our typed key union.
@@ -174,19 +265,89 @@ export function CategoriesCard({
     onSort: handleSort,
   });
 
+  const tree = useMemo(() => categoryTree(sorted), [sorted]);
+  const children = useMemo(() => childrenByParent(categories), [categories]);
+  const topLevel = useMemo(
+    () =>
+      categories
+        .filter((c) => !isChild(c))
+        .sort((a, b) => a.name.localeCompare(b.name, "es")),
+    [categories, isChild]
+  );
+
+  // The card first renders once the categories arrive, client-side, so
+  // storage is there to read.
+  const [collapsed, setCollapsed] = useState<Set<string>>(readCollapsed);
+  const toggleCollapsed = (id: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      writeCollapsed(next);
+      return next;
+    });
+  };
+  // The parent whose inline "new subcategory" row is open.
+  const [addingTo, setAddingTo] = useState<string | null>(null);
+  const startAdding = (id: string) => {
+    setAddingTo(id);
+    if (collapsed.has(id)) toggleCollapsed(id);
+  };
+
+  const subcategoryCount = categories.length - topLevel.length;
+  const rows: React.ReactNode[] = [];
+  tree.forEach((entry, index) => {
+    const { category, depth, parent } = entry;
+    if (depth === 1 && parent && collapsed.has(parent.id)) return;
+    const kids = depth === 0 ? (children.get(category.id) ?? []) : [];
+    rows.push(
+      <CategoryRow
+        key={category.id}
+        category={category}
+        parent={parent}
+        childCount={kids.length}
+        expanded={!collapsed.has(category.id)}
+        onToggle={() => toggleCollapsed(category.id)}
+        onAddSubcategory={() => startAdding(category.id)}
+        topLevel={topLevel}
+        onChange={onChange}
+        trends={depth === 1 ? splitTrends : trends}
+        trendsError={depth === 1 ? splitTrendsError : trendsError}
+      />
+    );
+    // The inline add row closes the parent's group.
+    const groupOwner = depth === 0 ? category : parent;
+    const next = tree[index + 1];
+    const groupEnds = !next || next.depth === 0;
+    if (groupOwner && groupEnds && addingTo === groupOwner.id) {
+      rows.push(
+        <AddSubcategoryRow
+          key={`add-${groupOwner.id}`}
+          parent={groupOwner}
+          onDone={(created) => {
+            setAddingTo(null);
+            if (created) onChange();
+          }}
+        />
+      );
+    }
+  });
+
   return (
     <Card>
       <CardHeader>
         <CardTitle>Categorías</CardTitle>
         <CardDescription>
-          {plural(categories.length, "categoría", "categorías")}. Gasto en
-          CLP sin transferencias internas; elige una categoría para ver su
-          detalle.
+          {plural(topLevel.length, "categoría", "categorías")}
+          {subcategoryCount > 0 &&
+            ` y ${plural(subcategoryCount, "subcategoría", "subcategorías")}`}
+          . Gasto en CLP sin transferencias internas; el de cada categoría
+          incluye sus subcategorías. Elige una categoría para ver su detalle.
           {trendsError && " No se pudieron cargar los gastos por categoría."}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
-        <AddCategoryForm onCreated={onChange} />
+        <AddCategoryForm topLevel={topLevel} onCreated={onChange} />
         {categories.length === 0 && (
           <p className="text-muted-foreground">
             No hay categorías. Agrega una arriba.
@@ -215,15 +376,7 @@ export function CategoriesCard({
             </TableRow>
           </TableHeader>
           <TableBody>
-            {sorted.map((category) => (
-              <CategoryRow
-                key={category.id}
-                category={category}
-                onChange={onChange}
-                trends={trends}
-                trendsError={trendsError}
-              />
-            ))}
+            {rows}
             <UncategorizedRow trends={trends} trailingCells={3} />
           </TableBody>
         </Table>

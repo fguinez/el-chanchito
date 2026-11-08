@@ -13,10 +13,13 @@ import {
  * Every category's trend over the `months` months ending with the current
  * one, CLP and every product, from one GET /api/categories/spend?groupBy=month
  * (see lib/category-trends). `trends` is null while loading or on error.
+ * Subcategories roll into their parent unless `split` keeps every category
+ * apart (the Categorías table's subcategory rows read that one).
  */
 export function useCategoryTrends(
   months: number,
-  refreshKey = 0
+  refreshKey = 0,
+  { split = false }: { split?: boolean } = {}
 ): {
   trends: Map<string, CategoryTrend> | null;
   currentMonth: string;
@@ -25,7 +28,9 @@ export function useCategoryTrends(
   // Fixed at mount, so a page left open past midnight keeps one window.
   const [currentMonth] = useState(() => monthOf(new Date()));
   const { from, to } = trailingMonthsWindow(currentMonth, months);
-  const query = new URLSearchParams({ from, to, groupBy: "month" }).toString();
+  const params = new URLSearchParams({ from, to, groupBy: "month" });
+  if (split) params.set("split", "1");
+  const query = params.toString();
   const { data, error } = useCategorySpend(query, refreshKey);
   const trends = useMemo(
     () => (data ? categoryTrends(data.groups ?? [], currentMonth, months) : null),

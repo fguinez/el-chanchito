@@ -224,7 +224,7 @@ describe("GET /api/transactions/[id]", () => {
         name: "Banco de Prueba",
         slug: "banco-prueba",
       },
-      category: { id: CATEGORY_ID, name: "Categoría de prueba" },
+      category: { id: CATEGORY_ID, name: "Categoría de prueba", parentName: null },
       transfer: null,
       billing: null,
     });

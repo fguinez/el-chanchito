@@ -48,7 +48,8 @@ import {
   useActiveProducts,
   useCategories,
 } from "@/components/transactions/pickers";
-import { SELECT_CLASS } from "@/components/ui/native-select";
+import { CategoryPicker } from "@/components/categories/CategoryPicker";
+import { categoryPath } from "@/lib/category-tree";
 import { LOCATION_TEXT_MAX_LENGTH } from "@/lib/transaction-location";
 import { CategoryDonut, categoryKey } from "@/components/charts/category-donut";
 import { useCategorySpend } from "@/components/charts/use-category-spend";
@@ -214,9 +215,17 @@ function ExpensesView() {
   const [saving, setSaving] = useState(false);
 
   const categories = useCategories();
-  const categoryName = useCallback(
-    (id: string | null) => categories.find((c) => c.id === id)?.name ?? null,
+  // "Viajes / Japón" for a subcategory, so a filter chip or sort says which.
+  const categoriesById = useMemo(
+    () => new Map(categories.map((c) => [c.id, c])),
     [categories]
+  );
+  const categoryName = useCallback(
+    (id: string | null) => {
+      const category = id ? categoriesById.get(id) : undefined;
+      return category ? categoryPath(category, categoriesById) : null;
+    },
+    [categoriesById]
   );
   // Every active product, to name the product and institution filters; the
   // manual form picks among the CLP ones, like the transfers picker.
@@ -821,19 +830,13 @@ function ExpensesView() {
                       onClick={(e) => e.stopPropagation()}
                       onKeyDown={(e) => e.stopPropagation()}
                     >
-                      <select
-                        className={SELECT_CLASS}
-                        value={txn.categoryId ?? ""}
-                        onChange={(e) => recategorize(txn.id, e.target.value)}
+                      <CategoryPicker
                         aria-label="Categoría"
-                      >
-                        <option value="">Sin categoría</option>
-                        {categories.map((c) => (
-                          <option key={c.id} value={c.id}>
-                            {c.name}
-                          </option>
-                        ))}
-                      </select>
+                        categories={categories}
+                        value={txn.categoryId ?? ""}
+                        onChange={(id) => recategorize(txn.id, id)}
+                        emptyLabel="Sin categoría"
+                      />
                     </TableCell>
                     <TableCell>
                       <Badge variant="outline" className="text-xs">

@@ -14,6 +14,7 @@ import {
   trimKeyword,
   type RuleMatchType,
 } from "@/lib/categories";
+import { CategoryPicker } from "./CategoryPicker";
 import { RulePreview } from "./RulePreview";
 import {
   CategoryLabel,
@@ -227,27 +228,15 @@ export function RuleRow({
         </TableCell>
         <TableCell>
           {draft ? (
-            <select
+            <CategoryPicker
               aria-label="Categoría de la regla"
+              categories={categories}
               value={selectedCategoryId}
-              onChange={(e) =>
-                setDraft({ ...draft, categoryId: e.target.value })
-              }
-              className={`${SELECT_CLASS} max-w-56`}
-            >
-              {!selectedCategoryId && (
-                <option value="" disabled>
-                  Elige una categoría
-                </option>
-              )}
-              {categories.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
+              onChange={(categoryId) => setDraft({ ...draft, categoryId })}
+              className="max-w-56"
+            />
           ) : category ? (
-            <CategoryLabel category={category} />
+            <CategoryLabel category={category} byId={categoriesById} />
           ) : null}
         </TableCell>
         <TableCell className="text-right tabular-nums">

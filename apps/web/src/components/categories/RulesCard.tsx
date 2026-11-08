@@ -28,6 +28,7 @@ import {
   trimKeyword,
   type RuleMatchType,
 } from "@/lib/categories";
+import { CategoryPicker } from "./CategoryPicker";
 import { RulePreview } from "./RulePreview";
 import { RuleRow } from "./RuleRow";
 import {
@@ -191,21 +192,12 @@ function AddRuleForm({
             >
               Categoría
             </label>
-            <select
+            <CategoryPicker
               id="new-rule-category"
+              categories={categories}
               value={selectedCategoryId}
-              onChange={(e) => setCategoryId(e.target.value)}
-              className={SELECT_CLASS}
-            >
-              <option value="" disabled>
-                Elige una categoría
-              </option>
-              {categories.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
+              onChange={setCategoryId}
+            />
           </div>
           <div className="w-28">
             <label
