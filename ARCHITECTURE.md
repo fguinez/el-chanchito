@@ -435,6 +435,15 @@ keyword, one database transaction creates or reuses an exact rule keyed on the
 raw `description` and recategorizes the visible, non-manual rows with that
 exact description.
 
+Categories nest one level deep (V046): a subcategory's `parent_id` names a
+top-level category, and a transaction's single `category_id` may point at
+either. The dashboard rolls subcategory rows into their parent wherever spend
+is shown per category (`rollUpToParents` in `lib/category-spend`), and a
+`categoryId` filter on a parent also matches its subcategories' rows
+(`inCategoryScope` in `lib/db/transactions`); filtering on a subcategory
+matches only its own rows. Deleting a parent promotes its subcategories to
+top-level.
+
 Category suggestions are computed on demand, with no external service
 (`lib/category-suggestions` scores, `lib/category-suggestions-db` queries). The
 history is the visible categorized rows grouped by trimmed lowercase
@@ -497,6 +506,7 @@ suggested category, cascading with the category.
 | `V043__budget_item_kinds_and_income.sql` | `fixed_expenses.kind` (`fixed` default, `estimated`, `savings`; CHECK), backfilled by name: `Ahorro:` prefix becomes `savings` with the prefix stripped, `Gastos diarios...` becomes `estimated`; `budget_settings`, a single-row table with the monthly income (`monthly_income >= 0`) |
 | `V044__transactions_billing_status.sql` | transactions gain `billing_status` (`unbilled` / `billed`, NULL = not reported; CHECK) and `statement_date` (only on billed rows; CHECK); the writer only moves them forward (see "Card billing status"); no backfill |
 | `V045__transactions_deleted_by.sql` | transactions gain `deleted_by` (`scraper` when a scraper cleanup soft-deleted the row, NULL when visible or deleted by the user; CHECK): scraper-deleted rows are never adopted and are restored when a scrape lists their key again; scraper logic only, no backfill |
+| `V046__category_subcategories.sql` | subcategories one level deep on the existing `categories.parent_id`: index on `parent_id` and a `BEFORE INSERT OR UPDATE OF parent_id` trigger (`trg_categories_one_level`) rejecting a self parent, a parent that is itself a subcategory, and re-parenting a category that has subcategories; no backfill |
 
 ## Scraper Architecture
 

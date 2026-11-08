@@ -10,6 +10,7 @@ import { resolveProductId } from "@/lib/db/resolve";
 import {
   descriptionMatches,
   displayDescription,
+  inCategoryScope,
   notDeleted,
 } from "@/lib/db/transactions";
 import { eq, desc, and, gte, isNull, lte } from "drizzle-orm";
@@ -28,7 +29,8 @@ import {
 /** GET /api/transactions: list transactions, newest first. Optional filters,
  *  all combined: `month` (budget month, scheduled_month), `from`/`to`
  *  (inclusive transaction_date), `productId`, `institution` (slug),
- *  `categoryId` (a uuid, or `none` for uncategorized rows) and `q` (every word
+ *  `categoryId` (a uuid, which takes in its subcategories' rows too, or
+ *  `none` for uncategorized rows) and `q` (every word
  *  in the display or the raw description, ignoring case and accents; see
  *  lib/transaction-search). */
 export async function GET(request: NextRequest) {
@@ -54,7 +56,7 @@ export async function GET(request: NextRequest) {
   if (categoryId === UNCATEGORIZED_PARAM) {
     conditions.push(isNull(transactions.categoryId));
   } else if (categoryId) {
-    conditions.push(eq(transactions.categoryId, categoryId));
+    conditions.push(inCategoryScope(categoryId));
   }
   const search = descriptionMatches(q);
   if (search) conditions.push(search);

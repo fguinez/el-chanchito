@@ -71,10 +71,12 @@ describe("GET /api/transactions filters", () => {
     expect(sql).toContain('"transaction_date" >=');
   });
 
-  it("filters one category, case-insensitively", async () => {
+  it("filters one category and its subcategories, case-insensitively", async () => {
     await get(`?categoryId=${CATEGORY.toUpperCase()}`);
     const select = fake.queries.find((q) => q.op === "select")!;
-    expect(listWhereSql()).toContain('"category_id" =');
+    const sql = listWhereSql();
+    expect(sql).toContain('"category_id" in (select');
+    expect(sql).toContain('"parent_id" =');
     expect(whereParams(select)).toContain(CATEGORY);
   });
 

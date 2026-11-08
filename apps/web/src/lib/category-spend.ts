@@ -19,6 +19,13 @@
 // Product and institution groups with no spend are left out unless
 // `keepIncomeGroups` is set (the route sets it for a `categoryId` scope), in
 // which case a group with income alone stays.
+//
+// Subcategories (V046): a subcategory's rows count toward its parent, so the
+// route rolls them up (rollUpToParents) before summarizing and every chart
+// shows one slice per top-level category. A parent's detail panel asks for
+// the split instead (categoryInfoFor with `splitParentId`): one slice per
+// subcategory plus SPLIT_DIRECT_NAME for the rows assigned to the parent
+// itself.
 
 import { DEFAULT_CATEGORY_COLOR } from "@/lib/categories";
 import { countsTowardFlow } from "@/lib/transactions";
@@ -49,6 +56,69 @@ export interface SpendCategoryInfo {
   id: string;
   name: string;
   color: string | null;
+  /** The top-level category this one is a subcategory of (V046). */
+  parentId?: string | null;
+}
+
+/** A parent's split: the label of the rows assigned to the parent itself
+ *  rather than to one of its subcategories. */
+export const SPLIT_DIRECT_NAME = "Sin subcategoría";
+
+/** `rows` with every subcategory's rows moved onto its parent, so each
+ *  top-level category sums its subcategories too. Ids missing from
+ *  `categoryInfo` stay as they are. */
+export function rollUpToParents(
+  rows: readonly SpendRow[],
+  categoryInfo: ReadonlyMap<string, SpendCategoryInfo>
+): SpendRow[] {
+  return rows.map((row) => {
+    const parentId = row.categoryId
+      ? categoryInfo.get(row.categoryId)?.parentId
+      : null;
+    return parentId ? { ...row, categoryId: parentId } : row;
+  });
+}
+
+/** `hex` (#rrggbb) mixed toward white by `amount` (0 to 1). */
+export function lightenColor(hex: string, amount: number): string {
+  const channel = (i: number) => {
+    const value = parseInt(hex.slice(i, i + 2), 16);
+    return Math.round(value + (255 - value) * amount)
+      .toString(16)
+      .padStart(2, "0");
+  };
+  return `#${channel(1)}${channel(3)}${channel(5)}`;
+}
+
+/**
+ * The category lookup the summaries read, from the categories table's rows.
+ * A subcategory without a color of its own takes its parent's. With
+ * `splitParentId` (a parent's breakdown), that parent is renamed
+ * SPLIT_DIRECT_NAME, since only its direct rows keep its id, and its
+ * colorless subcategories get lighter shades of its color so the slices stay
+ * apart.
+ */
+export function categoryInfoFor(
+  rows: readonly SpendCategoryInfo[],
+  { splitParentId }: { splitParentId?: string } = {}
+): Map<string, SpendCategoryInfo> {
+  const byId = new Map(rows.map((c) => [c.id, c]));
+  const info = new Map<string, SpendCategoryInfo>();
+  let shade = 0;
+  for (const c of [...rows].sort((a, b) => a.name.localeCompare(b.name, "es"))) {
+    const parent = c.parentId ? byId.get(c.parentId) : undefined;
+    let color = c.color ?? parent?.color ?? null;
+    if (splitParentId && c.parentId === splitParentId && c.color == null) {
+      const base = parent?.color ?? DEFAULT_CATEGORY_COLOR;
+      color = lightenColor(base, 0.2 + 0.15 * (shade++ % 4));
+    }
+    info.set(c.id, {
+      ...c,
+      name: c.id === splitParentId ? SPLIT_DIRECT_NAME : c.name,
+      color,
+    });
+  }
+  return info;
 }
 
 /** Gross flows of a set of counted rows, in the scope's currency. */

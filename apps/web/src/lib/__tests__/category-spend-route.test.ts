@@ -26,6 +26,7 @@ const FUN = "22222222-2222-4222-8222-222222222222";
 const CARD = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const USD_CARD = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const CRYPTO = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const TRIP = "33333333-3333-4333-8333-333333333333";
 
 interface Sum {
   categoryId: string | null;
@@ -62,8 +63,9 @@ function respond(query: RecordedQuery): unknown {
   const from = argOf(query, "from");
   if (from === categories) {
     return [
-      { id: FOOD, name: "Comida", color: "#ff0000" },
-      { id: FUN, name: "Ocio", color: null },
+      { id: FOOD, name: "Comida", color: "#ff0000", parentId: null },
+      { id: FUN, name: "Ocio", color: null, parentId: null },
+      { id: TRIP, name: "Viaje de prueba", color: null, parentId: FUN },
     ];
   }
   if (from === products) return world.product ? [world.product] : [];
@@ -222,6 +224,50 @@ describe("GET /api/categories/spend", () => {
       ["2026-01", 0],
       ["2026-02", 1_000_000],
       ["2026-03", 0],
+    ]);
+  });
+
+  it("rolls subcategories into their parent", async () => {
+    world.sums = [
+      sum({ categoryId: FUN, amount: "-1000000.00" }),
+      sum({ categoryId: TRIP, amount: "-2500000.00" }),
+      sum({ categoryId: FOOD, amount: "-999999.00" }),
+    ];
+    const body = await (await get("from=2026-01-01&to=2026-01-31")).json();
+    expect(
+      body.categories.map((c: { categoryId: string; amount: number }) => [c.categoryId, c.amount])
+    ).toEqual([
+      [FUN, 3_500_000],
+      [FOOD, 999_999],
+    ]);
+  });
+
+  it("takes a parent's subcategories into its scope and splits them on request", async () => {
+    world.sums = [
+      sum({ categoryId: FUN, amount: "-1000000.00" }),
+      sum({ categoryId: TRIP, amount: "-2500000.00" }),
+    ];
+    const body = await (
+      await get(`from=2026-01-01&to=2026-01-31&categoryId=${FUN}&split=1`)
+    ).json();
+    const sql = spendWhereSql();
+    expect(sql).toContain('"category_id" in (select');
+    expect(sql).toContain('"parent_id" =');
+    expect(
+      body.categories.map((c: { categoryId: string; name: string }) => [c.categoryId, c.name])
+    ).toEqual([
+      [TRIP, "Viaje de prueba"],
+      [FUN, "Sin subcategoría"],
+    ]);
+  });
+
+  it("keeps a subcategory's own name in its scope", async () => {
+    world.sums = [sum({ categoryId: TRIP, amount: "-2500000.00" })];
+    const body = await (
+      await get(`from=2026-01-01&to=2026-01-31&categoryId=${TRIP}`)
+    ).json();
+    expect(body.categories).toEqual([
+      expect.objectContaining({ categoryId: TRIP, name: "Viaje de prueba" }),
     ]);
   });
 
