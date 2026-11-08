@@ -37,7 +37,13 @@ export const UNCATEGORIZED_NAME = "Sin categoría";
 /** Gray of the uncategorized slice. */
 export const UNCATEGORIZED_COLOR = "#cbd5e1";
 
-export const SPEND_GROUP_BYS = ["none", "month", "product", "institution"] as const;
+export const SPEND_GROUP_BYS = [
+  "none",
+  "month",
+  "product",
+  "institution",
+  "category",
+] as const;
 export type SpendGroupBy = (typeof SPEND_GROUP_BYS)[number];
 
 /** A signed amount already in the scope's currency, or a partial sum of rows
@@ -150,7 +156,8 @@ export interface CategorySpendSummary extends SpendFlows {
 }
 
 export interface CategorySpendGroup extends CategorySpendSummary {
-  /** YYYY-MM, product id or institution slug. */
+  /** YYYY-MM, product id, institution slug, or category id
+   *  (UNCATEGORIZED_PARAM for "Sin categoría"). */
   key: string;
 }
 
@@ -165,8 +172,9 @@ export interface CategorySpendResponse extends CategorySpendSummary {
   currency: string;
   groupBy: SpendGroupBy;
   /** Present unless `groupBy` is "none"; `label` is the YYYY-MM month, the
-   *  product's display name or the institution's name. */
-  groups?: (CategorySpendGroup & { label: string })[];
+   *  product's display name, the institution's name or the category's name
+   *  (with its color, for category groups). */
+  groups?: (CategorySpendGroup & { label: string; color?: string })[];
   /** Expense rows (amount < 0) left out because their currency has no CLP
    *  rate; unconvertible income never counts as spend, so it is not here. */
   unconvertedCount: number;
@@ -244,6 +252,7 @@ export function summarizeSpend(
 function groupKey(row: SpendRow, groupBy: Exclude<SpendGroupBy, "none">): string {
   if (groupBy === "month") return row.month;
   if (groupBy === "product") return row.productId;
+  if (groupBy === "category") return row.categoryId ?? UNCATEGORIZED_PARAM;
   return row.institutionSlug;
 }
 
@@ -269,8 +278,8 @@ export function monthsBetween(from: string, to: string): string[] {
  * `rows` split by month, product or institution, each part summarized on its
  * own (shares are of the part's total). Month groups run oldest first and
  * cover every month of `window` when given, empty ones included, so a bar
- * chart keeps its gaps; product and institution groups run largest first and
- * leave out those with no spend, unless `keepIncomeGroups` keeps those with
+ * chart keeps its gaps; product, institution and category groups run largest
+ * first and leave out those with no spend, unless `keepIncomeGroups` keeps those with
  * income (ranked after the spenders, by income).
  */
 export function groupSpend(

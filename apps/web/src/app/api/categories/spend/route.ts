@@ -16,11 +16,14 @@ import {
   groupSpend,
   rollUpToParents,
   summarizeSpend,
+  UNCATEGORIZED_COLOR,
+  UNCATEGORIZED_NAME,
   UNCATEGORIZED_PARAM,
   type CategorySpendResponse,
   type SpendRow,
 } from "@/lib/category-spend";
 import { getRateBook } from "@/lib/rate-book";
+import { DEFAULT_CATEGORY_COLOR } from "@/lib/categories";
 import { ratesFor, toClp } from "@/lib/rates";
 import { displayProductName } from "@/lib/product-names";
 
@@ -34,7 +37,8 @@ const txnMonth = sql<string>`to_char(${transactions.transactionDate}, 'YYYY-MM')
  * `productId` (amounts then stay in the product's currency), `institution`
  * (slug), `categoryId` (a uuid, or `none` for uncategorized rows); outside a
  * product, amounts are CLP converted with each product's rates. `groupBy`
- * month|product|institution adds `groups`, each summarized on its own.
+ * month|product|institution|category adds `groups`, each summarized on its
+ * own (category groups carry the category's color too).
  * Subcategories (V046) roll into their parent: one entry per top-level
  * category, and a parent's `categoryId` takes in its subcategories' rows.
  * `split=1` keeps them apart instead; scoped to a parent, the parent's own
@@ -220,9 +224,17 @@ export async function GET(request: NextRequest) {
         from && to ? { from, to } : undefined,
         // One category's panel shows where its income lands too.
         { keepIncomeGroups: categoryId != null }
-      ).map(
-        (group) => ({ ...group, label: labels.get(group.key) ?? group.key })
-      );
+      ).map((group) => {
+        if (groupBy !== "category") {
+          return { ...group, label: labels.get(group.key) ?? group.key };
+        }
+        const info = categoryInfo.get(group.key);
+        return {
+          ...group,
+          label: info?.name ?? UNCATEGORIZED_NAME,
+          color: info ? (info.color ?? DEFAULT_CATEGORY_COLOR) : UNCATEGORIZED_COLOR,
+        };
+      });
     }
     return NextResponse.json(body);
   } catch (error) {

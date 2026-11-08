@@ -7,7 +7,8 @@ import type { CategorySpendResponse } from "@/lib/category-spend";
  * GET /api/categories/spend for `query` (a URL query string). Each result
  * remembers the query it answers, so a new query reads as loading (or as its
  * own error) instead of showing the previous one's figures; bumping
- * `refreshKey` refetches the same query and keeps its figures meanwhile.
+ * `refreshKey` refetches the same query and keeps its figures meanwhile. An
+ * empty `query` fetches nothing (a split the caller does not need).
  *
  * With `keepPrevious`, a new query keeps the last figures as `data` (with
  * `stale` set) until its own arrive, so a chart can animate from the old
@@ -25,6 +26,7 @@ export function useCategorySpend(
   } | null>(null);
 
   useEffect(() => {
+    if (!query) return;
     const controller = new AbortController();
     fetch(`/api/categories/spend?${query}`, { signal: controller.signal })
       .then((res) => {

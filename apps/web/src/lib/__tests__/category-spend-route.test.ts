@@ -261,6 +261,24 @@ describe("GET /api/categories/spend", () => {
     ]);
   });
 
+  it("groups a parent's split by subcategory with names and colors", async () => {
+    world.sums = [
+      sum({ categoryId: FUN, amount: "-1000000.00" }),
+      sum({ categoryId: TRIP, amount: "-2500000.00" }),
+      sum({ categoryId: TRIP, amount: "999999.00" }),
+    ];
+    const body = await (
+      await get(`from=2026-01-01&to=2026-01-31&categoryId=${FUN}&split=1&groupBy=category`)
+    ).json();
+    expect(
+      body.groups.map((g: { key: string; label: string; net: number }) => [g.key, g.label, g.net])
+    ).toEqual([
+      [TRIP, "Viaje de prueba", 1_500_001],
+      [FUN, "Sin subcategoría", 1_000_000],
+    ]);
+    expect(body.groups[0].color).toMatch(/^#[0-9a-f]{6}$/);
+  });
+
   it("keeps a subcategory's own name in its scope", async () => {
     world.sums = [sum({ categoryId: TRIP, amount: "-2500000.00" })];
     const body = await (
