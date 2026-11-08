@@ -546,12 +546,28 @@ export function validateAccountPatch(
 // Database errors
 // ---------------------------------------------------------------------------
 
-/**
- * True for a Postgres unique violation (SQLSTATE 23505), optionally on one
- * named constraint. Drizzle wraps driver errors, so the cause chain is
- * walked too.
- */
+/** True for a Postgres unique violation (SQLSTATE 23505), optionally on one
+ *  named constraint. */
 export function isUniqueViolation(error: unknown, constraint?: string): boolean {
+  return isPgError(error, "23505", constraint);
+}
+
+/** True for a Postgres foreign key violation (SQLSTATE 23503), optionally on
+ *  one named constraint. */
+export function isForeignKeyViolation(error: unknown, constraint?: string): boolean {
+  return isPgError(error, "23503", constraint);
+}
+
+/** True for a Postgres check violation (SQLSTATE 23514), optionally on one
+ *  named constraint (a trigger can name one too, as V046's does). */
+export function isCheckViolation(error: unknown, constraint?: string): boolean {
+  return isPgError(error, "23514", constraint);
+}
+
+/** True for a Postgres error with SQLSTATE `code`, optionally on one named
+ *  constraint. Drizzle wraps driver errors, so the cause chain is walked
+ *  too. */
+function isPgError(error: unknown, code: string, constraint?: string): boolean {
   let current: unknown = error;
   for (let depth = 0; current != null && depth < 5; depth += 1) {
     if (typeof current !== "object") return false;
@@ -560,7 +576,7 @@ export function isUniqueViolation(error: unknown, constraint?: string): boolean 
       constraint_name?: unknown;
       cause?: unknown;
     };
-    if (e.code === "23505") {
+    if (e.code === code) {
       return constraint == null || e.constraint_name === constraint;
     }
     current = e.cause;

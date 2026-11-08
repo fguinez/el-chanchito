@@ -149,13 +149,86 @@ describe("POST /api/categories", () => {
       name: "Mascotas",
       color: null,
       icon: null,
+      parentId: null,
     });
+  });
+
+  it("stores a subcategory under a top-level parent", async () => {
+    fake.respondWith((query) =>
+      query.op === "insert"
+        ? [{ id: FAKE_ROW_ID, ...(argOf(query, "values") as object) }]
+        : whereParams(query).includes(CATEGORY_ID)
+          ? [{ id: CATEGORY_ID, parentId: null }]
+          : []
+    );
+
+    const response = await categories.POST(
+      jsonRequest("POST", { name: "Viaje de prueba", parentId: CATEGORY_ID })
+    );
+
+    expect(response.status).toBe(201);
+    expect(argOf(onlyQuery("insert"), "values")).toMatchObject({
+      name: "Viaje de prueba",
+      parentId: CATEGORY_ID,
+    });
+  });
+
+  it("rejects a parent that is itself a subcategory", async () => {
+    fake.respondWith((query) =>
+      query.op === "select" && whereParams(query).includes(CATEGORY_ID)
+        ? [{ id: CATEGORY_ID, parentId: ROW_ID }]
+        : []
+    );
+
+    const response = await categories.POST(
+      jsonRequest("POST", { name: "Viaje de prueba", parentId: CATEGORY_ID })
+    );
+
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.field).toBe("parentId");
+    expect(body.issues).toHaveLength(1);
+    expect(fake.queries.some((q) => q.op === "insert")).toBe(false);
+  });
+
+  it("answers 400 when the parent is deleted before the insert", async () => {
+    fake.respondWith((query) => {
+      if (query.op === "insert") {
+        // Drizzle wraps the driver error; the route walks the cause chain.
+        throw new Error("insert failed", {
+          cause: { code: "23503", constraint_name: "categories_parent_id_fkey" },
+        });
+      }
+      return whereParams(query).includes(CATEGORY_ID)
+        ? [{ id: CATEGORY_ID, parentId: null }]
+        : [];
+    });
+
+    const response = await categories.POST(
+      jsonRequest("POST", { name: "Viaje de prueba", parentId: CATEGORY_ID })
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: "La categoría padre no existe",
+      field: "parentId",
+    });
+  });
+
+  it("rejects an unknown parent", async () => {
+    const response = await categories.POST(
+      jsonRequest("POST", { name: "Viaje de prueba", parentId: CATEGORY_ID })
+    );
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toBe("La categoría padre no existe");
   });
 
   it.each([
     [{ name: "   " }, "name"],
     [{ name: "Mascotas", color: "red" }, "color"],
     [{ name: "Mascotas", icon: "not-an-icon" }, "icon"],
+    [{ name: "Mascotas", parentId: "viajes" }, "parentId"],
   ])("rejects %j on %s", async (body, field) => {
     await expectRejected(await categories.POST(jsonRequest("POST", body)), field);
   });

@@ -2,15 +2,27 @@ import { NextRequest, NextResponse } from "next/server";
 import { and, eq, ne, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { categories, categoryRules, transactions } from "@/lib/db/schema";
-import { UUID_RE, failureBody, validateCategoryInput } from "@/lib/categories";
+import {
+  CATEGORY_ONE_LEVEL_CLASH,
+  CATEGORY_ONE_LEVEL_CONSTRAINT,
+  CATEGORY_PARENT_FK,
+  CATEGORY_PARENT_MISSING,
+  UUID_RE,
+  checkParentPlacement,
+  failureBody,
+  validateCategoryInput,
+} from "@/lib/categories";
+import { isCheckViolation, isForeignKeyViolation } from "@/lib/management";
 import { readJsonBody } from "@/lib/api/validation";
 
 // Next 16: dynamic segment params arrive as a Promise on the context arg.
 type Context = { params: Promise<{ id: string }> };
 
-/** PATCH /api/categories/[id]: partial update `{ name?, color?, icon? }`.
- *  A new name must not clash, case-insensitively, with another category
- *  (409). */
+/** PATCH /api/categories/[id]: partial update `{ name?, color?, icon?,
+ *  parentId? }`. A new name must not clash, case-insensitively, with another
+ *  category (409). `parentId` moves the category under a top-level one, or
+ *  back to top-level with null; a category with subcategories cannot move
+ *  under another (400 on `parentId`, as for a missing or nested parent). */
 export async function PATCH(request: NextRequest, { params }: Context) {
   try {
     const { id } = await params;
@@ -33,6 +45,30 @@ export async function PATCH(request: NextRequest, { params }: Context) {
       .where(eq(categories.id, id));
     if (!existing) {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+
+    const parentId = result.value.parentId;
+    if (parentId != null) {
+      const [[parent], [child]] = await Promise.all([
+        db
+          .select({ id: categories.id, parentId: categories.parentId })
+          .from(categories)
+          .where(eq(categories.id, parentId)),
+        db
+          .select({ id: categories.id })
+          .from(categories)
+          .where(eq(categories.parentId, id))
+          .limit(1),
+      ]);
+      const placement = checkParentPlacement({
+        id,
+        parentId,
+        parent,
+        hasChildren: child !== undefined,
+      });
+      if (!placement.ok) {
+        return NextResponse.json(failureBody(placement), { status: 400 });
+      }
     }
 
     if (result.value.name !== undefined) {
@@ -63,6 +99,18 @@ export async function PATCH(request: NextRequest, { params }: Context) {
     }
     return NextResponse.json(updated);
   } catch (error) {
+    // The tree changed between the checks and the update (V046's trigger).
+    if (isCheckViolation(error, CATEGORY_ONE_LEVEL_CONSTRAINT)) {
+      return NextResponse.json(failureBody(CATEGORY_ONE_LEVEL_CLASH), {
+        status: 400,
+      });
+    }
+    // The new parent was deleted between the check and the update.
+    if (isForeignKeyViolation(error, CATEGORY_PARENT_FK)) {
+      return NextResponse.json(failureBody(CATEGORY_PARENT_MISSING), {
+        status: 400,
+      });
+    }
     console.error("PATCH /api/categories/[id] failed:", error);
     return NextResponse.json({ error: "Internal error" }, { status: 500 });
   }
@@ -72,7 +120,8 @@ export async function PATCH(request: NextRequest, { params }: Context) {
  * DELETE /api/categories/[id]: delete a category even when in use, in one
  * transaction. Its transactions become uncategorized and lose the manual flag
  * (the user's choice no longer exists, so rules may categorize them again),
- * its subcategories become top-level, and its rules are deleted. Returns
+ * its subcategories become top-level (keeping their own rows, which stop
+ * counting toward it), and its rules are deleted. Returns
  * `{ id, uncategorized, rulesDeleted }`.
  */
 export async function DELETE(_request: NextRequest, { params }: Context) {
@@ -84,7 +133,7 @@ export async function DELETE(_request: NextRequest, { params }: Context) {
 
     const outcome = await db.transaction(async (tx) => {
       const [existing] = await tx
-        .select({ id: categories.id })
+        .select({ id: categories.id, color: categories.color })
         .from(categories)
         .where(eq(categories.id, id))
         .for("update");
@@ -101,7 +150,11 @@ export async function DELETE(_request: NextRequest, { params }: Context) {
         .returning({ id: transactions.id });
       await tx
         .update(categories)
-        .set({ parentId: null })
+        .set({
+          parentId: null,
+          // Keep the color they showed, inherited from the deleted parent.
+          color: sql`coalesce(${categories.color}, ${existing.color})`,
+        })
         .where(eq(categories.parentId, id));
       const rules = await tx
         .delete(categoryRules)

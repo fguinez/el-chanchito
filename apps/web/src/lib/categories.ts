@@ -30,6 +30,22 @@ export const EXACT_KEYWORD_CLASH = {
   field: "keyword",
 };
 
+/** The constraint name V046's one-level trigger raises with, and the 400 a
+ *  write that loses a race against it gets. */
+export const CATEGORY_ONE_LEVEL_CONSTRAINT = "chk_categories_one_level";
+export const CATEGORY_ONE_LEVEL_CLASH = {
+  error: "Las subcategorías tienen un solo nivel",
+  field: "parentId",
+};
+
+/** V001's foreign key on `categories.parent_id`, and the 400 a write gets
+ *  when its parent is missing (checked up front, or deleted meanwhile). */
+export const CATEGORY_PARENT_FK = "categories_parent_id_fkey";
+export const CATEGORY_PARENT_MISSING = {
+  error: "La categoría padre no existe",
+  field: "parentId",
+};
+
 /** Icons a category may use: kebab-case lucide names, the first eight being
  *  the V007 seeds. The UI maps each name to its lucide component. */
 export const CATEGORY_ICON_NAMES = [
@@ -67,6 +83,9 @@ export type NormalizedCategoryInput = {
   name: string;
   color: string | null;
   icon: CategoryIconName | null;
+  /** The top-level category this one is a subcategory of (V046); null for a
+   *  top-level category. */
+  parentId: string | null;
 };
 
 /** A rule write, validated and normalized. */
@@ -168,7 +187,9 @@ function normalizePriority(raw: unknown): ValidationResult<number> {
 
 /**
  * Validate and normalize a category write. Create mode (default) requires
- * `name` and defaults `color` and `icon` to null. `{ partial: true }`
+ * `name` and defaults `color`, `icon` and `parentId` to null. Whether the
+ * parent exists and may hold subcategories is checked by the route
+ * (checkParentPlacement). `{ partial: true }`
  * validates only the fields present, for PATCH, and rejects a body with none.
  */
 export function validateCategoryInput(
@@ -213,10 +234,62 @@ export function validateCategoryInput(
     out.icon = null;
   }
 
+  if (body.parentId !== undefined) {
+    const parentId = body.parentId;
+    if (parentId !== null && !isUuid(parentId)) {
+      return fail("Field 'parentId' must be a UUID or null", "parentId");
+    }
+    out.parentId = parentId === null ? null : parentId.toLowerCase();
+  } else if (!partial) {
+    out.parentId = null;
+  }
+
   if (partial && Object.keys(out).length === 0) {
-    return fail("Request body must include at least one of: name, color, icon");
+    return fail(
+      "Request body must include at least one of: name, color, icon, parentId"
+    );
   }
   return { ok: true, value: out };
+}
+
+/**
+ * Whether a category may sit under `parent` (V046 keeps the tree one level
+ * deep; the database trigger enforces the same rules). `id` is the category
+ * being written (undefined on create), `parent` the row `parentId` names
+ * (undefined when no such category exists), and `hasChildren` whether the
+ * category already has subcategories. Messages are Spanish because the
+ * dialog shows a 400's `error` as is.
+ */
+export function checkParentPlacement({
+  id,
+  parentId,
+  parent,
+  hasChildren,
+}: {
+  id?: string;
+  parentId: string;
+  parent: { id: string; parentId: string | null } | undefined;
+  hasChildren: boolean;
+}): ValidationResult<string> {
+  if (id !== undefined && id.toLowerCase() === parentId.toLowerCase()) {
+    return fail("Una categoría no puede ser su propia categoría padre", "parentId");
+  }
+  if (!parent) {
+    return fail(CATEGORY_PARENT_MISSING.error, CATEGORY_PARENT_MISSING.field);
+  }
+  if (parent.parentId !== null) {
+    return fail(
+      "La categoría padre no puede ser una subcategoría",
+      "parentId"
+    );
+  }
+  if (hasChildren) {
+    return fail(
+      "Una categoría con subcategorías no puede ser subcategoría",
+      "parentId"
+    );
+  }
+  return { ok: true, value: parentId };
 }
 
 /**
