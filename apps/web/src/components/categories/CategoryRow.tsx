@@ -228,7 +228,7 @@ export function CategoryRow({
       className={cn("group", rowProps?.className)}
     >
       <TableCell className="font-medium">
-        <div className={cn("flex items-start", isChild && "pl-3")}>
+        <div className={cn("flex items-start", isChild && "pl-9")}>
           {isChild ? (
             // The thin connector ties a subcategory to the parent above.
             <span aria-hidden className="mr-2 self-stretch border-l" />
@@ -440,7 +440,7 @@ export function AddSubcategoryRow({
   return (
     <TableRow className="hover:bg-transparent">
       <TableCell colSpan={COLUMN_COUNT}>
-        <div className="flex items-center gap-2 pl-3">
+        <div className="flex items-center gap-2 pl-9">
           <span aria-hidden className="mr-2 self-stretch border-l" />
           <Input
             aria-label={`Nombre de la nueva subcategoría de ${parent.name}`}
