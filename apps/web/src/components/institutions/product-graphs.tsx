@@ -58,7 +58,6 @@ import {
   buildWaterfallData,
   type WaterfallDatum,
 } from "@/lib/product-movements";
-import { countsTowardFlow } from "@/lib/transactions";
 import { investmentComposition } from "@/lib/investment-composition";
 import {
   buildPriceRows,
@@ -471,12 +470,11 @@ export function TransactionWaterfallCard({
 // Monthly flow (products with transactions)
 // ---------------------------------------------------------------------------
 
-/** Ingresos/Gastos per month. Rows an internal transfer links are skipped:
- *  the money only changed product (the balance waterfall still walks them). */
+/** Ingresos/Gastos per month: every movement in or out of this product,
+ *  internal transfers included. */
 function buildMonthlyFlow(transactions: ProductTransaction[]) {
   const byMonth = new Map<string, { Ingresos: number; Gastos: number }>();
   for (const t of transactions) {
-    if (!countsTowardFlow(t)) continue;
     const key = t.transactionDate.slice(0, 7);
     const entry = byMonth.get(key) ?? { Ingresos: 0, Gastos: 0 };
     if (t.amount >= 0) entry.Ingresos += t.amount;
