@@ -47,7 +47,6 @@ _ALL = {
     "bci_lider",
     "santander",
     "banco_falabella",
-    "mach",
     "mercadopago",
     "tenpo",
 }
@@ -86,7 +85,7 @@ def _clean_env(monkeypatch):
         ),
         pytest.param(("BANCO_FALABELLA_RUT",), set(), id="banco-falabella-rut-only"),
         pytest.param(("BANCO_FALABELLA_PASSWORD",), set(), id="banco-falabella-password-only"),
-        pytest.param(_EMAIL, {"mach", "mercadopago", "tenpo"}, id="email-trio"),
+        pytest.param(_EMAIL, {"mercadopago", "tenpo"}, id="email-scrapers"),
         pytest.param(_EMAIL[:2], set(), id="email-no-password"),
         pytest.param(_EMAIL[1:], set(), id="email-no-host"),
         pytest.param(_EMAIL[::2], set(), id="email-no-user"),
