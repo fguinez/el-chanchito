@@ -44,7 +44,6 @@ from scrapers.institutions import (
     BciLiderScraper,
     BudaScraper,
     FintualScraper,
-    MachScraper,
     MercadoPagoScraper,
     SantanderScraper,
     SkipoScraper,
@@ -326,10 +325,10 @@ def build_scrapers() -> dict[str, BaseScraper]:
         os.environ.get(k)
         for k in ("EMAIL_IMAP_HOST", "EMAIL_IMAP_USER", "EMAIL_IMAP_PASSWORD")
     ):
-        scrapers["mach"] = MachScraper()
+        # MACH is disabled: its email parser produced transactions that never happened.
         scrapers["mercadopago"] = MercadoPagoScraper()
         scrapers["tenpo"] = TenpoScraper()
-        logger.info("Email-based scrapers enabled: mach, mercadopago, tenpo")
+        logger.info("Email-based scrapers enabled: mercadopago, tenpo")
 
     return scrapers
 
