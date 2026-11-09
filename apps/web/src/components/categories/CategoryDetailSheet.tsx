@@ -2,12 +2,12 @@
 
 // Side panel with one category's spending, open while the URL carries
 // `?category=<id|none>` (the same pattern as the `?txn=` transaction panel):
-// 12 monthly bars, the split by product and by institution over a chosen
-// window, and its latest transactions (searchable), each opening the
+// a chosen period (a preset or a custom month range) with its totals, monthly
+// bars, the split by product and by institution, and its latest transactions (searchable), each opening the
 // transaction panel on top without closing this one. Needs a Suspense
 // boundary (useSearchParams).
 //
-// A category with income in the 12 months gets a Gastos / Ingresos / Neto
+// A category with income in the bars' months gets a Gastos / Ingresos / Neto
 // toggle (Neto by default) over the bars and the splits; one without it shows
 // expenses alone. Neto is expenses minus income: net spending in
 // the category's color above zero, net income in green below.
@@ -31,14 +31,19 @@ import {
 } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import { SearchInput } from "@/components/ui/search-input";
 import { Table, TableBody, TableCell, TableRow } from "@/components/ui/table";
-import { CategoryStackedBars } from "@/components/charts/category-stacked-bars";
+import {
+  CategoryStackedBars,
+  formatSpendMonth,
+} from "@/components/charts/category-stacked-bars";
 import { useCategorySpend } from "@/components/charts/use-category-spend";
 import { useSelectedTransaction } from "@/components/transactions/use-selected-transaction";
 import { hrefWithSearchParam } from "@/lib/transaction-selection";
 import {
   CATEGORY_PARAM,
+  PERIOD_PARAM,
   categoryDetailHref,
   categoryExpensesHref,
   monthWindow,
@@ -49,7 +54,7 @@ import {
   type CategorySpendResponse,
   type SpendFlows,
 } from "@/lib/category-spend";
-import { monthOf, trailingMonthsWindow } from "@/lib/category-trends";
+import { monthOf, shiftMonth, trailingMonthsWindow } from "@/lib/category-trends";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
 import {
   cn,
@@ -63,11 +68,98 @@ import { CategorySwatch, DEFAULT_CATEGORY_COLOR, type ApiCategory } from "./shar
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** Months of the monthly bars. */
-const BAR_MONTHS = 12;
-/** Windows the product/institution split and the list can cover, in months. */
-const WINDOW_OPTIONS = [3, 6, 12] as const;
-type WindowMonths = (typeof WINDOW_OPTIONS)[number];
+/** Fewest months the bars show: a shorter period is drawn with the months
+ *  before it, for context. */
+const MIN_BAR_MONTHS = 6;
+
+/** An inclusive YYYY-MM range. */
+interface MonthRange {
+  from: string;
+  to: string;
+}
+type PresetId = "this-month" | "last-month" | "3m" | "6m" | "12m" | "ytd";
+const PRESETS: { id: PresetId; label: string; range: (current: string) => MonthRange }[] = [
+  { id: "this-month", label: "Este mes", range: (c) => ({ from: c, to: c }) },
+  {
+    id: "last-month",
+    label: "Mes pasado",
+    range: (c) => ({ from: shiftMonth(c, -1), to: shiftMonth(c, -1) }),
+  },
+  { id: "3m", label: "3 meses", range: (c) => ({ from: shiftMonth(c, -2), to: c }) },
+  { id: "6m", label: "6 meses", range: (c) => ({ from: shiftMonth(c, -5), to: c }) },
+  { id: "12m", label: "12 meses", range: (c) => ({ from: shiftMonth(c, -11), to: c }) },
+  { id: "ytd", label: "Este año", range: (c) => ({ from: `${c.slice(0, 4)}-01`, to: c }) },
+];
+
+/** The panel's period: a preset id, or a custom range as `YYYY-MM..YYYY-MM`. */
+type PanelPeriod = PresetId | MonthRange;
+const PERIOD_STORAGE_KEY = "category-panel-period";
+const MONTH = /^\d{4}-(0[1-9]|1[0-2])$/;
+
+function parsePeriod(value: string | null): PanelPeriod | null {
+  if (!value) return null;
+  if (PRESETS.some((p) => p.id === value)) return value as PresetId;
+  const [from, to] = value.split("..");
+  return MONTH.test(from ?? "") && MONTH.test(to ?? "") && from <= to
+    ? { from, to }
+    : null;
+}
+
+function serializePeriod(period: PanelPeriod): string {
+  return typeof period === "string" ? period : `${period.from}..${period.to}`;
+}
+
+function readStoredPeriod(): PanelPeriod | null {
+  try {
+    return parsePeriod(window.localStorage.getItem(PERIOD_STORAGE_KEY));
+  } catch {
+    return null;
+  }
+}
+
+/** The period from `?period=`, else the last one picked in this browser, else
+ *  12 months. Picking one writes both, so it carries across categories,
+ *  reloads and reopening the panel. */
+function usePanelPeriod() {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const fromUrl = parsePeriod(searchParams.get(PERIOD_PARAM));
+  const period: PanelPeriod = fromUrl ?? "12m";
+  const setPeriod = (next: PanelPeriod) => {
+    const value = serializePeriod(next);
+    try {
+      window.localStorage.setItem(PERIOD_STORAGE_KEY, value);
+    } catch {
+      // Storage blocked: the URL still carries it.
+    }
+    router.replace(
+      hrefWithSearchParam(pathname, searchParams.toString(), PERIOD_PARAM, value),
+      { scroll: false }
+    );
+  };
+  // Read storage after mount (the server has none), once per panel.
+  useEffect(() => {
+    if (fromUrl) return;
+    const stored = readStoredPeriod();
+    if (stored) setPeriod(stored);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return { period, setPeriod };
+}
+
+/** Months from `from` to `to`, inclusive. */
+function monthSpan({ from, to }: MonthRange): number {
+  const index = (m: string) => Number(m.slice(0, 4)) * 12 + Number(m.slice(5, 7));
+  return index(to) - index(from) + 1;
+}
+
+/** "ene 26 – mar 26", or one month alone. */
+function rangeLabel(range: MonthRange): string {
+  return range.from === range.to
+    ? formatSpendMonth(range.from)
+    : `${formatSpendMonth(range.from)} – ${formatSpendMonth(range.to)}`;
+}
 /** Transactions listed before the "Ver todas en Gastos" link. */
 const TXN_CAP = 20;
 
@@ -182,7 +274,12 @@ export function CategoryDetailSheet({
 
   const close = () =>
     router.replace(
-      hrefWithSearchParam(pathname, searchParams.toString(), CATEGORY_PARAM, null),
+      hrefWithSearchParam(
+        pathname,
+        hrefWithSearchParam("", searchParams.toString(), PERIOD_PARAM, null).slice(1),
+        CATEGORY_PARAM,
+        null
+      ),
       { scroll: false }
     );
 
@@ -289,11 +386,25 @@ function CategoryDetail({
   const subcategoryNames = new Map(subcategories.map((s) => [s.id, s.name]));
   // Fixed at mount, so a panel left open past midnight keeps one window.
   const [currentMonth] = useState(() => monthOf(new Date()));
-  const [windowMonths, setWindowMonths] = useState<WindowMonths>(12);
+  const { period: chosenPeriod, setPeriod } = usePanelPeriod();
+  const preset: PresetId | "custom" =
+    typeof chosenPeriod === "string" ? chosenPeriod : "custom";
+  const customRange: MonthRange =
+    typeof chosenPeriod === "string"
+      ? PRESETS.find((p) => p.id === chosenPeriod)!.range(currentMonth)
+      : chosenPeriod;
+  const setPreset = (id: PresetId) => setPeriod(id);
+  const setCustomRange = (update: (r: MonthRange) => MonthRange) =>
+    setPeriod(update(customRange));
+  const range =
+    preset === "custom"
+      ? customRange
+      : PRESETS.find((p) => p.id === preset)!.range(currentMonth);
+  const barMonths = Math.max(monthSpan(range), MIN_BAR_MONTHS);
   // Null until the user picks one, so the default follows the data.
   const [chosenMeasure, setChosenMeasure] = useState<Measure | null>(null);
 
-  const bars = trailingMonthsWindow(currentMonth, BAR_MONTHS);
+  const bars = trailingMonthsWindow(range.to, barMonths);
   const barsSpend = useCategorySpend(
     new URLSearchParams({
       ...bars,
@@ -302,7 +413,15 @@ function CategoryDetail({
     }).toString(),
     refreshKey
   );
-  const period = trailingMonthsWindow(currentMonth, windowMonths);
+  const period = {
+    from: monthWindow(range.from).from,
+    to: monthWindow(range.to).to,
+  };
+  // Totals over the period itself (the bars may reach further back).
+  const totals = useCategorySpend(
+    new URLSearchParams({ ...period, categoryId: categoryParam }).toString(),
+    refreshKey
+  );
   const splitQuery = (groupBy: string) =>
     new URLSearchParams({ ...period, categoryId: categoryParam, groupBy }).toString();
   const byProduct = useCategorySpend(splitQuery("product"), refreshKey);
@@ -324,7 +443,7 @@ function CategoryDetail({
   if (q) txnsQuery.set("q", q);
   const txns = useCategoryTransactions(txnsQuery.toString(), refreshKey);
 
-  // Income anywhere in the 12 months turns on the toggle; without it the
+  // Income anywhere in the bars turns on the toggle; without it the
   // panel shows expenses alone. If the bars fail, the splits' income decides,
   // so the toggle still works for them.
   const hasIncome = barsSpend.data
@@ -339,15 +458,9 @@ function CategoryDetail({
     (barsSpend.data?.unconvertedIncomeCount ?? 0);
   const measure: Measure = hasIncome ? (chosenMeasure ?? "net") : "expenses";
   const currency = barsSpend.data?.currency ?? "CLP";
-  const thisMonth = barsSpend.data?.groups?.find((g) => g.key === currentMonth);
-  const monthNet = thisMonth?.net ?? 0;
+  const periodNet = totals.data?.net ?? 0;
   const monthHrefFor = (_: string | null, month: string) =>
     categoryExpensesHref({ categoryId, ...monthWindow(month) });
-  const figure = (value: string, className?: string) => (
-    <span className={cn("font-medium tabular-nums text-foreground", className)}>
-      {value}
-    </span>
-  );
 
   return (
     <>
@@ -358,7 +471,7 @@ function CategoryDetail({
           {parent ? (
             <span className="flex min-w-0 items-center gap-1">
               <Link
-                href={categoryDetailHref(parent.id)}
+                href={categoryDetailHref(parent.id, serializePeriod(chosenPeriod))}
                 replace
                 scroll={false}
                 className="truncate font-normal text-muted-foreground hover:text-foreground hover:underline"
@@ -377,36 +490,86 @@ function CategoryDetail({
           )}
         </SheetTitle>
         <SheetDescription>
-          Este mes:{" "}
-          {barsSpend.error ? (
-            figure("sin datos")
-          ) : !barsSpend.data ? (
-            figure("...")
-          ) : (
-            <>
-              gastos {figure(formatAmount(currency, thisMonth?.expenses ?? 0))}
-              {hasIncome && (
-                <>
-                  , ingresos{" "}
-                  {figure(formatAmount(currency, thisMonth?.income ?? 0), "text-green-600")}
-                  , neto{" "}
-                  {figure(
-                    formatNet(currency, monthNet),
-                    monthNet < 0 ? "text-green-600" : undefined
-                  )}
-                </>
-              )}
-            </>
-          )}
-          . En CLP, sin transferencias internas
+          En CLP, sin transferencias internas
           {hasChildren && ", con sus subcategorías"}.
         </SheetDescription>
       </SheetHeader>
 
       <div className="flex-1 space-y-6 overflow-y-auto p-4">
+        <section className="space-y-3">
+          <div className="flex flex-wrap items-center gap-1" role="group" aria-label="Período">
+            {PRESETS.map((p) => (
+              <Button
+                key={p.id}
+                variant={preset === p.id ? "secondary" : "ghost"}
+                size="xs"
+                aria-pressed={preset === p.id}
+                onClick={() => setPreset(p.id)}
+              >
+                {p.label}
+              </Button>
+            ))}
+            <Button
+              variant={preset === "custom" ? "secondary" : "ghost"}
+              size="xs"
+              aria-pressed={preset === "custom"}
+              onClick={() => {
+                if (preset !== "custom") setPeriod(range);
+              }}
+            >
+              Personalizado
+            </Button>
+          </div>
+          {preset === "custom" && (
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <label className="flex items-center gap-1">
+                Desde
+                <Input
+                  type="month"
+                  className="h-8 w-40"
+                  value={customRange.from}
+                  max={customRange.to}
+                  onChange={(e) =>
+                    e.target.value &&
+                    setCustomRange((r) => ({
+                      from: e.target.value,
+                      to: e.target.value > r.to ? e.target.value : r.to,
+                    }))
+                  }
+                />
+              </label>
+              <label className="flex items-center gap-1">
+                Hasta
+                <Input
+                  type="month"
+                  className="h-8 w-40"
+                  value={customRange.to}
+                  min={customRange.from}
+                  max={currentMonth}
+                  onChange={(e) =>
+                    e.target.value &&
+                    setCustomRange((r) => ({
+                      from: e.target.value < r.from ? e.target.value : r.from,
+                      to: e.target.value,
+                    }))
+                  }
+                />
+              </label>
+            </div>
+          )}
+          <PeriodTotals
+            label={rangeLabel(range)}
+            currency={totals.data?.currency ?? "CLP"}
+            error={Boolean(totals.error)}
+            data={totals.data ?? null}
+            hasIncome={Boolean(hasIncome)}
+            net={periodNet}
+          />
+        </section>
+
         <section className="space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <h3 className="text-sm font-semibold">Últimos {BAR_MONTHS} meses</h3>
+            <h3 className="text-sm font-semibold">Por mes</h3>
             {hasIncome && (
               <div className="flex items-center gap-1" role="group" aria-label="Medida">
                 {MEASURES.map((m) => (
@@ -439,7 +602,8 @@ function CategoryDetail({
               currency={currency}
               height={180}
               hrefFor={monthHrefFor}
-              emptyMessage={`Sin ${MEASURE_NOUNS[measure]} en los últimos ${BAR_MONTHS} meses.`}
+              netBreakdown={measure === "net"}
+              emptyMessage={`Sin ${MEASURE_NOUNS[measure]} en estos meses.`}
             />
           )}
           {unconverted > 0 && (
@@ -451,21 +615,7 @@ function CategoryDetail({
           )}
         </section>
 
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h3 className="text-sm font-semibold">Detalle</h3>
-          <div className="flex items-center gap-1" role="group" aria-label="Período">
-            {WINDOW_OPTIONS.map((months) => (
-              <Button
-                key={months}
-                variant={windowMonths === months ? "secondary" : "ghost"}
-                size="xs"
-                onClick={() => setWindowMonths(months)}
-              >
-                {months} meses
-              </Button>
-            ))}
-          </div>
-        </div>
+        <h3 className="text-sm font-semibold">Detalle · {rangeLabel(range)}</h3>
 
         {hasChildren && (
           <SpendSplit
@@ -474,7 +624,7 @@ function CategoryDetail({
             color={color}
             measure={measure}
             ready={measureKnown}
-            hrefFor={(key) => (key !== categoryId ? categoryDetailHref(key) : null)}
+            hrefFor={(key) => (key !== categoryId ? categoryDetailHref(key, serializePeriod(chosenPeriod)) : null)}
             emptyGroups={subcategories.map((s) => ({
               key: s.id,
               label: s.name,
@@ -734,4 +884,50 @@ function useCategoryTransactions(
     return { rows: result.rows, error: false, stale: true, q };
   }
   return { rows: null, error: false, stale: false, q: null };
+}
+
+/** The period's gastos, ingresos and the net between them. */
+function PeriodTotals({
+  label,
+  currency,
+  error,
+  data,
+  hasIncome,
+  net,
+}: {
+  label: string;
+  currency: string;
+  error: boolean;
+  data: SpendFlows | null;
+  hasIncome: boolean;
+  net: number;
+}) {
+  const tile = (title: string, value: string, className?: string) => (
+    <div className="rounded-md border p-2">
+      <p className="text-xs text-muted-foreground">{title}</p>
+      <p className={cn("font-semibold tabular-nums", className)}>{value}</p>
+    </div>
+  );
+  return (
+    <div className="space-y-1">
+      <p className="text-xs text-muted-foreground">{label}</p>
+      {error ? (
+        <ErrorNote />
+      ) : !data ? (
+        <Loading />
+      ) : (
+        <div className={cn("grid gap-2", hasIncome ? "grid-cols-3" : "grid-cols-1")}>
+          {tile("Gastos", formatAmount(currency, data.expenses))}
+          {hasIncome &&
+            tile("Ingresos", formatAmount(currency, data.income), "text-green-600")}
+          {hasIncome &&
+            tile(
+              net > 0 ? "Gasto neto" : net < 0 ? "Ingreso neto" : "Neto",
+              formatNet(currency, net),
+              net < 0 ? "text-green-600" : undefined
+            )}
+        </div>
+      )}
+    </div>
+  );
 }

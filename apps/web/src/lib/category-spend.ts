@@ -353,10 +353,15 @@ export function categoryExpensesHref({
  *  category id, or UNCATEGORIZED_PARAM for "Sin categoría". */
 export const CATEGORY_PARAM = "category";
 
-/** The Categorías page with one category's detail panel open. */
-export function categoryDetailHref(categoryId: string | null): string {
+/** The detail panel's period: a preset id or `YYYY-MM..YYYY-MM`. */
+export const PERIOD_PARAM = "period";
+
+/** The Categorías page with one category's detail panel open, optionally
+ *  over a given period. */
+export function categoryDetailHref(categoryId: string | null, period?: string): string {
   const params = new URLSearchParams({
     [CATEGORY_PARAM]: categoryId ?? UNCATEGORIZED_PARAM,
   });
+  if (period) params.set(PERIOD_PARAM, period);
   return `/categories?${params}`;
 }

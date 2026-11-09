@@ -228,6 +228,42 @@ function BarsLayer({
   );
 }
 
+/** Tooltip for the net view: the month's gastos minus ingresos, and the result. */
+function NetBreakdownTooltip({
+  label,
+  currency,
+  expenses,
+  income,
+  net,
+}: {
+  label: string;
+  currency: string;
+  expenses: number;
+  income: number;
+  net: number;
+}) {
+  const line = "flex justify-between gap-4 tabular-nums";
+  return (
+    <div className="rounded-md border bg-background p-2 text-xs shadow-sm">
+      <p className="mb-1 font-medium">{label}</p>
+      <p className={line}>
+        <span>Gastos</span>
+        <span>{formatAmount(currency, expenses)}</span>
+      </p>
+      <p className={line}>
+        <span>− Ingresos</span>
+        <span className="text-green-600">{formatAmount(currency, income)}</span>
+      </p>
+      <p className={`${line} mt-1 border-t pt-1 font-medium`}>
+        <span>{net > 0 ? "= Gasto neto" : net < 0 ? "= Ingreso neto" : "= Neto"}</span>
+        <span className={net < 0 ? "text-green-600" : undefined}>
+          {net < 0 ? `+${formatAmount(currency, -net)}` : formatAmount(currency, net)}
+        </span>
+      </p>
+    </div>
+  );
+}
+
 export function CategoryStackedBars({
   groups,
   currency,
@@ -235,6 +271,7 @@ export function CategoryStackedBars({
   hrefFor,
   onSelect,
   emptyMessage = "Sin gastos en este período.",
+  netBreakdown = false,
 }: {
   groups: CategorySpendGroup[];
   currency: string;
@@ -242,6 +279,8 @@ export function CategoryStackedBars({
   hrefFor?: (categoryId: string | null, month: string) => string;
   onSelect?: (categoryId: string | null, month: string) => void;
   emptyMessage?: string;
+  /** Tooltip shows gastos - ingresos = neto instead of the series. */
+  netBreakdown?: boolean;
 }) {
   const router = useRouter();
   const yAxis = useYAxisRange();
@@ -260,6 +299,9 @@ export function CategoryStackedBars({
     const row: Record<string, number | string> = {
       x: columnX(frame, group.key),
       month: group.key,
+      _expenses: group.expenses ?? 0,
+      _income: group.income ?? 0,
+      _net: group.net ?? 0,
     };
     for (const c of group.categories) row[categoryKey(c.categoryId)] = c.amount;
     return row;
@@ -312,6 +354,21 @@ export function CategoryStackedBars({
         />
         <YAxis tickFormatter={formatAxisValue} fontSize={12} {...yAxisProps} />
         <Tooltip
+          {...(netBreakdown && {
+            content: ({ active, payload, label }) => {
+              const row = payload?.[0]?.payload as Record<string, number> | undefined;
+              if (!active || !row) return null;
+              return (
+                <NetBreakdownTooltip
+                  label={labelAt(label)}
+                  currency={currency}
+                  expenses={row._expenses}
+                  income={row._income}
+                  net={row._net}
+                />
+              );
+            },
+          })}
           labelFormatter={labelAt}
           formatter={(value, name) => [
             formatAmount(currency, Math.abs(Number(value))),
