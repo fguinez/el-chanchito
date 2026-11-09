@@ -105,7 +105,9 @@ export function CategoryPicker({
   const optionId = (index: number) => `${listId}-${index}`;
 
   return (
-    <Popover open={open} onOpenChange={onOpenChange}>
+    // modal: the list is portaled outside any open Sheet/Dialog, whose scroll
+    // lock would otherwise swallow wheel/trackpad events over it.
+    <Popover modal open={open} onOpenChange={onOpenChange}>
       <PopoverTrigger asChild>
         <button
           type="button"
