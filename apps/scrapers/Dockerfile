@@ -11,7 +11,12 @@ COPY apps/scrapers/requirements.txt .
 # `--with-deps` pulls the apt libraries Chromium needs on the slim base; without
 # it the BanChile scraper (one Playwright session for movements and balances)
 # can't launch a browser and both legs no-op.
-RUN pip install --no-cache-dir -r requirements.txt \
+# Playwright's bundled node links libatomic on arm64 (since 1.65), and the
+# slim base lacks it, so `playwright install` itself dies before `--with-deps`.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libatomic1 \
+ && rm -rf /var/lib/apt/lists/* \
+ && pip install --no-cache-dir -r requirements.txt \
  && python -m playwright install --with-deps chromium
 
 COPY apps/scrapers/ .
