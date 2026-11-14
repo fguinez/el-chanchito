@@ -11,9 +11,8 @@ finding the Chrome binary, launching it on a debug port, checking the port,
 connecting, finding a tab, asking Chrome what it has open and tearing the
 process tree down. Nothing here
 knows an institution: ports, profile directories, URLs and env var names are
-arguments. Mercado Pago (`backends/mercadopago_web.py`) is its only user today.
-`backends/bci_lider_web.py` predates it and carries its own private copies of
-these helpers; it should move onto this module in a change of its own.
+arguments. Its users are Mercado Pago (`backends/mercadopago_web.py`) and
+Tarjeta Lider Bci (`backends/bci_lider_web.py`).
 
 Every call that talks to the browser takes a timeout or a deadline: an
 unbounded Playwright call has hung the scraper service before.

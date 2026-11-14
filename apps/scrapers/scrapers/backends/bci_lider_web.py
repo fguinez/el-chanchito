@@ -19,9 +19,10 @@ Chromium (headless or headed) gets an unsolvable interactive "Verifique que es u
 ser humano" check, and a captured session doesn't survive headless reuse (the auth
 token lives in tab-scoped sessionStorage and Cloudflare rebinds on a fresh browser).
 So both sign-in and scraping drive a *genuine* Chrome: an ordinary OS process on a
-debug port (`_launch_real_chrome`), not a Playwright-launched browser. Playwright
-connects over CDP only to autofill the login (Turnstile then clears invisibly, or
-after the human ticks the check, which we never do) and to read pages.
+debug port (`_launch_real_chrome`, built on the shared `real_chrome` helpers), not
+a Playwright-launched browser. Playwright connects over CDP only to autofill the
+login (Turnstile then clears invisibly, or after the human ticks the check, which
+we never do) and to read pages.
 
 `scrape_card` runs in one of two modes:
   * managed (default, fully unattended): it launches a headed Chrome, signs in via
@@ -49,11 +50,7 @@ import importlib.util
 import logging
 import os
 import re
-import shutil
-import signal
-import socket
 import subprocess
-import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -61,6 +58,7 @@ from typing import Optional
 
 from product_model import CreditCardAttributes, CreditCardMetrics
 
+from scrapers.backends import real_chrome
 from scrapers.backends.bci_lider_billing import (
     LiderStatement,
     billing_metrics,
@@ -91,83 +89,13 @@ _APP_DIR = Path(__file__).resolve().parents[2]
 CDP_URL_ENV = "LIDER_BCI_CDP_URL"
 _DEFAULT_CDP_PORT = 9222
 _CHROME_PROFILE = _APP_DIR / ".bci_lider_chrome_profile"
+_CHROME_PATH_ENV = "LIDER_BCI_CHROME_PATH"
 # Budget for a scrape that may need to (re-)log in via autofill first.
 _LOGIN_WAIT_S = 120
 
 
 def _cdp_port() -> int:
     return int(os.environ.get("LIDER_BCI_CDP_PORT", _DEFAULT_CDP_PORT))
-
-
-def _is_windows() -> bool:
-    return os.name == "nt"
-
-
-# Chrome's own install dirs under each Windows base folder (Chromium installs
-# per user, like Chrome's non-admin install).
-_WINDOWS_CHROME_DIRS = (
-    ("PROGRAMFILES", ("Google", "Chrome", "Application", "chrome.exe")),
-    ("PROGRAMFILES(X86)", ("Google", "Chrome", "Application", "chrome.exe")),
-    ("LOCALAPPDATA", ("Google", "Chrome", "Application", "chrome.exe")),
-    ("LOCALAPPDATA", ("Chromium", "Application", "chrome.exe")),
-)
-# Linux names on PATH. Google Chrome has no ARM64 Linux build, so on a
-# Raspberry Pi this finds Debian's `chromium`.
-_PATH_CHROME_NAMES = (
-    "google-chrome",
-    "google-chrome-stable",
-    "chromium",
-    "chromium-browser",
-    "chrome",
-)
-
-
-def _chrome_candidates() -> list[str]:
-    """Where a real Chrome/Chromium usually lives on this OS, most preferred first."""
-    candidates: list[str] = []
-    if sys.platform == "darwin":
-        for app in ("Google Chrome.app/Contents/MacOS/Google Chrome",
-                    "Chromium.app/Contents/MacOS/Chromium"):
-            candidates.append(os.path.join("/Applications", app))
-            candidates.append(os.path.join(os.path.expanduser("~/Applications"), app))
-    if _is_windows():
-        for env_var, parts in _WINDOWS_CHROME_DIRS:
-            base = os.environ.get(env_var)
-            if base:
-                candidates.append(os.path.join(base, *parts))
-    for name in _PATH_CHROME_NAMES:
-        found = shutil.which(name)
-        if found:
-            candidates.append(found)
-    return candidates
-
-
-def _chrome_install_hint() -> str:
-    if sys.platform == "darwin":
-        return "Install Google Chrome into /Applications."
-    if _is_windows():
-        return (
-            "Install Google Chrome (looked under %ProgramFiles%, %ProgramFiles(x86)% "
-            "and %LocalAppData%)."
-        )
-    return (
-        "Install google-chrome-stable, or Chromium (Debian/Raspberry Pi OS: "
-        "`sudo apt install chromium`; Google Chrome has no ARM64 Linux build)."
-    )
-
-
-def _chrome_executable() -> str:
-    """Path to a real Chrome/Chromium (override with LIDER_BCI_CHROME_PATH)."""
-    override = os.environ.get("LIDER_BCI_CHROME_PATH")
-    if override:
-        return override
-    for candidate in _chrome_candidates():
-        if os.path.exists(candidate):
-            return candidate
-    raise BciLiderWebError(
-        "Could not find Google Chrome or Chromium. "
-        f"{_chrome_install_hint()} Or set LIDER_BCI_CHROME_PATH to its binary."
-    )
 
 
 def _launch_real_chrome(port: int, url: str, offscreen: bool = False) -> subprocess.Popen:
@@ -179,39 +107,16 @@ def _launch_real_chrome(port: int, url: str, offscreen: bool = False) -> subproc
     visible window if the off-screen launch misbehaves. Interactive sign-in
     (`save_login_session`) always launches visible so a human can see it.
     """
-    exe = _chrome_executable()
-    args = [
-        exe,
-        f"--remote-debugging-port={port}",
-        f"--user-data-dir={_CHROME_PROFILE}",
-        "--no-first-run",
-        "--no-default-browser-check",
-    ]
-    if offscreen:
-        args += ["--window-position=-32000,-32000", "--disable-backgrounding-occluded-windows"]
-    args.append(url)
-    logger.info(
-        "Launching Chrome: %s (debug port %s, offscreen=%s)", exe, port, offscreen
-    )
-    # Chrome gets its own process group so managed mode can tear down the whole
-    # tree (renderers/GPU/zygote): a new session (one killpg) on POSIX, a new
-    # process group (taskkill /T) on Windows, which has no sessions or killpg.
-    if _is_windows():
-        group = {
-            "creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
-        }
-    else:
-        group = {"start_new_session": True}
-    return subprocess.Popen(
-        args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **group
-    )
-
-
-def _port_in_use(port: int) -> bool:
-    """True if something is already listening on localhost:`port`."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(0.5)
-        return sock.connect_ex(("127.0.0.1", port)) == 0
+    try:
+        exe = real_chrome.find_chrome(_CHROME_PATH_ENV)
+        return real_chrome.launch_chrome(
+            exe, port=port, profile_dir=_CHROME_PROFILE, url=url, offscreen=offscreen
+        )
+    except real_chrome.ChromeNotFoundError as exc:
+        raise BciLiderWebError(str(exc)) from None
+    except real_chrome.ChromeLaunchError as exc:
+        # The helper's message has no path; name the setting that holds one.
+        raise BciLiderWebError(f"{exc} Check {_CHROME_PATH_ENV}.") from None
 
 
 # Timeouts (ms). We drive a real Chrome over CDP, so no browser-context tuning
@@ -528,14 +433,7 @@ def _click_first(page, selectors: list[str], timeout: int = 5000) -> bool:
 
 def _find_page_matching(browser, needle: str):
     """The first open page whose URL contains `needle`, or None."""
-    for context in browser.contexts:
-        for page in context.pages:
-            try:
-                if needle in page.url:
-                    return page
-            except Exception:
-                continue
-    return None
+    return real_chrome.find_page(browser, lambda url: needle in url)
 
 
 def _find_authenticated_page(browser, deadline: float):
@@ -634,14 +532,10 @@ def save_login_session(
 
     deadline = time.monotonic() + timeout_s
     with sync_playwright() as playwright:
-        browser = None
-        while browser is None and time.monotonic() < deadline:
-            try:
-                browser = playwright.chromium.connect_over_cdp(cdp_url)
-            except Exception:
-                time.sleep(1)
-        if browser is None:
-            raise BciLiderWebError(f"Could not reach the Chrome debug port {cdp_url}.")
+        try:
+            browser = real_chrome.connect_over_cdp(playwright, cdp_url, deadline=deadline)
+        except real_chrome.RealChromeError as exc:
+            raise BciLiderWebError(f"Could not reach the Chrome debug port {cdp_url}.") from exc
 
         login_page = None
         while login_page is None and time.monotonic() < deadline:
@@ -917,94 +811,14 @@ def _connect_cdp(playwright, cdp_url: str, deadline: float):
     Managed mode launches Chrome and connects immediately, so the port needs a few
     seconds to come up; attended mode connects on the first try.
     """
-    last_exc: Optional[Exception] = None
-    while time.monotonic() < deadline:
-        try:
-            return playwright.chromium.connect_over_cdp(cdp_url)
-        except Exception as exc:
-            last_exc = exc
-            time.sleep(1)
-    raise BciLiderSessionError(
-        f"Could not reach the Chrome debug port {cdp_url}. In managed mode Chrome "
-        "failed to start (a machine with a display is required); in reuse mode start "
-        "it with `make bci-lider-login`."
-    ) from last_exc
-
-
-def _terminate_chrome(proc: subprocess.Popen) -> None:
-    """Stop a Chrome we launched (managed mode), including its child processes."""
-    if _is_windows():
-        _terminate_chrome_windows(proc)
-    else:
-        _terminate_chrome_posix(proc)
-
-
-def _terminate_chrome_posix(proc: subprocess.Popen) -> None:
-    """Signal Chrome's whole process group, SIGTERM then SIGKILL.
-
-    Chrome spawns renderer/GPU/zygote children, so a SIGKILL fallback on the
-    parent alone could orphan them; the process is reaped after each signal so no
-    zombie lingers and the debug port / profile lock is released for the next run.
-    """
     try:
-        pgid = os.getpgid(proc.pid)
-    except Exception:
-        pgid = None
-
-    def _kill(sig: int) -> None:
-        try:
-            if pgid is not None:
-                os.killpg(pgid, sig)
-            else:
-                proc.send_signal(sig)
-        except ProcessLookupError:
-            pass
-        except Exception:
-            logger.warning("BciLider: error signalling managed Chrome", exc_info=True)
-
-    _kill(signal.SIGTERM)
-    try:
-        proc.wait(timeout=10)
-        return
-    except Exception:
-        pass
-    _kill(signal.SIGKILL)
-    try:
-        proc.wait(timeout=5)
-    except Exception:
-        logger.warning("BciLider: managed Chrome did not exit after SIGKILL")
-
-
-def _taskkill(pid: int, force: bool) -> None:
-    args = ["taskkill", "/PID", str(pid), "/T"]
-    if force:
-        args.append("/F")
-    try:
-        subprocess.run(
-            args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15, check=False
-        )
-    except Exception:
-        logger.warning("BciLider: taskkill failed for managed Chrome", exc_info=True)
-
-
-def _terminate_chrome_windows(proc: subprocess.Popen) -> None:
-    """Close Chrome's process tree with taskkill: politely, then /F.
-
-    Windows has no process-group signals; `taskkill /T` walks the tree from the
-    PID Chrome was launched with (CREATE_NEW_PROCESS_GROUP), so its children go
-    too, and the process is reaped so the debug port / profile lock is released.
-    """
-    _taskkill(proc.pid, force=False)
-    try:
-        proc.wait(timeout=10)
-        return
-    except Exception:
-        pass
-    _taskkill(proc.pid, force=True)
-    try:
-        proc.wait(timeout=5)
-    except Exception:
-        logger.warning("BciLider: managed Chrome did not exit after taskkill /F")
+        return real_chrome.connect_over_cdp(playwright, cdp_url, deadline=deadline)
+    except real_chrome.RealChromeError as exc:
+        raise BciLiderSessionError(
+            f"Could not reach the Chrome debug port {cdp_url}. In managed mode Chrome "
+            "failed to start (a machine with a display is required); in reuse mode start "
+            "it with `make bci-lider-login`."
+        ) from exc
 
 
 def _scrape_over_cdp(cdp_url: str, rut: Optional[str], password: Optional[str]) -> BciLiderCardResult:
@@ -1059,14 +873,14 @@ def _scrape_managed_sync(rut: Optional[str], password: Optional[str]) -> BciLide
     # A Chrome already on this port+profile would make our launch forward to it and
     # exit, so we'd scrape (and then fail to close) someone else's Chrome. Refuse
     # instead: the operator can close it or reuse it via LIDER_BCI_CDP_URL.
-    if _port_in_use(port):
+    if real_chrome.port_in_use(port):
         raise BciLiderSessionError(
             f"Port {port} is already in use. Close the Chrome on it, or set "
             f"LIDER_BCI_CDP_URL=http://localhost:{port} to reuse that Chrome."
         )
     cdp_url = f"http://localhost:{port}"
     # Prefer an off-screen window (no flash); if that misbehaves, fall back once to a
-    # normal visible window, which is the most reliable. `_terminate_chrome` waits
+    # normal visible window, which is the most reliable. `terminate_chrome` waits
     # for exit, so the port is free again before the fallback launch.
     try:
         return _scrape_managed_once(port, cdp_url, rut, password, offscreen=True)
@@ -1086,7 +900,7 @@ def _scrape_managed_once(
     try:
         return _scrape_over_cdp(cdp_url, rut, password)
     finally:
-        _terminate_chrome(proc)
+        real_chrome.terminate_chrome(proc)
 
 
 async def scrape_card(

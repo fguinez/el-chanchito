@@ -739,10 +739,11 @@ browser: a Playwright-launched Chromium (headless or headed) gets an unsolvable
 interactive "Verifique que es un ser humano" check, and a captured session doesn't
 survive headless reuse (the auth token lives in tab-scoped sessionStorage and
 Cloudflare rebinds on a fresh browser). So both sign-in and scraping drive a *real*
-Chrome over CDP: an ordinary Chrome on a debug port (`_launch_real_chrome`, not a
-Playwright browser), driven to autofill the RUT + clave and submit once Turnstile
-clears (invisibly, or after the human ticks the check, which we never do). By
-default `scrape_card` runs *managed*: it launches a headed Chrome off-screen (with
+Chrome over CDP: an ordinary Chrome on a debug port (launched through
+`backends/real_chrome.py`, not a Playwright browser), driven to autofill the RUT +
+clave and submit once Turnstile clears (invisibly, or after the human ticks the
+check, which we never do).
+By default `scrape_card` runs *managed*: it launches a headed Chrome off-screen (with
 a visible-window fallback so it doesn't flash on the desktop), signs in, scrapes,
 and closes it, so scheduled runs are fully unattended (needs a machine with a
 display: Cloudflare blocks headless). Setting `LIDER_BCI_CDP_URL` switches to *reuse*
@@ -802,8 +803,7 @@ Chrome off-screen on the profile, reads and terminates it (needs a machine
 with a display); `MERCADOPAGO_CDP_URL` switches to *reuse*, attaching to a
 Chrome that is already running with a signed-in tab and leaving it running.
 The generic real-Chrome plumbing (find the binary, launch, connect, find a
-tab, terminate) is `backends/real_chrome.py`; BCI Lider still carries its own
-copy.
+tab, terminate) is `backends/real_chrome.py`, shared with BCI Lider.
 
 The session is read under a fetch-only contract: the tab opens on
 `/banking/balance` and is never navigated, and the data comes from
