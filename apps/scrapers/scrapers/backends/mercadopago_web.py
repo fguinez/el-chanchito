@@ -1161,7 +1161,6 @@ def _drive_managed(movement_pages: int) -> MercadoPagoAccount:
         if watchdog is not None:
             watchdog.cancel()
         real_chrome.terminate_chrome(proc)
-    return account
 
 
 def _drive_reuse(cdp_url: str, movement_pages: int) -> MercadoPagoAccount:
