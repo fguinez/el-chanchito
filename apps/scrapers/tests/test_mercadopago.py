@@ -74,7 +74,12 @@ def _page(props: dict) -> str:
     return _html({"appProps": {"pageProps": props}, "synthetic": True})
 
 
-def _balance_props(raw=2_500_000, status="success") -> dict:
+def _balance_props(
+    raw=2_500_000,
+    status="success",
+    gain=999_999,
+    subtitle="Generando ganancias al 1,0% anual",
+) -> dict:
     return {
         "initialResult": {
             "balance": {
@@ -92,8 +97,8 @@ def _balance_props(raw=2_500_000, status="success") -> dict:
                     },
                     "invested": {
                         "data": {
-                            "title": {"middle": {"raw": 999_999}},
-                            "subtitle": "Generando ganancias al 1,0% anual",
+                            "title": {"middle": {"raw": gain}},
+                            "subtitle": subtitle,
                         }
                     },
                 },
@@ -114,7 +119,7 @@ def _pot(pot_id=POT_ID, name="Reserva sintética", raw=1_000_000, currency="CLP"
     }
 
 
-def _pots_props(pots: list, status="success") -> dict:
+def _pots_props(pots: list, status="success", rate="1.0", is_invested=True) -> dict:
     return {
         "hub": {
             "result": {
@@ -123,7 +128,7 @@ def _pots_props(pots: list, status="success") -> dict:
                     "result": {"pots": pots, "pots_amount": {"raw": 1_000_000}},
                 },
                 "investmentData": {
-                    "data": {"is_invested": True, "rate": "1.0", "fund_name": "Sintetico"}
+                    "data": {"is_invested": is_invested, "rate": rate, "fund_name": "Sintetico"}
                 },
             }
         }
@@ -386,6 +391,94 @@ class TestParseBalance:
             web.parse_balance(props)
 
 
+class TestParseWalletYield:
+    def test_rate_and_gain_are_read(self):
+        """The gain is title.middle.raw; the rate comes out of the subtitle."""
+        props = _balance_props(gain=999_999, subtitle="Generando ganancias al 4,50% anual")
+
+        result = web.parse_wallet_yield(props)
+
+        assert result == web.WalletYield(rate_pct=4.5, profit_12m=999_999)
+
+    @pytest.mark.parametrize(
+        ("subtitle", "expected"),
+        [
+            pytest.param("Generando ganancias al 1,0% anual", 1.0, id="comma-decimal"),
+            pytest.param("Generando ganancias al 1.0% anual", 1.0, id="dot-decimal"),
+            pytest.param("Generando ganancias al 4 % anual", 4.0, id="whole-with-space"),
+            pytest.param("Generando ganancias al 4,50% anual", 4.5, id="two-decimals"),
+            pytest.param("Generando ganancias al 1% anual", 1.0, id="whole-no-space"),
+            pytest.param("Generando ganancias al 12,5 % anual", 12.5, id="decimal-with-space"),
+            pytest.param("Generando ganancias al -0,5% anual", -0.5, id="negative"),
+            pytest.param(
+                "Generando ganancias al \u22120,5% anual", -0.5, id="negative-unicode-minus"
+            ),
+            pytest.param("GENERANDO GANANCIAS AL 1,0% ANUAL", 1.0, id="upper-case"),
+            pytest.param(
+                "100% disponible, al 1,0% anual", 1.0, id="first-percent-not-anual"
+            ),
+        ],
+    )
+    def test_rate_is_the_number_before_percent_anual(self, subtitle, expected):
+        """Only the number between "al" and "% anual" is the rate."""
+        assert web.parse_wallet_yield(_balance_props(subtitle=subtitle)).rate_pct == expected
+
+    @pytest.mark.parametrize(
+        "subtitle",
+        [
+            pytest.param("Generando ganancias", id="no-percent"),
+            pytest.param("Generando ganancias al %", id="percent-without-number"),
+            pytest.param("Generando ganancias al 1.234,5% anual", id="dotted-thousands"),
+            pytest.param("Generando ganancias al 1.0.0% anual", id="two-dots"),
+            pytest.param("Activa y gana hasta 1,0% anual", id="hasta-promo"),
+            pytest.param("Generando ganancias al 1,0%", id="percent-without-anual"),
+            pytest.param("100% disponible", id="percent-not-a-rate"),
+            pytest.param(None, id="null"),
+            pytest.param(1.0, id="not-text"),
+        ],
+    )
+    def test_malformed_subtitle_leaves_the_rate_empty(self, subtitle):
+        """No rate beats a guessed one; the gain is still read."""
+        result = web.parse_wallet_yield(_balance_props(subtitle=subtitle))
+
+        assert result == web.WalletYield(rate_pct=None, profit_12m=999_999)
+
+    @pytest.mark.parametrize(
+        ("gain", "expected"),
+        [
+            pytest.param(999_999.5, 1_000_000, id="rounds-half-up"),
+            pytest.param("999999", None, id="text"),
+            pytest.param(True, None, id="bool"),
+            pytest.param(None, None, id="null"),
+        ],
+    )
+    def test_gain_is_whole_pesos_or_empty(self, gain, expected):
+        """A gain that is not a JSON number is left empty."""
+        assert web.parse_wallet_yield(_balance_props(gain=gain)).profit_12m == expected
+
+    @pytest.mark.parametrize(
+        "props",
+        [
+            pytest.param({}, id="empty-page"),
+            pytest.param("synthetic", id="not-an-object"),
+            pytest.param(None, id="null"),
+        ],
+    )
+    def test_missing_page_data_is_empty_not_an_error(self, props):
+        """These are extras: a page without them never fails the read."""
+        assert web.parse_wallet_yield(props) == web.WalletYield()
+
+    def test_missing_invested_node_is_empty_and_balance_still_reads(self):
+        """A balance page without `invested` keeps its balance, without yield."""
+        props = _balance_props()
+        del props["initialResult"]["balance"]["result"]["invested"]
+
+        result = web.parse_wallet_yield(props)
+
+        assert result == web.WalletYield(rate_pct=None, profit_12m=None)
+        assert web.parse_balance(props) == 2_500_000
+
+
 class TestParsePots:
     def test_no_pots(self):
         """An account without pots is a real reading, not a failure."""
@@ -395,8 +488,62 @@ class TestParsePots:
         """Its uuid, name and CLP amount."""
         pots, skipped = web.parse_pots(_pots_props([_pot()]))
 
-        assert pots == [Pot(id=POT_ID, name="Reserva sintética", amount=1_000_000)]
+        assert pots == [
+            Pot(id=POT_ID, name="Reserva sintética", amount=1_000_000, rate_pct=1.0)
+        ]
         assert skipped == 0
+
+    def test_every_pot_gets_the_hub_rate_and_no_gain(self):
+        """One shared rate for all pots; the web shows no per-pot gain."""
+        props = _pots_props([_pot(), _pot(pot_id=POT_ID_2, raw=999_999)], rate="4,50")
+
+        pots, _ = web.parse_pots(props)
+
+        assert [pot.rate_pct for pot in pots] == [4.5, 4.5]
+
+    @pytest.mark.parametrize(
+        ("rate", "is_invested"),
+        [
+            pytest.param("1.0", False, id="not-invested"),
+            pytest.param("1.0", None, id="invested-flag-missing"),
+            pytest.param("1.0", "true", id="invested-flag-not-a-bool"),
+            pytest.param("sintetico", True, id="rate-not-a-number"),
+            pytest.param("1.0.0", True, id="rate-two-decimal-marks"),
+            pytest.param("", True, id="rate-blank"),
+            pytest.param(None, True, id="rate-null"),
+            pytest.param(True, True, id="rate-bool"),
+        ],
+    )
+    def test_pot_rate_is_empty_unless_invested_with_a_readable_rate(self, rate, is_invested):
+        """The pots keep their balances; only the rate is left empty."""
+        props = _pots_props([_pot()], rate=rate, is_invested=is_invested)
+
+        pots, skipped = web.parse_pots(props)
+
+        assert [(pot.amount, pot.rate_pct) for pot in pots] == [(1_000_000, None)]
+        assert skipped == 0
+
+    def test_a_numeric_rate_is_read_too(self):
+        """A rate sent as a JSON number reads like its string form."""
+        pots, _ = web.parse_pots(_pots_props([_pot()], rate=1.0))
+
+        assert pots[0].rate_pct == 1.0
+
+    @pytest.mark.parametrize("rate", ["-0,5", "\u22120.5"], ids=["ascii-minus", "unicode-minus"])
+    def test_a_negative_rate_is_read_like_the_wallets(self, rate):
+        """The pots accept the same signed rate the wallet subtitle does."""
+        pots, _ = web.parse_pots(_pots_props([_pot()], rate=rate))
+
+        assert pots[0].rate_pct == -0.5
+
+    def test_missing_investment_data_leaves_the_rate_empty(self):
+        """A hub without `investmentData` still yields its pots."""
+        props = _pots_props([_pot()])
+        del props["hub"]["result"]["investmentData"]
+
+        pots, skipped = web.parse_pots(props)
+
+        assert ([pot.rate_pct for pot in pots], skipped) == ([None], 0)
 
     def test_several_pots_keep_their_order(self):
         """One record per pot, in the page's order."""
@@ -807,7 +954,10 @@ class TestReadAccount:
         account = web.read_account(tab)
 
         assert account.balance == 2_500_000
-        assert account.pots == [Pot(id=POT_ID, name="Reserva sintética", amount=1_000_000)]
+        assert account.wallet_yield == web.WalletYield(rate_pct=1.0, profit_12m=999_999)
+        assert account.pots == [
+            Pot(id=POT_ID, name="Reserva sintética", amount=1_000_000, rate_pct=1.0)
+        ]
         assert [row.movement_id for row in account.movements] == [MOVEMENT_ID]
         assert account.warnings == []
         assert tab.calls == ["balance", "pots", ("movements", 1)]
@@ -1761,6 +1911,16 @@ class TestConfiguration:
         assert web.profile_dir() == tmp_path / "profile"
 
 
+class _FakeProc:
+    """What `launch_chrome` returns, as far as the managed flow uses it."""
+
+    pid = 4242
+    returncode = None
+
+    def poll(self):
+        return self.returncode
+
+
 class _Chrome:
     """Records what the real-Chrome helpers were asked to do; launches nothing."""
 
@@ -1770,6 +1930,7 @@ class _Chrome:
         self.launches: list[dict] = []
         self.terminated: list = []
         self.drives: list[dict] = []
+        self.proc = _FakeProc()
         self.outcome = MercadoPagoAccount(balance=2_500_000)
         profile = tmp_path / "profile"
         if profile_exists:
@@ -1778,16 +1939,26 @@ class _Chrome:
         monkeypatch.delenv("MERCADOPAGO_CDP_URL", raising=False)
         monkeypatch.delenv("MERCADOPAGO_CDP_PORT", raising=False)
         monkeypatch.setattr(web, "_require_playwright", lambda: None)
+        self.reclaims: list[dict] = []
+        monkeypatch.setattr(
+            web.real_chrome, "reclaim_orphaned_chrome", lambda **kwargs: self.reclaims.append(kwargs)
+        )
         monkeypatch.setattr(web.real_chrome, "port_in_use", lambda port: port_in_use)
         monkeypatch.setattr(web.real_chrome, "find_chrome", lambda env: "/synthetic/chrome")
         monkeypatch.setattr(web.real_chrome, "launch_chrome", self._launch)
-        monkeypatch.setattr(web.real_chrome, "terminate_chrome", self.terminated.append)
+        monkeypatch.setattr(web.real_chrome, "terminate_chrome", self._terminate)
+        self.terminate_stops = True
         if fake_drive:
             monkeypatch.setattr(web, "_drive_over_cdp", self._drive)
 
     def _launch(self, executable, **kwargs):
         self.launches.append({"executable": executable, **kwargs})
-        return "proc"
+        return self.proc
+
+    def _terminate(self, proc):
+        self.terminated.append(proc)
+        if self.terminate_stops:
+            proc.returncode = 0
 
     def _drive(self, cdp_url, movement_pages, **kwargs):
         self.drives.append({"cdp_url": cdp_url, "movement_pages": movement_pages, **kwargs})
@@ -1812,7 +1983,7 @@ class TestModes:
         assert launch["profile_dir"] == tmp_path / "profile"
         assert chrome.drives[0]["cdp_url"] == "http://127.0.0.1:9223"
         assert chrome.drives[0]["movement_pages"] == 2
-        assert chrome.terminated == ["proc"]
+        assert chrome.terminated == [chrome.proc]
 
     def test_managed_never_retries_a_lost_session(self, monkeypatch, tmp_path):
         """One launch, one drive, Chrome terminated, the error raised as is."""
@@ -1824,7 +1995,7 @@ class TestModes:
 
         assert len(chrome.launches) == 1
         assert len(chrome.drives) == 1
-        assert chrome.terminated == ["proc"]
+        assert chrome.terminated == [chrome.proc]
 
     def test_managed_without_a_profile_asks_for_the_login_and_launches_nothing(
         self, monkeypatch, tmp_path
@@ -1983,8 +2154,8 @@ class TestRealDrives:
         assert account.balance == 2_500_000
         assert account.warnings == []
         assert (connections.opened, connections.closed) == (5, 5)
-        assert set(connections.processes) == {"proc"}
-        assert chrome.terminated == ["proc"]
+        assert set(connections.processes) == {chrome.proc}
+        assert chrome.terminated == [chrome.proc]
 
     def test_managed_lost_session_never_attaches_and_closes_chrome(
         self, clock, monkeypatch, tmp_path
@@ -1999,7 +2170,7 @@ class TestRealDrives:
 
         assert connections.attempts == 0
         assert len(chrome.launches) == 1
-        assert chrome.terminated == ["proc"]
+        assert chrome.terminated == [chrome.proc]
 
     def test_managed_terminates_chrome_when_the_tab_never_attaches(
         self, clock, monkeypatch, tmp_path
@@ -2013,7 +2184,7 @@ class TestRealDrives:
             web._drive_managed(1)
 
         assert len(chrome.launches) == 1
-        assert chrome.terminated == ["proc"]
+        assert chrome.terminated == [chrome.proc]
         assert clock.now >= web.MANAGED_TAB_WAIT_S
 
     def test_managed_without_any_tab_says_chrome_opened_none(self, clock, monkeypatch, tmp_path):
@@ -2025,7 +2196,7 @@ class TestRealDrives:
             web._drive_managed(1)
 
         assert "make mercadopago-login" not in str(info.value)
-        assert chrome.terminated == ["proc"]
+        assert chrome.terminated == [chrome.proc]
 
     def test_managed_whose_chrome_never_answers_names_the_launch(
         self, clock, monkeypatch, tmp_path
@@ -2038,7 +2209,7 @@ class TestRealDrives:
             web._drive_managed(1)
 
         assert clock.now == web.CONNECT_WAIT_S
-        assert chrome.terminated == ["proc"]
+        assert chrome.terminated == [chrome.proc]
 
 
 class _FakeTimer:
@@ -2096,7 +2267,7 @@ class TestLaunchSafety:
         def overrun(cdp_url, movement_pages, **kwargs):
             assert chrome.terminated == []
             timers[0].fire()
-            assert chrome.terminated == ["proc"]
+            assert chrome.terminated == [chrome.proc]
             raise MercadoPagoWebError("synthetic: the browser went away")
 
         monkeypatch.setattr(web, "_drive_over_cdp", overrun)
@@ -2104,7 +2275,7 @@ class TestLaunchSafety:
         with pytest.raises(MercadoPagoWebError, match="went away"):
             web._drive_managed(1)
 
-        assert chrome.terminated == ["proc", "proc"]
+        assert chrome.terminated == [chrome.proc, chrome.proc]
         assert timers[0].cancelled is True
 
     def test_a_connection_cut_by_the_watchdog_reads_as_the_timeout(
@@ -2146,7 +2317,7 @@ class TestLaunchSafety:
 
         assert len(chrome.launches) == 1
         assert chrome.drives == []
-        assert chrome.terminated == ["proc"]
+        assert chrome.terminated == [chrome.proc]
 
     def test_the_sign_in_window_is_closed_when_the_prompt_cannot_print(
         self, monkeypatch, tmp_path
@@ -2162,11 +2333,11 @@ class TestLaunchSafety:
         with pytest.raises(BrokenPipeError):
             web.save_login_session(timeout_s=60)
 
-        assert chrome.terminated == ["proc"]
+        assert chrome.terminated == [chrome.proc]
 
     def test_the_sign_in_wait_gets_the_launched_process(self, monkeypatch, tmp_path):
         """So a closed window ends the wait instead of running out the clock."""
-        _Chrome(monkeypatch, tmp_path)
+        chrome = _Chrome(monkeypatch, tmp_path)
         seen = {}
         monkeypatch.setattr(
             web, "_await_sign_in", lambda url, timeout, process=None: seen.update(process=process)
@@ -2174,7 +2345,7 @@ class TestLaunchSafety:
 
         web.save_login_session(timeout_s=60)
 
-        assert seen == {"process": "proc"}
+        assert seen == {"process": chrome.proc}
 
     def test_the_managed_drive_gets_the_launched_process(self, monkeypatch, tmp_path, timers):
         """So a launch swallowed by another Chrome on the profile fails fast."""
@@ -2182,7 +2353,78 @@ class TestLaunchSafety:
 
         web._drive_managed(1)
 
-        assert chrome.drives[0]["process"] == "proc"
+        assert chrome.drives[0]["process"] is chrome.proc
+
+    def test_an_orphan_is_reclaimed_before_the_busy_port_check(self, monkeypatch, tmp_path):
+        """A killed run's Chrome is stopped first; the port check still guards the rest."""
+        _Chrome(monkeypatch, tmp_path, port_in_use=True)
+        events = []
+        monkeypatch.setattr(
+            web.real_chrome,
+            "reclaim_orphaned_chrome",
+            lambda **kwargs: events.append(("reclaim", kwargs)),
+        )
+        monkeypatch.setattr(
+            web.real_chrome, "port_in_use", lambda port: events.append(("port", port)) or True
+        )
+
+        with pytest.raises(MercadoPagoWebError, match="already in use"):
+            web._drive_managed(1)
+
+        assert events == [
+            ("reclaim", {"port": 9223, "profile_dir": tmp_path / "profile"}),
+            ("port", 9223),
+        ]
+
+    @pytest.mark.parametrize("fails", [False, True], ids=["read", "drive-fails"])
+    def test_the_managed_run_records_its_chrome_and_clears_it(
+        self, monkeypatch, tmp_path, timers, fails
+    ):
+        """The pidfile names the launch while it runs and is gone after the finally."""
+        chrome = _Chrome(monkeypatch, tmp_path)
+        pidfile = real_chrome.managed_pidfile(tmp_path / "profile")
+        seen = []
+
+        def drive(cdp_url, movement_pages, **kwargs):
+            seen.append(json.loads(pidfile.read_text()))
+            if fails:
+                raise MercadoPagoWebError("synthetic")
+            return chrome.outcome
+
+        monkeypatch.setattr(web, "_drive_over_cdp", drive)
+        outcome = pytest.raises(MercadoPagoWebError) if fails else contextlib.nullcontext()
+
+        with outcome:
+            web._drive_managed(1)
+
+        assert [(record["pid"], record["port"]) for record in seen] == [(4242, 9223)]
+        assert not pidfile.exists()
+
+    def test_a_chrome_that_survives_teardown_keeps_its_record(self, monkeypatch, tmp_path, timers):
+        """Only a stopped Chrome is forgotten, so the next run can still reclaim it."""
+        chrome = _Chrome(monkeypatch, tmp_path)
+        chrome.terminate_stops = False
+
+        web._drive_managed(1)
+
+        record = json.loads(real_chrome.managed_pidfile(tmp_path / "profile").read_text())
+        assert record["pid"] == 4242
+
+    def test_the_sign_in_window_records_its_chrome_and_clears_it(self, monkeypatch, tmp_path):
+        """The login Chrome is reclaimable too, and cleared once closed."""
+        _Chrome(monkeypatch, tmp_path, profile_exists=False)
+        pidfile = real_chrome.managed_pidfile(tmp_path / "profile")
+        seen = []
+        monkeypatch.setattr(
+            web,
+            "_await_sign_in",
+            lambda url, timeout, process=None: seen.append(json.loads(pidfile.read_text())["pid"]),
+        )
+
+        web.save_login_session(timeout_s=60)
+
+        assert seen == [4242]
+        assert not pidfile.exists()
 
     def test_a_binary_that_cannot_start_names_the_setting_not_the_path(
         self, monkeypatch, tmp_path
@@ -2338,7 +2580,7 @@ class TestReuseWatchdog:
         web._drive_managed(1)
 
         (watchdog,) = timers
-        assert watchdog.args == ("proc",)
+        assert watchdog.args == (chrome.proc,)
         assert "kill_switch" not in chrome.drives[0]
 
     def test_a_frozen_balance_read_ends_without_another_playwright_call(
@@ -2658,7 +2900,7 @@ class TestManualSignIn:
         assert launch["offscreen"] is False
         assert launch["url"] == web.START_URL
         assert waits == ["http://127.0.0.1:9223"]
-        assert chrome.terminated == ["proc"]
+        assert chrome.terminated == [chrome.proc]
         assert "nothing is typed for you" in capsys.readouterr().out
 
     def test_closes_chrome_when_the_sign_in_times_out(self, monkeypatch, tmp_path):
@@ -2673,7 +2915,7 @@ class TestManualSignIn:
         with pytest.raises(MercadoPagoSessionError):
             web.save_login_session(timeout_s=60)
 
-        assert chrome.terminated == ["proc"]
+        assert chrome.terminated == [chrome.proc]
 
 
 # --- The scraper: both legs through a faked backend facade ----------------------
@@ -2879,6 +3121,28 @@ class TestLegs:
             ("savings", "CLP", f"mp_pot_{POT_ID}", "Reserva sintética", 1_000_000),
             ("savings", "CLP", f"mp_pot_{POT_ID_2}", "Reserva sintética 2", 999_999),
         ]
+
+    def test_products_carry_the_yield_metrics(self, monkeypatch):
+        """The wallet's rate and gain, and each pot's rate, land in the metrics."""
+        account = _account(
+            wallet_yield=web.WalletYield(rate_pct=1.0, profit_12m=999_999),
+            pots=[Pot(id=POT_ID, name="Reserva sintética", amount=1_000_000, rate_pct=4.5)],
+        )
+        _install(monkeypatch, account=account)
+
+        wallet, pot = asyncio.run(self.scraper.scrape_products()).products
+
+        assert (wallet.metrics.annual_rate_pct, wallet.metrics.profit_12m) == (1.0, 999_999)
+        assert (pot.metrics.annual_rate_pct, pot.metrics.profit) == (4.5, None)
+
+    def test_missing_yield_leaves_the_metrics_empty(self, monkeypatch):
+        """No rate or gain on the pages: the metrics stay None, never zero."""
+        _install(monkeypatch, account=_account())
+
+        wallet, *pots = asyncio.run(self.scraper.scrape_products()).products
+
+        assert (wallet.metrics.annual_rate_pct, wallet.metrics.profit_12m) == (None, None)
+        assert {(p.metrics.annual_rate_pct, p.metrics.profit) for p in pots} == {(None, None)}
 
     def test_no_savings_product_is_ever_ref_less(self, monkeypatch):
         """A ref-less savings product would be a roll-up the writer retires."""
