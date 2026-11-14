@@ -71,6 +71,10 @@ export interface SavingsMetrics {
   accounting_balance?: number | null;
   /** Date the institution printed next to the balance. */
   reported_as_of?: string | null;
+  /** Annual yield rate as a percent number, as reported by the institution. */
+  annual_rate_pct?: number | null;
+  /** Accumulated gain as reported by the institution. */
+  profit?: number | null;
 }
 
 /** Identity fields for a vista account (cuenta vista). */
@@ -105,6 +109,10 @@ export interface WalletMetrics {
   kind: "wallet";
   /** Wallet balance in the wallet currency (whole pesos for CLP). */
   balance: number;
+  /** Annual yield rate as a percent number, as reported by the institution. */
+  annual_rate_pct?: number | null;
+  /** Accumulated gain as reported by the institution. */
+  profit?: number | null;
 }
 
 /** Config fields for a term deposit (depósito a plazo). */
@@ -466,6 +474,8 @@ export const METRIC_FIELDS: Record<
   savings: {
     balance: { denomination: "currency" },
     accounting_balance: { denomination: "currency" },
+    annual_rate_pct: { denomination: "percent" },
+    profit: { denomination: "currency" },
   },
   vista: {
     balance: { denomination: "currency" },
@@ -473,6 +483,8 @@ export const METRIC_FIELDS: Record<
   },
   wallet: {
     balance: { denomination: "currency" },
+    annual_rate_pct: { denomination: "percent" },
+    profit: { denomination: "currency" },
   },
   term_deposit: {
     balance: { denomination: "currency" },
@@ -567,6 +579,8 @@ export const FAMILY_INFO: Record<
     columns: [
       { key: "saldo", labelEs: "Saldo", source: "headline", field: null, format: "currency", align: "right", optional: false, signed: false },
       { key: "saldo_contable", labelEs: "Saldo contable", source: "metric", field: "accounting_balance", format: "currency", align: "right", optional: true, signed: false },
+      { key: "tasa", labelEs: "Tasa anual", source: "metric", field: "annual_rate_pct", format: "percent", align: "right", optional: true, signed: false },
+      { key: "ganancia", labelEs: "Ganancia", source: "metric", field: "profit", format: "currency", align: "right", optional: true, signed: true },
     ],
   },
   term_deposit: {

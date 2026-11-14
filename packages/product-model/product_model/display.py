@@ -95,6 +95,21 @@ _FAMILY_SPECS: tuple[FamilySpec, ...] = (
                 field="accounting_balance",
                 optional=True,
             ),
+            ColumnSpec(
+                key="tasa",
+                label_es="Tasa anual",
+                source=ColumnSource.METRIC,
+                field="annual_rate_pct",
+                optional=True,
+            ),
+            ColumnSpec(
+                key="ganancia",
+                label_es="Ganancia",
+                source=ColumnSource.METRIC,
+                field="profit",
+                optional=True,
+                signed=True,
+            ),
         ),
     ),
     FamilySpec(

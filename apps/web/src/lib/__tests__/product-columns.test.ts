@@ -107,6 +107,19 @@ describe("visibleColumns", () => {
     ]);
   });
 
+  it("shows Tasa anual and Ganancia on the cash table once a wallet or pot has them", () => {
+    const checking = product("checking", {
+      metrics: { kind: "checking", balance: 2_500_000 },
+    });
+    const wallet = product("wallet", {
+      metrics: { kind: "wallet", balance: 2_500_000, annual_rate_pct: 1.0, profit: 999_999 },
+    });
+    const keys = (rows: ColumnProduct[]) =>
+      visibleColumns("cash", rows).map((c) => c.key);
+    expect(keys([checking])).toEqual(["saldo"]);
+    expect(keys([checking, wallet])).toEqual(["saldo", "tasa", "ganancia"]);
+  });
+
   it("keeps required columns even when every row is empty", () => {
     const rows = [
       product("credit_card", {
@@ -331,6 +344,30 @@ describe("resolveColumnCell", () => {
       const lossCell = resolveColumnCell(loss, column("investment", "ganancia"));
       expect(lossCell.text).toBe(formatCLP(-999_999));
       expect(lossCell.tone).toBe("negative");
+    });
+
+    it("renders a cash row's yearly rate as a plain percent and its gain signed", () => {
+      const pot = product("savings", {
+        currentBalance: 1_000_000,
+        metrics: { kind: "savings", balance: 1_000_000, annual_rate_pct: 4.5, profit: 999_999 },
+      });
+      const tasa = resolveColumnCell(pot, column("cash", "tasa"));
+      expect(tasa.text).toBe(formatPercent(4.5));
+      expect(tasa.text).toMatch(/^4[.,]5%$/);
+      expect(tasa.tone).toBeNull();
+      expect(tasa.sortValue).toBe(4.5);
+
+      const ganancia = resolveColumnCell(pot, column("cash", "ganancia"));
+      expect(ganancia.text).toBe(`+${formatCLP(999_999)}`);
+      expect(ganancia.tone).toBe("positive");
+    });
+
+    it("leaves a cash row without yield metrics empty in both columns", () => {
+      const pot = product("savings", {
+        metrics: { kind: "savings", balance: 1_000_000 },
+      });
+      expect(resolveColumnCell(pot, column("cash", "tasa")).text).toBeNull();
+      expect(resolveColumnCell(pot, column("cash", "ganancia")).text).toBeNull();
     });
 
     it("leaves unsigned columns untoned", () => {

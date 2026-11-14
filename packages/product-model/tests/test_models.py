@@ -196,6 +196,40 @@ def test_wallet_balance_keeps_cents():
     assert clp.headline() == 999_999
 
 
+@pytest.mark.parametrize("kind", ["wallet", "savings"])
+def test_yielding_balances_carry_a_rate_and_a_gain(kind):
+    """Wallets and savings take the reported yearly rate and gain; both optional."""
+    full = METRICS_ADAPTER.validate_python(
+        {"kind": kind, "balance": 1_000_000, "annual_rate_pct": 4.5, "profit": 999_999}
+    )
+    bare = METRICS_ADAPTER.validate_python({"kind": kind, "balance": 1_000_000})
+
+    assert (full.annual_rate_pct, full.profit) == (4.5, 999_999)
+    assert (bare.annual_rate_pct, bare.profit) == (None, None)
+    assert full.headline() == 1_000_000
+
+
+@pytest.mark.parametrize(
+    ("field", "denomination"),
+    [("annual_rate_pct", "percent"), ("profit", "currency")],
+)
+@pytest.mark.parametrize("kind", ["wallet", "savings"])
+def test_yield_fields_carry_their_denomination(kind, field, denomination):
+    """The rate is a percent number and the gain an amount in the product currency."""
+    properties = REGISTRY[kind].metrics_cls.model_json_schema()["properties"]
+
+    assert properties[field]["denomination"] == denomination
+
+
+@pytest.mark.parametrize("kind", ["checking", "vista"])
+def test_other_bank_accounts_do_not_take_yield_fields(kind):
+    """The yield fields are scoped to wallets and savings, not every account."""
+    with pytest.raises(ValidationError):
+        METRICS_ADAPTER.validate_python(
+            {"kind": kind, "balance": 1_000_000, "annual_rate_pct": 4.5}
+        )
+
+
 def test_stock_metrics_carry_a_position():
     """The per-unit fields ride along with nav; the quote time round-trips."""
     metrics = StockMetrics(

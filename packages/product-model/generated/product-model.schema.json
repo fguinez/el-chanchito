@@ -1198,6 +1198,20 @@
           "description": "Accounting balance in account currency (Saldo contable).",
           "title": "Accounting Balance"
         },
+        "annual_rate_pct": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "denomination": "percent",
+          "description": "Annual yield rate as a percent number, as reported by the institution.",
+          "title": "Annual Rate Pct"
+        },
         "balance": {
           "denomination": "currency",
           "description": "Available balance in account currency (Saldo disponible).",
@@ -1210,6 +1224,20 @@
           "description": "Payload discriminator; always \"savings\".",
           "title": "Kind",
           "type": "string"
+        },
+        "profit": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "denomination": "currency",
+          "description": "Accumulated gain as reported by the institution.",
+          "title": "Profit"
         },
         "reported_as_of": {
           "anyOf": [
@@ -2268,6 +2296,20 @@
       "additionalProperties": false,
       "description": "Observation for an app wallet; headline is `balance`.",
       "properties": {
+        "annual_rate_pct": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "denomination": "percent",
+          "description": "Annual yield rate as a percent number, as reported by the institution.",
+          "title": "Annual Rate Pct"
+        },
         "balance": {
           "denomination": "currency",
           "description": "Wallet balance in the wallet currency (whole pesos for CLP).",
@@ -2280,6 +2322,20 @@
           "description": "Payload discriminator; always \"wallet\".",
           "title": "Kind",
           "type": "string"
+        },
+        "profit": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "denomination": "currency",
+          "description": "Accumulated gain as reported by the institution.",
+          "title": "Profit"
         }
       },
       "required": [
