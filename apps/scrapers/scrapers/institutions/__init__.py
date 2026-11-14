@@ -6,7 +6,10 @@ drives its own Playwright login for both legs
 (`scrapers.backends.banchile_web` for balances,
 `scrapers.backends.banchile_movements` for movements and the shared session);
 the BCI Lider scraper consumes `scrapers.backends.bci_lider_web` (a real Chrome driven
-over CDP) for both legs, the Santander scraper consumes
+over CDP) for both legs, the Mercado Pago scraper consumes
+`scrapers.backends.mercadopago_web` (a real Chrome over CDP on a profile a
+human signed in to, read only by in-page fetch) for both legs, the Santander
+scraper consumes
 `scrapers.backends.santander_web` (a headless login whose data comes from the
 SPA's own JSON) for both legs, and the Banco Falabella scraper consumes
 `scrapers.backends.banco_falabella_web` (a headless login whose data is read

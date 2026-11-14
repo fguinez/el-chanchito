@@ -9,7 +9,7 @@ real classes are built. Every value is synthetic.
 
 import pytest
 
-from main import build_scrapers
+from main import _SCHEDULES, build_scrapers
 
 _VALUES = {
     "FINTUAL_EMAIL": "user@example.com",
@@ -26,6 +26,7 @@ _VALUES = {
     "SANTANDER_PASSWORD": "synthetic-password",
     "BANCO_FALABELLA_RUT": "00.000.000-0",
     "BANCO_FALABELLA_PASSWORD": "synthetic-password",
+    "MERCADOPAGO_ENABLED": "1",
     "EMAIL_IMAP_HOST": "imap.example.com",
     "EMAIL_IMAP_USER": "user@example.com",
     "EMAIL_IMAP_PASSWORD": "synthetic-password",
@@ -36,6 +37,7 @@ _CONSTRUCTOR_VARS = (
     "EMAIL_LOOKBACK_DAYS",
     "SANTANDER_HEADLESS",
     "BANCO_FALABELLA_HEADLESS",
+    "MERCADOPAGO_MOVEMENT_PAGES",
 )
 
 _EMAIL = ("EMAIL_IMAP_HOST", "EMAIL_IMAP_USER", "EMAIL_IMAP_PASSWORD")
@@ -85,7 +87,8 @@ def _clean_env(monkeypatch):
         ),
         pytest.param(("BANCO_FALABELLA_RUT",), set(), id="banco-falabella-rut-only"),
         pytest.param(("BANCO_FALABELLA_PASSWORD",), set(), id="banco-falabella-password-only"),
-        pytest.param(_EMAIL, {"mercadopago", "tenpo"}, id="email-scrapers"),
+        pytest.param(("MERCADOPAGO_ENABLED",), {"mercadopago"}, id="mercadopago"),
+        pytest.param(_EMAIL, {"tenpo"}, id="email-scrapers"),
         pytest.param(_EMAIL[:2], set(), id="email-no-password"),
         pytest.param(_EMAIL[1:], set(), id="email-no-host"),
         pytest.param(_EMAIL[::2], set(), id="email-no-user"),
@@ -97,6 +100,50 @@ def test_enabled_scrapers(monkeypatch, present, enabled):
         monkeypatch.setenv(var, _VALUES[var])
 
     assert set(build_scrapers()) == enabled
+
+
+@pytest.mark.parametrize("value", ["0", "false", "No", " off "])
+def test_mercadopago_flag_can_be_switched_off(monkeypatch, value):
+    """The opt-in flag reads 0/false/no/off as off, like the other flags."""
+    monkeypatch.setenv("MERCADOPAGO_ENABLED", value)
+
+    assert build_scrapers() == {}
+
+
+def test_mercadopago_no_longer_rides_on_the_mailbox(monkeypatch):
+    """Its e-mail leg is retired: IMAP credentials alone must not enable it."""
+    for var in _EMAIL:
+        monkeypatch.setenv(var, _VALUES[var])
+
+    scrapers = build_scrapers()
+
+    assert "mercadopago" not in scrapers
+
+
+def test_mercadopago_is_a_web_scraper(monkeypatch):
+    """One source per product: the wallet is read from the web, not from e-mail."""
+    monkeypatch.setenv("MERCADOPAGO_ENABLED", "1")
+
+    scraper = build_scrapers()["mercadopago"]
+
+    assert (scraper.method, scraper.institution) == ("web", "mercadopago")
+
+
+def test_mercadopago_runs_every_six_hours_off_the_mailbox_cadence():
+    """No login per run, so more often than the daily browser logins."""
+    schedule = _SCHEDULES["mercadopago"]
+
+    assert schedule["hours"] == 6
+    assert "minutes" not in schedule
+    assert "email" not in schedule["label"].lower()
+
+
+def test_every_scraper_that_can_be_enabled_has_a_schedule(monkeypatch):
+    """Without one a scraper runs once at startup and can never be refreshed."""
+    for var, value in _VALUES.items():
+        monkeypatch.setenv(var, value)
+
+    assert set(build_scrapers()) <= set(_SCHEDULES)
 
 
 def test_empty_values_count_as_unset(monkeypatch):
