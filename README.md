@@ -13,7 +13,7 @@ El Chanchito (“the piggy bank”) is a self-hosted personal finance tracker. P
 ## Highlights
 
 - **Monitors**: an equation over product values (say, the checking balance minus what the cards owe) checked against alert and warning thresholds that can ramp through the month, plus variaciones (transactions to ignore, like a reimbursed expense) that shift them until month end; evaluated live and replayed day by day from balance history.
-- **Ten institution scrapers** on independent schedules, mixing REST APIs (Fintual, Buda, Skipo), browser automation (Playwright for Banco de Chile, Banco Santander and Banco Falabella, a real Chrome over CDP for Tarjeta Lider Bci), and Gmail inbox parsing (MACH, MercadoPago, Tenpo).
+- **Ten institution scrapers** on independent schedules, mixing REST APIs (Fintual, Buda, Skipo), browser automation (Playwright for Banco de Chile, Banco Santander and Banco Falabella, a real Chrome over CDP for Tarjeta Lider Bci and Mercado Pago), and Gmail inbox parsing (MACH, Tenpo).
 - **Typed product registry**: every product kind (checking, credit card, crypto, ...) is declared once in pydantic, grouped into display families with the column specs of their dashboard tables, and code-generated into TypeScript types, a JSON Schema, and per-kind docs.
 - **Net worth from snapshots**: derived from per-product snapshot history, with per-kind asset/liability conventions and multi-currency conversion to CLP.
 - **On-demand refresh**: an internal control endpoint lets the dashboard trigger a scrape immediately instead of waiting for the next scheduled run.
@@ -44,9 +44,10 @@ Every published port listens on loopback only (`127.0.0.1`), so nothing is reach
 make scrapers-once    # run every configured scraper once
 make scrapers-start   # long-running, each scraper on its own schedule
 make fintual-login    # one-time Fintual sign-in (e-mail 2FA, session cached)
+make mercadopago-login  # Mercado Pago sign-in by hand in a real Chrome (session kept in its profile)
 ```
 
-A scraper is enabled only when its credentials are present. See [USAGE.md](USAGE.md) for the full guide: scraper setup, dashboard pages, daily and monthly workflows, CSV import, categories and automatic categorization, deployment, and the API reference.
+A scraper is enabled only when its credentials are present (Mercado Pago, which has none to store, by `MERCADOPAGO_ENABLED`). See [USAGE.md](USAGE.md) for the full guide: scraper setup, dashboard pages, daily and monthly workflows, CSV import, categories and automatic categorization, deployment, and the API reference.
 
 ## Configuration
 
@@ -58,10 +59,11 @@ A scraper is enabled only when its credentials are present. See [USAGE.md](USAGE
 | `BANCO_FALABELLA_RUT` | no | Banco Falabella RUT; with `BANCO_FALABELLA_PASSWORD`, enables the Banco Falabella scraper (headless Playwright: CMR Mastercard credit card, cuenta corriente and línea de crédito) |
 | `LIDER_BCI_RUT` | no | Tarjeta Lider Bci RUT; enables its scraper (drives a real Chrome, so it needs a machine with a display) |
 | `FINTUAL_EMAIL` | no | Fintual account e-mail; enables the Fintual scraper (run `make fintual-login` once) |
-| `EMAIL_IMAP_HOST` / `EMAIL_IMAP_USER` | no | Gmail IMAP identifiers; enable the e-mail parsers (MACH, MercadoPago, Tenpo) |
+| `MERCADOPAGO_ENABLED` | no | Set to `1` to enable the Mercado Pago scraper: wallet balance, savings pots and wallet movements, read by driving a real Chrome on a profile you sign in to with `make mercadopago-login` (needs a machine with a display; no crypto) |
+| `EMAIL_IMAP_HOST` / `EMAIL_IMAP_USER` | no | Gmail IMAP identifiers; enable the e-mail parsers (MACH, Tenpo) |
 | `chanchito.*` | scrapers only | Secrets (bank passwords, Buda and Skipo API keys, Gmail App Password) live in the secret store (macOS Keychain, system keyring, or owner-only `local/secrets.env`): `make secrets-init` / `make secrets-status`. Values exported in your shell win over the store |
 
-`.env.example` documents every other setting the code reads, with its default (e-mail lookback window, Fintual session cache, scraper mode, dashboard login, on-demand refresh wiring).
+`.env.example` documents every other setting the code reads, with its default (e-mail lookback window, Fintual session cache, the real-Chrome settings of Tarjeta Lider Bci and Mercado Pago, scraper mode, dashboard login, on-demand refresh wiring).
 
 ## Development
 

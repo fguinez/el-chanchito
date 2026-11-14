@@ -1,5 +1,5 @@
 .PHONY: help install install-deps install-py dev dev-web build db-up db-down db-migrate db-reset db-shell \
-       scrapers-once scrapers-start scrapers-test fintual-login bci-lider-login up down logs clean typecheck lint \
+       scrapers-once scrapers-start scrapers-test fintual-login bci-lider-login mercadopago-login up down logs clean typecheck lint \
        test test-ts test-py test-db test-db-up test-db-down product-model-generate
 
 # ─── Help ────────────────────────────────────────────────────────────────────
@@ -148,8 +148,12 @@ bci-lider-login: ## Tarjeta Lider Bci reuse mode (optional; managed is default):
 	@. ./scripts/load-secrets.sh && cd apps/scrapers && \
 		../../.venv/bin/python -m scrapers.institutions.bci_lider
 
+mercadopago-login: ## Sign in to Mercado Pago by hand in a real Chrome on its dedicated profile (once, and again whenever the session is lost); the scraper reuses that profile
+	@cd apps/scrapers && \
+		../../.venv/bin/python -m scrapers.institutions.mercadopago
+
 scrapers-test: ## Test scraper imports and basic functionality
-	cd apps/scrapers && ../../.venv/bin/python -c "from scrapers.institutions import FintualScraper, BudaScraper, BanChileScraper, BancoFalabellaScraper, BciLiderScraper, MachScraper, MercadoPagoScraper, SantanderScraper, SkipoScraper, TenpoScraper; from scrapers.backends.email import get_session, fetch_transactions_for_pattern; from scrapers.backends.banchile_movements import fetch_session; from scrapers.backends.santander_web import fetch_session as santander_fetch_session; from scrapers.backends.banco_falabella_web import fetch_session as banco_falabella_fetch_session; from db.writer import start_scraper_run, finish_scraper_run; print('All scraper imports OK')"
+	cd apps/scrapers && ../../.venv/bin/python -c "from scrapers.institutions import FintualScraper, BudaScraper, BanChileScraper, BancoFalabellaScraper, BciLiderScraper, MachScraper, MercadoPagoScraper, SantanderScraper, SkipoScraper, TenpoScraper; from scrapers.backends.email import get_session, fetch_transactions_for_pattern; from scrapers.backends.mercadopago_web import scrape_account; from scrapers.backends.banchile_movements import fetch_session; from scrapers.backends.santander_web import fetch_session as santander_fetch_session; from scrapers.backends.banco_falabella_web import fetch_session as banco_falabella_fetch_session; from db.writer import start_scraper_run, finish_scraper_run; print('All scraper imports OK')"
 
 # ─── Docker (full stack) ────────────────────────────────────────────────────
 
