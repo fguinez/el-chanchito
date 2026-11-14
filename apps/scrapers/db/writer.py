@@ -22,6 +22,7 @@ from scrapers.base import (
     ScrapedTransaction,
     SupersededTransaction,
     TransactionLocation,
+    VanishedProductScope,
     VanishedWindow,
 )
 
@@ -179,17 +180,8 @@ def _resolve_product(
         raise RuntimeError("No users found — run the V009 migration first")
     user_id = user_row[0]
 
-    account_row = conn.execute(
-        """
-        SELECT id FROM accounts
-        WHERE user_id = %s AND institution_id = %s
-        ORDER BY display_order LIMIT 1
-        """,
-        (user_id, institution_id),
-    ).fetchone()
-    if account_row:
-        account_id = account_row[0]
-    else:
+    account_id = _scraper_account(conn, user_id, institution_id)
+    if account_id is None:
         account_id = str(uuid4())
         conn.execute(
             "INSERT INTO accounts (id, user_id, institution_id) VALUES (%s, %s, %s)",
@@ -245,12 +237,40 @@ def _resolve_product(
     return product_row[0]
 
 
+# The attributes keys `retire_vanished_products` stamps on a product it retires,
+# so a later scrape can tell it from one the user deactivated by hand.
+RETIRED_MARKER_KEY = "retired_by_scraper"
+RETIRED_AT_KEY = "retired_by_scraper_at"
+# Stamped (with an ISO timestamp) on an active product the first complete
+# listing lacks; only the next complete listing that still lacks it retires it.
+VANISHED_PENDING_KEY = "vanished_pending_since"
+
+
+def _scraper_account(conn, user_id, institution_id):
+    """The account scrapers write an institution's products to (its first by
+    display order), or None when the user has none there yet."""
+    row = conn.execute(
+        """
+        SELECT id FROM accounts
+        WHERE user_id = %s AND institution_id = %s
+        ORDER BY display_order LIMIT 1
+        """,
+        (user_id, institution_id),
+    ).fetchone()
+    return row[0] if row else None
+
+
 def _resolve_product_row(conn, product_id: str):
-    """The (account_id, kind, currency, external_ref, is_active) of a product."""
+    """The (account_id, kind, currency, external_ref, is_active,
+    retired_by_scraper, vanished_pending) of a product, row locked until the
+    caller's transaction ends, so a concurrent hand toggle of `is_active` (the
+    web PATCH locks the row too) can't land between this read and the write
+    decided from it."""
     return conn.execute(
-        "SELECT account_id, kind, currency, external_ref, is_active "
-        "FROM products WHERE id = %s",
-        (product_id,),
+        "SELECT account_id, kind, currency, external_ref, is_active, "
+        "attributes @> %s, attributes ? %s "
+        "FROM products WHERE id = %s FOR NO KEY UPDATE",
+        (Jsonb({RETIRED_MARKER_KEY: True}), VANISHED_PENDING_KEY, product_id),
     ).fetchone()
 
 
@@ -297,19 +317,26 @@ def _retire_rollup_sibling(conn, account_id, kind: str, currency: str) -> str | 
 
 
 def _write_decision(
-    is_active: bool, external_ref: str | None, has_active_ref_sibling: bool
+    is_active: bool,
+    external_ref: str | None,
+    has_active_ref_sibling: bool,
+    retired_by_scraper: bool = False,
 ) -> str:
     """What `upsert_product` should do with a resolved product row.
 
-    - ``"skip_inactive"``: the row is retired (a roll-up superseded by
-      per-holding products, or the retired Fintual aggregate). Leave it frozen
-      so a fallback scrape can't resurrect a double-counting aggregate.
+    - ``"reactivate"``: the row is inactive because `retire_vanished_products`
+      retired it (the source had stopped listing it), and the source lists it
+      again: reactivate it, then write it normally.
+    - ``"skip_inactive"``: the row is retired otherwise (a roll-up superseded
+      by per-holding products, the retired Fintual aggregate, or a product the
+      user deactivated). Leave it frozen so a fallback scrape can't resurrect
+      a double-counting aggregate.
     - ``"skip_superseded"``: a NULL-ref roll-up whose per-holding siblings are
       active. Writing it would double-count, so the per-holding rows win.
     - ``"write"``: proceed normally.
     """
     if not is_active:
-        return "skip_inactive"
+        return "reactivate" if retired_by_scraper else "skip_inactive"
     if external_ref is None and has_active_ref_sibling:
         return "skip_superseded"
     return "write"
@@ -1471,7 +1498,9 @@ def upsert_product(sp: ScrapedProduct) -> None:
     same transaction so the denormalized columns can't drift.
 
     Two guards keep a roll-up total and its per-holding rows from both counting
-    (see `_write_decision`): a retired product is left frozen, and a NULL-ref
+    (see `_write_decision`): a retired product is left frozen (unless
+    `retire_vanished_products` retired it, which reactivates it; a write also
+    clears a pending vanished marker), and a NULL-ref
     roll-up is dropped when active per-holding siblings exist. Conversely, a
     per-holding write retires any active NULL-ref sibling for its account/kind.
     """
@@ -1486,13 +1515,56 @@ def upsert_product(sp: ScrapedProduct) -> None:
             name=sp.name,
         )
 
-        account_id, kind, currency, external_ref, is_active = _resolve_product_row(
-            conn, product_id
-        )
+        (
+            account_id,
+            kind,
+            currency,
+            external_ref,
+            is_active,
+            retired_by_scraper,
+            vanished_pending,
+        ) = _resolve_product_row(conn, product_id)
         has_sibling = external_ref is None and _has_active_ref_sibling(
             conn, account_id, kind, currency
         )
-        decision = _write_decision(is_active, external_ref, has_sibling)
+        decision = _write_decision(
+            is_active, external_ref, has_sibling, retired_by_scraper
+        )
+        if decision == "reactivate":
+            # Listed again after the scraper retired it: back to active, and
+            # the markers go. The guard keeps a row that lost its marker (a
+            # hand toggle) from being reactivated.
+            conn.execute(
+                "UPDATE products SET is_active = true, "
+                "attributes = attributes - %s - %s - %s, updated_at = now() "
+                "WHERE id = %s AND attributes @> %s",
+                (
+                    RETIRED_MARKER_KEY,
+                    RETIRED_AT_KEY,
+                    VANISHED_PENDING_KEY,
+                    product_id,
+                    Jsonb({RETIRED_MARKER_KEY: True}),
+                ),
+            )
+        elif retired_by_scraper or vanished_pending:
+            # Written (listed again) or left frozen: the markers go either way,
+            # so a product the user re-enabled by hand stays frozen on a later
+            # hand deactivation, and a stray pending stamp can't make the next
+            # miss after a reactivation retire at once. `is_active` is the
+            # user's and is never touched here.
+            conn.execute(
+                "UPDATE products SET attributes = attributes - %s - %s - %s "
+                "WHERE id = %s",
+                (RETIRED_MARKER_KEY, RETIRED_AT_KEY, VANISHED_PENDING_KEY, product_id),
+            )
+        if decision == "reactivate":
+            logger.info(
+                "Reactivated %s/%s %s (external_ref=%s): listed again",
+                sp.institution,
+                sp.kind,
+                sp.currency,
+                external_ref,
+            )
         if decision == "skip_inactive":
             logger.warning(
                 "Skipping retired product %s/%s %s (external_ref=%s); left frozen",
@@ -1586,6 +1658,125 @@ def upsert_product(sp: ScrapedProduct) -> None:
             sp.currency,
             metrics_dict,
         )
+
+
+@dataclass(frozen=True)
+class VanishedProductsResult:
+    """What one `retire_vanished_products` call did.
+
+    `retired` counts the products deactivated (missing from two complete
+    listings in a row); `pending` counts those newly flagged on their first
+    miss, still active.
+    """
+
+    retired: int = 0
+    pending: int = 0
+
+
+@with_db_retry
+def retire_vanished_products(scope: VanishedProductScope) -> VanishedProductsResult:
+    """Retire the stored products two complete listings in a row no longer carry.
+
+    Candidates are the active products of the scope's kind and currency, on
+    the account `_resolve_product` writes to, whose `external_ref` has the
+    scope's prefix and is not in `present_refs` (never a ref-less one). A
+    candidate without `VANISHED_PENDING_KEY` is only stamped with it (one
+    missed listing may be the source's glitch). One already stamped is
+    retired: deactivated, stamped with `RETIRED_MARKER_KEY` / `RETIRED_AT_KEY`
+    (the pending key goes) so `upsert_product` can reactivate it, and given a
+    `closed_metrics` snapshot, so its history stays and net worth stops
+    counting it. `upsert_product` clears the pending key when the product is
+    listed again.
+    """
+    metrics_dict = scope.closed_metrics.model_dump(mode="json", exclude_none=True)
+    headline = _headline_decimal(scope.closed_metrics.headline())
+    present = list(scope.present_refs)
+    pool = get_pool()
+    with pool.connection() as conn, conn.transaction():
+        owner = conn.execute(
+            """
+            SELECT u.id, i.id FROM institutions i,
+                (SELECT id FROM users ORDER BY created_at LIMIT 1) u
+            WHERE i.slug = %s
+            """,
+            (scope.institution,),
+        ).fetchone()
+        account_id = owner and _scraper_account(conn, owner[0], owner[1])
+        if account_id is None:
+            return VanishedProductsResult()
+        rows = conn.execute(
+            """
+            SELECT p.id, p.metrics, p.attributes ? %s FROM products p
+            WHERE p.account_id = %s
+              AND p.kind = %s AND p.currency = %s
+              AND p.external_ref LIKE %s
+              AND NOT (p.external_ref = ANY(%s::text[]))
+              AND p.is_active
+            FOR UPDATE OF p
+            """,
+            (
+                VANISHED_PENDING_KEY,
+                account_id,
+                scope.product_kind,
+                scope.currency,
+                _like_prefix(scope.external_ref_prefix),
+                present,
+            ),
+        ).fetchall()
+        now = datetime.now(timezone.utc)
+        retired = 0
+        pending = 0
+        for product_id, current_metrics, already_pending in rows:
+            if not already_pending:
+                conn.execute(
+                    "UPDATE products SET attributes = attributes || %s WHERE id = %s",
+                    (Jsonb({VANISHED_PENDING_KEY: now.isoformat()}), product_id),
+                )
+                pending += 1
+                continue
+            changed = _canonical_metrics(metrics_dict) != _canonical_metrics(
+                current_metrics
+            )
+            if changed and headline is not None:
+                conn.execute(
+                    """
+                    INSERT INTO product_snapshots
+                        (id, product_id, balance, metrics, as_of, source)
+                    VALUES (%s, %s, %s, %s, %s, 'scraper')
+                    ON CONFLICT (product_id, as_of) DO NOTHING
+                    """,
+                    (str(uuid4()), product_id, headline, Jsonb(metrics_dict), now),
+                )
+            conn.execute(
+                """
+                UPDATE products
+                SET is_active = false, current_balance = %s, metrics = %s,
+                    balance_as_of = %s, attributes = (attributes - %s) || %s,
+                    updated_at = %s
+                WHERE id = %s
+                """,
+                (
+                    headline,
+                    Jsonb(metrics_dict),
+                    now,
+                    VANISHED_PENDING_KEY,
+                    Jsonb({RETIRED_MARKER_KEY: True, RETIRED_AT_KEY: now.isoformat()}),
+                    now,
+                    product_id,
+                ),
+            )
+            retired += 1
+    if retired or pending:
+        logger.info(
+            "%s %s %s: retired %d product(s) missing from two complete listings, "
+            "flagged %d missing from this one",
+            scope.institution,
+            scope.product_kind,
+            scope.currency,
+            retired,
+            pending,
+        )
+    return VanishedProductsResult(retired=retired, pending=pending)
 
 
 # --- Exchange rates (V024) -----------------------------------------------------

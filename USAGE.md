@@ -497,8 +497,17 @@ What it reads, every 6 hours:
 
 What it does not read: crypto (Meli Dólar, Bitcoin: on the web it only shows
 on the home page, which the scraper never opens) and movements of the savings
-pots (the web shows none). A pot you close keeps its last balance on the
-dashboard; deactivate it under Instituciones.
+pots (the web shows none). A pot you close is retired once two runs in a row
+read the pots list in full without it (the first only flags it, in case the
+page glitched): it turns inactive at a zero balance, so it stops counting
+toward net worth while its history stays, and the run's status line under
+Estado de scrapers notes how many pots it retired. A run that could not read
+every pot neither flags nor retires anything, and a retired pot that shows
+up again comes back. Activating or deactivating a pot yourself under
+Instituciones clears those flags, so the scraper never reactivates a pot you
+turned off.
+A monitor that references a retired pot shows as broken until the pot
+reappears.
 
 It only reads. The tab stays on the balance page and the data is fetched from
 inside it, three pages and nothing else, without following redirects. When the

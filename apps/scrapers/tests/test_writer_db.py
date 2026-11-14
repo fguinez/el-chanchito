@@ -5,7 +5,8 @@ run the SQL that carries them out: the institution -> account -> product
 resolution chain, transaction dedup and issue #57's in-place re-key,
 transactions that name an existing product by its ref, snapshot
 history only on change, the roll-up guards, the exchange-rate upsert (V024),
-the price-history upsert (V038), the stock re-kind (V039), Banco Falabella's
+the price-history upsert (V038), the stock re-kind (V039), retiring products
+a complete listing no longer carries, Banco Falabella's
 three singleton products, the forward-only billing status (V044) and the
 scraper run log. Each test gets its own freshly migrated database (see conftest.py) and is
 skipped unless TEST_DATABASE_URL is set. Every figure and identifier is
@@ -28,9 +29,11 @@ from tests.conftest import MIGRATIONS_DIR, apply_migrations
 from db.writer import (
     UnresolvedPriceScope,
     UnresolvedRateScope,
+    VanishedProductsResult,
     delete_superseded_transactions,
     finish_scraper_run,
     mark_billed_statements,
+    retire_vanished_products,
     soft_delete_vanished_transactions,
     start_scraper_run,
     upsert_exchange_rate,
@@ -50,6 +53,7 @@ from product_model import (
     LineOfCreditAttributes,
     LineOfCreditMetrics,
     ProductRef,
+    SavingsMetrics,
     ScrapedExchangeRate,
     ScrapedPriceHistory,
     ScrapedProduct,
@@ -57,8 +61,14 @@ from product_model import (
     StockMetrics,
     TermDepositMetrics,
     TransactionLocation,
+    WalletMetrics,
 )
-from scrapers.base import BilledStatement, SupersededTransaction, VanishedWindow
+from scrapers.base import (
+    BilledStatement,
+    SupersededTransaction,
+    VanishedProductScope,
+    VanishedWindow,
+)
 
 # The single user V009 seeds; `_resolve_product` attaches everything to it.
 SEEDED_USER_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -2583,6 +2593,311 @@ class TestRollupGuards:
         rollup = self._by_ref(db_conn)[None]
         assert (rollup["is_active"], rollup["current_balance"]) == (True, None)
         assert len(_snapshots(db_conn)) == 1
+
+
+_POT_1 = "mp_pot_00000000-0000-0000-0000-000000000001"
+_POT_2 = "mp_pot_00000000-0000-0000-0000-000000000002"
+
+
+def _pot(external_ref, balance=1000000, institution="mercadopago"):
+    return ScrapedProduct(
+        institution=institution,
+        kind="savings",
+        external_ref=external_ref,
+        metrics=SavingsMetrics(balance=balance),
+    )
+
+
+def _pot_scope(*present, institution="mercadopago"):
+    return VanishedProductScope(
+        institution=institution,
+        product_kind="savings",
+        currency="CLP",
+        external_ref_prefix="mp_pot_",
+        present_refs=frozenset(present),
+        closed_metrics=SavingsMetrics(balance=0),
+    )
+
+
+def _miss_twice(scope):
+    """Two complete listings in a row: the first flags, the second retires."""
+    retire_vanished_products(scope)
+    return retire_vanished_products(scope)
+
+
+class TestRetireVanishedProducts:
+    """A product two complete listings in a row no longer carry is retired, not deleted."""
+
+    def _by_ref(self, conn, institution="mercadopago"):
+        return {p["external_ref"]: p for p in _products(conn, institution)}
+
+    def _states(self, conn):
+        return {
+            (p["external_ref"], p["kind"], p["is_active"], p["current_balance"])
+            for institution in ("mercadopago", "banchile")
+            for p in _products(conn, institution)
+        }
+
+    def _balances(self, conn, product_id):
+        return [
+            row["balance"]
+            for row in conn.execute(
+                "SELECT balance FROM product_snapshots WHERE product_id = %s "
+                "ORDER BY as_of",
+                (product_id,),
+            ).fetchall()
+        ]
+
+    def test_a_first_miss_only_flags_the_pot(self, db_conn):
+        """Still active, same balance, no snapshot: only the pending stamp lands."""
+        # Arrange
+        upsert_product(_pot(_POT_1, 2500000))
+        upsert_product(_pot(_POT_2, 999999))
+        before = self._by_ref(db_conn)[_POT_1]
+
+        # Act
+        result = retire_vanished_products(_pot_scope(_POT_2))
+
+        # Assert
+        pot = self._by_ref(db_conn)[_POT_1]
+        assert result == VanishedProductsResult(retired=0, pending=1)
+        assert (pot["is_active"], pot["current_balance"]) == (True, Decimal("2500000"))
+        assert pot["metrics"] == before["metrics"]
+        assert pot["balance_as_of"] == before["balance_as_of"]
+        assert "vanished_pending_since" in pot["attributes"]
+        assert "retired_by_scraper" not in pot["attributes"]
+        assert self._balances(db_conn, pot["id"]) == [Decimal("2500000")]
+        assert "vanished_pending_since" not in self._by_ref(db_conn)[_POT_2]["attributes"]
+
+    def test_a_second_miss_retires_the_pot_with_a_zero_snapshot(self, db_conn):
+        """Inactive, zero balance, marked, pending stamp gone, earlier history kept."""
+        # Arrange
+        upsert_product(_pot(_POT_1, 2500000))
+        upsert_product(_pot(_POT_2, 999999))
+        retire_vanished_products(_pot_scope(_POT_2))
+
+        # Act
+        result = retire_vanished_products(_pot_scope(_POT_2))
+
+        # Assert
+        pot = self._by_ref(db_conn)[_POT_1]
+        assert result == VanishedProductsResult(retired=1, pending=0)
+        assert (pot["is_active"], pot["current_balance"]) == (False, Decimal("0"))
+        assert pot["metrics"] == {"kind": "savings", "balance": 0}
+        assert pot["attributes"]["retired_by_scraper"] is True
+        assert "retired_by_scraper_at" in pot["attributes"]
+        assert "vanished_pending_since" not in pot["attributes"]
+        assert self._balances(db_conn, pot["id"]) == [Decimal("2500000"), Decimal("0")]
+
+    def test_a_flagged_pot_listed_again_loses_the_flag(self, db_conn):
+        """A write clears the stamp, so the next miss starts over at pending."""
+        # Arrange
+        upsert_product(_pot(_POT_1, 2500000))
+        retire_vanished_products(_pot_scope())
+
+        # Act
+        upsert_product(_pot(_POT_1, 999999))
+        listed = self._by_ref(db_conn)[_POT_1]
+        result = retire_vanished_products(_pot_scope())
+
+        # Assert
+        pot = self._by_ref(db_conn)[_POT_1]
+        assert "vanished_pending_since" not in listed["attributes"]
+        assert listed["current_balance"] == Decimal("999999")
+        assert result == VanishedProductsResult(retired=0, pending=1)
+        assert pot["is_active"] is True
+
+    def test_a_flagged_active_pot_written_again_stays_active(self, db_conn):
+        """The stamp goes; `is_active` is only rewritten for a scraper-retired row."""
+        # Arrange
+        upsert_product(_pot(_POT_1, 2500000))
+        retire_vanished_products(_pot_scope())
+
+        # Act
+        upsert_product(_pot(_POT_1, 2500000))
+
+        # Assert
+        pot = self._by_ref(db_conn)[_POT_1]
+        assert pot["is_active"] is True
+        assert "vanished_pending_since" not in pot["attributes"]
+
+    def test_a_flagged_pot_deactivated_by_hand_stays_frozen_and_loses_the_flag(
+        self, db_conn
+    ):
+        """Deactivated outside the PATCH: still frozen, but no stamp left to
+        retire it on its first miss after a reactivation."""
+        # Arrange
+        upsert_product(_pot(_POT_1, 2500000))
+        retire_vanished_products(_pot_scope())
+        db_conn.execute("UPDATE products SET is_active = false")
+        before = self._by_ref(db_conn)[_POT_1]
+
+        # Act
+        upsert_product(_pot(_POT_1, 999999))
+
+        # Assert
+        pot = self._by_ref(db_conn)[_POT_1]
+        assert (pot["is_active"], pot["current_balance"]) == (False, Decimal("2500000"))
+        assert (pot["metrics"], pot["balance_as_of"]) == (
+            before["metrics"],
+            before["balance_as_of"],
+        )
+        assert "vanished_pending_since" not in pot["attributes"]
+        assert self._balances(db_conn, pot["id"]) == [Decimal("2500000")]
+
+    def test_a_flag_survives_a_run_that_declares_no_listing(self, db_conn):
+        """An incomplete read writes other products but no scope: the flag stays put."""
+        # Arrange
+        upsert_product(_pot(_POT_1, 2500000))
+        retire_vanished_products(_pot_scope())
+        stamp = self._by_ref(db_conn)[_POT_1]["attributes"]["vanished_pending_since"]
+
+        # Act
+        upsert_product(_pot(_POT_2, 999999))
+
+        # Assert
+        pot = self._by_ref(db_conn)[_POT_1]
+        assert pot["is_active"] is True
+        assert pot["attributes"]["vanished_pending_since"] == stamp
+
+    def test_everything_outside_the_scope_is_left_alone(self, db_conn):
+        """The wallet, another prefix, kind or institution, and a listed pot."""
+        upsert_product(
+            ScrapedProduct(
+                institution="mercadopago", kind="wallet", metrics=WalletMetrics(balance=2500000)
+            )
+        )
+        upsert_product(_pot(None))
+        upsert_product(_pot(_POT_2))
+        upsert_product(_pot("otro_00000000-0000-0000-0000-000000000003"))
+        upsert_product(
+            ScrapedProduct(
+                institution="mercadopago",
+                kind="checking",
+                external_ref="mp_pot_00000000-0000-0000-0000-000000000004",
+                metrics=CheckingMetrics(balance=999999),
+            )
+        )
+        upsert_product(_pot(_POT_1, institution="banchile"))
+        before = self._states(db_conn)
+        snapshots = _count(db_conn, "product_snapshots")
+
+        result = _miss_twice(_pot_scope(_POT_2))
+
+        after = self._states(db_conn)
+        assert result == VanishedProductsResult()
+        assert not any(
+            "vanished_pending_since" in p["attributes"]
+            for institution in ("mercadopago", "banchile")
+            for p in _products(db_conn, institution)
+        )
+        assert after == before
+        assert _count(db_conn, "product_snapshots") == snapshots
+
+    def test_an_already_inactive_pot_is_untouched(self, db_conn):
+        """A product the user deactivated keeps its balance and gets no marker."""
+        upsert_product(_pot(_POT_1, 2500000))
+        db_conn.execute("UPDATE products SET is_active = false")
+
+        result = _miss_twice(_pot_scope())
+
+        pot = self._by_ref(db_conn)[_POT_1]
+        assert result == VanishedProductsResult()
+        assert pot["current_balance"] == Decimal("2500000")
+        assert "retired_by_scraper" not in pot["attributes"]
+        assert "vanished_pending_since" not in pot["attributes"]
+        assert len(_snapshots(db_conn)) == 1
+
+    def test_an_empty_listing_retires_every_pot(self, db_conn):
+        """A complete read with no pots means every stored pot was closed."""
+        upsert_product(_pot(_POT_1))
+        upsert_product(_pot(_POT_2))
+
+        result = _miss_twice(_pot_scope())
+
+        assert result == VanishedProductsResult(retired=2)
+        assert not any(p["is_active"] for p in self._by_ref(db_conn).values())
+
+    def test_a_retired_pot_listed_again_is_reactivated_and_written(self, db_conn):
+        """The marker goes, the new balance lands and the history keeps growing."""
+        upsert_product(_pot(_POT_1, 2500000))
+        _miss_twice(_pot_scope())
+
+        upsert_product(_pot(_POT_1, 999999))
+
+        pot = self._by_ref(db_conn)[_POT_1]
+        assert (pot["is_active"], pot["current_balance"]) == (True, Decimal("999999"))
+        assert "retired_by_scraper" not in pot["attributes"]
+        assert "retired_by_scraper_at" not in pot["attributes"]
+        assert self._balances(db_conn, pot["id"]) == [
+            Decimal("2500000"),
+            Decimal("0"),
+            Decimal("999999"),
+        ]
+
+    def test_a_pot_deactivated_by_hand_stays_frozen(self, db_conn):
+        """No marker, no reactivation: the user's choice wins."""
+        upsert_product(_pot(_POT_1, 2500000))
+        db_conn.execute("UPDATE products SET is_active = false")
+
+        upsert_product(_pot(_POT_1, 999999))
+
+        pot = self._by_ref(db_conn)[_POT_1]
+        assert (pot["is_active"], pot["current_balance"]) == (False, Decimal("2500000"))
+        assert len(_snapshots(db_conn)) == 1
+
+    def test_a_pot_re_enabled_by_hand_loses_the_marker_on_its_next_write(
+        self, db_conn
+    ):
+        """Once written again, a later hand deactivation is the user's and sticks."""
+        upsert_product(_pot(_POT_1, 2500000))
+        _miss_twice(_pot_scope())
+        db_conn.execute("UPDATE products SET is_active = true")
+
+        upsert_product(_pot(_POT_1, 1000000))
+        written = self._by_ref(db_conn)[_POT_1]
+        db_conn.execute("UPDATE products SET is_active = false")
+        upsert_product(_pot(_POT_1, 999999))
+
+        pot = self._by_ref(db_conn)[_POT_1]
+        assert "retired_by_scraper" not in written["attributes"]
+        assert "retired_by_scraper_at" not in written["attributes"]
+        assert (pot["is_active"], pot["current_balance"]) == (False, Decimal("1000000"))
+
+    def test_a_non_boolean_marker_never_breaks_a_write(self, db_conn):
+        """Only a literal `true` marks a product; anything else is ignored."""
+        upsert_product(_pot(_POT_1, 2500000))
+        db_conn.execute(
+            "UPDATE products SET attributes = attributes || "
+            "'{\"retired_by_scraper\": \"sintetico\"}'::jsonb"
+        )
+
+        upsert_product(_pot(_POT_1, 999999))
+
+        assert self._by_ref(db_conn)[_POT_1]["current_balance"] == Decimal("999999")
+
+    def test_another_account_of_the_institution_is_untouched(self, db_conn):
+        """Only the account the scraper writes to is in scope."""
+        upsert_product(_pot(_POT_1, 2500000))
+        (other_account,) = db_conn.execute(
+            "INSERT INTO accounts (user_id, institution_id, name, display_order) "
+            "SELECT %s, id, 'Sintetica', 1 FROM institutions WHERE slug = 'mercadopago' "
+            "RETURNING id",
+            (SEEDED_USER_ID,),
+        ).fetchone().values()
+        db_conn.execute(
+            "INSERT INTO products (account_id, name, slug, kind, currency, "
+            "external_ref, current_balance) "
+            "VALUES (%s, 'Reserva sintetica', 'reserva-sintetica-manual', "
+            "'savings', 'CLP', %s, 1000000)",
+            (other_account, _POT_2),
+        )
+
+        result = _miss_twice(_pot_scope(_POT_1))
+
+        other = self._by_ref(db_conn)[_POT_2]
+        assert result == VanishedProductsResult()
+        assert (other["is_active"], other["current_balance"]) == (True, Decimal("1000000"))
 
 
 class TestScraperRuns:

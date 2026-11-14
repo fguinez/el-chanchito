@@ -26,15 +26,14 @@ export function runStatusStyle(status: string): RunStatusStyle {
     : { label: status, badgeClass: "" };
 }
 
-/** True when a run's row can expand to show its error_message. */
+/** True when a run's row can expand to show its error_message. A finished
+ *  run of any status may carry one: a `success` run's holds notes only
+ *  (e.g. `retired: ...` for products its source stopped listing). */
 export function hasRunDetails(run: {
   status: string;
   error_message: string | null;
 }): boolean {
-  return (
-    (run.status === "error" || run.status === "partial") &&
-    Boolean(run.error_message)
-  );
+  return run.status !== "running" && Boolean(run.error_message);
 }
 
 export function truncateRunMessage(message: string, max = 120): string {

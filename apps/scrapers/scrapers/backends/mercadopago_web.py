@@ -372,13 +372,16 @@ class MercadoPagoAccount:
 
     `warnings` flag partial coverage (the pots page or a ledger page failed
     after the balance was read), so the run records `partial`. A failed pots
-    page leaves `pots` empty, like an account without pots; only the warning
-    tells them apart.
+    page leaves `pots` empty, like an account without pots; `pots_complete`
+    tells them apart. It is True only when the pots page answered with a
+    success status and no pot was skipped, so `pots` lists every pot the
+    account has (an empty list included).
     """
 
     balance: int
     wallet_yield: WalletYield = field(default_factory=WalletYield)
     pots: list[Pot] = field(default_factory=list)
+    pots_complete: bool = False
     movements: list[Movement] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -966,6 +969,8 @@ def read_account(
     else:
         if skipped:
             account.warnings.append(f"MercadoPago: {skipped} savings pot(s) not read")
+        else:
+            account.pots_complete = True
 
     _read_movements(page, account, movement_pages, deadline, kill_switch)
     logger.info(

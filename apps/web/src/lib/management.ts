@@ -299,11 +299,40 @@ export interface ProductEditRow extends ProductRuleRow {
 }
 
 /** The columns a product PATCH writes: a reset is already resolved to the
- *  default name, and billing days to the merged attributes. */
+ *  default name, and billing days (or dropped scraper markers) to the whole
+ *  new attributes object. */
 export type ProductChanges = Omit<ProductPatch, "name" | BillingDayField> & {
   name?: string;
-  attributes?: CreditCardAttributes;
+  attributes?: ProductAttributes | Record<string, never>;
 };
+
+/**
+ * The attributes keys the scraper writer stamps when a complete listing no
+ * longer carries a product (apps/scrapers/db/writer.py: `RETIRED_MARKER_KEY`,
+ * `RETIRED_AT_KEY`, `VANISHED_PENDING_KEY`). A retired-by-scraper product is
+ * reactivated when its source lists it again, so a hand toggle of `isActive`
+ * drops them all: a manual deactivation then sticks, and a manual
+ * reactivation starts with no pending retirement.
+ */
+export const SCRAPER_RETIREMENT_KEYS = [
+  "retired_by_scraper",
+  "retired_by_scraper_at",
+  "vanished_pending_since",
+] as const;
+
+/** `attributes` without the scraper's retirement markers, or null when it
+ *  carries none (nothing to write). Never mutates its argument. */
+function withoutRetirementMarkers(
+  attributes: ProductAttributes | Record<string, never>
+): ProductAttributes | Record<string, never> | null {
+  const present = SCRAPER_RETIREMENT_KEYS.filter((key) =>
+    Object.hasOwn(attributes, key)
+  );
+  if (present.length === 0) return null;
+  const next: Record<string, unknown> = { ...attributes };
+  for (const key of present) delete next[key];
+  return next as ProductAttributes | Record<string, never>;
+}
 
 /**
  * True when making `parentId` the parent of `productId` would close a loop,
@@ -363,6 +392,8 @@ function planBillingDays(
  *
  * - `name: null` resets the name to the product's default name.
  * - Billing days apply to a credit card only and merge into its attributes.
+ * - Changing `isActive` also drops the scraper's retirement markers
+ *   (`SCRAPER_RETIREMENT_KEYS`) from the attributes.
  * - Deactivating a product with no balance is refused: inactive + no balance
  *   is exactly the retired-ghost shape (lib/retired-products), which the UI
  *   hides everywhere, so the product would vanish with no way to reactivate
@@ -393,6 +424,10 @@ export function planProductUpdate(
       );
     }
     changes.isActive = patch.isActive;
+    const cleared = withoutRetirementMarkers(
+      changes.attributes ?? product.attributes
+    );
+    if (cleared) changes.attributes = cleared;
   }
 
   if (patch.slug !== undefined && patch.slug !== product.slug) {

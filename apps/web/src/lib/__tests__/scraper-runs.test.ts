@@ -28,7 +28,9 @@ describe("hasRunDetails", () => {
     ["partial", "transactions: 1 of 2 not written", true],
     ["partial", null, false],
     ["success", null, false],
+    ["success", "retired: 1 mercadopago savings CLP product(s) no longer listed", true],
     ["running", null, false],
+    ["running", "products: still reading", false],
   ])("%s with message %j -> %s", (status, error_message, expected) => {
     expect(hasRunDetails({ status, error_message })).toBe(expected);
   });
