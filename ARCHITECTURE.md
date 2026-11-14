@@ -800,7 +800,9 @@ library or aggregator covers it, and its login cannot be automated (a
 reCAPTCHA on the e-mail step, a step-up on the password step). So a human
 signs in once, in a real Chrome on a dedicated persistent profile
 (`make mercadopago-login`: a visible window, nothing typed by the code, closed
-once the balance page reads), and `backends/mercadopago_web.py` drives that
+once the balance page reads and the `ssid` login cookie is persistent; a
+balance read alone can pass while only session cookies hold the session, which
+closing Chrome then loses), and `backends/mercadopago_web.py` drives that
 Chrome over CDP. By default `scrape_account` runs *managed*: it launches
 Chrome off-screen on the profile, reads and terminates it (needs a machine
 with a display); `MERCADOPAGO_CDP_URL` switches to *reuse*, attaching to a
@@ -902,11 +904,13 @@ without duplicates or skipped rows, in whole CLP amounts, every row with its
 `scheduled_month`, and as many rows as the page reports in total;
 `movement_id` unchanged across separate Chrome launches of one signed-in
 profile; the session surviving repeated launch and SIGTERM teardown cycles;
-and the empty-URL stale connection, which reattaching resolves. Not verified
-live: `make mercadopago-login` against a live window (no fresh sign-in was
-performed) and where the portal lands the tab afterwards; `movement_id`
-across separate sign-ins; how a lost session presents (a tab bounced off the
-portal or a redirect on the fetch: both are handled, neither was observed);
+the empty-URL stale connection, which reattaching resolves; and a fresh
+sign-in on a new profile whose login cookie was already lasting surviving a
+SIGTERM close and relaunch (an earlier sign-in, closed before `ssid` was set,
+was lost). Not verified live: `make mercadopago-login` waiting for the lasting
+session (diagnosed live; the fix itself not yet run live); where the portal
+lands the tab after a sign-in; `movement_id` across separate sign-ins; how a
+lost session presents (a tab bounced off the portal or a redirect on the fetch: both are handled, neither was observed);
 how long a sign-in lasts; which ledger rows are movements between the user's
 own products (none is flagged `internal_transfer`); and reuse mode against a
 live Chrome.

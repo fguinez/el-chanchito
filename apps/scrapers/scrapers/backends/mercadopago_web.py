@@ -224,6 +224,15 @@ MAX_HTML_CHARS = 8_000_000
 LOGIN_TIMEOUT_S = 10 * 60
 _LOGIN_POLL_S = 2.0
 _LOGIN_PROBE_INTERVAL_S = 15.0
+# The login cookie that must be persistent before the login closes Chrome.
+# Found live: a sign-in whose balance read already passed was closed before
+# `ssid` / `orguserid` were set, and the next launch was signed out; another
+# sign-in, whose `ssid` was already persistent, survived a SIGTERM close and a
+# relaunch. Live, `ssid` sat on `.mercadopago.cl` (also on `.mercadolibre.cl`
+# and `.mercadolibre.com`, which this check does not read).
+LASTING_SESSION_COOKIE = "ssid"
+# Cookie-jar reads that may fail in a row before the wait gives up on Chrome.
+_MAX_JAR_READ_FAILURES = 5
 
 _SIGN_IN_HINT = (
     "Run `make mercadopago-login` and sign in again (with MERCADOPAGO_CDP_URL "
@@ -1300,8 +1309,90 @@ def _balance_readable(page) -> bool:
     return True
 
 
+def _portal_cookies(page) -> list:
+    """Chrome's cookies for the portal, read from its own jar (raises on failure).
+
+    A local read over the debug connection: nothing is sent to Mercado Pago.
+    """
+    return page.context.cookies(f"https://{PORTAL_HOST}/")
+
+
+def _has_lasting_session(page) -> bool:
+    """Whether Chrome holds a persistent `LASTING_SESSION_COOKIE` for the portal.
+
+    A session cookie (no expiry) dies with the window, so it does not count.
+    A jar that cannot be read raises.
+    """
+    return any(
+        c.get("name") == LASTING_SESSION_COOKIE and (c.get("expires") or -1) > 0
+        for c in _portal_cookies(page)
+    )
+
+
+def _await_lasting_session(page, deadline: float, process=None) -> None:
+    """After the balance reads, wait until the session would survive a restart.
+
+    Local cookie-jar reads only, one every `_LOGIN_POLL_S` seconds; no further
+    balance probe. Bounded by the sign-in `deadline`. A launched Chrome that
+    has ended stops the wait at once; `_MAX_JAR_READ_FAILURES` failed reads in
+    a row end it as a Chrome problem, not a session one.
+    """
+    told = False
+    failures = 0
+    while True:
+        try:
+            lasting = _has_lasting_session(page)
+        except Exception as exc:
+            failures += 1
+            lasting = False
+            if real_chrome.has_exited(process):
+                raise _chrome_exited() from None
+            if failures >= _MAX_JAR_READ_FAILURES:
+                # Not a MercadoPagoConnectError: the caller retries those as a
+                # tab still loading.
+                raise MercadoPagoWebError(
+                    f"Chrome's cookies could not be read {failures} times in a row "
+                    f"({type(exc).__name__}). {_CHROME_GONE_HINT}"
+                ) from None
+        else:
+            failures = 0
+        if lasting:
+            return
+        if not told:
+            print(
+                "Signed in; waiting for Mercado Pago to save the session before "
+                "closing Chrome...",
+                flush=True,
+            )
+            told = True
+        if real_chrome.has_exited(process):
+            raise _chrome_exited()
+        if time.monotonic() >= deadline:
+            _log_portal_cookie_names(page)
+            raise MercadoPagoSessionError(
+                "Signed in, but Mercado Pago did not save a lasting session in time, so "
+                "it would not survive Chrome closing. Re-run `make mercadopago-login` "
+                "and stay on the balance page until the login closes Chrome itself (if "
+                "the sign-in page offers a \"keep me signed in\" option, tick it)."
+            )
+        time.sleep(_LOGIN_POLL_S)
+
+
+def _log_portal_cookie_names(page) -> None:
+    """Log which portal cookies Chrome holds: names and persistence, never values."""
+    try:
+        cookies = _portal_cookies(page)
+    except Exception:
+        return
+    names = sorted(
+        f"{c.get('name')}({'persistent' if (c.get('expires') or -1) > 0 else 'session'})"
+        for c in cookies
+    )
+    logger.info("MercadoPago: portal cookies at the sign-in deadline: %s", ", ".join(names))
+
+
 def _await_sign_in(cdp_url: str, timeout_s: float, process=None) -> None:
-    """Wait until a portal tab can read the balance page, or time out.
+    """Wait until a portal tab reads the balance page and the session lasts.
 
     Only looks while the human signs in: it never types, clicks or navigates.
 
@@ -1315,12 +1406,18 @@ def _await_sign_in(cdp_url: str, timeout_s: float, process=None) -> None:
     `/banking/balance` made from inside the portal tab, with the session
     cookie and without following a redirect (the same fetch a run starts
     with). A probe needs a fresh Playwright connection (watched for up to
-    `ATTACH_POLL_S`, then dropped) and is made when a look finds a tab on
+    `ATTACH_POLL_S`, then dropped, unless the balance reads) and is made when a look finds a tab on
     the portal at a URL that was not probed yet, and otherwise at most once
     every `_LOGIN_PROBE_INTERVAL_S` seconds while that tab stays put. So a
     human who sits on a portal page for the whole `timeout_s` without being
     signed in costs at most `timeout_s / _LOGIN_PROBE_INTERVAL_S` probes, and
     the usual sign-in costs one or two.
+
+    A balance read is not enough on its own: it can pass while only session
+    cookies carry the session, and closing Chrome then loses it. So once it
+    reads, that connection stays open, for local cookie-jar reads only
+    (`_await_lasting_session`), until the persistent login cookie is in
+    Chrome's jar or `timeout_s` runs out.
 
     `process` is the Chrome `save_login_session` launched: once it has ended
     (the window was closed) the wait ends with it.
@@ -1348,6 +1445,7 @@ def _await_sign_in(cdp_url: str, timeout_s: float, process=None) -> None:
                         if page is not None:
                             probed_key, probed_at = summary.matching_key, time.monotonic()
                             if _balance_readable(page):
+                                _await_lasting_session(page, deadline, process)
                                 return
                 except MercadoPagoConnectError as exc:
                     # The tab may be mid-load; the next look tries again.
@@ -1363,8 +1461,9 @@ def save_login_session(timeout_s: float = LOGIN_TIMEOUT_S) -> None:
     """Open a visible Chrome on the dedicated profile for a human to sign in.
 
     The code never types a credential and never touches the login form: it
-    opens the balance page, waits (bounded) until that page reads, and closes
-    Chrome. The session stays in the profile, which every later run reuses.
+    opens the balance page, waits (bounded) until that page reads and the
+    login cookie is persistent, and closes Chrome. The session stays in the
+    profile, which every later run reuses.
     """
     _require_playwright()
     port = cdp_port()

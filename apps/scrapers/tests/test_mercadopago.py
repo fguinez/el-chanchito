@@ -1230,14 +1230,39 @@ class TestLedgerPaging:
 # --- Transport: Chrome plumbing (never launched) --------------------------------
 
 
+LASTING_SSID = {"name": "ssid", "value": "synthetic", "expires": 1_900_000_000.0}
+SESSION_SSID = {"name": "ssid", "value": "synthetic", "expires": -1}
+
+
+class _Jar:
+    """Chrome's cookie jar: each read returns the next scripted entry (last repeats).
+
+    With no script it holds a persistent `ssid`. An entry that is an exception
+    makes that read fail.
+    """
+
+    def __init__(self, *script):
+        self.script = list(script) or [[LASTING_SSID]]
+        self.reads: list[str] = []
+
+    def cookies(self, url):
+        entry = self.script[min(len(self.reads), len(self.script) - 1)]
+        self.reads.append(url)
+        if isinstance(entry, Exception):
+            raise entry
+        return entry
+
+
 class _Tab:
-    def __init__(self, url):
+    def __init__(self, url, jar=None):
         self.url = url
+        self.context = jar if jar is not None else _Jar()
 
 
 class _Browser:
-    def __init__(self, *urls):
-        self.contexts = [type("Context", (), {"pages": [_Tab(url) for url in urls]})()]
+    def __init__(self, *urls, jar=None):
+        tabs = [_Tab(url, jar) for url in urls]
+        self.contexts = [type("Context", (), {"pages": tabs})()]
 
 
 class _Clock:
@@ -2437,6 +2462,110 @@ class TestManualSignIn:
 
         assert clock.now == 0
         assert (connections.opened, connections.closed) == (1, 1)
+
+    def test_a_readable_balance_waits_for_the_lasting_login_cookie(self, clock, monkeypatch):
+        """The cookie lands on a later local read: no second balance probe, one connection."""
+        probes = []
+        monkeypatch.setattr(web, "_balance_readable", lambda page: probes.append(clock.now) or True)
+        _Looks(monkeypatch, PORTAL)
+        jar = _Jar([], [SESSION_SSID], [SESSION_SSID, LASTING_SSID])
+        connections = _Connections(monkeypatch, _Browser(web.START_URL, jar=jar))
+
+        web._await_sign_in(CDP_URL, timeout_s=30)
+
+        assert probes == [0.0]
+        assert len(jar.reads) == 3
+        assert clock.now == 2 * web._LOGIN_POLL_S
+        assert (connections.opened, connections.closed) == (1, 1)
+
+    def test_only_a_session_cookie_fails_at_the_shared_deadline(self, clock, monkeypatch, capsys):
+        """Signed in late with nothing lasting: the cookie wait ends at the sign-in deadline."""
+        probes = []
+        monkeypatch.setattr(
+            web, "_balance_readable", lambda page: probes.append(clock.now) or clock.now >= 16
+        )
+        _Looks(monkeypatch, PORTAL)
+        _Connections(monkeypatch, _Browser(web.START_URL, jar=_Jar([SESSION_SSID])))
+
+        with pytest.raises(MercadoPagoSessionError, match="would not survive Chrome closing"):
+            web._await_sign_in(CDP_URL, timeout_s=30)
+
+        assert probes == [0.0, 16.0]
+        assert clock.now == 30
+        assert capsys.readouterr().out.count("waiting for Mercado Pago to save the session") == 1
+
+    @pytest.mark.parametrize(
+        "jar",
+        [
+            pytest.param(_Jar(RuntimeError("closed")), id="jar-unreadable"),
+            pytest.param(_Jar([SESSION_SSID]), id="session-ssid-only"),
+        ],
+    )
+    def test_a_window_closed_while_waiting_for_the_cookie_ends_the_wait(
+        self, clock, monkeypatch, jar
+    ):
+        """The launched Chrome is gone: no waiting out the clock."""
+        monkeypatch.setattr(web, "_balance_readable", lambda page: True)
+        _Looks(monkeypatch, PORTAL)
+        _Connections(monkeypatch, _Browser(web.START_URL, jar=jar))
+
+        with pytest.raises(MercadoPagoWebError, match="no longer running"):
+            web._await_sign_in(CDP_URL, timeout_s=600, process=_Exited())
+
+        assert clock.now == 0
+
+    def test_a_jar_that_keeps_failing_is_a_chrome_problem(self, clock, monkeypatch):
+        """Failed reads in a row end the wait early, naming the failure type only."""
+        monkeypatch.setattr(web, "_balance_readable", lambda page: True)
+        _Looks(monkeypatch, PORTAL)
+        jar = _Jar(RuntimeError("synthetic"))
+        _Connections(monkeypatch, _Browser(web.START_URL, jar=jar))
+
+        with pytest.raises(MercadoPagoWebError, match=r"5 times in a row \(RuntimeError\)"):
+            web._await_sign_in(CDP_URL, timeout_s=600)
+
+        assert len(jar.reads) == web._MAX_JAR_READ_FAILURES
+        assert clock.now == (web._MAX_JAR_READ_FAILURES - 1) * web._LOGIN_POLL_S
+
+    def test_a_failed_jar_read_followed_by_the_cookie_succeeds(self, clock, monkeypatch):
+        """One unreadable moment is not fatal; the count resets on a good read."""
+        monkeypatch.setattr(web, "_balance_readable", lambda page: True)
+        _Looks(monkeypatch, PORTAL)
+        failed = RuntimeError("synthetic")
+        jar = _Jar(failed, [SESSION_SSID], failed, [LASTING_SSID])
+        _Connections(monkeypatch, _Browser(web.START_URL, jar=jar))
+
+        web._await_sign_in(CDP_URL, timeout_s=600)
+
+        assert len(jar.reads) == 4
+
+    def test_the_deadline_logs_cookie_names_never_values(self, clock, monkeypatch, caplog):
+        """What Chrome held is logged by name and persistence only."""
+        monkeypatch.setattr(web, "_balance_readable", lambda page: True)
+        _Looks(monkeypatch, PORTAL)
+        _Connections(monkeypatch, _Browser(web.START_URL, jar=_Jar([SESSION_SSID])))
+
+        with caplog.at_level("INFO"), pytest.raises(MercadoPagoSessionError):
+            web._await_sign_in(CDP_URL, timeout_s=10)
+
+        assert "ssid(session)" in caplog.text
+        assert "synthetic" not in caplog.text
+
+    @pytest.mark.parametrize(
+        ("cookies", "expected"),
+        [
+            pytest.param([LASTING_SSID], True, id="persistent-ssid"),
+            pytest.param([SESSION_SSID], False, id="session-only-ssid"),
+            pytest.param([{"name": "orguserid", "expires": 1_900_000_000.0}], False, id="other"),
+            pytest.param([], False, id="none"),
+        ],
+    )
+    def test_only_a_persistent_ssid_is_a_lasting_session(self, cookies, expected):
+        """Read from Chrome's jar for the portal; a session cookie does not count."""
+        jar = _Jar(cookies)
+
+        assert web._has_lasting_session(_Tab(web.START_URL, jar)) is expected
+        assert jar.reads == [f"https://{web.PORTAL_HOST}/"]
 
     def test_probes_sparingly_while_the_tab_does_not_move(self, clock, monkeypatch):
         """An unreadable portal tab is probed, and attached to, on an interval."""

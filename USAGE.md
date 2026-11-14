@@ -461,9 +461,13 @@ MERCADOPAGO_ENABLED=1      # add to .env to enable the scraper
 ```
 
 `make mercadopago-login` opens a visible Chrome window on the balance page.
-Sign in there (nothing is typed for you); once the balance page loads, the
-command reports success and closes Chrome. The session stays in the profile
-directory (`apps/scrapers/.mercadopago_chrome_profile`, gitignored; move it
+Sign in there (nothing is typed for you); once the balance page loads and
+Mercado Pago has saved a lasting session (its `ssid` cookie with an expiry),
+the command reports success and closes Chrome. If it says it is waiting for
+the session to be saved, leave the window open. If it then fails, run it again
+and stay on the balance page until the command closes Chrome itself (if the
+sign-in page offers a "keep me signed in" option, tick it). The session stays
+in the profile directory (`apps/scrapers/.mercadopago_chrome_profile`, gitignored; move it
 with `MERCADOPAGO_CHROME_PROFILE`). Treat that directory like a password: it
 holds your signed-in session.
 
@@ -509,11 +513,13 @@ never tries to sign in by itself: run the command and sign in again.
 **What has been checked against a live account.** In managed mode: a whole
 run, the wallet and pot balances against what the account shows, the
 movements read as a single page and as the whole history (no duplicates,
-nothing skipped), movement ids staying the same from one run to the next, and
-the session surviving repeated runs. Not checked yet: `make
-mercadopago-login` on a fresh sign-in, movement ids across separate sign-ins,
-what a lost session looks like in practice, how long a sign-in lasts, and
-attaching with `MERCADOPAGO_CDP_URL`. Movements between your own products
+nothing skipped), movement ids staying the same from one run to the next, the
+session surviving repeated runs, and a fresh sign-in whose login cookie was
+already lasting surviving a SIGTERM close and relaunch. Not checked yet:
+`make mercadopago-login` waiting for the lasting session (diagnosed live; the
+fix itself not yet run live), movement ids across separate sign-ins, what a
+lost session looks like in practice, how long a sign-in lasts, and attaching
+with `MERCADOPAGO_CDP_URL`. Movements between your own products
 are not recognised as such: tick **Transferencia interna** on them in the
 transaction panel.
 
