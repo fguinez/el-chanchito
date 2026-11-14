@@ -71,7 +71,12 @@ def _page(props: dict) -> str:
     return _html({"appProps": {"pageProps": props}, "synthetic": True})
 
 
-def _balance_props(raw=2_500_000, status="success") -> dict:
+def _balance_props(
+    raw=2_500_000,
+    status="success",
+    gain=999_999,
+    subtitle="Generando ganancias al 1,0% anual",
+) -> dict:
     return {
         "initialResult": {
             "balance": {
@@ -89,8 +94,8 @@ def _balance_props(raw=2_500_000, status="success") -> dict:
                     },
                     "invested": {
                         "data": {
-                            "title": {"middle": {"raw": 999_999}},
-                            "subtitle": "Generando ganancias al 1,0% anual",
+                            "title": {"middle": {"raw": gain}},
+                            "subtitle": subtitle,
                         }
                     },
                 },
@@ -111,7 +116,7 @@ def _pot(pot_id=POT_ID, name="Reserva sintética", raw=1_000_000, currency="CLP"
     }
 
 
-def _pots_props(pots: list, status="success") -> dict:
+def _pots_props(pots: list, status="success", rate="1.0", is_invested=True) -> dict:
     return {
         "hub": {
             "result": {
@@ -120,7 +125,7 @@ def _pots_props(pots: list, status="success") -> dict:
                     "result": {"pots": pots, "pots_amount": {"raw": 1_000_000}},
                 },
                 "investmentData": {
-                    "data": {"is_invested": True, "rate": "1.0", "fund_name": "Sintetico"}
+                    "data": {"is_invested": is_invested, "rate": rate, "fund_name": "Sintetico"}
                 },
             }
         }
@@ -383,6 +388,94 @@ class TestParseBalance:
             web.parse_balance(props)
 
 
+class TestParseWalletYield:
+    def test_rate_and_gain_are_read(self):
+        """The gain is title.middle.raw; the rate comes out of the subtitle."""
+        props = _balance_props(gain=999_999, subtitle="Generando ganancias al 4,50% anual")
+
+        result = web.parse_wallet_yield(props)
+
+        assert result == web.WalletYield(rate_pct=4.5, profit=999_999)
+
+    @pytest.mark.parametrize(
+        ("subtitle", "expected"),
+        [
+            pytest.param("Generando ganancias al 1,0% anual", 1.0, id="comma-decimal"),
+            pytest.param("Generando ganancias al 1.0% anual", 1.0, id="dot-decimal"),
+            pytest.param("Generando ganancias al 4 % anual", 4.0, id="whole-with-space"),
+            pytest.param("Generando ganancias al 4,50% anual", 4.5, id="two-decimals"),
+            pytest.param("Generando ganancias al 1% anual", 1.0, id="whole-no-space"),
+            pytest.param("Generando ganancias al 12,5 % anual", 12.5, id="decimal-with-space"),
+            pytest.param("Generando ganancias al -0,5% anual", -0.5, id="negative"),
+            pytest.param(
+                "Generando ganancias al \u22120,5% anual", -0.5, id="negative-unicode-minus"
+            ),
+            pytest.param("GENERANDO GANANCIAS AL 1,0% ANUAL", 1.0, id="upper-case"),
+            pytest.param(
+                "100% disponible, al 1,0% anual", 1.0, id="first-percent-not-anual"
+            ),
+        ],
+    )
+    def test_rate_is_the_number_before_percent_anual(self, subtitle, expected):
+        """Only the number between "al" and "% anual" is the rate."""
+        assert web.parse_wallet_yield(_balance_props(subtitle=subtitle)).rate_pct == expected
+
+    @pytest.mark.parametrize(
+        "subtitle",
+        [
+            pytest.param("Generando ganancias", id="no-percent"),
+            pytest.param("Generando ganancias al %", id="percent-without-number"),
+            pytest.param("Generando ganancias al 1.234,5% anual", id="dotted-thousands"),
+            pytest.param("Generando ganancias al 1.0.0% anual", id="two-dots"),
+            pytest.param("Activa y gana hasta 1,0% anual", id="hasta-promo"),
+            pytest.param("Generando ganancias al 1,0%", id="percent-without-anual"),
+            pytest.param("100% disponible", id="percent-not-a-rate"),
+            pytest.param(None, id="null"),
+            pytest.param(1.0, id="not-text"),
+        ],
+    )
+    def test_malformed_subtitle_leaves_the_rate_empty(self, subtitle):
+        """No rate beats a guessed one; the gain is still read."""
+        result = web.parse_wallet_yield(_balance_props(subtitle=subtitle))
+
+        assert result == web.WalletYield(rate_pct=None, profit=999_999)
+
+    @pytest.mark.parametrize(
+        ("gain", "expected"),
+        [
+            pytest.param(999_999.5, 1_000_000, id="rounds-half-up"),
+            pytest.param("999999", None, id="text"),
+            pytest.param(True, None, id="bool"),
+            pytest.param(None, None, id="null"),
+        ],
+    )
+    def test_gain_is_whole_pesos_or_empty(self, gain, expected):
+        """A gain that is not a JSON number is left empty."""
+        assert web.parse_wallet_yield(_balance_props(gain=gain)).profit == expected
+
+    @pytest.mark.parametrize(
+        "props",
+        [
+            pytest.param({}, id="empty-page"),
+            pytest.param("synthetic", id="not-an-object"),
+            pytest.param(None, id="null"),
+        ],
+    )
+    def test_missing_page_data_is_empty_not_an_error(self, props):
+        """These are extras: a page without them never fails the read."""
+        assert web.parse_wallet_yield(props) == web.WalletYield()
+
+    def test_missing_invested_node_is_empty_and_balance_still_reads(self):
+        """A balance page without `invested` keeps its balance, without yield."""
+        props = _balance_props()
+        del props["initialResult"]["balance"]["result"]["invested"]
+
+        result = web.parse_wallet_yield(props)
+
+        assert result == web.WalletYield(rate_pct=None, profit=None)
+        assert web.parse_balance(props) == 2_500_000
+
+
 class TestParsePots:
     def test_no_pots(self):
         """An account without pots is a real reading, not a failure."""
@@ -392,8 +485,62 @@ class TestParsePots:
         """Its uuid, name and CLP amount."""
         pots, skipped = web.parse_pots(_pots_props([_pot()]))
 
-        assert pots == [Pot(id=POT_ID, name="Reserva sintética", amount=1_000_000)]
+        assert pots == [
+            Pot(id=POT_ID, name="Reserva sintética", amount=1_000_000, rate_pct=1.0)
+        ]
         assert skipped == 0
+
+    def test_every_pot_gets_the_hub_rate_and_no_gain(self):
+        """One shared rate for all pots; the web shows no per-pot gain."""
+        props = _pots_props([_pot(), _pot(pot_id=POT_ID_2, raw=999_999)], rate="4,50")
+
+        pots, _ = web.parse_pots(props)
+
+        assert [pot.rate_pct for pot in pots] == [4.5, 4.5]
+
+    @pytest.mark.parametrize(
+        ("rate", "is_invested"),
+        [
+            pytest.param("1.0", False, id="not-invested"),
+            pytest.param("1.0", None, id="invested-flag-missing"),
+            pytest.param("1.0", "true", id="invested-flag-not-a-bool"),
+            pytest.param("sintetico", True, id="rate-not-a-number"),
+            pytest.param("1.0.0", True, id="rate-two-decimal-marks"),
+            pytest.param("", True, id="rate-blank"),
+            pytest.param(None, True, id="rate-null"),
+            pytest.param(True, True, id="rate-bool"),
+        ],
+    )
+    def test_pot_rate_is_empty_unless_invested_with_a_readable_rate(self, rate, is_invested):
+        """The pots keep their balances; only the rate is left empty."""
+        props = _pots_props([_pot()], rate=rate, is_invested=is_invested)
+
+        pots, skipped = web.parse_pots(props)
+
+        assert [(pot.amount, pot.rate_pct) for pot in pots] == [(1_000_000, None)]
+        assert skipped == 0
+
+    def test_a_numeric_rate_is_read_too(self):
+        """A rate sent as a JSON number reads like its string form."""
+        pots, _ = web.parse_pots(_pots_props([_pot()], rate=1.0))
+
+        assert pots[0].rate_pct == 1.0
+
+    @pytest.mark.parametrize("rate", ["-0,5", "\u22120.5"], ids=["ascii-minus", "unicode-minus"])
+    def test_a_negative_rate_is_read_like_the_wallets(self, rate):
+        """The pots accept the same signed rate the wallet subtitle does."""
+        pots, _ = web.parse_pots(_pots_props([_pot()], rate=rate))
+
+        assert pots[0].rate_pct == -0.5
+
+    def test_missing_investment_data_leaves_the_rate_empty(self):
+        """A hub without `investmentData` still yields its pots."""
+        props = _pots_props([_pot()])
+        del props["hub"]["result"]["investmentData"]
+
+        pots, skipped = web.parse_pots(props)
+
+        assert ([pot.rate_pct for pot in pots], skipped) == ([None], 0)
 
     def test_several_pots_keep_their_order(self):
         """One record per pot, in the page's order."""
@@ -790,7 +937,10 @@ class TestReadAccount:
         account = web.read_account(tab)
 
         assert account.balance == 2_500_000
-        assert account.pots == [Pot(id=POT_ID, name="Reserva sintética", amount=1_000_000)]
+        assert account.wallet_yield == web.WalletYield(rate_pct=1.0, profit=999_999)
+        assert account.pots == [
+            Pot(id=POT_ID, name="Reserva sintética", amount=1_000_000, rate_pct=1.0)
+        ]
         assert [row.movement_id for row in account.movements] == [MOVEMENT_ID]
         assert account.warnings == []
         assert tab.calls == ["balance", "pots", ("movements", 1)]
@@ -2516,6 +2666,27 @@ class TestLegs:
             ("savings", "CLP", f"mp_pot_{POT_ID}", "Reserva sintética", 1_000_000),
             ("savings", "CLP", f"mp_pot_{POT_ID_2}", "Reserva sintética 2", 999_999),
         ]
+
+    def test_products_carry_the_yield_metrics(self, monkeypatch):
+        """The wallet's rate and gain, and each pot's rate, land in the metrics."""
+        account = _account(
+            wallet_yield=web.WalletYield(rate_pct=1.0, profit=999_999),
+            pots=[Pot(id=POT_ID, name="Reserva sintética", amount=1_000_000, rate_pct=4.5)],
+        )
+        _install(monkeypatch, account=account)
+
+        wallet, pot = asyncio.run(self.scraper.scrape_products()).products
+
+        assert (wallet.metrics.annual_rate_pct, wallet.metrics.profit) == (1.0, 999_999)
+        assert (pot.metrics.annual_rate_pct, pot.metrics.profit) == (4.5, None)
+
+    def test_missing_yield_leaves_the_metrics_empty(self, monkeypatch):
+        """No rate or gain on the pages: the metrics stay None, never zero."""
+        _install(monkeypatch, account=_account())
+
+        products = asyncio.run(self.scraper.scrape_products()).products
+
+        assert {(p.metrics.annual_rate_pct, p.metrics.profit) for p in products} == {(None, None)}
 
     def test_no_savings_product_is_ever_ref_less(self, monkeypatch):
         """A ref-less savings product would be a roll-up the writer retires."""

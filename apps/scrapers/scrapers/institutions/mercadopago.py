@@ -44,10 +44,16 @@ consumes it, re-raising a cached error without driving again):
   cashback rows are ordinary income rows.
 - `scrape_products()`: the singleton CLP `wallet` with its balance, and one
   CLP `savings` product per pot, told apart by `external_ref`
-  (`mp_pot_<uuid>`) and named after the pot. Pots have no movements on the
-  web, so no `savings` transaction is ever emitted (one without a ref would
-  create a roll-up product). A pot that disappears from the page keeps its
-  last balance: an absent pot cannot be told from a failed read.
+  (`mp_pot_<uuid>`) and named after the pot. Both carry the yield the pages
+  report: the wallet its yearly rate (`annual_rate_pct`) and gain (`profit`)
+  from the balance page, each pot the hub's shared yearly rate while the hub
+  says the pots are invested. Per-pot gain is not read (the key that would
+  carry it is unknown), so a pot's `profit` stays empty. A rate or gain the
+  page does not carry readably is left empty; it never fails the run. Pots
+  have no movements on the web, so no `savings` transaction is ever emitted
+  (one without a ref would create a roll-up product). A pot that disappears
+  from the page keeps its last balance: an absent pot cannot be told from a
+  failed read.
 
 If the pots page or a ledger page fails after the balance was read, or a pot
 or a ledger row cannot be read, the run ends `partial` with a warning instead
@@ -248,7 +254,11 @@ class MercadoPagoScraper(BaseScraper):
                 institution=self.institution,
                 kind=WALLET_KIND,
                 currency=CURRENCY,
-                metrics=WalletMetrics(balance=account.balance),
+                metrics=WalletMetrics(
+                    balance=account.balance,
+                    annual_rate_pct=account.wallet_yield.rate_pct,
+                    profit=account.wallet_yield.profit,
+                ),
             )
         ]
         for pot in account.pots:
@@ -259,7 +269,10 @@ class MercadoPagoScraper(BaseScraper):
                     currency=CURRENCY,
                     external_ref=pot_ref(pot.id),
                     name=pot.name or None,
-                    metrics=SavingsMetrics(balance=pot.amount),
+                    metrics=SavingsMetrics(
+                        balance=pot.amount,
+                        annual_rate_pct=pot.rate_pct,
+                    ),
                 )
             )
         return ProductScrapeResult(products, list(account.warnings))
