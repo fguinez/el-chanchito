@@ -69,6 +69,7 @@ Kinds: `checking`, `savings`, `vista`, `wallet`, `prepaid_card`
 | `saldo_contable` | Saldo contable | metric | `accounting_balance` | currency | optional |
 | `tasa` | Tasa anual | metric | `annual_rate_pct` | percent | optional |
 | `ganancia` | Ganancia | metric | `profit` | currency | optional, signed |
+| `ganancia_12m` | Ganancia 12 meses | metric | `profit_12m` | currency | optional, signed |
 
 ### Depósitos a plazo (`term_deposit`)
 
@@ -226,7 +227,7 @@ Net-worth role: **asset** · balance convention: **value** · family: **cash**
 | `kind` | `"wallet"` |  | Payload discriminator; always "wallet". |
 | `balance` | `float` | currency | Wallet balance in the wallet currency (whole pesos for CLP). |
 | `annual_rate_pct` | `float?` | percent | Annual yield rate as a percent number, as reported by the institution. |
-| `profit` | `float?` | currency | Accumulated gain as reported by the institution. |
+| `profit_12m` | `float?` | currency | Gain over the last 12 months, as reported by the institution. |
 
 ## Depósito a plazo (`term_deposit`)
 

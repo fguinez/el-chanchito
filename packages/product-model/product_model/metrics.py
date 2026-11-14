@@ -48,6 +48,17 @@ def _yield_profit_field():
     )
 
 
+def _yield_profit_12m_field():
+    """`profit_12m`: the gain a yielding balance earned over the last 12 months."""
+    return Field(
+        None,
+        description=(
+            "Gain over the last 12 months, as reported by the institution."
+        ),
+        json_schema_extra={"denomination": "currency"},
+    )
+
+
 class BankAccountMetrics(BaseMetrics):
     """Shared observation fields for bank accounts (checking/savings/vista)."""
 
@@ -152,7 +163,7 @@ class WalletMetrics(BaseMetrics):
         json_schema_extra={"denomination": "currency"},
     )
     annual_rate_pct: float | None = _annual_rate_pct_field()
-    profit: float | None = _yield_profit_field()
+    profit_12m: float | None = _yield_profit_12m_field()
 
     def headline(self) -> float | None:
         return self.balance

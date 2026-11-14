@@ -110,6 +110,14 @@ _FAMILY_SPECS: tuple[FamilySpec, ...] = (
                 optional=True,
                 signed=True,
             ),
+            ColumnSpec(
+                key="ganancia_12m",
+                label_es="Ganancia 12 meses",
+                source=ColumnSource.METRIC,
+                field="profit_12m",
+                optional=True,
+                signed=True,
+            ),
         ),
     ),
     FamilySpec(

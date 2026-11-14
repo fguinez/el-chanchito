@@ -196,26 +196,43 @@ def test_wallet_balance_keeps_cents():
     assert clp.headline() == 999_999
 
 
-@pytest.mark.parametrize("kind", ["wallet", "savings"])
-def test_yielding_balances_carry_a_rate_and_a_gain(kind):
-    """Wallets and savings take the reported yearly rate and gain; both optional."""
+@pytest.mark.parametrize(
+    ("kind", "gain_field"),
+    [("wallet", "profit_12m"), ("savings", "profit")],
+)
+def test_yielding_balances_carry_a_rate_and_a_gain(kind, gain_field):
+    """Wallets take a 12-month gain, savings an accumulated one; all optional."""
     full = METRICS_ADAPTER.validate_python(
-        {"kind": kind, "balance": 1_000_000, "annual_rate_pct": 4.5, "profit": 999_999}
+        {"kind": kind, "balance": 1_000_000, "annual_rate_pct": 4.5, gain_field: 999_999}
     )
     bare = METRICS_ADAPTER.validate_python({"kind": kind, "balance": 1_000_000})
 
-    assert (full.annual_rate_pct, full.profit) == (4.5, 999_999)
-    assert (bare.annual_rate_pct, bare.profit) == (None, None)
+    assert (full.annual_rate_pct, getattr(full, gain_field)) == (4.5, 999_999)
+    assert (bare.annual_rate_pct, getattr(bare, gain_field)) == (None, None)
     assert full.headline() == 1_000_000
 
 
 @pytest.mark.parametrize(
-    ("field", "denomination"),
-    [("annual_rate_pct", "percent"), ("profit", "currency")],
+    ("kind", "field"),
+    [("wallet", "profit"), ("savings", "profit_12m")],
 )
-@pytest.mark.parametrize("kind", ["wallet", "savings"])
+def test_each_yielding_kind_takes_only_its_own_gain(kind, field):
+    """A wallet reports a 12-month gain, a pot an accumulated one; never swapped."""
+    with pytest.raises(ValidationError):
+        METRICS_ADAPTER.validate_python({"kind": kind, "balance": 1_000_000, field: 999_999})
+
+
+@pytest.mark.parametrize(
+    ("kind", "field", "denomination"),
+    [
+        ("wallet", "annual_rate_pct", "percent"),
+        ("wallet", "profit_12m", "currency"),
+        ("savings", "annual_rate_pct", "percent"),
+        ("savings", "profit", "currency"),
+    ],
+)
 def test_yield_fields_carry_their_denomination(kind, field, denomination):
-    """The rate is a percent number and the gain an amount in the product currency."""
+    """The rate is a percent number and a gain an amount in the product currency."""
     properties = REGISTRY[kind].metrics_cls.model_json_schema()["properties"]
 
     assert properties[field]["denomination"] == denomination

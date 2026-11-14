@@ -111,8 +111,8 @@ export interface WalletMetrics {
   balance: number;
   /** Annual yield rate as a percent number, as reported by the institution. */
   annual_rate_pct?: number | null;
-  /** Accumulated gain as reported by the institution. */
-  profit?: number | null;
+  /** Gain over the last 12 months, as reported by the institution. */
+  profit_12m?: number | null;
 }
 
 /** Config fields for a term deposit (depósito a plazo). */
@@ -484,7 +484,7 @@ export const METRIC_FIELDS: Record<
   wallet: {
     balance: { denomination: "currency" },
     annual_rate_pct: { denomination: "percent" },
-    profit: { denomination: "currency" },
+    profit_12m: { denomination: "currency" },
   },
   term_deposit: {
     balance: { denomination: "currency" },
@@ -581,6 +581,7 @@ export const FAMILY_INFO: Record<
       { key: "saldo_contable", labelEs: "Saldo contable", source: "metric", field: "accounting_balance", format: "currency", align: "right", optional: true, signed: false },
       { key: "tasa", labelEs: "Tasa anual", source: "metric", field: "annual_rate_pct", format: "percent", align: "right", optional: true, signed: false },
       { key: "ganancia", labelEs: "Ganancia", source: "metric", field: "profit", format: "currency", align: "right", optional: true, signed: true },
+      { key: "ganancia_12m", labelEs: "Ganancia 12 meses", source: "metric", field: "profit_12m", format: "currency", align: "right", optional: true, signed: true },
     ],
   },
   term_deposit: {

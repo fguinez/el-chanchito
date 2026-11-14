@@ -2323,7 +2323,7 @@
           "title": "Kind",
           "type": "string"
         },
-        "profit": {
+        "profit_12m": {
           "anyOf": [
             {
               "type": "number"
@@ -2334,8 +2334,8 @@
           ],
           "default": null,
           "denomination": "currency",
-          "description": "Accumulated gain as reported by the institution.",
-          "title": "Profit"
+          "description": "Gain over the last 12 months, as reported by the institution.",
+          "title": "Profit 12M"
         }
       },
       "required": [
