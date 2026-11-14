@@ -158,6 +158,23 @@ class TestWriteDecision:
         assert _write_decision(True, "dep-1", True) == "write"
         assert _write_decision(True, "dep-1", False) == "write"
 
+    @pytest.mark.parametrize(
+        ("is_active", "retired_by_scraper", "expected"),
+        [
+            pytest.param(False, True, "reactivate", id="scraper-retired"),
+            pytest.param(False, False, "skip_inactive", id="hand-deactivated"),
+            pytest.param(True, True, "write", id="active-with-a-stale-marker"),
+        ],
+    )
+    def test_only_a_scraper_retired_product_is_reactivated(
+        self, is_active, retired_by_scraper, expected
+    ):
+        """A product the user deactivated stays frozen; one the scraper retired
+        comes back when the source lists it again."""
+        decision = _write_decision(is_active, "mp_pot_1", False, retired_by_scraper)
+
+        assert decision == expected
+
 
 class _FakeCursor:
     def __init__(self, result=None, rowcount=0):
@@ -196,9 +213,17 @@ class _FakeConn:
         q = " ".join(sql.split())
         p = params or ()
         if "SELECT account_id, kind, currency, external_ref, is_active" in q:
-            r = self.products[p[0]]
+            r = self.products[p[-1]]
             return _FakeCursor(
-                (r["account_id"], r["kind"], r["currency"], r["external_ref"], r["is_active"])
+                (
+                    r["account_id"],
+                    r["kind"],
+                    r["currency"],
+                    r["external_ref"],
+                    r["is_active"],
+                    r.get("retired_by_scraper", False),
+                    r.get("vanished_pending", False),
+                )
             )
         if "SELECT 1 FROM products" in q and "external_ref IS NOT NULL" in q:
             account_id, kind, currency = p
@@ -438,6 +463,63 @@ class TestUpsertProductExclusivity:
 
         assert _executed(conn, "UPDATE products SET is_active = false") == []
         assert conn.products["dep-1"]["current_balance"] == Decimal("2500000")
+
+
+class TestUpsertProductMarkers:
+    """`upsert_product` drops the vanished-product markers without touching `is_active`."""
+
+    def _pot(self, **overrides):
+        return {
+            "account_id": "acc",
+            "kind": "term_deposit",
+            "currency": "CLP",
+            "external_ref": "dep_00000000000000001",
+            "is_active": True,
+            "metrics": None,
+            "current_balance": 999999,
+            "vanished_pending": True,
+            **overrides,
+        }
+
+    @pytest.mark.parametrize("is_active", [True, False], ids=["active", "inactive"])
+    def test_a_pending_stamp_goes_without_setting_is_active(
+        self, monkeypatch, is_active
+    ):
+        """Only a scraper-retired row is reactivated; a hand toggle stays the user's."""
+        # Arrange
+        conn = _FakeConn({"pot": self._pot(is_active=is_active)})
+        _use_conn(monkeypatch, conn, "pot")
+
+        # Act
+        upsert_product(
+            ScrapedProduct(
+                institution="banchile",
+                kind="term_deposit",
+                external_ref="dep_00000000000000001",
+                metrics=TermDepositMetrics(balance=2500000),
+            )
+        )
+
+        # Assert
+        assert len(_executed(conn, "attributes = attributes -")) == 1
+        assert _executed(conn, "is_active = true") == []
+
+    def test_the_row_is_locked_before_the_decision(self, monkeypatch):
+        """A concurrent hand toggle must wait for the write, not slip under it."""
+        conn = _FakeConn({"pot": self._pot(vanished_pending=False)})
+        _use_conn(monkeypatch, conn, "pot")
+
+        upsert_product(
+            ScrapedProduct(
+                institution="banchile",
+                kind="term_deposit",
+                external_ref="dep_00000000000000001",
+                metrics=TermDepositMetrics(balance=2500000),
+            )
+        )
+
+        (read,) = _executed(conn, "SELECT account_id, kind, currency")
+        assert read.endswith("FOR NO KEY UPDATE")
 
 
 class TestResolveProductSlug:

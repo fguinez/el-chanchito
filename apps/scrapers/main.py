@@ -28,6 +28,7 @@ from db.writer import (
     delete_superseded_transactions,
     finish_scraper_run,
     mark_billed_statements,
+    retire_vanished_products,
     soft_delete_vanished_transactions,
     start_scraper_run,
     upsert_exchange_rate,
@@ -65,21 +66,26 @@ logger = logging.getLogger("scraper-service")
 
 
 def run_outcome(
-    errors: list[str], warnings: list[str], landed: int
+    errors: list[str],
+    warnings: list[str],
+    landed: int,
+    notes: list[str] | None = None,
 ) -> tuple[str, str | None]:
     """The final (status, error_message) of a run.
 
     `landed` counts what the run did store: scraped transactions that were
     written (new or already stored) plus products written. A failure only makes
     the run `error` when nothing landed; a run that stored part of its data is
-    `partial`, as is one whose scraper reported warnings.
+    `partial`, as is one whose scraper reported warnings. `notes` (e.g.
+    products retired as closed) only join the message: they never change the
+    status, so a clean run that retired a product stays `success`.
     """
-    message = "; ".join(errors + warnings) or None
+    message = "; ".join(errors + warnings + (notes or [])) or None
     if errors and not landed:
         return "error", message
     if errors or warnings:
         return "partial", message
-    return "success", None
+    return "success", message
 
 
 async def run_scraper(scraper: BaseScraper) -> None:
@@ -99,6 +105,11 @@ async def run_scraper(scraper: BaseScraper) -> None:
     The final status comes from `run_outcome`, and the products leg's
     non-fatal warnings (e.g. a BanChile surface that failed all its retries)
     join the message.
+    Once every product of the leg is written, the products its scraper listed
+    in full but no longer carries are flagged, and retired on the second
+    complete listing in a row that lacks them (`retire_vanished_products`);
+    the counts are `retired:` / `pending:` notes, which keep the status, and a
+    failure there is a `cleanup:` warning.
     The exchange rates and price histories it read are written after its
     products, each on its own: one that names an unknown product, or fails to
     write, is a warning. Neither counts as landed.
@@ -108,6 +119,7 @@ async def run_scraper(scraper: BaseScraper) -> None:
 
     errors: list[str] = []
     warnings: list[str] = []
+    notes: list[str] = []
     n_tx = 0
     inserted = 0
     n_prod = 0
@@ -205,6 +217,32 @@ async def run_scraper(scraper: BaseScraper) -> None:
                 f"products: {n_prod - products_written} of {n_prod} not written "
                 f"({'; '.join(failed)})"
             )
+        else:
+            # Products the source stopped listing. Only after a write where
+            # every product landed: one that failed to write must not look
+            # closed.
+            for scope in result.vanished_product_scopes:
+                try:
+                    swept = retire_vanished_products(scope)
+                    label = (
+                        f"{scope.institution} {scope.product_kind} {scope.currency}"
+                    )
+                    if swept.retired:
+                        notes.append(
+                            f"retired: {swept.retired} {label} product(s) "
+                            "no longer listed"
+                        )
+                    if swept.pending:
+                        notes.append(
+                            f"pending: {swept.pending} {label} product(s) "
+                            "missing from this listing; retired if the next complete "
+                            "one lacks them too"
+                        )
+                except Exception as e:
+                    logger.exception(
+                        "Scraper %s: vanished-product cleanup failed", scraper.name
+                    )
+                    warnings.append(f"cleanup: {e}")
 
     warnings.extend(_write_exchange_rates(scraper, rates))
     warnings.extend(_write_price_histories(scraper, histories))
@@ -217,7 +255,7 @@ async def run_scraper(scraper: BaseScraper) -> None:
         n_prod,
         sum(len(h.points) for h in histories),
     )
-    status, message = run_outcome(errors, warnings, landed)
+    status, message = run_outcome(errors, warnings, landed, notes)
     finish_scraper_run(
         run_id, status, transactions_imported=inserted, error_message=message
     )

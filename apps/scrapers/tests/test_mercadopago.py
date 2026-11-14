@@ -28,7 +28,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import main as main_mod
-from db.writer import TransactionWriteResult
+from db.writer import TransactionWriteResult, VanishedProductsResult
 from scrapers.backends import mercadopago_web as web
 from scrapers.backends import real_chrome
 from scrapers.backends.mercadopago_web import (
@@ -921,6 +921,28 @@ class TestReadAccount:
         account = web.read_account(tab)
 
         assert (account.pots, account.warnings) == ([], [])
+
+    @pytest.mark.parametrize(
+        ("pots", "complete"),
+        [
+            pytest.param(_ok(_pots_props([_pot()])), True, id="success"),
+            pytest.param(_ok(_pots_props([])), True, id="empty-success"),
+            pytest.param({"status": "http", "code": 500}, False, id="page-error"),
+            pytest.param(_ok(_pots_props([_pot()], status="error")), False, id="not-success"),
+            pytest.param(
+                _ok(_pots_props([_pot(), _pot(pot_id=POT_ID_2, currency="USD")])),
+                False,
+                id="skipped-entry",
+            ),
+        ],
+    )
+    def test_pots_complete_only_for_a_full_successful_read(self, pots, complete):
+        """Only a pots list read whole can tell a closed pot from a failed read."""
+        tab = _tab(pots=pots)
+
+        account = web.read_account(tab)
+
+        assert account.pots_complete is complete
 
 
 class TestLedgerPaging:
@@ -2101,6 +2123,11 @@ def _patched_writer(monkeypatch):
         main_mod, "write_transactions", MagicMock(return_value=TransactionWriteResult())
     )
     monkeypatch.setattr(main_mod, "upsert_product", MagicMock())
+    monkeypatch.setattr(
+        main_mod,
+        "retire_vanished_products",
+        MagicMock(return_value=VanishedProductsResult()),
+    )
     monkeypatch.setattr(main_mod, "finish_scraper_run", finish)
     return finish
 
@@ -2533,6 +2560,44 @@ class TestLegs:
         products = asyncio.run(self.scraper.scrape_products()).products
 
         assert [p.kind for p in products] == ["wallet"]
+
+    def test_a_complete_pots_read_declares_the_pots_scope(self, monkeypatch):
+        """Savings, CLP, the pot prefix, every pot's ref, closed at a zero balance."""
+        _install(monkeypatch, account=_account(pots_complete=True))
+
+        (scope,) = asyncio.run(self.scraper.scrape_products()).vanished_product_scopes
+
+        assert (
+            scope.institution,
+            scope.product_kind,
+            scope.currency,
+            scope.external_ref_prefix,
+            scope.present_refs,
+            scope.closed_metrics.balance,
+        ) == (
+            "mercadopago",
+            "savings",
+            "CLP",
+            "mp_pot_",
+            frozenset({f"mp_pot_{POT_ID}", f"mp_pot_{POT_ID_2}"}),
+            0,
+        )
+
+    def test_a_complete_read_without_pots_declares_an_empty_scope(self, monkeypatch):
+        """No pots at all is a real reading: every stored pot was closed."""
+        _install(monkeypatch, account=_account(pots=[], pots_complete=True))
+
+        (scope,) = asyncio.run(self.scraper.scrape_products()).vanished_product_scopes
+
+        assert scope.present_refs == frozenset()
+
+    def test_an_incomplete_pots_read_declares_no_scope(self, monkeypatch):
+        """A failed or partial pots read must never retire a pot."""
+        _install(monkeypatch, account=_account(pots_complete=False))
+
+        result = asyncio.run(self.scraper.scrape_products())
+
+        assert result.vanished_product_scopes == []
 
     def test_an_unnamed_pot_gets_the_default_name(self, monkeypatch):
         """A blank name is sent as none, so the writer names the product."""
