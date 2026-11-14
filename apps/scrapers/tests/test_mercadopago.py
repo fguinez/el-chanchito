@@ -2307,6 +2307,28 @@ class TestReuseWatchdog:
         assert log == ["start", ("connect", web.REUSE_TAB_WAIT_S * 1000), "stop"]
         assert state["proc"].killed.is_set() is False  # no driver was live to kill
 
+    def test_a_kill_during_the_connect_ends_the_drive_as_a_timeout(
+        self, clock, monkeypatch, tmp_path, timers, driver_log
+    ):
+        """The failed attach is not retried, nor is a tab that then disappears
+        reported as missing: the drive ends as the timeout it is."""
+        _Chrome(monkeypatch, tmp_path, fake_drive=False)
+        log, state = driver_log
+        proc = state["proc"] = _DriverProc()
+        _Looks(monkeypatch, PORTAL, NO_TAB)
+
+        def connect():
+            timers[0].fire()
+            proc.call("connect_over_cdp")
+
+        state["connect"] = connect
+
+        with pytest.raises(MercadoPagoWebError, match="did not finish in time"):
+            web._drive_reuse("http://localhost:9333", 1)
+
+        assert proc.late_calls == []
+        assert log == ["start", ("connect", web.REUSE_TAB_WAIT_S * 1000), "stop"]
+
     def test_a_scraper_error_after_the_kill_is_reported_as_itself(
         self, monkeypatch, tmp_path, timers
     ):

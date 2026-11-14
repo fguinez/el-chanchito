@@ -9,6 +9,7 @@ URL is synthetic.
 import os
 import signal
 import subprocess
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -490,6 +491,27 @@ class TestDriverKillSwitch:
             assert callable(getattr(proc, "kill", None))
         finally:
             manager.__exit__(None, None, None)
+
+    def test_the_installed_playwright_stops_cleanly_after_a_kill(self):
+        """Leaving `with sync_playwright()` once the switch killed its driver
+        must return, or the reuse drive's worker thread would never end."""
+        from playwright.sync_api import sync_playwright
+
+        switch = real_chrome.DriverKillSwitch()
+        stopped = threading.Event()
+
+        def drive():
+            manager = sync_playwright()
+            with manager:
+                switch.attach(manager)
+                switch.kill()
+            stopped.set()
+
+        worker = threading.Thread(target=drive, daemon=True)
+        worker.start()
+        worker.join(timeout=30)
+
+        assert stopped.is_set()
 
 
 class TestTargetSummary:
