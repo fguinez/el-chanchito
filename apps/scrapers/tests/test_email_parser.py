@@ -176,8 +176,8 @@ class TestDomainMatches:
             ("mail.somosmach.com", "somosmach", True),
             ("notsomosmach.com", "somosmach", False),
             ("bci.cl", "somosmach", False),
-            ("mercadopago.cl", "mercadopago.cl", True),
-            ("mercadopago.com", "mercadopago.cl", False),
+            ("tenpo.cl", "tenpo.cl", True),
+            ("tenpo.com", "tenpo.cl", False),
             ("", "tenpo", False),
         ],
     )
@@ -191,7 +191,7 @@ class TestSenderDomain:
         [
             ("MACH <notificaciones@somosmach.com>", "somosmach.com"),
             ("Tenpo, Notificaciones  <notificaciones@TENPO.cl>", "tenpo.cl"),
-            ("info@mercadopago.cl", "mercadopago.cl"),
+            ("info@tenpo.cl", "tenpo.cl"),
             ("Sin direccion", ""),
         ],
     )

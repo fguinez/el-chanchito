@@ -507,13 +507,6 @@ attaching with `MERCADOPAGO_CDP_URL`. Movements between your own products
 are not recognised as such: tick **Transferencia interna** on them in the
 transaction panel.
 
-**Coming from the e-mail parser.** Mercado Pago used to be read from its
-notification e-mails. That leg is retired, because a product takes its
-movements from one source only. Transactions the e-mail parser stored (their
-ids start with `email_mercadopago_`) are not removed automatically, so a
-movement both sources saw shows up twice: delete the old e-mail rows in
-Gastos once the ledger rows are in.
-
 ### Skipo API key
 
 Skipo is read through its official API with a personal key. Create one in

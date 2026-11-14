@@ -16,7 +16,7 @@ Acquisition decision (rung numbers are the acquisition ladder's):
 - Rungs 3, 5 and 6: the login cannot be automated (a reCAPTCHA on the e-mail
   step, a step-up on the password step), so there is no plain-HTTP and no
   headless login.
-- Rung 4, e-mail (the previous technique): transactions only, heuristic, no
+- Rung 4, e-mail: transactions only, heuristic, no
   balance, and it also captured purchases where Mercado Pago was only the
   payment gateway for another card.
 - Rung 7, chosen: a dedicated real-Chrome profile a human signed in to
@@ -83,11 +83,6 @@ Not verified live:
 - which ledger rows are movements between the user's own products (none is
   flagged `internal_transfer`);
 - reuse mode (`MERCADOPAGO_CDP_URL`) against a live Chrome.
-
-The e-mail leg this replaces keyed its rows `email_mercadopago_<digest>`. The
-same movements now arrive from the ledger under `mp_` keys, so the old rows
-stay in the database until they are removed by hand: nothing here deletes
-them.
 """
 
 import datetime

@@ -1393,9 +1393,8 @@ Transactions are deduplicated via `UNIQUE(product_id, external_id)`:
   and is stored a second time
 - Mercado Pago: `mp_{movement_id}`, the wallet ledger's own per-row id.
   Savings pots are products, not transactions, told apart by `external_ref`
-  `mp_pot_{uuid}`. Rows its retired e-mail leg stored keep their
-  `email_mercadopago_` keys and are not removed, so a movement both sources
-  saw is stored twice until the old row is deleted by hand
+  `mp_pot_{uuid}`. The rows its retired e-mail leg stored
+  (`email_mercadopago_` keys) were deleted by V047
 - Email: `email_{institution}_{sha1(Message-ID)[:8]}` (`hashlib`, not Python's
   per-process salted `hash()`); an email without a Message-ID hashes
   `Date|From|Subject|body` instead
