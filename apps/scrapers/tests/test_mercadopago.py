@@ -2407,16 +2407,38 @@ class TestSignInMarker:
 
         assert chrome.launches == []
 
-    def test_a_successful_run_clears_the_marker(self, monkeypatch, tmp_path):
-        """A read that works proves the session is back."""
+    def _drive_reads(self, monkeypatch, tab):
+        """Make the managed drive run the real read on `tab`."""
+        monkeypatch.setattr(
+            web, "_drive_over_cdp", lambda cdp_url, pages, **kwargs: web.read_account(tab, pages)
+        )
+
+    def test_a_redirect_on_the_balance_page_marks(self, monkeypatch, tmp_path, no_sleep):
+        """The balance page is what `make mercadopago-login` checks, so it can clear this."""
+        _Chrome(monkeypatch, tmp_path)
+        self._drive_reads(monkeypatch, _tab(balance={"status": "redirect"}))
+
+        with pytest.raises(MercadoPagoSessionError):
+            asyncio.run(web.scrape_account())
+
+        assert self._marker(tmp_path).exists()
+
+    @pytest.mark.parametrize("surface", ["pots", ("movements", 1)], ids=["pots", "ledger"])
+    def test_a_lost_session_after_the_balance_read_does_not_mark(
+        self, monkeypatch, tmp_path, no_sleep, surface
+    ):
+        """The run still fails, but a login (which checks only the balance) could not clear it."""
         chrome = _Chrome(monkeypatch, tmp_path)
-        monkeypatch.setattr(web.sign_in_marker, "marked_since", lambda path: None)
-        self._marker(tmp_path).write_text(SYNTHETIC_SINCE)
+        tab = _tab()
+        tab.responses[surface] = {"status": "redirect"}
+        self._drive_reads(monkeypatch, tab)
 
-        account = asyncio.run(web.scrape_account())
+        with pytest.raises(MercadoPagoSessionError, match="make mercadopago-login") as info:
+            asyncio.run(web.scrape_account())
 
-        assert account is chrome.outcome
+        assert info.value.after_balance is True
         assert not self._marker(tmp_path).exists()
+        assert chrome.terminated == ["proc"]
 
     def test_reuse_mode_ignores_the_marker(self, monkeypatch, tmp_path):
         """The user signs in in their own Chrome there, so a marker would block forever."""
@@ -2480,6 +2502,22 @@ class TestSignInMarker:
             web.save_login_session(timeout_s=60)
 
         assert self._marker(tmp_path).read_text() == SYNTHETIC_SINCE
+
+    def test_a_skipped_run_logs_a_warning_without_a_traceback(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        """Expected on every run until a sign-in, so the scraper log stays short."""
+        _Chrome(monkeypatch, tmp_path)
+        self._marker(tmp_path).write_text(SYNTHETIC_SINCE)
+
+        with caplog.at_level(logging.WARNING, logger=mp_mod.__name__):
+            with pytest.raises(web.MercadoPagoSignInPending):
+                asyncio.run(MercadoPagoScraper().scrape_transactions())
+
+        (record,) = [r for r in caplog.records if r.name == mp_mod.__name__]
+        assert record.levelno == logging.WARNING
+        assert record.exc_info is None
+        assert "needs sign-in since" in record.getMessage()
 
     def test_a_skipped_run_still_finishes_its_run_row_in_error(self, monkeypatch, tmp_path):
         """The web poller waits for a finished row: it gets one, with the hint."""
