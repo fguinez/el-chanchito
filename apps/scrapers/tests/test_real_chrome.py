@@ -1,14 +1,16 @@
 """Tests for the generic real-Chrome helpers (`backends/real_chrome.py`).
 
-No Chrome and no Playwright is ever started: `subprocess.Popen`, the signals
-and the CDP connection are replaced by fakes. Every path, port and URL is
-synthetic.
+No Chrome is ever started: `subprocess.Popen`, the signals and the CDP
+connection are replaced by fakes. One test starts the bare Playwright driver
+(no browser) to check where the kill switch finds it. Every path, port and
+URL is synthetic.
 """
 
 import os
 import signal
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -399,6 +401,96 @@ class TestFindPage:
         browser = _FakeBrowser(["about:blank"])
 
         assert real_chrome.find_page(browser, lambda url: url.startswith("https://")) is None
+
+
+class _DriverProc:
+    def __init__(self, error=None):
+        self.kills = 0
+        self.error = error
+
+    def kill(self):
+        self.kills += 1
+        if self.error is not None:
+            raise self.error
+
+
+def _manager(proc):
+    """A started `sync_playwright()` manager, as far as the switch looks into it."""
+    transport = SimpleNamespace(_proc=proc)
+    return SimpleNamespace(_connection=SimpleNamespace(_transport=transport))
+
+
+class TestDriverKillSwitch:
+    def test_a_kill_with_nothing_attached_only_fires(self):
+        switch = real_chrome.DriverKillSwitch()
+
+        switch.kill()
+
+        assert switch.fired is True
+
+    def test_a_kill_after_attach_kills_the_driver_process(self):
+        switch = real_chrome.DriverKillSwitch()
+        proc = _DriverProc()
+        switch.attach(_manager(proc))
+
+        switch.kill()
+
+        assert proc.kills == 1
+
+    def test_a_detached_driver_is_not_killed(self):
+        """Once its connection has ended the process may be reaped and its pid reused."""
+        switch = real_chrome.DriverKillSwitch()
+        proc = _DriverProc()
+        switch.attach(_manager(proc))
+        switch.detach()
+
+        switch.kill()
+
+        assert (proc.kills, switch.fired) == (0, True)
+
+    def test_an_attach_after_the_kill_is_refused(self):
+        switch = real_chrome.DriverKillSwitch()
+        switch.kill()
+        proc = _DriverProc()
+
+        with pytest.raises(real_chrome.DriverKilledError):
+            switch.attach(_manager(proc))
+
+        switch.kill()
+        assert proc.kills == 0
+
+    def test_a_kill_that_fails_never_raises(self):
+        """A driver that already exited is not an error for the watchdog thread."""
+        switch = real_chrome.DriverKillSwitch()
+        switch.attach(_manager(_DriverProc(ProcessLookupError())))
+
+        switch.kill()
+
+        assert switch.fired is True
+
+    def test_a_manager_without_the_expected_attributes_disarms_the_switch(self):
+        """A Playwright upgrade that moves the process must not fail the drive."""
+        switch = real_chrome.DriverKillSwitch()
+        switch.attach(SimpleNamespace())
+
+        switch.kill()
+
+        assert switch.fired is True
+
+    def test_the_installed_playwright_exposes_its_driver_process(self):
+        """The switch reads private attributes; an upgrade that moves them would
+        silently disarm the reuse watchdog, so check them on the real driver."""
+        from playwright.sync_api import sync_playwright
+
+        manager = sync_playwright()
+        manager.start()
+        try:
+            proc = real_chrome._driver_process(manager)
+            assert proc is not None
+            assert callable(getattr(proc, "kill", None))
+        finally:
+            manager.__exit__(None, None, None)
+
 
 class TestTargetSummary:
     """Chrome's own `/json/list`, faked: no request is ever made."""

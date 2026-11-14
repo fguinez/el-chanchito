@@ -29,6 +29,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from collections.abc import Callable
@@ -269,6 +270,72 @@ def find_page(browser, matches: Callable[[str], bool]):
                     return page
             except Exception:
                 continue
+    return None
+
+
+class DriverKilledError(RealChromeError):
+    """The Playwright driver was ended by a `DriverKillSwitch`."""
+
+
+class DriverKillSwitch:
+    """Ends the live Playwright driver from another thread (a watchdog's).
+
+    The sync API is bound to the thread that started it, so a watchdog cannot
+    stop it; it can only kill the driver subprocess, which makes every pending
+    call fail at once. Over CDP that just drops the connection: the browser
+    and its tabs keep running. Once fired, `attach` refuses new drivers.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._proc = None
+        self._fired = False
+
+    @property
+    def fired(self) -> bool:
+        return self._fired
+
+    def raise_if_fired(self) -> None:
+        if self._fired:
+            raise DriverKilledError("The Playwright driver was stopped by the watchdog.")
+
+    def attach(self, manager) -> None:
+        """Publish the driver of a started `sync_playwright()` manager."""
+        with self._lock:
+            self.raise_if_fired()
+            self._proc = _driver_process(manager)
+            if self._proc is None:
+                logger.warning("Playwright driver process not found; the watchdog cannot end it")
+
+    def detach(self) -> None:
+        with self._lock:
+            self._proc = None
+
+    def kill(self) -> None:
+        """Kill the attached driver, if any, and refuse later ones. Never raises."""
+        with self._lock:
+            self._fired = True
+            if self._proc is None:
+                return
+            try:
+                self._proc.kill()
+            except ProcessLookupError:
+                pass  # it had already ended
+            except Exception:
+                logger.warning("Could not kill the Playwright driver", exc_info=True)
+
+
+def _driver_process(manager):
+    """The driver subprocess behind a started `sync_playwright()` manager, or None.
+
+    Private Playwright attributes (`_connection` up to 1.61, `_client` from
+    1.65): a missing one disarms the switch instead of failing the drive.
+    """
+    for holder in ("_connection", "_client"):
+        transport = getattr(getattr(manager, holder, None), "_transport", None)
+        proc = getattr(transport, "_proc", None)
+        if proc is not None:
+            return proc
     return None
 
 
