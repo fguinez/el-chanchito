@@ -9,11 +9,14 @@ only attaches to it over CDP.
 This module holds the parts of that which are the same for every institution:
 finding the Chrome binary, launching it on a debug port, checking the port,
 connecting, finding a tab, asking Chrome what it has open and tearing the
-process tree down. Nothing here
+process tree down. A managed launch is also recorded in a pidfile inside its
+profile, so a Chrome orphaned by a killed scraper service (its `finally` never
+ran) is found and stopped by the next run instead of holding the port and the
+profile lock forever (`record_managed_launch`, `reclaim_orphaned_chrome`).
+Nothing here
 knows an institution: ports, profile directories, URLs and env var names are
-arguments. Mercado Pago (`backends/mercadopago_web.py`) is its only user today.
-`backends/bci_lider_web.py` predates it and carries its own private copies of
-these helpers; it should move onto this module in a change of its own.
+arguments. Its users are Mercado Pago (`backends/mercadopago_web.py`) and
+Tarjeta Lider Bci (`backends/bci_lider_web.py`).
 
 Every call that talks to the browser takes a timeout or a deadline: an
 unbounded Playwright call has hung the scraper service before.
@@ -31,10 +34,10 @@ import subprocess
 import sys
 import time
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
@@ -47,6 +50,13 @@ _CONNECT_RETRY_PAUSE_S = 1.0
 # SIGTERM, and how long after each signal to its whole process group.
 _BROWSER_EXIT_WAIT_S = 10
 _GROUP_EXIT_WAIT_S = 5
+# How often an orphan's pid is polled while it is asked to exit.
+_ORPHAN_POLL_S = 0.1
+# The state reader may spawn `ps` (macOS), so it is consulted every Nth poll.
+_STATUS_EVERY_N_POLLS = 5
+# Inside the profile dir (gitignored with it), under a name Chrome never uses.
+MANAGED_PIDFILE_NAME = "el-chanchito-managed-chrome.json"
+_PS_TIMEOUT_S = 5
 # Chrome's target list is a few kilobytes; more than this is not read.
 _TARGET_LIST_MAX_BYTES = 1_000_000
 _TARGET_TYPE_RE = re.compile(r"^[a-z_]{1,30}$")
@@ -462,3 +472,381 @@ def _terminate_windows(proc: subprocess.Popen) -> None:
         proc.wait(timeout=5)
     except Exception:
         logger.warning("The launched Chrome did not exit after taskkill /F")
+
+
+# What a command-line reader returns: the argv list (Linux /proc), one
+# space-joined string (`ps` on macOS), or None when it cannot be read.
+Cmdline = Optional[Union[Sequence[str], str]]
+
+
+def managed_pidfile(profile_dir: Path) -> Path:
+    """Where the record of the Chrome launched on `profile_dir` lives."""
+    return Path(profile_dir) / MANAGED_PIDFILE_NAME
+
+
+def record_managed_launch(proc: subprocess.Popen, *, port: int, profile_dir: Path) -> None:
+    """Write down the Chrome `launch_chrome` just started. Never raises.
+
+    The record (pid, port, owner pid, resolved profile, launch time) is written
+    atomically inside the profile, so a later run can tell whether a Chrome
+    still holding the port is this one, orphaned.
+    """
+    try:
+        pidfile = managed_pidfile(profile_dir)
+        pidfile.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        record = {
+            "pid": int(proc.pid),
+            "port": int(port),
+            "owner_pid": os.getpid(),
+            "profile_dir": str(Path(profile_dir).resolve()),
+            "launched_at": time.time(),
+        }
+        tmp = pidfile.with_name(f"{pidfile.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(record), encoding="utf-8")
+        os.replace(tmp, pidfile)
+    except Exception as exc:
+        logger.warning(
+            "Could not record the launched Chrome (%s); an orphan of this run "
+            "would not be reclaimed",
+            type(exc).__name__,
+        )
+
+
+def forget_managed_launch(profile_dir: Path, pid: int) -> None:
+    """Drop the record of `pid`, only if the pidfile still names it. Never raises."""
+    try:
+        pidfile = managed_pidfile(profile_dir)
+        record = _read_record(pidfile)
+        if record is not None and record["pid"] == pid:
+            pidfile.unlink(missing_ok=True)
+    except Exception as exc:
+        logger.warning("Could not clear the launched Chrome's record (%s)", type(exc).__name__)
+
+
+def _read_record(pidfile: Path) -> Optional[dict]:
+    """The pidfile's record; None when missing. Raises ValueError when corrupt."""
+    try:
+        raw = pidfile.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    record = json.loads(raw)
+    if not isinstance(record, dict):
+        raise ValueError("not an object")
+    pid, port, profile = record.get("pid"), record.get("port"), record.get("profile_dir")
+    if not (isinstance(pid, int) and not isinstance(pid, bool) and pid > 0):
+        raise ValueError("bad pid")
+    if not (isinstance(port, int) and not isinstance(port, bool)):
+        raise ValueError("bad port")
+    if not isinstance(profile, str):
+        raise ValueError("bad profile")
+    return record
+
+
+def _remove(pidfile: Path) -> None:
+    try:
+        pidfile.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("Could not remove the managed Chrome record (%s)", type(exc).__name__)
+
+
+def read_proc_cmdline(pid: int, proc_root: Path = Path("/proc")) -> Cmdline:
+    """Linux: the process's argv from /proc, NUL-separated; None if unreadable.
+
+    Chrome rewrites its process title into one space-joined string, so a
+    single field comes back as a `ps`-style line, matched like one.
+    """
+    try:
+        raw = (proc_root / str(pid) / "cmdline").read_bytes()
+    except OSError:
+        return None
+    parts = [p.decode("utf-8", "surrogateescape") for p in raw.rstrip(b"\0").split(b"\0")]
+    if not parts[0]:
+        return None
+    return parts if len(parts) > 1 else parts[0]
+
+
+def _run_ps(pid: int, fields: str) -> Optional[str]:
+    """One `ps` column set for `pid`, stripped; None if `ps` fails or knows no such pid."""
+    try:
+        result = subprocess.run(
+            ["ps", "-ww", "-o", fields, "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=_PS_TIMEOUT_S,
+            check=False,
+        )
+    except Exception:
+        return None
+    line = result.stdout.strip() if result.returncode == 0 else ""
+    return line or None
+
+
+def read_ps_command(pid: int) -> Cmdline:
+    """macOS: the process's full command line from `ps`; None if unreadable."""
+    return _run_ps(pid, "command=")
+
+
+@dataclass(frozen=True)
+class ProcessStatus:
+    """A process's parent pid and its state letters ("S", "R", "Z", ...)."""
+
+    ppid: int
+    state: str
+
+
+def read_proc_status(pid: int, proc_root: Path = Path("/proc")) -> Optional[ProcessStatus]:
+    """Linux: state and parent from /proc/<pid>/stat; None if unreadable."""
+    try:
+        raw = (proc_root / str(pid) / "stat").read_text(encoding="utf-8", errors="replace")
+        # The command name sits in parentheses and may hold spaces or ')'.
+        fields = raw[raw.rindex(")") + 1 :].split()
+        return ProcessStatus(ppid=int(fields[1]), state=fields[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def read_ps_status(pid: int) -> Optional[ProcessStatus]:
+    """macOS: state and parent from `ps`; None if unreadable."""
+    line = _run_ps(pid, "ppid=,stat=")
+    try:
+        ppid, state = line.split()[:2]
+        return ProcessStatus(ppid=int(ppid), state=state)
+    except (AttributeError, ValueError):
+        return None
+
+
+def _cmdline_reader(platform: str) -> Optional[Callable[[int], Cmdline]]:
+    if platform.startswith("linux"):
+        return read_proc_cmdline
+    if platform == "darwin":
+        return read_ps_command
+    return None
+
+
+def _status_reader(platform: str) -> Optional[Callable[[int], Optional[ProcessStatus]]]:
+    if platform.startswith("linux"):
+        return read_proc_status
+    if platform == "darwin":
+        return read_ps_status
+    return None
+
+
+def _has_whole_arg(cmdline: Union[Sequence[str], str], arg: str) -> bool:
+    """Whether `arg` is one whole argument of `cmdline`, never a prefix of one.
+
+    An argv list is compared element by element. A `ps` line has lost the
+    argument boundaries, so `arg` must follow a space and be followed by the
+    next option (" -") or the line's end; a path with a space in it still
+    matches, and `--x=/a/b` does not match `--x=/a/bc` or `--x=/a/b c`.
+    """
+    if not isinstance(cmdline, str):
+        return arg in cmdline
+    needle = f" {arg}"
+    start = cmdline.find(needle)
+    while start != -1:
+        end = start + len(needle)
+        if end == len(cmdline) or cmdline.startswith(" -", end):
+            return True
+        start = cmdline.find(needle, start + 1)
+    return False
+
+
+StatusReader = Optional[Callable[[int], Optional[ProcessStatus]]]
+
+
+def _pid_state(pid: int, read_status: StatusReader = None) -> str:
+    """'gone', 'alive' (ours to signal) or 'foreign' (exists, not signallable).
+
+    A zombie counts as gone: it has exited, only its parent has not reaped
+    it yet (it is reaped here when that parent is us).
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return "gone"
+    except OSError:
+        return "foreign"
+    if _reaped_here(pid):
+        return "gone"
+    status = read_status(pid) if read_status is not None else None
+    if status is not None and status.state.startswith("Z"):
+        return "gone"
+    return "alive"
+
+
+def _reaped_here(pid: int) -> bool:
+    """Reap `pid` if it is our own exited child; True when it was."""
+    no_hang = getattr(os, "WNOHANG", None)
+    if no_hang is None:
+        return False
+    try:
+        reaped, _ = os.waitpid(pid, no_hang)
+    except (ChildProcessError, OSError):
+        return False
+    return reaped == pid
+
+
+def _gone_within(pid: int, timeout_s: float, read_status: StatusReader = None) -> bool:
+    """Poll `pid` for up to `timeout_s`; True once it is no longer ours."""
+    deadline = time.monotonic() + timeout_s
+    tick = 0
+    while True:
+        reader = read_status if tick % _STATUS_EVERY_N_POLLS == 0 else None
+        tick += 1
+        if _pid_state(pid, reader) != "alive":
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(_ORPHAN_POLL_S)
+
+
+def _terminate_orphan(pid: int, read_status: StatusReader = None) -> bool:
+    """`_terminate_posix` for a pid we cannot `wait()` on: browser, then group."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    except Exception:
+        logger.warning("Error signalling the orphaned Chrome", exc_info=True)
+    if _gone_within(pid, _BROWSER_EXIT_WAIT_S, read_status):
+        return True
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pid, sig)
+        except ProcessLookupError:
+            return True
+        except Exception:
+            logger.warning("Error signalling the orphaned Chrome's process group", exc_info=True)
+        if _gone_within(pid, _GROUP_EXIT_WAIT_S, read_status):
+            return True
+    logger.warning("The orphaned Chrome (pid %s) did not exit after SIGKILL", pid)
+    return False
+
+
+def _owner_still_holds(pid: int, record: dict, read_status: StatusReader) -> bool:
+    """Whether the run that launched `pid` is alive and still its parent.
+
+    Then it is not an orphan (a sign-in window still open, or our own drive
+    still running) and must not be killed. A parent that cannot be read
+    counts as still holding it. A record without an owner proves nothing.
+    """
+    owner = record.get("owner_pid")
+    if not isinstance(owner, int) or isinstance(owner, bool) or owner <= 0:
+        return False
+    if owner != os.getpid() and _pid_state(owner) == "gone":
+        return False
+    status = read_status(pid) if read_status is not None else None
+    return status is None or status.ppid == owner
+
+
+def reclaim_orphaned_chrome(
+    *,
+    port: int,
+    profile_dir: Path,
+    platform: str = sys.platform,
+    read_cmdline: Optional[Callable[[int], Cmdline]] = None,
+    read_status: StatusReader = None,
+) -> bool:
+    """Stop a managed Chrome a killed run left behind on `profile_dir`.
+
+    Reads the pidfile `record_managed_launch` wrote. A missing record does
+    nothing; a corrupt one, or one whose process has ended (or is a zombie),
+    is removed. A Chrome whose launching run is alive and still its parent
+    is not an orphan: it is left running and its record is kept, and the
+    caller's busy-port check reports it. Otherwise a live process is terminated only
+    when it is verifiably that Chrome: the record names this profile, its
+    command line carries both exact `--remote-debugging-port` (the recorded
+    port, which may differ from `port` after a config change) and
+    `--user-data-dir` arguments `launch_chrome` passes, and it still leads
+    its own process group (pgid == pid, as its new session made it).
+    Any of those checks failing kills nothing and drops the stale record. A
+    command line that cannot be read (a slow or failing `ps`) kills nothing
+    and keeps the record, so the next run checks again.
+
+    Termination mirrors `terminate_chrome` and can take up to about 20 s.
+    Returns True when an orphan was stopped. Skipped on Windows (the record
+    stays). Never raises.
+    """
+    if platform.startswith(("win", "cygwin")):
+        return False
+    pidfile = managed_pidfile(profile_dir)
+    if read_status is None:
+        read_status = _status_reader(platform)
+    try:
+        try:
+            record = _read_record(pidfile)
+        except ValueError:
+            logger.warning("The managed Chrome record is corrupt; removing it")
+            _remove(pidfile)
+            return False
+        if record is None:
+            return False
+        pid = record["pid"]
+        state = _pid_state(pid, read_status)
+        if state == "gone":
+            _remove(pidfile)
+            return False
+        if state == "alive" and _owner_still_holds(pid, record, read_status):
+            logger.info("The managed Chrome (pid %s) still has its launching run; leaving it", pid)
+            return False
+        verdict = (
+            _is_managed_chrome(
+                pid, record, profile_dir=profile_dir, platform=platform, read_cmdline=read_cmdline
+            )
+            if state == "alive"
+            else False
+        )
+        if verdict is None:
+            logger.warning(
+                "Could not read the command line of pid %s; keeping the managed Chrome record",
+                pid,
+            )
+            return False
+        if not verdict:
+            logger.warning(
+                "pid %s from the managed Chrome record is not that Chrome; "
+                "leaving it alone and dropping the record",
+                pid,
+            )
+            _remove(pidfile)
+            return False
+        logger.warning("Stopping an orphaned managed Chrome (pid %s)", pid)
+        if not _terminate_orphan(pid, read_status):
+            return False
+        _remove(pidfile)
+        logger.info(
+            "Reclaimed an orphaned managed Chrome (pid %s, debug port %s)", pid, record["port"]
+        )
+        return True
+    except Exception:
+        logger.warning("Could not reclaim an orphaned Chrome", exc_info=True)
+        return False
+
+
+def _is_managed_chrome(
+    pid: int,
+    record: dict,
+    *,
+    profile_dir: Path,
+    platform: str,
+    read_cmdline: Optional[Callable[[int], Cmdline]],
+) -> Optional[bool]:
+    """Whether `pid` is the recorded Chrome; None when its command line cannot be read."""
+    if record["profile_dir"] != str(Path(profile_dir).resolve()):
+        return False
+    reader = read_cmdline if read_cmdline is not None else _cmdline_reader(platform)
+    cmdline = reader(pid) if reader is not None else None
+    if cmdline is None:
+        return None
+    if not cmdline:
+        return False
+    expected = (
+        f"--remote-debugging-port={record['port']}",
+        f"--user-data-dir={profile_dir}",
+    )
+    if not all(_has_whole_arg(cmdline, arg) for arg in expected):
+        return False
+    try:
+        return os.getpgid(pid) == pid
+    except Exception:
+        return False
