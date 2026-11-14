@@ -26,6 +26,8 @@ from datetime import date
 from unittest.mock import MagicMock
 
 import pytest
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 import main as main_mod
 from db.writer import TransactionWriteResult
@@ -34,6 +36,7 @@ from scrapers.backends import real_chrome
 from scrapers.backends.mercadopago_web import (
     MercadoPagoAccount,
     MercadoPagoConnectError,
+    MercadoPagoConnectionLostError,
     MercadoPagoFetchError,
     MercadoPagoPageError,
     MercadoPagoSessionError,
@@ -778,6 +781,20 @@ class TestParseMovements:
 # --- Transport: the in-page fetch contract ------------------------------------
 
 
+class _TargetClosedError(PlaywrightError):
+    """Named like Playwright's private `TargetClosedError`, which is matched by name."""
+
+
+_TargetClosedError.__name__ = "TargetClosedError"
+
+
+def _raise(error):
+    def call(*args, **kwargs):
+        raise error
+
+    return call
+
+
 class _FakeHandle:
     def __init__(self, value):
         self.value = value
@@ -1011,7 +1028,7 @@ class TestReadAccount:
             pytest.param({"status": "timeout"}, id="timeout"),
             pytest.param({"status": "error"}, id="network"),
             pytest.param({"status": "http", "code": 503}, id="http-503"),
-            pytest.param(RuntimeError("synthetic playwright failure"), id="call-raised"),
+            pytest.param(PlaywrightTimeoutError("synthetic"), id="call-timed-out"),
         ],
     )
     def test_an_unreachable_balance_page_is_not_a_lost_session(self, balance):
@@ -1045,6 +1062,72 @@ class TestReadAccount:
         assert account.pots == []
         assert account.warnings == [f"MercadoPago: savings pots not read ({reason})"]
         assert len(account.movements) == 1
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            pytest.param(PlaywrightTimeoutError("synthetic"), id="timed-out"),
+            pytest.param(PlaywrightError("Execution context was destroyed"), id="navigated"),
+        ],
+    )
+    def test_a_pots_call_that_failed_on_a_live_tab_is_a_warning(self, error):
+        """A timeout or a navigation leaves the tab usable: read on."""
+        tab = _tab(pots=error)
+
+        account = web.read_account(tab)
+
+        assert account.warnings == [
+            f"MercadoPago: savings pots not read (pots: in-page fetch failed ({type(error).__name__}))"
+        ]
+        assert len(account.movements) == 1
+
+    @pytest.mark.parametrize(
+        ("overrides", "calls"),
+        [
+            pytest.param({"balance": RuntimeError("synthetic")}, ["balance"], id="balance"),
+            pytest.param({"pots": RuntimeError("synthetic")}, ["balance", "pots"], id="pots"),
+            pytest.param(
+                {("movements", 1): RuntimeError("synthetic")},
+                ["balance", "pots", ("movements", 1)],
+                id="movements",
+            ),
+            pytest.param(
+                {"pots": _TargetClosedError("synthetic")}, ["balance", "pots"], id="target-closed"
+            ),
+        ],
+    )
+    def test_a_call_that_failed_otherwise_ends_the_read(self, overrides, calls):
+        """A dead driver or a closed tab: no partial account, no call after it."""
+        tab = _tab()
+        tab.responses.update(overrides)
+
+        with pytest.raises(MercadoPagoConnectionLostError) as info:
+            web.read_account(tab)
+
+        assert "lost its connection to the tab" in str(info.value)
+        assert "make mercadopago-login" not in str(info.value)
+        assert tab.calls == calls
+
+    def test_a_failed_copy_out_ends_the_read_without_a_dispose(self):
+        """`json_value` failing may mean a dead connection: no call follows it."""
+        tab = _tab()
+        handles: list = []
+        fetch = tab.wait_for_function
+
+        def failing_copy(script, arg=None, timeout=None):
+            handle = fetch(script, arg=arg, timeout=timeout)
+            if arg["surface"] == "pots":
+                handle.json_value = _raise(RuntimeError("synthetic"))
+            handles.append(handle)
+            return handle
+
+        tab.wait_for_function = failing_copy
+
+        with pytest.raises(MercadoPagoConnectionLostError):
+            web.read_account(tab)
+
+        assert [handle.disposed for handle in handles] == [True, False]
+        assert tab.calls == ["balance", "pots"]
 
     def test_a_skipped_pot_is_a_warning(self):
         """A pot left out is money left out, so the run says so."""
@@ -1361,7 +1444,7 @@ class _Connections:
         monkeypatch.setattr(web, "_cdp_connection", self)
 
     @contextlib.contextmanager
-    def __call__(self, cdp_url, wait_s, process=None):
+    def __call__(self, cdp_url, wait_s, process=None, kill_switch=None):
         entry = self.script[min(self.attempts, len(self.script) - 1)]
         self.attempts += 1
         self.waits.append(wait_s)
@@ -1674,12 +1757,18 @@ class TestTabDiscovery:
 
 
 class _FakeDriver:
-    """What `sync_playwright()` returns: logs its start, stop and connections."""
+    """What `sync_playwright()` returns: logs its start, stop and connections.
 
-    def __init__(self, log, connect):
+    `proc` stands in for the driver subprocess, where Playwright keeps it.
+    """
+
+    def __init__(self, log, connect, proc=None):
         self.log = log
         self.connect = connect
         self.chromium = self
+        if proc is not None:
+            transport = types.SimpleNamespace(_proc=proc)
+            self._connection = types.SimpleNamespace(_transport=transport)
 
     def __enter__(self):
         self.log.append("start")
@@ -1698,9 +1787,10 @@ class _FakeDriver:
 def driver_log(monkeypatch):
     """Install a fake `playwright.sync_api`; no driver process is started."""
     log: list = []
-    state = {"connect": lambda: "browser"}
+    state = {"connect": lambda: "browser", "proc": None}
     module = types.ModuleType("playwright.sync_api")
-    module.sync_playwright = lambda: _FakeDriver(log, lambda: state["connect"]())
+    module.sync_playwright = lambda: _FakeDriver(log, lambda: state["connect"](), state["proc"])
+    module.Error = PlaywrightError
     package = types.ModuleType("playwright")
     package.sync_api = module
     monkeypatch.setitem(sys.modules, "playwright", package)
@@ -1877,6 +1967,7 @@ class _Chrome:
         return self.outcome
 
 
+@pytest.mark.usefixtures("timers")
 class TestModes:
     def test_managed_launches_offscreen_reads_and_terminates(self, monkeypatch, tmp_path):
         """Default mode: its own Chrome, on the profile, on the balance page."""
@@ -1982,6 +2073,7 @@ class TestModes:
             assert "ws://" not in str(link) and "Call log" not in str(link)
 
 
+@pytest.mark.usefixtures("timers")
 class TestRealDrives:
     """Both modes through the real discovery loop, on fake looks and connections."""
 
@@ -2132,6 +2224,7 @@ class _FakeTimer:
         self.started = False
         self.cancelled = False
         self.daemon = False
+        self.finished = threading.Event()
         _FakeTimer.created.append(self)
 
     def start(self):
@@ -2142,6 +2235,7 @@ class _FakeTimer:
 
     def fire(self):
         self.function(*self.args)
+        self.finished.set()
 
 
 @pytest.fixture
@@ -2183,6 +2277,31 @@ class TestLaunchSafety:
 
         assert chrome.terminated == [chrome.proc, chrome.proc]
         assert timers[0].cancelled is True
+
+    def test_a_connection_cut_by_the_watchdog_reads_as_the_timeout(
+        self, monkeypatch, tmp_path, timers
+    ):
+        """Terminating Chrome is what lost the connection: say it overran."""
+        _Chrome(monkeypatch, tmp_path)
+
+        def overrun(cdp_url, movement_pages, **kwargs):
+            timers[0].fire()
+            raise MercadoPagoConnectionLostError("synthetic")
+
+        monkeypatch.setattr(web, "_drive_over_cdp", overrun)
+
+        with pytest.raises(MercadoPagoWebError, match="did not finish in time"):
+            web._drive_managed(1)
+
+    def test_a_connection_lost_before_the_watchdog_fired_keeps_its_reason(
+        self, monkeypatch, tmp_path, timers
+    ):
+        """Only the watchdog's own cut is reported as a timeout."""
+        chrome = _Chrome(monkeypatch, tmp_path)
+        chrome.outcome = MercadoPagoConnectionLostError("synthetic: lost")
+
+        with pytest.raises(MercadoPagoConnectionLostError, match="synthetic: lost"):
+            web._drive_managed(1)
 
     def test_chrome_is_closed_when_the_watchdog_cannot_start(self, monkeypatch, tmp_path):
         """Nothing between the launch and the cleanup may leak the Chrome."""
@@ -2333,6 +2452,250 @@ class TestLaunchSafety:
             assert "/synthetic" not in str(error)
             error = error.__cause__ or error.__context__
         assert terminated == []
+
+
+class _DriverProc:
+    """The driver subprocess, and how Playwright before 1.64 behaved once killed.
+
+    `kill` ends the call blocked on it. The first call after the kill fails;
+    any later one would spin forever on those versions, so here it is
+    recorded in `late_calls` (and fails, so a test cannot hang on it).
+    """
+
+    def __init__(self):
+        self.killed = threading.Event()
+        self.failed_once = False
+        self.late_calls: list[str] = []
+
+    def kill(self):
+        self.killed.set()
+
+    def call(self, name):
+        if not self.killed.is_set():
+            return
+        if self.failed_once:
+            self.late_calls.append(name)
+            raise RuntimeError("synthetic: a dead dispatcher would spin here")
+        self.failed_once = True
+        raise RuntimeError("Connection closed while reading from the driver")
+
+
+class _DriverHandle:
+    """A fetch result handle on the fake driver; `on_json` runs inside `json_value`."""
+
+    def __init__(self, proc, value, on_json=None):
+        self.proc = proc
+        self.value = value
+        self.on_json = on_json
+
+    def json_value(self):
+        self.proc.call("json_value")
+        if self.on_json is not None:
+            self.on_json()
+        return self.value
+
+    def dispose(self):
+        self.proc.call("dispose")
+
+
+class _DriverTab:
+    """A portal tab on the fake driver, answering each surface like `_tab()`.
+
+    `hooks` maps a surface (or a ("movements", N) pair) to a callable run
+    while that fetch copies its result out of the page.
+    """
+
+    url = web.START_URL
+
+    def __init__(self, proc, log, hooks):
+        self.proc = proc
+        self.log = log
+        self.hooks = hooks
+        self.responses = _tab().responses
+        self.calls: list = []
+
+    def wait_for_function(self, script, arg=None, timeout=None):
+        self.proc.call("wait_for_function")
+        surface, number = arg["surface"], arg["pageNumber"]
+        key = (surface, number) if surface == "movements" else surface
+        self.calls.append(key)
+        value = self.responses.get(key, self.responses.get(surface))
+        return _DriverHandle(self.proc, value, self.hooks.get(key))
+
+    def close(self):
+        self.log.append("page.close")
+
+
+class TestReuseWatchdog:
+    """Reuse mode, through the real `_cdp_connection` on a fake Playwright."""
+
+    def _install(self, monkeypatch, driver_log, hooks):
+        log, state = driver_log
+        proc = _DriverProc()
+        tab = _DriverTab(proc, log, hooks)
+        browser = _Browser()
+        browser.contexts[0].pages.append(tab)
+        browser.close = lambda: log.append("browser.close")
+        state["proc"] = proc
+        state["connect"] = lambda: browser
+        _Looks(monkeypatch, PORTAL)
+        return log, proc, tab
+
+    def _run_reuse(self):
+        with pytest.raises(MercadoPagoWebError) as info:
+            asyncio.run(web.scrape_account(cdp_url="http://localhost:9333"))
+        return info.value
+
+    def _frozen_until_killed(self, timers, proc, worker):
+        """A copy out of the page that never returns until the watchdog fires."""
+
+        def freeze():
+            worker.append(threading.current_thread())
+            firing = threading.Thread(target=timers[0].fire, daemon=True)
+            firing.start()
+            assert proc.killed.wait(timeout=5), "the driver was never killed"
+            firing.join(timeout=5)
+            proc.call("json_value")  # the pending call fails with the driver
+
+        return freeze
+
+    def test_the_watchdog_is_armed_for_the_reuse_limit_and_disarmed_after(
+        self, monkeypatch, tmp_path, timers
+    ):
+        """It lands before the run's own timeout; the drive gets its kill switch."""
+        chrome = _Chrome(monkeypatch, tmp_path)
+
+        web._drive_reuse("http://localhost:9333", 1)
+
+        (watchdog,) = timers
+        assert watchdog.interval == web.REUSE_HARD_LIMIT_S < web.DRIVE_TIMEOUT_S
+        assert (watchdog.started, watchdog.daemon, watchdog.cancelled) == (True, True, True)
+        assert isinstance(chrome.drives[0]["kill_switch"], real_chrome.DriverKillSwitch)
+
+    def test_managed_mode_keeps_its_chrome_watchdog_and_no_kill_switch(
+        self, monkeypatch, tmp_path, timers
+    ):
+        chrome = _Chrome(monkeypatch, tmp_path)
+
+        web._drive_managed(1)
+
+        (watchdog,) = timers
+        assert watchdog.args == (chrome.proc,)
+        assert "kill_switch" not in chrome.drives[0]
+
+    def test_a_frozen_balance_read_ends_without_another_playwright_call(
+        self, clock, monkeypatch, tmp_path, timers, driver_log
+    ):
+        """The worker thread ends, nothing is disposed, Chrome is left alone."""
+        chrome = _Chrome(monkeypatch, tmp_path, fake_drive=False)
+        worker: list = []
+        hooks: dict = {}
+        log, proc, tab = self._install(monkeypatch, driver_log, hooks)
+        hooks["balance"] = self._frozen_until_killed(timers, proc, worker)
+
+        error = self._run_reuse()
+
+        assert str(error) == "Mercado Pago read did not finish in time."
+        assert proc.late_calls == []
+        assert tab.calls == ["balance"]
+        worker[0].join(timeout=5)
+        assert not worker[0].is_alive()
+        assert log == ["start", ("connect", web.REUSE_TAB_WAIT_S * 1000), "stop"]
+        assert chrome.terminated == []
+        for link in _chain(error):
+            assert "Connection closed" not in str(link)
+
+    def test_a_frozen_pots_read_is_not_a_warning_to_carry_on_from(
+        self, clock, monkeypatch, tmp_path, timers, driver_log
+    ):
+        """No partial account: the ledger is not fetched after the kill."""
+        _Chrome(monkeypatch, tmp_path, fake_drive=False)
+        worker: list = []
+        hooks: dict = {}
+        _, proc, tab = self._install(monkeypatch, driver_log, hooks)
+        hooks["pots"] = self._frozen_until_killed(timers, proc, worker)
+
+        error = self._run_reuse()
+
+        assert "did not finish in time" in str(error)
+        assert proc.late_calls == []
+        assert tab.calls == ["balance", "pots"]
+
+    def test_a_kill_between_fetches_stops_before_the_next_call(
+        self, clock, monkeypatch, tmp_path, timers, driver_log
+    ):
+        """Fired while no call was pending: the result is not disposed, nothing follows."""
+        _Chrome(monkeypatch, tmp_path, fake_drive=False)
+        hooks: dict = {}
+        _, proc, tab = self._install(monkeypatch, driver_log, hooks)
+        hooks["balance"] = lambda: timers[0].fire()
+
+        error = self._run_reuse()
+
+        assert "did not finish in time" in str(error)
+        assert proc.killed.is_set()
+        assert (proc.failed_once, proc.late_calls) == (False, [])
+        assert tab.calls == ["balance"]
+
+    def test_no_attach_starts_once_the_watchdog_has_fired(
+        self, clock, monkeypatch, tmp_path, timers, driver_log
+    ):
+        """A watchdog that fires between attaches ends the drive before another driver."""
+        _Chrome(monkeypatch, tmp_path, fake_drive=False)
+        log, state = driver_log
+        state["proc"] = _DriverProc()
+        state["connect"] = lambda: _Browser(STALE)
+        looks = _Looks(monkeypatch, PORTAL)
+
+        def look(cdp_url, matches, **kwargs):
+            if looks.count == 1:
+                timers[0].fire()
+            return looks(cdp_url, matches)
+
+        monkeypatch.setattr(web.real_chrome, "summarize_targets", look)
+
+        with pytest.raises(MercadoPagoWebError, match="did not finish in time"):
+            web._drive_reuse("http://localhost:9333", 1)
+
+        assert log == ["start", ("connect", web.REUSE_TAB_WAIT_S * 1000), "stop"]
+        assert state["proc"].killed.is_set() is False  # no driver was live to kill
+
+    def test_a_kill_during_the_connect_ends_the_drive_as_a_timeout(
+        self, clock, monkeypatch, tmp_path, timers, driver_log
+    ):
+        """The failed attach is not retried, nor is a tab that then disappears
+        reported as missing: the drive ends as the timeout it is."""
+        _Chrome(monkeypatch, tmp_path, fake_drive=False)
+        log, state = driver_log
+        proc = state["proc"] = _DriverProc()
+        _Looks(monkeypatch, PORTAL, NO_TAB)
+
+        def connect():
+            timers[0].fire()
+            proc.call("connect_over_cdp")
+
+        state["connect"] = connect
+
+        with pytest.raises(MercadoPagoWebError, match="did not finish in time"):
+            web._drive_reuse("http://localhost:9333", 1)
+
+        assert proc.late_calls == []
+        assert log == ["start", ("connect", web.REUSE_TAB_WAIT_S * 1000), "stop"]
+
+    def test_a_scraper_error_after_the_kill_is_reported_as_itself(
+        self, monkeypatch, tmp_path, timers
+    ):
+        """Only a driver error becomes the timeout; a lost session stays one."""
+        _Chrome(monkeypatch, tmp_path)
+
+        def drive(*args, **kwargs):
+            timers[0].fire()
+            raise MercadoPagoSessionError("synthetic: sign in again")
+
+        monkeypatch.setattr(web, "_drive_over_cdp", drive)
+
+        with pytest.raises(MercadoPagoSessionError, match="sign in again"):
+            web._drive_reuse("http://localhost:9333", 1)
 
 
 def _patched_writer(monkeypatch):

@@ -884,13 +884,17 @@ emitted).
 
 Every Playwright call that takes a timeout gets one (the connection and each
 in-page fetch) and the reads share a time budget. Copying a fetch's result
-out of the page takes none, so a watchdog terminates the managed Chrome if a
-drive overruns, and in either mode the run gives up on a drive that does not
-finish in time. A managed Chrome orphaned by a killed service is reclaimed
-on the next run through its pidfile (see above). The e-mail leg this
-replaced read transactions only, heuristically, and also captured purchases
-where Mercado Pago was just the gateway; the rows it stored are not removed
-(see "Deduplication").
+out of the page takes none, so a watchdog ends an overrunning drive (managed
+mode terminates its Chrome; reuse mode kills the Playwright driver and leaves
+the user's Chrome running), and in either mode the run gives up on a drive
+that does not finish in time. A call that fails because the tab or its
+connection is gone (a crashed driver, a closed tab or Chrome) stops the read
+there rather than carrying on to the next page; Playwright is held at 1.64 or
+later because older sync calls spin forever on a dead driver. A managed Chrome
+orphaned by a killed service is reclaimed on the next run through its pidfile
+(see above). The e-mail leg this replaced read transactions only,
+heuristically, and also captured purchases where Mercado Pago was just the
+gateway; the rows it stored are not removed (see "Deduplication").
 
 Verified live, in managed mode with an off-screen Chrome on a real signed-in
 profile: a whole run end to end (launch, reattaching until the tab shows,
