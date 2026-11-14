@@ -42,10 +42,10 @@ Six criteria decide the ranking. The first two count most:
 | 1 | Official API (open finance, developer API, user-issued keys) | `open_banking` / `http_api` | yes | high | httpx | Buda (`institutions/buda.py`) |
 | 2 | Maintained library or aggregator | `fintself` or the library's own technique | usually | depends on the library | the library's | BanChile once ran on `fintself` (see `V008` backfill) |
 | 3 | Private web API over plain HTTP, login reproduced | `http_api` | yes, or with a cached session | medium | httpx | Fintual (`institutions/fintual.py`) |
-| 4 | Passive feeds: notification or statement e-mails over IMAP | `email` | yes | medium-high | IMAP | MACH, MercadoPago, Tenpo (`backends/email.py`) |
+| 4 | Passive feeds: notification or statement e-mails over IMAP | `email` | yes | medium-high | IMAP | MACH, Tenpo (`backends/email.py`) |
 | 5 | Headless browser for login, private API for data | `web` | yes | medium | Chromium | BanChile movements (`backends/banchile_movements.py`) |
 | 6 | Headless browser DOM scraping | `web` | yes | low | Chromium | BanChile balances (`backends/banchile_web.py`) |
-| 7 | Real Chrome over CDP (genuine browser, anti-bot) | `web` | partly: needs a display, some logins need a human | low-medium | Chrome + display | BCI Lider (`backends/bci_lider_web.py`) |
+| 7 | Real Chrome over CDP (genuine browser, anti-bot) | `web` | partly: needs a display, some logins need a human | low-medium | Chrome + display | BCI Lider (`backends/bci_lider_web.py`), Mercado Pago (`backends/mercadopago_web.py`) |
 | 8 | Mobile app private API, reverse-engineered | `http_api` (or a new `mobile_api`) | yes once built | low | httpx, plus device-bound secrets | none yet |
 | 9 | Native app UI automation on an emulator or device | new `mobile_app` | fragile | very low | Android SDK, emulator, Appium | none yet |
 
@@ -64,9 +64,10 @@ dashboard may label methods.
    endpoint?" before you write a selector.
 3. **One source per product.** Two sources feeding the same product's
    transactions double-count, since their ids never match. Portals often
-   expose two overlapping feeds: an "activity" stream and the ledger. During
-   an unmerged Mercado Pago web experiment, the activity feed overlapped the
-   ledger and lacked interest rows. Pick the ledger.
+   expose two overlapping feeds: an "activity" stream and the ledger. Mercado
+   Pago's activity feed overlaps its wallet ledger, lacks the interest rows
+   and adds purchases paid with other cards where it was only the gateway.
+   Pick the ledger.
 4. **Re-evaluate after stepping down.** Once a lower rung is unavoidable for one
    leg, check the other leg again. Reading both legs from that one session
    (BCI Lider caches one browser result for both legs) usually beats adding a
@@ -218,7 +219,7 @@ rotating keys, WebAuthn-only), or a bot challenge guards it.
 ## Rung 4: passive feeds (e-mail)
 
 **What.** Read what the institution already sends you: per-transaction
-notification e-mails (MACH, MercadoPago, Tenpo), or periodic statement e-mails
+notification e-mails (MACH, Tenpo), or periodic statement e-mails
 with a PDF or CSV attached. No login to the institution at all.
 
 **Strengths.** Zero account risk, no browser, survives portal redesigns, and the
@@ -307,14 +308,21 @@ when the browser is relaunched.
 **What.** Drive a genuine Chrome (the user's binary, a persistent profile)
 through `playwright.chromium.connect_over_cdp`. A real browser passes checks
 that a Playwright-launched one fails (BCI Lider's Turnstile), and keeps a
-session some portals bind to the browser instance. A relaunched browser lost
-the session even with the same profile in an unmerged Mercado Pago
-experiment.
+session a human had to open (Mercado Pago, whose login cannot be automated).
+Check during recon whether a relaunch on the same profile keeps the session:
+Mercado Pago's persistent profile does (verified live across repeated launch
+and SIGTERM teardown cycles of the managed Chrome), though an early
+experiment there once lost it.
 
-**Two modes (both in `backends/bci_lider_web.py`):**
+The generic plumbing (find the binary, launch on a debug port, connect, find
+a tab, terminate) is `backends/real_chrome.py`: start from it.
+
+**Two modes (both in `backends/bci_lider_web.py` and
+`backends/mercadopago_web.py`):**
 - **Managed** (unattended): launch a headed Chrome off-screen, sign in with
-  autofill, scrape, then terminate the process group. Needs a display, so it
-  can't run in headless Docker.
+  autofill (or reuse the profile's session, when only a human can sign in),
+  scrape, then terminate the process group. Needs a display, so it can't run
+  in headless Docker.
 - **Reuse:** a long-lived Chrome started by `make <slug>-login`, where the human
   signs in once. The scraper attaches via `<SLUG>_CDP_URL` and reuses the
   signed-in tab.
@@ -323,11 +331,24 @@ experiment.
 - Submit only once the challenge token is present; never click the check
   yourself.
 - Prefer a **fetch-only contract**: read data with in-page `fetch()` from
-  the parked tab and never navigate. In that same unmerged experiment,
-  navigating to the portal's home route re-triggered the auth step-up and
-  killed the session.
+  the parked tab and never navigate (`backends/mercadopago_web.py`: a fixed
+  allowlist of pages, `redirect: 'manual'`, a redirect means the session is
+  gone; verified live, the read works under the portal's content security
+  policy). In an early Mercado Pago experiment, navigating to the portal's
+  home route re-triggered the auth step-up and killed the session.
 - A tab stuck loading can make `connect_over_cdp` hang for its whole timeout.
   Recover through the CDP HTTP endpoints (`/json/new`, `/json/close/<id>`).
+- A connection made while a tab is still loading can hold that tab with an
+  empty `page.url` and never learn the real one, while Chrome's own
+  `/json/list` already shows it (verified live on Mercado Pago). Let the
+  target list say where the tab is and attach only when it is on the portal,
+  over fresh connections (`_with_portal_tab` in
+  `backends/mercadopago_web.py`, verified live to resolve it). That also
+  keeps automation off the sign-in pages. Never read an empty URL as "signed
+  out".
+- Tear the browser down by asking the browser process alone first
+  (`real_chrome.terminate_chrome`): a signal to the whole process group ends
+  the child that owns the cookie store before it has written it.
 - Sessions expire on their own. Raise a clear "re-run `make <slug>-login`"
   error instead of retrying into a lockout.
 - Drive the browser once per cycle: the transactions leg caches its result

@@ -285,6 +285,12 @@ def _write_price_histories(
     ]
 
 
+def _env_flag(name: str) -> bool:
+    """Whether the opt-in flag `name` is on: set, and not 0/false/no/off."""
+    value = os.environ.get(name, "").strip().lower()
+    return value not in ("", "0", "false", "no", "off")
+
+
 def build_scrapers() -> dict[str, BaseScraper]:
     """Instantiate only scrapers whose credentials are configured."""
     scrapers: dict[str, BaseScraper] = {}
@@ -321,14 +327,20 @@ def build_scrapers() -> dict[str, BaseScraper]:
         scrapers["banco_falabella"] = BancoFalabellaScraper()
         logger.info("Banco Falabella scraper enabled")
 
+    # Mercado Pago has no credential to gate on: auth is the Chrome profile a
+    # human signed in to (make mercadopago-login), so it is opt-in by flag; a
+    # missing or expired session surfaces as a run error.
+    if _env_flag("MERCADOPAGO_ENABLED"):
+        scrapers["mercadopago"] = MercadoPagoScraper()
+        logger.info("MercadoPago scraper enabled")
+
     if all(
         os.environ.get(k)
         for k in ("EMAIL_IMAP_HOST", "EMAIL_IMAP_USER", "EMAIL_IMAP_PASSWORD")
     ):
         # MACH is disabled: its email parser produced transactions that never happened.
-        scrapers["mercadopago"] = MercadoPagoScraper()
         scrapers["tenpo"] = TenpoScraper()
-        logger.info("Email-based scrapers enabled: mercadopago, tenpo")
+        logger.info("Email-based scrapers enabled: tenpo")
 
     return scrapers
 
@@ -354,8 +366,10 @@ _SCHEDULES: dict[str, dict] = {
     "bci_lider":    {"hours": 24, "label": "BCI Lider (daily)"},
     "santander":    {"hours": 24, "label": "Santander (daily)"},
     "banco_falabella": {"hours": 24, "label": "Banco Falabella (daily)"},
+    # No login per run (the Chrome profile holds the session), so it can run
+    # more often than the daily browser logins.
+    "mercadopago":  {"hours": 6,  "label": "MercadoPago (every 6h)"},
     "mach":         {"minutes": _EMAIL_INTERVAL_MINUTES, "label": "MACH email (every 30m)"},
-    "mercadopago":  {"minutes": _EMAIL_INTERVAL_MINUTES, "label": "MercadoPago email (every 30m)"},
     "tenpo":        {"minutes": _EMAIL_INTERVAL_MINUTES, "label": "Tenpo email (every 30m)"},
 }
 

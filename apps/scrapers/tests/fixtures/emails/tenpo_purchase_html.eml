@@ -1,8 +1,8 @@
-From: Mercado Pago <info@mercadopago.cl>
+From: Tenpo <notificaciones@tenpo.cl>
 To: Usuario Sintetico <usuario@example.com>
-Subject: Tu pago fue aprobado
+Subject: Tu compra fue aprobada
 Date: Sun, 20 Sep 2026 14:20:00 -0300
-Message-ID: <synthetic-mp-payment@example.com>
+Message-ID: <synthetic-tenpo-purchase-html@example.com>
 X-Fixture: synthetic
 MIME-Version: 1.0
 Content-Type: text/html; charset="utf-8"
@@ -12,12 +12,12 @@ Content-Type: text/html; charset="utf-8"
 <div class="preheader">Invita a tus amigos y gana hasta &#36;&nbsp;1.000.000</div>
 <table>
   <tr>
-    <td>Pagaste&nbsp;&#36;&nbsp;999.999 a <b>COMERCIO SINTETICO</b>.</td>
+    <td>Realizaste una compra por&nbsp;&#36;&nbsp;999.999 en <b>COMERCIO SINTETICO</b>.</td>
   </tr>
   <tr>
     <td>Total</td>
     <td>&#36;&nbsp;999.999</td>
   </tr>
 </table>
-<p>Mercado Pago &middot; correo sint&eacute;tico de prueba</p>
+<p>Tenpo &middot; correo sint&eacute;tico de prueba</p>
 </body></html>

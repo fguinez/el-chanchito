@@ -41,7 +41,6 @@ from scrapers.backends.email import (
     parse_transaction,
 )
 from scrapers.institutions.mach import PATTERN as MACH_PATTERN
-from scrapers.institutions.mercadopago import PATTERN as MP_PATTERN
 from scrapers.institutions.tenpo import PATTERN as TENPO_PATTERN
 
 APP_DIR = Path(__file__).resolve().parents[1]
@@ -92,13 +91,13 @@ class TestParseAmount:
         """A figure no anchor claims is not a transaction."""
         text = "Obten hasta $ 1.000.000 en descuentos."
 
-        assert _parse_amount(text, MP_PATTERN.amount_rules) is None
+        assert _parse_amount(text, TENPO_PATTERN.amount_rules) is None
 
     def test_earliest_anchor_wins_across_rules(self):
         """A refund that restates the purchase is still a refund of its own figure."""
         text = "Te devolvimos $ 999.999 de tu compra de $ 1.000.000."
 
-        assert _parse_amount(text, MP_PATTERN.amount_rules) == (999_999, True)
+        assert _parse_amount(text, MACH_PATTERN.amount_rules) == (999_999, True)
 
     def test_label_and_value_in_separate_lines(self):
         """HTML tables put the label and the figure in different cells."""
@@ -137,23 +136,23 @@ class TestParseAmount:
 
 class TestParseMerchant:
     def test_bare_preposition_does_not_anchor(self):
-        """MercadoPago's merchant needs the verb, not any "a" in the body."""
-        text = "Hola a todos. Pagaste $ 999.999 a COMERCIO SINTETICO. Gracias"
+        """A transfer's recipient needs the verb, not any "a" in the body."""
+        text = "Hola a todos. Transferiste $ 999.999 a Persona Sintetica. Gracias"
 
-        assert _parse_merchant(text, MP_PATTERN.merchant_patterns) == "COMERCIO SINTETICO"
+        assert _parse_merchant(text, MACH_PATTERN.merchant_patterns) == "Persona Sintetica"
 
     def test_merchant_without_amount(self):
         assert (
-            _parse_merchant("Pagaste en COMERCIO SINTETICO.\nOtro texto", MP_PATTERN.merchant_patterns)
+            _parse_merchant("Compraste en COMERCIO SINTETICO.\nOtro texto", MACH_PATTERN.merchant_patterns)
             == "COMERCIO SINTETICO"
         )
 
     def test_runaway_capture_is_rejected(self):
         """A capture longer than any merchant name is not one."""
-        assert _parse_merchant("comercio: " + "A" * 200 + ".", MP_PATTERN.merchant_patterns) is None
+        assert _parse_merchant("comercio: " + "A" * 200 + ".", MACH_PATTERN.merchant_patterns) is None
 
     def test_no_match(self):
-        assert _parse_merchant("Notificacion de seguridad", MP_PATTERN.merchant_patterns) is None
+        assert _parse_merchant("Notificacion de seguridad", MACH_PATTERN.merchant_patterns) is None
 
 
 class TestStripHtml:
@@ -177,8 +176,8 @@ class TestDomainMatches:
             ("mail.somosmach.com", "somosmach", True),
             ("notsomosmach.com", "somosmach", False),
             ("bci.cl", "somosmach", False),
-            ("mercadopago.cl", "mercadopago.cl", True),
-            ("mercadopago.com", "mercadopago.cl", False),
+            ("tenpo.cl", "tenpo.cl", True),
+            ("tenpo.com", "tenpo.cl", False),
             ("", "tenpo", False),
         ],
     )
@@ -192,7 +191,7 @@ class TestSenderDomain:
         [
             ("MACH <notificaciones@somosmach.com>", "somosmach.com"),
             ("Tenpo, Notificaciones  <notificaciones@TENPO.cl>", "tenpo.cl"),
-            ("info@mercadopago.cl", "mercadopago.cl"),
+            ("info@tenpo.cl", "tenpo.cl"),
             ("Sin direccion", ""),
         ],
     )
@@ -207,17 +206,13 @@ class TestMatchPattern:
     @pytest.mark.parametrize(
         ("from_addr", "subject", "pattern", "expected"),
         [
-            ("noreply@mercadopago.cl", "Tu pago fue exitoso", MP_PATTERN, True),
-            ("info@mercadolibre.cl", "Compra realizada", MP_PATTERN, True),
             ("notificaciones@somosmach.com", "Compra aprobada", MACH_PATTERN, True),
             ("info@tenpo.cl", "Transacción exitosa", TENPO_PATTERN, True),
-            ("NoReply@MercadoPago.CL", "PAGO EXITOSO", MP_PATTERN, True),
-            ("noreply@mercadopago.cl", "Bienvenido a MercadoPago", MP_PATTERN, True),
-            ("noreply@mercadopago.cl", "Actualiza tu perfil", MP_PATTERN, False),
+            ("Notificaciones@SomosMach.COM", "COMPRA APROBADA", MACH_PATTERN, True),
+            ("notificaciones@somosmach.com", "Actualiza tu perfil", MACH_PATTERN, False),
             ("Banco Bci <notificaciones@bci.cl>", "Compra aprobada", MACH_PATTERN, False),
             ("MACH <alertas@bci.cl>", "Compra aprobada", MACH_PATTERN, False),
             ("machuca@example.com", "Compra aprobada", MACH_PATTERN, False),
-            ("noreply@other.com", "Compra aprobada", MP_PATTERN, False),
             ("noreply@other.com", "Compra aprobada", TENPO_PATTERN, False),
         ],
         ids=lambda v: v.institution if hasattr(v, "institution") else None,
@@ -236,10 +231,8 @@ class TestParseTransaction:
             ("mach_purchase.eml", MACH_PATTERN, -999_999, "COMERCIO SINTETICO", date(2026, 9, 20)),
             ("mach_transfer_in.eml", MACH_PATTERN, 1_000_000, "Persona Sintetica", date(2026, 9, 20)),
             ("mach_transfer_out.eml", MACH_PATTERN, -2_500_000, "Persona Sintetica", date(2026, 9, 19)),
-            ("mp_payment.eml", MP_PATTERN, -999_999, "COMERCIO SINTETICO", date(2026, 9, 20)),
-            ("mp_money_received.eml", MP_PATTERN, 1_000_000, "Persona Sintetica", date(2026, 9, 20)),
-            ("mp_refund.eml", MP_PATTERN, 999_999, "COMERCIO SINTETICO", date(2026, 9, 20)),
             ("tenpo_purchase.eml", TENPO_PATTERN, -999_999, "COMERCIO SINTETICO", date(2026, 9, 20)),
+            ("tenpo_purchase_html.eml", TENPO_PATTERN, -999_999, "COMERCIO SINTETICO", date(2026, 9, 20)),
             ("tenpo_refund.eml", TENPO_PATTERN, 999_999, "COMERCIO SINTETICO", date(2026, 9, 20)),
             ("tenpo_transfer_in.eml", TENPO_PATTERN, 1_000_000, "Persona Sintetica", date(2026, 9, 20)),
             ("tenpo_cashback.eml", TENPO_PATTERN, 999_999, "Recibiste cashback", date(2026, 9, 20)),
@@ -261,13 +254,34 @@ class TestParseTransaction:
         ("fixture", "pattern"),
         [
             ("bci_bank_purchase.eml", MACH_PATTERN),
-            ("mp_promo.eml", MP_PATTERN),
+            ("tenpo_promo.eml", TENPO_PATTERN),
             ("tenpo_zero_amount.eml", TENPO_PATTERN),
         ],
     )
     def test_not_a_transaction(self, fixture, pattern):
         """A Banco Bci email, a promo, and a zero amount yield nothing."""
         assert parse_transaction(load(fixture), pattern) is None
+
+    def test_html_only_mail_reads_the_anchored_figure_not_the_hidden_one(self):
+        """A single-part text/html mail: the style block and the hidden
+        preheader's decoy figure are ignored, and entities decode first."""
+        msg = load("tenpo_purchase_html.eml")
+
+        tx = parse_transaction(msg, TENPO_PATTERN)
+
+        assert not msg.is_multipart()
+        assert msg.get_content_type() == "text/html"
+        assert "&#36;&nbsp;1.000.000" in msg.get_payload()
+        assert (tx.amount, tx.description) == (-999_999, "TENPO - COMERCIO SINTETICO")
+
+    def test_a_promo_that_passes_the_subject_filter_is_skipped_visibly(self, caplog):
+        """Its figure is anchored by no rule: no transaction, and a log line."""
+        caplog.set_level(logging.INFO, logger=email_mod.__name__)
+        msg = load("tenpo_promo.eml")
+
+        assert _match_pattern(msg["From"], msg["Subject"], TENPO_PATTERN) is True
+        assert parse_transaction(msg, TENPO_PATTERN) is None
+        assert "no amount rule anchors" in caplog.text
 
     def test_zero_amount_is_logged(self, caplog):
         """A zero amount is skipped with a debug line naming the subject."""
