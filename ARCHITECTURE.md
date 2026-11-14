@@ -847,7 +847,25 @@ Both legs share one drive per cycle: `scrape_transactions` opens it and
 caches the result for `scrape_products` (an error is re-raised, never
 retried). The products leg emits the singleton
 CLP `wallet` with its balance and one CLP `savings` product per pot
-(`external_ref` `mp_pot_<uuid>`, named after the pot). The transactions leg
+(`external_ref` `mp_pot_<uuid>`, named after the pot). When the pots page
+was read in full (success status, no pot skipped), it also declares the pots
+as a complete listing (`VanishedProductScope`): once every product of the leg
+is written, `run_scraper` calls `db/writer.py::retire_vanished_products`.
+An active stored pot the listing lacks is first only stamped
+`vanished_pending_since` (one missed listing may be a glitch); the next
+complete listing that still lacks it deactivates it, writes a zero-balance
+snapshot (history kept, net worth stops counting it) and swaps the pending
+stamp for `retired_by_scraper` / `retired_by_scraper_at`. The counts join
+the run's `scraper_runs.error_message` as `retired:` / `pending:` notes,
+which never change its status (a clean run stays `success`; the dashboard
+expands any finished run with a message). `upsert_product` locks the row,
+clears the stamps whenever it sees the pot (frozen ones included) and
+reactivates only a pot carrying `retired_by_scraper`; one the user
+deactivated (no stamp) stays frozen. The product PATCH in
+`apps/web/src/lib/management.ts` drops all three keys whenever it changes
+`isActive`, so a hand deactivation is never undone by a scrape and a hand
+reactivation starts clean. A failed or partial pots read declares nothing,
+so it neither advances nor clears a pending stamp. The transactions leg
 emits the ledger rows on the wallet (the newest
 `MERCADOPAGO_MOVEMENT_PAGES` pages of 100, default 1; 0 reads every page,
 capped at 50), with the ledger's sign (negative is money out) and its UTC
