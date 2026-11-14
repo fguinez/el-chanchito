@@ -21,20 +21,20 @@ from scrapers.backends.banchile_movements import (
     BanChileMovement,
     BanChileStatement,
     BilledLegRead,
-    billed_leg_from_statements,
-    card_location,
-    merge_locations,
     _read_card_billed,
     _read_card_billed_usd,
     _read_card_unbilled,
+    billed_leg_from_statements,
     billed_reference,
+    card_location,
     cartola_account_number,
     cartola_has_more_pages,
     dedupe_movements,
-    drop_unbilled_duplicates,
     detail_glosa_body,
+    drop_unbilled_duplicates,
     international_statement_dates,
     is_international,
+    merge_locations,
     needs_detail_glosa,
     operation_id_from_detail,
     operation_id_from_glosa,
@@ -179,9 +179,7 @@ class TestOperationIdFromGlosa:
         assert operation_id_from_glosa(glosa) == "12345678901"
 
     def test_tolerates_the_accent_and_casing(self):
-        assert operation_id_from_glosa(["ID TRANSACCIÓN: TEF_IPE00000001"]) == (
-            "TEF_IPE00000001"
-        )
+        assert operation_id_from_glosa(["ID TRANSACCIÓN: TEF_IPE00000001"]) == ("TEF_IPE00000001")
 
     def test_free_form_fija_glosa_yields_nothing(self):
         """The SPA's `detalleGlosa[0] == "Fija"` shape has no label/value lines."""
@@ -203,9 +201,7 @@ class TestOperationIdFromGlosa:
 
 class TestOperationIdFromDetail:
     def test_reads_transaccion_id(self):
-        assert operation_id_from_detail({"transaccionId": "TEFMBCO00000001"}) == (
-            "TEFMBCO00000001"
-        )
+        assert operation_id_from_detail({"transaccionId": "TEFMBCO00000001"}) == ("TEFMBCO00000001")
 
     def test_error_bodies_mean_no_id(self):
         """501 ("Glosa aun no implementada") and 503 are not failures."""
@@ -526,9 +522,7 @@ class TestBilledFingerprintCollisions:
     """Identical reference-less rows of one statement keep distinct keys (fix B)."""
 
     def _payment(self, referencia):
-        return _billed_row(
-            referencia=referencia, monto=1000000, fecha="07/09/2026", grupo="pagos"
-        )
+        return _billed_row(referencia=referencia, monto=1000000, fecha="07/09/2026", grupo="pagos")
 
     def test_two_identical_payments_both_survive(self):
         """Same day, amount and card: only the all-zero reference differs."""
@@ -555,7 +549,7 @@ class TestBilledFingerprintCollisions:
 
         # Assert
         assert external_id_for(first) == external_id_for(single[0])
-        assert second.fingerprint == first.fingerprint + ("0809 00000000",)
+        assert second.fingerprint == (*first.fingerprint, "0809 00000000")
 
     def test_fully_identical_rows_get_an_occurrence_counter(self):
         """Even the raw reference can repeat; a counter still separates them."""
@@ -579,9 +573,7 @@ class TestBilledFingerprintCollisions:
         second_read = parse_billed_movements(_billed_payload(rows), "2026-09-22")
 
         # Assert
-        assert [external_id_for(m) for m in first_read] == [
-            external_id_for(m) for m in second_read
-        ]
+        assert [external_id_for(m) for m in first_read] == [external_id_for(m) for m in second_read]
 
     def test_dedupe_keeps_both(self):
         """`dedupe_movements` no longer collapses the pair into one."""
@@ -637,9 +629,7 @@ class TestBilledSectionReferenceKeys:
         alone = parse_billed_movements(_billed_payload([self._purchase()]), "2026-08-25")
 
         # Act
-        purchase, _ = parse_billed_movements(
-            self._payload([self._stamp_tax()]), "2026-08-25"
-        )
+        purchase, _ = parse_billed_movements(self._payload([self._stamp_tax()]), "2026-08-25")
 
         # Assert
         assert purchase.reference_tag == ""
@@ -683,9 +673,7 @@ class TestBilledSectionReferenceKeys:
         second_read = parse_billed_movements(payload, "2026-08-25")
 
         # Assert
-        assert [external_id_for(m) for m in first_read] == [
-            external_id_for(m) for m in second_read
-        ]
+        assert [external_id_for(m) for m in first_read] == [external_id_for(m) for m in second_read]
 
     def test_dedupe_keeps_every_tagged_row_and_drops_a_replay(self):
         """Repeats within a statement survive; the statement read twice does not."""
@@ -1018,9 +1006,10 @@ class TestCartolaDates:
         assert parse_cartola_movement(row).fingerprint == (
             parse_cartola_movement(shifted).fingerprint
         )
-        assert len(dedupe_movements(
-            [parse_cartola_movement(row), parse_cartola_movement(shifted)]
-        )) == 1
+        assert (
+            len(dedupe_movements([parse_cartola_movement(row), parse_cartola_movement(shifted)]))
+            == 1
+        )
 
 
 class TestAllZeroOperationId:
@@ -1033,9 +1022,7 @@ class TestAllZeroOperationId:
         assert operation_id_from_detail({"transaccionId": "00000000000"}) is None
 
     def test_a_real_id_containing_zeros_survives(self):
-        assert operation_id_from_detail({"transaccionId": "TEF_IPE00000001"}) == (
-            "TEF_IPE00000001"
-        )
+        assert operation_id_from_detail({"transaccionId": "TEF_IPE00000001"}) == ("TEF_IPE00000001")
 
 
 class TestBilledSigns:
@@ -1054,9 +1041,7 @@ class TestBilledSigns:
         Negating it would import the month's card payment, typically the
         largest line on the statement, as a charge.
         """
-        assert self._amount(monto=2500000, grupo="pagos", referencia="2008 00000000") == (
-            2500000
-        )
+        assert self._amount(monto=2500000, grupo="pagos", referencia="2008 00000000") == (2500000)
 
     def test_a_negative_pagos_row_is_still_income(self):
         assert self._amount(monto=-2500000, grupo="pagos") == 2500000
@@ -1192,9 +1177,7 @@ class TestSharedSession:
         ]
         assert result.failed_surfaces == ("card", "tarjeta facturados")
 
-    def test_a_certain_login_is_refused_before_launching_chromium(
-        self, tmp_path, monkeypatch
-    ):
+    def test_a_certain_login_is_refused_before_launching_chromium(self, tmp_path, monkeypatch):
         """A login attempt just now and no cached session: nothing to launch."""
         monkeypatch.setenv("BANCHILE_SESSION_FILE", str(tmp_path / ".banchile_session.json"))
         monkeypatch.delenv("BANCHILE_LOGIN_COOLDOWN_MINUTES", raising=False)
@@ -1248,9 +1231,7 @@ class TestUnbilledCurrency:
         assert movement.amount == Decimal("1234.56")
 
     def test_float_noise_never_reaches_the_cents(self):
-        movement = parse_unbilled_movement(
-            _unbilled_row(monto=0.1 + 0.2, origen="INT")
-        )
+        movement = parse_unbilled_movement(_unbilled_row(monto=0.1 + 0.2, origen="INT"))
         assert movement.amount == Decimal("-0.30")
 
     def test_usd_fingerprint_renders_the_amount_canonically(self):
@@ -1279,12 +1260,8 @@ class TestUnbilledCurrency:
 
     def test_legacy_rounding_is_bankers_rounding(self):
         """Python's round(12.5) is 12; the legacy rows hold exactly that."""
-        assert parse_unbilled_movement(
-            _unbilled_row(monto=12.5, origen="INT")
-        ).legacy_amount == -12
-        assert parse_unbilled_movement(
-            _unbilled_row(monto=13.5, origen="INT")
-        ).legacy_amount == -14
+        assert parse_unbilled_movement(_unbilled_row(monto=12.5, origen="INT")).legacy_amount == -12
+        assert parse_unbilled_movement(_unbilled_row(monto=13.5, origen="INT")).legacy_amount == -14
 
     def test_clp_rows_carry_no_legacy_fields(self):
         movement = parse_unbilled_movement(_unbilled_row())
@@ -1397,9 +1374,7 @@ class TestInternationalBilled:
         """Same section, day, amount and bare `numeroDocumento`: neither is dropped."""
         # Arrange
         payment = _intl_row(numero_documento="2008", monto=-12.5, grupo="pagos")
-        single = parse_international_billed_movements(
-            _intl_payload(pagos=[payment]), "2026-08-25"
-        )
+        single = parse_international_billed_movements(_intl_payload(pagos=[payment]), "2026-08-25")
 
         # Act
         parsed = dedupe_movements(
@@ -1439,9 +1414,7 @@ class TestInternationalBilled:
         assert len(parse_international_billed_movements(payload)) == 1
 
     def test_a_purchase_is_keyed_on_its_reference(self):
-        (movement,) = parse_international_billed_movements(
-            _intl_payload(compras=[_intl_row()])
-        )
+        (movement,) = parse_international_billed_movements(_intl_payload(compras=[_intl_row()]))
         assert movement.operation_id == "2008 " + "1" * 23
 
     def test_payments_fall_back_to_a_fingerprint(self):
@@ -1684,9 +1657,7 @@ class TestStatementSummary:
         assert (summary.billed_amount, summary.minimum_payment) == (999999.0, 100000.0)
 
     def test_the_usd_statement_has_no_minimum_payment(self):
-        summary = parse_statement_summary(
-            _statement_payload(facturado=1234.56, minimo=None), "USD"
-        )
+        summary = parse_statement_summary(_statement_payload(facturado=1234.56, minimo=None), "USD")
         assert summary.currency == "USD"
         assert summary.billed_amount == 1234.56
         assert summary.minimum_payment is None
@@ -1770,9 +1741,7 @@ class TestStatementOrder:
     def test_a_replay_answered_with_another_statement_tags_nothing(self):
         """Its rows keep their keys but report no billing status or date."""
         wrong = _statement_payload([_billed_row()], actual="05/08/2026")
-        right = _statement_payload(
-            [_billed_row(referencia="0509 11111111")], actual="05/09/2026"
-        )
+        right = _statement_payload([_billed_row(referencia="0509 11111111")], actual="05/09/2026")
 
         read = self._read([("2026-09-05", right), ("2026-07-05", wrong)])
 
@@ -1910,9 +1879,7 @@ class TestCardLocation:
         assert movement.location == TransactionLocation(city="CIUDAD SINTETICA")
 
     def test_a_usd_statement_row_reads_ciudad_comercio_and_pais(self):
-        (movement,) = parse_international_billed_movements(
-            _intl_payload(compras=[_intl_row()])
-        )
+        (movement,) = parse_international_billed_movements(_intl_payload(compras=[_intl_row()]))
         assert movement.location == _PLACE
 
     def test_codigo_pais_is_only_a_fallback(self):
@@ -1931,9 +1898,7 @@ class TestCardLocation:
 
     def test_values_are_trimmed_and_not_recased(self):
         location = card_location("  Ciudad Sintetica ", "PAIS SINTETICO ")
-        assert location == TransactionLocation(
-            city="Ciudad Sintetica", country="PAIS SINTETICO"
-        )
+        assert location == TransactionLocation(city="Ciudad Sintetica", country="PAIS SINTETICO")
 
     def test_an_unstorable_value_drops_the_location_not_the_movement(self):
         movement = parse_unbilled_movement(_unbilled_row(ciudad="X" * 500))
@@ -1959,9 +1924,7 @@ class TestCardLocation:
     def test_a_dropped_twin_fills_the_billed_rows_gaps_field_by_field(self):
         """The billed leg wins per field; the unbilled one only fills gaps."""
         unbilled = parse_unbilled_movement(
-            _unbilled_row(
-                monto=1234.56, origen="INT", ciudad="OTRA", pais="PAIS SINTETICO"
-            )
+            _unbilled_row(monto=1234.56, origen="INT", ciudad="OTRA", pais="PAIS SINTETICO")
         )
         (billed,) = parse_international_billed_movements(
             _intl_payload(compras=[_intl_row(ciudad="CIUDAD SINTETICA", pais="")])
@@ -1975,9 +1938,7 @@ class TestCardLocation:
         unbilled = parse_unbilled_movement(
             _unbilled_row(monto=1234.56, origen="INT", ciudad="OTRA")
         )
-        (billed,) = parse_international_billed_movements(
-            _intl_payload(compras=[_intl_row()])
-        )
+        (billed,) = parse_international_billed_movements(_intl_payload(compras=[_intl_row()]))
 
         (kept,) = drop_unbilled_duplicates([unbilled, billed])
 
@@ -2013,9 +1974,7 @@ class TestReadSession:
     """One page, every read: products, then the USD card rate, then movements."""
 
     def _patch(self, monkeypatch, calls, rates=(), rate_failed=()):
-        product = ScrapedProduct(
-            institution="banchile", kind="credit_card", currency="USD"
-        )
+        product = ScrapedProduct(institution="banchile", kind="credit_card", currency="USD")
         movement = BanChileMovement(
             source="card_billed",
             product_kind="credit_card",
@@ -2061,13 +2020,9 @@ class TestReadSession:
         assert result.movements == [movement]
         assert result.failed_surfaces == ("línea", "movimientos")
 
-    def test_a_failed_rate_is_a_failed_surface_and_costs_nothing_else(
-        self, monkeypatch
-    ):
+    def test_a_failed_rate_is_a_failed_surface_and_costs_nothing_else(self, monkeypatch):
         calls = []
-        product, movement = self._patch(
-            monkeypatch, calls, rate_failed=("tipo de cambio",)
-        )
+        product, movement = self._patch(monkeypatch, calls, rate_failed=("tipo de cambio",))
 
         result = read_session(MagicMock())
 
@@ -2495,9 +2450,7 @@ class TestDialogSteps:
 
     def test_a_remembered_account_reopens_the_dialog_with_its_button(self):
         """Once an account is remembered the route shows no dialog by itself."""
-        page = _FakeDialogPage(
-            remembered=True, cartolas={"CLP": {"movimientos": [_cartola_row()]}}
-        )
+        page = _FakeDialogPage(remembered=True, cartolas={"CLP": {"movimientos": [_cartola_row()]}})
 
         found = movements_mod._read_checking_movements(page, attempt=0)
 
@@ -2509,9 +2462,7 @@ class TestDialogSteps:
         second["id"] = "CTD00-000-00000-03:20260820 12:41:33:1000000:abono:1"
         page = _FakeDialogPage(
             radios={"CLP": [_CLP_RADIO, "Cuenta Vista 00-000-00000-03 (CLP)"]},
-            cartolas={
-                "CLP": [{"movimientos": [_cartola_row()]}, {"movimientos": [second]}]
-            },
+            cartolas={"CLP": [{"movimientos": [_cartola_row()]}, {"movimientos": [second]}]},
         )
 
         found = movements_mod._read_checking_movements(page, attempt=0)
@@ -2975,9 +2926,7 @@ class TestUsdAndClpNeverCollide:
         them, and `external_id` is unique per product), and one scrape keeps
         both."""
         clp = parse_cartola_movement(_cartola_row(), operation_id="12345678901")
-        usd = parse_cartola_movement(
-            _usd_cartola_row(), operation_id="12345678901", currency="USD"
-        )
+        usd = parse_cartola_movement(_usd_cartola_row(), operation_id="12345678901", currency="USD")
         assert (clp.currency, usd.currency) == ("CLP", "USD")
         assert dedupe_movements([clp, usd]) == [clp, usd]
 

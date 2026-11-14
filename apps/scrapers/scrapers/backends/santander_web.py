@@ -57,7 +57,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
@@ -139,15 +139,15 @@ class SantanderMovement:
     """
 
     transaction_date: date
-    accounting_date: Optional[date]
+    accounting_date: date | None
     amount: Decimal
     currency: str
     description: str
-    movement_number: Optional[str]
+    movement_number: str | None
     raw_amount: str
     raw_balance: str
     flag: str
-    new_balance: Optional[Decimal] = None
+    new_balance: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -178,7 +178,7 @@ def _text(value: Any) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def parse_cents(raw: Any) -> Optional[Decimal]:
+def parse_cents(raw: Any) -> Decimal | None:
     """A zero-padded string of cents ("000000000250000000") as a Decimal.
 
     Santander pads every amount with leading zeros and keeps two implied
@@ -198,7 +198,7 @@ def parse_cents(raw: Any) -> Optional[Decimal]:
     return -value if "-" in (leading, trailing) else value
 
 
-def parse_iso_date(raw: Any) -> Optional[date]:
+def parse_iso_date(raw: Any) -> date | None:
     """The calendar date at the start of an ISO string, as printed.
 
     The API reports dates as "YYYY-MM-DD" optionally followed by a time; only
@@ -311,7 +311,7 @@ def _description(row: dict) -> str:
     return "Movimiento Santander"
 
 
-def _movement_number(raw: Any) -> Optional[str]:
+def _movement_number(raw: Any) -> str | None:
     """`movementNumber` without its zero padding; None when absent or all zeros."""
     text = _text(raw)
     if not _DIGITS_RE.match(text):
@@ -324,9 +324,7 @@ SKIP_ZERO = "zero"
 SKIP_SIGN_MISMATCH = "sign_mismatch"
 
 
-def parse_movement(
-    row: Any, currency: str = "CLP"
-) -> tuple[Optional[SantanderMovement], Optional[str]]:
+def parse_movement(row: Any, currency: str = "CLP") -> tuple[SantanderMovement | None, str | None]:
     """One raw movement, or None and the reason it must be skipped.
 
     Returns `(movement, None)` or `(None, reason)`. The sign comes from the
@@ -431,12 +429,13 @@ def external_id_for(movement: SantanderMovement) -> str:
     return f"san_fp_{digest}"
 
 
-def latest_balance(movements: list[SantanderMovement]) -> Optional[Decimal]:
+def latest_balance(movements: list[SantanderMovement]) -> Decimal | None:
     """The running balance after the most recent movement, when reported.
 
     "Most recent" is the latest posting (else occurrence) date, then the
     highest movement number; movements without a balance are ignored.
     """
+
     def key(movement: SantanderMovement) -> tuple:
         day = movement.accounting_date or movement.transaction_date
         number = int(movement.movement_number) if movement.movement_number else -1
@@ -558,7 +557,7 @@ class SantanderSessionResult:
     the scraper hands to `ProductScrapeResult.warnings`.
     """
 
-    account: Optional[SantanderAccount] = None
+    account: SantanderAccount | None = None
     movements: list[SantanderMovement] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -569,7 +568,7 @@ def _normalized_text(text: str) -> str:
     return "".join(c for c in decomposed if not unicodedata.combining(c)).lower()
 
 
-def find_marker(text: str, markers: tuple[str, ...]) -> Optional[str]:
+def find_marker(text: str, markers: tuple[str, ...]) -> str | None:
     """The first of `markers` present in `text`, matched accent-insensitively."""
     normalized = _normalized_text(text)
     return next((marker for marker in markers if marker in normalized), None)
@@ -607,7 +606,7 @@ class SessionCapture:
 
     def __init__(self) -> None:
         self.products: list[dict] = []
-        self.movements: list[tuple[Optional[str], dict]] = []
+        self.movements: list[tuple[str | None, dict]] = []
         self.headers: dict[str, str] = {}
         self.blocked = False
         # The page's main frame, set once the page exists (block detection).
@@ -653,7 +652,7 @@ class SessionCapture:
         except Exception:
             pass
 
-    def movements_for(self, account_id: str) -> Optional[dict]:
+    def movements_for(self, account_id: str) -> dict | None:
         """The latest movements payload whose request asked for `account_id`.
 
         Strict on purpose: a payload whose request body was unreadable, or
@@ -665,7 +664,7 @@ class SessionCapture:
                 return payload
         return None
 
-    def replay_headers(self) -> Optional[dict[str, str]]:
+    def replay_headers(self) -> dict[str, str] | None:
         """The captured headers a replay needs, or None if any is missing."""
         if not all(self.headers.get(name) for name in _REPLAY_HEADERS_REQUIRED):
             return None
@@ -675,9 +674,7 @@ class SessionCapture:
 
 def _raise_if_blocked(page, capture: SessionCapture) -> None:
     if capture.blocked or _BLOCK_FRAGMENT in (page.url or ""):
-        raise SantanderBlockedError(
-            "Santander's edge served its block page; not retrying this run"
-        )
+        raise SantanderBlockedError("Santander's edge served its block page; not retrying this run")
 
 
 def _launch_browser(playwright, headless: bool):
@@ -723,9 +720,7 @@ def _login_iframe_text(page) -> str:
 
 
 def _raise_step_up() -> None:
-    raise SantanderStepUpError(
-        "Santander asked for a second factor; the scraper cannot answer it"
-    )
+    raise SantanderStepUpError("Santander asked for a second factor; the scraper cannot answer it")
 
 
 def _check_login_texts(page, baseline: str) -> None:
@@ -815,9 +810,7 @@ def _login(page, capture: SessionCapture, rut: str, password: str) -> None:
                 _login_frame(page) is not None,
             )
             if _PRIVATE_HOST in (page.url or ""):
-                raise SantanderPayloadError(
-                    "Santander dashboard did not load the product list"
-                )
+                raise SantanderPayloadError("Santander dashboard did not load the product list")
             raise SantanderLoginError("Santander login did not reach the private site")
         page.wait_for_timeout(_POLL_MS)
 
@@ -865,7 +858,7 @@ def _open_movements_view(page) -> bool:
 
 def _replay_movements(
     page, capture: SessionCapture, account: SantanderAccount, today: date
-) -> tuple[int, Optional[dict]]:
+) -> tuple[int, dict | None]:
     """POST the transactions call from inside the page, as the SPA would.
 
     Only with headers the SPA itself sent in this session (nothing is ever
@@ -896,7 +889,7 @@ def _replay_movements(
 
 def _read_movements(
     page, capture: SessionCapture, account: SantanderAccount, today: date
-) -> Optional[dict]:
+) -> dict | None:
     """The vista's movements payload: the SPA's own call, else one replay."""
     if _open_movements_view(page):
         payload = _wait_for(
@@ -969,15 +962,11 @@ def read_session(page, capture: SessionCapture, today: date) -> SantanderSession
             f"Santander: {movements.sign_mismatches} movements skipped (sign and "
             "debit/credit flag disagree)"
         )
-    warnings.extend(
-        _balance_unit_warnings(account.balance, latest_balance(movements.movements))
-    )
-    return SantanderSessionResult(
-        account=account, movements=movements.movements, warnings=warnings
-    )
+    warnings.extend(_balance_unit_warnings(account.balance, latest_balance(movements.movements)))
+    return SantanderSessionResult(account=account, movements=movements.movements, warnings=warnings)
 
 
-def _balance_unit_warnings(balance: Decimal, running: Optional[Decimal]) -> list[str]:
+def _balance_unit_warnings(balance: Decimal, running: Decimal | None) -> list[str]:
     """Cross-check the implied-cents balance with the latest running balance.
 
     A gap of exactly a factor of 100 means one of the two cents readings is
@@ -1048,9 +1037,7 @@ def _session_sync(rut: str, password: str, headless: bool) -> SantanderSessionRe
             # A raw Playwright error can carry URLs and call logs; the run
             # records only its type. The traceback stays in the local log.
             logger.debug("Santander: session crashed", exc_info=True)
-            raise SantanderError(
-                f"Santander session failed ({type(exc).__name__})"
-            ) from None
+            raise SantanderError(f"Santander session failed ({type(exc).__name__})") from None
         finally:
             if browser is not None:
                 try:

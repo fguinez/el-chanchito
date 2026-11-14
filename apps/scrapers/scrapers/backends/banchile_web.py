@@ -36,10 +36,10 @@ import re
 import tempfile
 import threading
 import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterator, Optional
 
 from product_model import (
     CheckingMetrics,
@@ -51,7 +51,6 @@ from product_model import (
     TermDepositAttributes,
     TermDepositMetrics,
 )
-
 from scrapers.base import ScrapedProduct
 
 logger = logging.getLogger(__name__)
@@ -78,11 +77,11 @@ LOGIN_TIMEOUT = 45000
 # attempts we pause, then recover to the portal home so every retry starts from
 # a known state.
 _SURFACE_ATTEMPTS = 3
-_RENDER_TIMEOUTS_MS = (30_000, 45_000, 60_000)   # per-attempt render/poll budget
+_RENDER_TIMEOUTS_MS = (30_000, 45_000, 60_000)  # per-attempt render/poll budget
 _CARD_LINK_TIMEOUTS_MS = (6_000, 9_000, 12_000)  # per-attempt card shortcut budget
-_ASIDE_CLICK_TIMEOUTS_MS = (6_000, 9_000, 12_000)    # per-attempt VER DETALLE budget
+_ASIDE_CLICK_TIMEOUTS_MS = (6_000, 9_000, 12_000)  # per-attempt VER DETALLE budget
 _ASIDE_RENDER_TIMEOUTS_MS = (10_000, 15_000, 20_000)  # per-attempt aside render/poll
-_RETRY_PAUSES_MS = (2_000, 4_000)                # pause before attempt 2 / attempt 3
+_RETRY_PAUSES_MS = (2_000, 4_000)  # pause before attempt 2 / attempt 3
 # Bound on each in-page text read, hash route and key press. `page.evaluate`
 # and `page.keyboard.press` take no timeout (not even `set_default_timeout`'s),
 # so they wait as long as a stalled renderer does (the likely cause of the
@@ -223,7 +222,10 @@ _AMT = r"([\d.]{1,15}(?:,\d{1,2})?)"
 # own listing routes instead (see the inversiones per-holding section below).
 _PRODUCT_ROWS: list[tuple[str, "re.Pattern[str]"]] = [
     ("checking", re.compile(r"cuenta\s+corriente.{0,60}?disponible\s*\$\s?" + _AMT, re.I | re.S)),
-    ("credit_card", re.compile(r"tarjetas?\s+de\s+cr[eé]dito.{0,120}?disponible\s*\$\s?" + _AMT, re.I | re.S)),
+    (
+        "credit_card",
+        re.compile(r"tarjetas?\s+de\s+cr[eé]dito.{0,120}?disponible\s*\$\s?" + _AMT, re.I | re.S),
+    ),
 ]
 
 # Fallback for the dedicated "Saldos y Movimientos" checking view, which labels
@@ -264,9 +266,7 @@ _MASKED_NUMBER_RE = re.compile(r"\*{4}(\d{4})")
 
 # USD cuenta corriente on the dashboard: same block as the CLP one but the
 # figure is "Disponible USD …". Coupled to "USD" so it never grabs a CLP "$".
-_USD_CHECKING_RE = re.compile(
-    r"cuenta\s+corriente.{0,60}?disponible\s*USD\s?" + _AMT, re.I | re.S
-)
+_USD_CHECKING_RE = re.compile(r"cuenta\s+corriente.{0,60}?disponible\s*USD\s?" + _AMT, re.I | re.S)
 
 # --- Línea de crédito detail page ("Saldos y movimientos de la línea") ---------
 # Labels "Monto autorizado" (total cupo -> metrics.limit), "Saldo disponible"
@@ -367,7 +367,7 @@ _TERM_DAYS_RE = re.compile(r"(\d+)\s*d[ií]as", re.I)
 _DDMMYYYY_RE = re.compile(r"(\d{1,2})/(\d{1,2})/(\d{4})")
 
 
-def parse_amount(raw: Optional[str]) -> Optional[float]:
+def parse_amount(raw: str | None) -> float | None:
     """Parse a Chilean-formatted CLP/USD amount into a float (keeps decimals).
 
     Handles ``$1.234.567``, ``USD 2.345,67``, ``$ 1.234.567`` and
@@ -391,13 +391,13 @@ def parse_amount(raw: Optional[str]) -> Optional[float]:
         return None
 
 
-def parse_clp(raw: Optional[str]) -> Optional[int]:
+def parse_clp(raw: str | None) -> int | None:
     """Parse a Chilean-formatted CLP amount into whole pesos (rounds decimals)."""
     value = parse_amount(raw)
-    return int(round(value)) if value is not None else None
+    return round(value) if value is not None else None
 
 
-def _sum_clp_rows(text: str, pattern: "re.Pattern[str]") -> Optional[int]:
+def _sum_clp_rows(text: str, pattern: "re.Pattern[str]") -> int | None:
     """Sum every CLP "$" figure `pattern` captures; None when none parse."""
     total = 0
     found = False
@@ -409,7 +409,7 @@ def _sum_clp_rows(text: str, pattern: "re.Pattern[str]") -> Optional[int]:
     return total if found else None
 
 
-def _parse_pct(raw: Optional[str]) -> Optional[float]:
+def _parse_pct(raw: str | None) -> float | None:
     """Parse a Chilean-formatted percent ("0,45%", "+1,2345%", "12,34 %").
 
     Comma is the decimal separator and a sign, when printed, precedes the
@@ -424,7 +424,7 @@ def _parse_pct(raw: Optional[str]) -> Optional[float]:
     return float(match.group(1).replace(".", "").replace(",", "."))
 
 
-def _parse_date_ddmmyyyy(raw: Optional[str]) -> Optional[datetime.date]:
+def _parse_date_ddmmyyyy(raw: str | None) -> datetime.date | None:
     """Parse a "DD/MM/YYYY" date; None when absent or not a real date."""
     if not raw:
         return None
@@ -438,7 +438,7 @@ def _parse_date_ddmmyyyy(raw: Optional[str]) -> Optional[datetime.date]:
         return None
 
 
-def _parse_term_days(raw: Optional[str]) -> Optional[int]:
+def _parse_term_days(raw: str | None) -> int | None:
     """Parse a "NN días" term into its day count; None when absent."""
     if not raw:
         return None
@@ -457,12 +457,12 @@ def _section(text: str, start_re: "re.Pattern[str]", end_re: "re.Pattern[str]") 
     start = start_re.search(text)
     if start is None:
         return ""
-    tail = text[start.end():]
+    tail = text[start.end() :]
     end = end_re.search(tail)
     return tail[: end.start()] if end else tail
 
 
-def balances_by_kind(text: Optional[str]) -> dict[str, int]:
+def balances_by_kind(text: str | None) -> dict[str, int]:
     """Map each BdC `product_kind` present in `text` to its CLP total.
 
     Returns ``{}`` when nothing parses. Checking falls back to the dedicated
@@ -488,7 +488,7 @@ def balances_by_kind(text: Optional[str]) -> dict[str, int]:
     return result
 
 
-def _balance_from_text(text: Optional[str]) -> Optional[int]:
+def _balance_from_text(text: str | None) -> int | None:
     """The CLP checking balance only (kept for callers/tests that want a scalar).
 
     See `balances_by_kind` for the full per-kind map.
@@ -496,7 +496,7 @@ def _balance_from_text(text: Optional[str]) -> Optional[int]:
     return balances_by_kind(text).get("checking")
 
 
-def card_saldos_from_text(text: Optional[str]) -> dict[str, dict[str, float]]:
+def card_saldos_from_text(text: str | None) -> dict[str, dict[str, float]]:
     """Read a card's cupos per currency off the detail page.
 
     Returns e.g. ``{"CLP": {"available": 3600000.0, "limit": 4000000.0,
@@ -541,7 +541,7 @@ def card_saldos_from_text(text: Optional[str]) -> dict[str, dict[str, float]]:
     return result
 
 
-def card_last4_from_text(text: Optional[str]) -> Optional[str]:
+def card_last4_from_text(text: str | None) -> str | None:
     """The card's last four digits from the masked number ("****0000"), if shown.
 
     One shared value for the whole card — the CLP "Nacional" and USD
@@ -554,7 +554,7 @@ def card_last4_from_text(text: Optional[str]) -> Optional[str]:
     return match.group(1) if match else None
 
 
-def _usd_checking_from_text(text: Optional[str]) -> Optional[float]:
+def _usd_checking_from_text(text: str | None) -> float | None:
     """Sum every USD "Cuenta Corriente … Disponible USD …" on the dashboard.
 
     Returns None when there's no USD cuenta corriente (the common case). Kept
@@ -572,7 +572,7 @@ def _usd_checking_from_text(text: Optional[str]) -> Optional[float]:
     return total if found else None
 
 
-def linea_saldo_from_text(text: Optional[str]) -> Optional[dict[str, float]]:
+def linea_saldo_from_text(text: str | None) -> dict[str, float] | None:
     """Read a línea de crédito's cupos off its detail page.
 
     Returns ``{"available": 80000.0, "limit": 100000.0, "owed": 20000.0}``
@@ -625,9 +625,7 @@ def _route_to(page, route: str) -> None:
     `page.evaluate`, under a timeout; this predicate assigns the hash and
     returns true, so that first evaluation is the whole call.
     """
-    _dispose(
-        page.wait_for_function(_SET_HASH_JS, arg=route, timeout=_PAGE_CALL_TIMEOUT_MS)
-    )
+    _dispose(page.wait_for_function(_SET_HASH_JS, arg=route, timeout=_PAGE_CALL_TIMEOUT_MS))
 
 
 def _dispose(handle) -> None:
@@ -666,7 +664,7 @@ def _press_escape(page) -> None:
     page.locator("body").press("Escape", timeout=_PAGE_CALL_TIMEOUT_MS)
 
 
-def _read_checking(page) -> Optional[int]:
+def _read_checking(page) -> int | None:
     """Read the page's visible text and extract the CLP checking balance.
 
     Quiet (no logging) so it's safe to call in a polling loop; returns None
@@ -680,7 +678,7 @@ def _read_checking(page) -> Optional[int]:
     return _balance_from_text(text)
 
 
-def dashboard_balances_from_text(text: Optional[str]) -> list[ScrapedProduct]:
+def dashboard_balances_from_text(text: str | None) -> list[ScrapedProduct]:
     """Shape the "Mis Productos" dashboard text into ScrapedProducts.
 
     Emits the CLP checking figure plus the USD cuenta corriente when present. The
@@ -744,7 +742,7 @@ def balances_from_page(page) -> list[ScrapedProduct]:
     return dashboard_balances_from_text(text)
 
 
-def card_balances_from_text(text: Optional[str]) -> list[ScrapedProduct]:
+def card_balances_from_text(text: str | None) -> list[ScrapedProduct]:
     """Card ScrapedProducts (CLP + USD) from the card detail page text.
 
     Available cupo -> `metrics.available`, total cupo -> `metrics.limit`, and
@@ -774,15 +772,13 @@ def card_balances_from_text(text: Optional[str]) -> list[ScrapedProduct]:
                 kind="credit_card",
                 currency=currency,
                 attributes=attributes,
-                metrics=CreditCardMetrics(
-                    available=data["available"], limit=limit, owed=owed
-                ),
+                metrics=CreditCardMetrics(available=data["available"], limit=limit, owed=owed),
             )
         )
     return balances
 
 
-def linea_balances_from_text(text: Optional[str]) -> list[ScrapedProduct]:
+def linea_balances_from_text(text: str | None) -> list[ScrapedProduct]:
     """Línea de crédito ScrapedProduct from its detail page text.
 
     The reported "Monto utilizado" rides along as `metrics.owed` when it parses
@@ -813,7 +809,7 @@ def linea_balances_from_text(text: Optional[str]) -> list[ScrapedProduct]:
     ]
 
 
-def depositos_header_from_text(text: Optional[str]) -> dict:
+def depositos_header_from_text(text: str | None) -> dict:
     """The depósitos listing header: CLP total and deposit count.
 
     Returns ``{"total": <Saldo Depósitos en Pesos>, "cantidad": <Cantidad>}``
@@ -833,7 +829,7 @@ def depositos_header_from_text(text: Optional[str]) -> dict:
     return result
 
 
-def deposito_cards_from_text(text: Optional[str]) -> list[dict]:
+def deposito_cards_from_text(text: str | None) -> list[dict]:
     """The depósitos listing cards, anchored after "MIS DEPÓSITOS A PLAZO".
 
     Each card is ``{"tipo_deposito", "vencimiento", "monto_a_recibir"}`` (None
@@ -856,7 +852,7 @@ def deposito_cards_from_text(text: Optional[str]) -> list[dict]:
     ]
 
 
-def deposito_aside_from_text(text: Optional[str]) -> Optional[dict]:
+def deposito_aside_from_text(text: str | None) -> dict | None:
     """Parse the LAST "Detalle del Depósito a Plazo" aside block in `text`.
 
     Opening an aside appends its text to the end of body.innerText, so the
@@ -870,9 +866,9 @@ def deposito_aside_from_text(text: Optional[str]) -> Optional[dict]:
     anchors = list(_DEPOSITO_ASIDE_ANCHOR_RE.finditer(text))
     if not anchors:
         return None
-    block = text[anchors[-1].start():]
+    block = text[anchors[-1].start() :]
 
-    def value(pattern: "re.Pattern[str]") -> Optional[str]:
+    def value(pattern: "re.Pattern[str]") -> str | None:
         match = pattern.search(block)
         return match.group(1) if match else None
 
@@ -889,7 +885,7 @@ def deposito_aside_from_text(text: Optional[str]) -> Optional[dict]:
     }
 
 
-def fondos_header_from_text(text: Optional[str]) -> Optional[int]:
+def fondos_header_from_text(text: str | None) -> int | None:
     """The fondos listing header total (SALDO TOTAL EN FONDOS MUTUOS), CLP int.
 
     Equals the sum of the cards' "Mi saldo" and the resumen's "En activos
@@ -902,7 +898,7 @@ def fondos_header_from_text(text: Optional[str]) -> Optional[int]:
     return parse_clp(match.group(1)) if match else None
 
 
-def fondo_cards_from_text(text: Optional[str]) -> list[dict]:
+def fondo_cards_from_text(text: str | None) -> list[dict]:
     """The fondos listing cards, anchored after "MIS FONDOS MUTUOS".
 
     Each card is ``{"name", "serie", "invertido", "variacion", "saldo"}``;
@@ -933,7 +929,7 @@ def fondo_cards_from_text(text: Optional[str]) -> list[dict]:
     return cards
 
 
-def fondo_aside_from_text(text: Optional[str]) -> Optional[dict]:
+def fondo_aside_from_text(text: str | None) -> dict | None:
     """Parse the LAST "Acerca del fondo" aside block in `text` (best-effort).
 
     Yields ``{"fund_name", "serie", "var_daily_pct", "var_30d_pct",
@@ -948,9 +944,9 @@ def fondo_aside_from_text(text: Optional[str]) -> Optional[dict]:
     anchors = list(_FONDO_ASIDE_ANCHOR_RE.finditer(text))
     if not anchors:
         return None
-    block = text[anchors[-1].start():]
+    block = text[anchors[-1].start() :]
 
-    def value(pattern: "re.Pattern[str]") -> Optional[str]:
+    def value(pattern: "re.Pattern[str]") -> str | None:
         match = pattern.search(block)
         return match.group(1) if match else None
 
@@ -987,7 +983,7 @@ def _deposito_product(aside: dict) -> ScrapedProduct:
 
 
 def build_depositos_products(
-    text: Optional[str], asides: list[dict], attempt: int
+    text: str | None, asides: list[dict], attempt: int
 ) -> list[ScrapedProduct]:
     """Shape the depósitos listing + its per-deposit asides into ScrapedProducts.
 
@@ -1016,9 +1012,7 @@ def build_depositos_products(
     header = depositos_header_from_text(text)
     cards = deposito_cards_from_text(text)
     final = attempt >= _SURFACE_ATTEMPTS - 1
-    complete = [
-        a for a in asides if a.get("numero") and a.get("monto_inicial") is not None
-    ]
+    complete = [a for a in asides if a.get("numero") and a.get("monto_inicial") is not None]
     numeros = {a["numero"] for a in complete}
     all_complete = len(complete) == len(asides) and len(numeros) == len(complete)
 
@@ -1046,8 +1040,7 @@ def build_depositos_products(
         return products
     if not final:
         logger.info(
-            "BanChile: depósitos parse incomplete (%d cards, %d asides, "
-            "cantidad %s); will retry",
+            "BanChile: depósitos parse incomplete (%d cards, %d asides, cantidad %s); will retry",
             len(cards),
             len(asides),
             header["cantidad"],
@@ -1071,7 +1064,7 @@ def build_depositos_products(
 
 
 def build_fondos_products(
-    text: Optional[str], asides: list[dict], attempt: int
+    text: str | None, asides: list[dict], attempt: int
 ) -> list[ScrapedProduct]:
     """Shape the fondos listing cards (+ best-effort aside vars) into products.
 
@@ -1093,12 +1086,9 @@ def build_fondos_products(
     total = fondos_header_from_text(text)
     final = attempt >= _SURFACE_ATTEMPTS - 1
     if cards:
-        if not final and (
-            total is None or sum(card["saldo"] for card in cards) != total
-        ):
+        if not final and (total is None or sum(card["saldo"] for card in cards) != total):
             logger.info(
-                "BanChile: fondos cards (%d) do not add up to the header total; "
-                "will retry",
+                "BanChile: fondos cards (%d) do not add up to the header total; will retry",
                 len(cards),
             )
             return []
@@ -1242,7 +1232,7 @@ def _launch_browser(playwright, headless: bool):
         return playwright.chromium.launch(headless=headless)
 
 
-def _new_context(browser, storage_state: Optional[dict] = None):
+def _new_context(browser, storage_state: dict | None = None):
     """Build the anti-detection browser context both BdC sessions use.
 
     Extracted so the shared products + movements session
@@ -1257,9 +1247,7 @@ def _new_context(browser, storage_state: Optional[dict] = None):
         timezone_id=TIMEZONE_ID,
         storage_state=storage_state,
     )
-    context.add_init_script(
-        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-    )
+    context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     return context
 
 
@@ -1360,9 +1348,7 @@ _DEPOSITOS_READY_RE = re.compile(
     r"mis\s+dep[oó]sitos\s+a\s+plazo|saldo\s+total\s+de\s+mis\s+dep[oó]sitos", re.I
 )
 _FONDOS_ROUTE = "#/inversion/fondos-mutuos/consultar/mis-fondos"
-_FONDOS_READY_RE = re.compile(
-    r"mis\s+fondos\s+mutuos|saldo\s+total\s+en\s+fondos\s+mutuos", re.I
-)
+_FONDOS_READY_RE = re.compile(r"mis\s+fondos\s+mutuos|saldo\s+total\s+en\s+fondos\s+mutuos", re.I)
 # Every holding card pairs its safe "VER DETALLE" with transactional controls
 # (OPERAR; the deposits page adds SIMULAR and the fund aside ends in REINVERTIR/
 # RESCATAR/APORTAR), and the fondos marketing block has a near-miss "VER
@@ -1412,7 +1398,7 @@ def _ensure_on_portal(page) -> bool:
         return False
 
 
-def _wait_for_text(page, ready_re: "re.Pattern[str]", timeout_ms: int) -> Optional[str]:
+def _wait_for_text(page, ready_re: "re.Pattern[str]", timeout_ms: int) -> str | None:
     """Poll the page's visible text until `ready_re` matches; return it or None.
 
     SPA route changes swap content in via XHR, so the target figures aren't there
@@ -1457,7 +1443,7 @@ def _read_deadline(budget_ms: int = _SESSION_READ_BUDGET_MS) -> float:
     return time.monotonic() + budget_ms / 1000
 
 
-def _deadline_passed(deadline: Optional[float]) -> bool:
+def _deadline_passed(deadline: float | None) -> bool:
     """True once `deadline` (from `_read_deadline`; None means none) has passed."""
     return deadline is not None and time.monotonic() >= deadline
 
@@ -1476,7 +1462,7 @@ def _read_surface_with_retries(
     surface: str,
     read: Callable,
     allow_empty: bool = False,
-    deadline: Optional[float] = None,
+    deadline: float | None = None,
 ):
     """Run one surface's reader with bounded retries and escalating budgets.
 
@@ -1533,9 +1519,7 @@ def _read_surface_with_retries(
             continue
         if items or allow_empty:
             return items
-    logger.warning(
-        "BanChile: %s surface failed after %d attempts", surface, _SURFACE_ATTEMPTS
-    )
+    logger.warning("BanChile: %s surface failed after %d attempts", surface, _SURFACE_ATTEMPTS)
     return None if allow_empty else []
 
 
@@ -1552,7 +1536,9 @@ def _read_card_detail(page, attempt: int) -> list[ScrapedProduct]:
     """
     if not _ensure_on_portal(page):
         return []
-    if not _click_first(page, _CARD_LINK_SELECTORS, timeout=_budget(_CARD_LINK_TIMEOUTS_MS, attempt)):
+    if not _click_first(
+        page, _CARD_LINK_SELECTORS, timeout=_budget(_CARD_LINK_TIMEOUTS_MS, attempt)
+    ):
         logger.info(
             "BanChile: card saldos link not found (attempt %d/%d)",
             attempt + 1,
@@ -1614,7 +1600,7 @@ def _close_aside(page) -> None:
         pass
 
 
-def _wait_for_aside(page, extract: Callable, timeout_ms: int) -> Optional[dict]:
+def _wait_for_aside(page, extract: Callable, timeout_ms: int) -> dict | None:
     """Poll the page's visible text until `extract(text)` yields a value.
 
     Opening an aside never changes the URL; its text is APPENDED to the end of
@@ -1661,28 +1647,22 @@ def _collect_asides(
     collected: list[dict] = []
     for index in range(count):
 
-        def fresh(text: str, _index: int = index) -> Optional[dict]:
+        def fresh(text: str, _index: int = index) -> dict | None:
             aside = parse(text)
             if aside is not None and accept(_index, aside, collected):
                 return aside
             return None
 
         for round_ in range(2):
-            if not _click_nth(
-                page, selectors, index, _budget(_ASIDE_CLICK_TIMEOUTS_MS, attempt)
-            ):
+            if not _click_nth(page, selectors, index, _budget(_ASIDE_CLICK_TIMEOUTS_MS, attempt)):
                 break
-            aside = _wait_for_aside(
-                page, fresh, _budget(_ASIDE_RENDER_TIMEOUTS_MS, attempt)
-            )
+            aside = _wait_for_aside(page, fresh, _budget(_ASIDE_RENDER_TIMEOUTS_MS, attempt))
             _close_aside(page)
             if aside is not None:
                 collected.append(aside)
                 break
             if round_ == 0:
-                logger.debug(
-                    "BanChile: aside %d stale or unreadable; re-clicking once", index
-                )
+                logger.debug("BanChile: aside %d stale or unreadable; re-clicking once", index)
     return collected
 
 
@@ -1712,8 +1692,12 @@ def _read_depositos_detail(page, attempt: int) -> list[ScrapedProduct]:
         return bool(numero) and numero not in {a.get("numero") for a in collected}
 
     asides = _collect_asides(
-        page, len(cards), _DEPOSITO_DETALLE_SELECTORS,
-        deposito_aside_from_text, accept, attempt,
+        page,
+        len(cards),
+        _DEPOSITO_DETALLE_SELECTORS,
+        deposito_aside_from_text,
+        accept,
+        attempt,
     )
     return build_depositos_products(text, asides, attempt)
 
@@ -1747,8 +1731,12 @@ def _read_fondos_detail(page, attempt: int) -> list[ScrapedProduct]:
         return serie is None or serie == card["serie"]
 
     asides = _collect_asides(
-        page, len(cards), _FONDO_DETALLE_SELECTORS,
-        fondo_aside_from_text, accept, attempt,
+        page,
+        len(cards),
+        _FONDO_DETALLE_SELECTORS,
+        fondo_aside_from_text,
+        accept,
+        attempt,
     )
     return build_fondos_products(text, asides, attempt)
 
@@ -1764,7 +1752,7 @@ _SURFACE_READERS: list[tuple[str, Callable]] = [
 ]
 
 
-def _read_all_surfaces(page, deadline: Optional[float] = None) -> BalanceFetchResult:
+def _read_all_surfaces(page, deadline: float | None = None) -> BalanceFetchResult:
     """Read every product surface off an authenticated page, with retries.
 
     This is the seam the retry tests drive with a fake page. A detail reading
@@ -1807,7 +1795,7 @@ def _session_file() -> Path:
     return Path(os.environ.get("BANCHILE_SESSION_FILE") or _DEFAULT_SESSION_FILE)
 
 
-def _load_session_state(path: Path) -> tuple[Optional[dict], str]:
+def _load_session_state(path: Path) -> tuple[dict | None, str]:
     """The cached storage state, or None plus why it can't be used."""
     try:
         state = json.loads(path.read_text())
@@ -1837,9 +1825,7 @@ def _save_session(context, path: Path) -> None:
             fh.write(payload)
         os.replace(tmp, path)
     except Exception as exc:
-        logger.warning(
-            "BanChile: could not save the session cache (%s)", type(exc).__name__
-        )
+        logger.warning("BanChile: could not save the session cache (%s)", type(exc).__name__)
         if tmp is not None:
             try:
                 os.unlink(tmp)
@@ -1903,7 +1889,7 @@ _DEFAULT_LOGIN_COOLDOWN_MINUTES = 10
 # `time.monotonic()` of the last attempt, in process memory. Claimed from the
 # scrape's executor thread and read from the control server's.
 _login_attempt_lock = threading.Lock()
-_last_login_attempt: Optional[float] = None
+_last_login_attempt: float | None = None
 
 
 def _login_cooldown_seconds() -> float:
@@ -1927,7 +1913,7 @@ def _login_cooldown_seconds() -> float:
     return seconds
 
 
-def _cooldown_left(last_attempt: Optional[float], now: float) -> Optional[float]:
+def _cooldown_left(last_attempt: float | None, now: float) -> float | None:
     if last_attempt is None:
         return None
     remaining = last_attempt + _login_cooldown_seconds() - now
@@ -1955,7 +1941,7 @@ def _claim_login_attempt() -> None:
         _last_login_attempt = now
 
 
-def login_cooldown_retry_after(now: Optional[float] = None) -> Optional[float]:
+def login_cooldown_retry_after(now: float | None = None) -> float | None:
     """Seconds until a run may start, or None if it may start now.
 
     Refused only when the run would certainly need a full login inside the
@@ -2044,9 +2030,7 @@ def _scrape_sync(rut: str, password: str, headless: bool) -> BalanceFetchResult:
             browser.close()
 
 
-async def fetch_balances(
-    rut: str, password: str, *, headless: bool = True
-) -> BalanceFetchResult:
+async def fetch_balances(rut: str, password: str, *, headless: bool = True) -> BalanceFetchResult:
     """Log into Banco de Chile and return its scraped balances.
 
     Covers the dashboard checking (CLP/USD) plus the card total cupo/límite, the

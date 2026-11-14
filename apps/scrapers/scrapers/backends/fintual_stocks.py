@@ -27,7 +27,7 @@ import math
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -282,7 +282,7 @@ def _moment(value: Any) -> datetime | None:
         parsed = datetime.fromisoformat(value)
     except ValueError:
         return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 def local_date(value: Any) -> date | None:
@@ -691,9 +691,7 @@ def shows_unsold_stocks(entries: list[LedgerEntry]) -> bool:
     """True when the ledger has a stock bought and never sold nor paid out in
     a cash merger: one the positions list should still hold, unless it left
     through a non-cash event."""
-    return any(
-        stock.buys > 0 and not stock.sold for stock in _stock_totals(entries).values()
-    )
+    return any(stock.buys > 0 and not stock.sold for stock in _stock_totals(entries).values())
 
 
 def sold_out_products(

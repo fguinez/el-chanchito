@@ -11,7 +11,7 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from dotenv import load_dotenv
@@ -163,9 +163,7 @@ async def run_scraper(scraper: BaseScraper) -> None:
         try:
             vanished = scraper.vanished_windows()
             if vanished and not written.failed and not written.unresolved:
-                soft_delete_vanished_transactions(
-                    vanished, {t.external_id for t in transactions}
-                )
+                soft_delete_vanished_transactions(vanished, {t.external_id for t in transactions})
         except Exception as e:
             logger.exception("Scraper %s: vanished-row cleanup failed", scraper.name)
             warnings.append(f"cleanup: {e}")
@@ -224,13 +222,10 @@ async def run_scraper(scraper: BaseScraper) -> None:
             for scope in result.vanished_product_scopes:
                 try:
                     swept = retire_vanished_products(scope)
-                    label = (
-                        f"{scope.institution} {scope.product_kind} {scope.currency}"
-                    )
+                    label = f"{scope.institution} {scope.product_kind} {scope.currency}"
                     if swept.retired:
                         notes.append(
-                            f"retired: {swept.retired} {label} product(s) "
-                            "no longer listed"
+                            f"retired: {swept.retired} {label} product(s) no longer listed"
                         )
                     if swept.pending:
                         notes.append(
@@ -239,9 +234,7 @@ async def run_scraper(scraper: BaseScraper) -> None:
                             "one lacks them too"
                         )
                 except Exception as e:
-                    logger.exception(
-                        "Scraper %s: vanished-product cleanup failed", scraper.name
-                    )
+                    logger.exception("Scraper %s: vanished-product cleanup failed", scraper.name)
                     warnings.append(f"cleanup: {e}")
 
     warnings.extend(_write_exchange_rates(scraper, rates))
@@ -256,14 +249,10 @@ async def run_scraper(scraper: BaseScraper) -> None:
         sum(len(h.points) for h in histories),
     )
     status, message = run_outcome(errors, warnings, landed, notes)
-    finish_scraper_run(
-        run_id, status, transactions_imported=inserted, error_message=message
-    )
+    finish_scraper_run(run_id, status, transactions_imported=inserted, error_message=message)
 
 
-def _write_exchange_rates(
-    scraper: BaseScraper, rates: list[ScrapedExchangeRate]
-) -> list[str]:
+def _write_exchange_rates(scraper: BaseScraper, rates: list[ScrapedExchangeRate]) -> list[str]:
     """Write each rate on its own; return a warning per rate that wasn't written.
 
     A rate is auxiliary to the products it prices, so neither an unresolvable
@@ -275,9 +264,7 @@ def _write_exchange_rates(
         try:
             upsert_exchange_rate(rate)
         except UnresolvedRateScope as e:
-            logger.warning(
-                "Scraper %s: exchange rate %s skipped: %s", scraper.name, label, e
-            )
+            logger.warning("Scraper %s: exchange rate %s skipped: %s", scraper.name, label, e)
             warnings.append(f"exchange rate {label}: {e}")
         except Exception as e:
             logger.exception("Scraper %s: exchange rate %s failed", scraper.name, label)
@@ -285,9 +272,7 @@ def _write_exchange_rates(
     return warnings
 
 
-def _write_price_histories(
-    scraper: BaseScraper, histories: list[ScrapedPriceHistory]
-) -> list[str]:
+def _write_price_histories(scraper: BaseScraper, histories: list[ScrapedPriceHistory]) -> list[str]:
     """Write each price history on its own; return one warning counting the
     series that weren't written, by exception type.
 
@@ -304,9 +289,7 @@ def _write_price_histories(
         try:
             upsert_price_history(history)
         except UnresolvedPriceScope as e:
-            logger.warning(
-                "Scraper %s: price history %s skipped: %s", scraper.name, label, e
-            )
+            logger.warning("Scraper %s: price history %s skipped: %s", scraper.name, label, e)
             failures[type(e).__name__] += 1
         except Exception as e:
             logger.exception("Scraper %s: price history %s failed", scraper.name, label)
@@ -373,8 +356,7 @@ def build_scrapers() -> dict[str, BaseScraper]:
         logger.info("MercadoPago scraper enabled")
 
     if all(
-        os.environ.get(k)
-        for k in ("EMAIL_IMAP_HOST", "EMAIL_IMAP_USER", "EMAIL_IMAP_PASSWORD")
+        os.environ.get(k) for k in ("EMAIL_IMAP_HOST", "EMAIL_IMAP_USER", "EMAIL_IMAP_PASSWORD")
     ):
         # MACH is disabled: its email parser produced transactions that never happened.
         scrapers["tenpo"] = TenpoScraper()
@@ -397,18 +379,18 @@ async def run_all_once(scrapers: dict[str, BaseScraper]) -> None:
 # APScheduler intervals per institution (hours unless noted)
 _EMAIL_INTERVAL_MINUTES = 30
 _SCHEDULES: dict[str, dict] = {
-    "fintual":      {"hours": 6,  "label": "Fintual API (every 6h)"},
-    "buda":         {"hours": 1,  "label": "Buda API (every 1h)"},
-    "skipo":        {"hours": 1,  "label": "Skipo API (every 1h)"},
-    "banchile":     {"hours": 24, "label": "BanChile (daily)"},
-    "bci_lider":    {"hours": 24, "label": "BCI Lider (daily)"},
-    "santander":    {"hours": 24, "label": "Santander (daily)"},
+    "fintual": {"hours": 6, "label": "Fintual API (every 6h)"},
+    "buda": {"hours": 1, "label": "Buda API (every 1h)"},
+    "skipo": {"hours": 1, "label": "Skipo API (every 1h)"},
+    "banchile": {"hours": 24, "label": "BanChile (daily)"},
+    "bci_lider": {"hours": 24, "label": "BCI Lider (daily)"},
+    "santander": {"hours": 24, "label": "Santander (daily)"},
     "banco_falabella": {"hours": 24, "label": "Banco Falabella (daily)"},
     # No login per run (the Chrome profile holds the session), so it can run
     # more often than the daily browser logins.
-    "mercadopago":  {"hours": 6,  "label": "MercadoPago (every 6h)"},
-    "mach":         {"minutes": _EMAIL_INTERVAL_MINUTES, "label": "MACH email (every 30m)"},
-    "tenpo":        {"minutes": _EMAIL_INTERVAL_MINUTES, "label": "Tenpo email (every 30m)"},
+    "mercadopago": {"hours": 6, "label": "MercadoPago (every 6h)"},
+    "mach": {"minutes": _EMAIL_INTERVAL_MINUTES, "label": "MACH email (every 30m)"},
+    "tenpo": {"minutes": _EMAIL_INTERVAL_MINUTES, "label": "Tenpo email (every 30m)"},
 }
 
 # Manual-refresh cooldowns: slug -> the seconds until a manual trigger may run,
@@ -483,14 +465,12 @@ def _make_control_handler(
         job = scheduler.get_job(slug)
         if job is None:
             return False
-        job.modify(next_run_time=datetime.now(timezone.utc))
+        job.modify(next_run_time=datetime.now(UTC))
         logger.info("Manual trigger for %s", slug)
         return True
 
     class ControlHandler(BaseHTTPRequestHandler):
-        def _send(
-            self, code: int, payload: dict, headers: dict[str, str] | None = None
-        ) -> None:
+        def _send(self, code: int, payload: dict, headers: dict[str, str] | None = None) -> None:
             body = json.dumps(payload).encode()
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
@@ -500,7 +480,7 @@ def _make_control_handler(
             self.end_headers()
             self.wfile.write(body)
 
-        def do_GET(self) -> None:  # noqa: N802
+        def do_GET(self) -> None:
             if self.path == "/health":
                 age = round(heartbeat.age())
                 if age < _HEARTBEAT_STALE_SECONDS:
@@ -519,16 +499,14 @@ def _make_control_handler(
             else:
                 self._send(404, {"error": "not found"})
 
-        def do_POST(self) -> None:  # noqa: N802
+        def do_POST(self) -> None:
             if self.path == "/refresh":
                 triggered: list[str] = []
                 skipped: list[dict] = []
                 for slug in sorted(s for s in scraper_keys if scheduler.get_job(s)):
                     wait = seconds_left(slug)
                     if wait:
-                        logger.info(
-                            "Manual trigger for %s skipped: cooldown, %ds left", slug, wait
-                        )
+                        logger.info("Manual trigger for %s skipped: cooldown, %ds left", slug, wait)
                         skipped.append({"slug": slug, "retry_after_seconds": wait})
                     elif trigger(slug):
                         triggered.append(slug)
@@ -537,9 +515,7 @@ def _make_control_handler(
                 slug = self.path[len("/refresh/") :]
                 wait = seconds_left(slug) if scheduler.get_job(slug) else 0
                 if wait:
-                    logger.info(
-                        "Manual trigger for %s refused: cooldown, %ds left", slug, wait
-                    )
+                    logger.info("Manual trigger for %s refused: cooldown, %ds left", slug, wait)
                     self._send(
                         429,
                         {
@@ -577,17 +553,12 @@ def _start_control_server(
         return None
 
     host = os.environ.get("SCRAPER_CONTROL_HOST") or "127.0.0.1"
-    handler = _make_control_handler(
-        scheduler, scraper_keys, heartbeat, _REFRESH_COOLDOWNS
-    )
+    handler = _make_control_handler(scheduler, scraper_keys, heartbeat, _REFRESH_COOLDOWNS)
     server = ThreadingHTTPServer((host, int(port)), handler)
-    thread = threading.Thread(
-        target=server.serve_forever, name="scraper-control", daemon=True
-    )
+    thread = threading.Thread(target=server.serve_forever, name="scraper-control", daemon=True)
     thread.start()
     logger.info(
-        "Control server listening on %s:%s "
-        "(POST /refresh[/{slug}], GET /scrapers, GET /health)",
+        "Control server listening on %s:%s (POST /refresh[/{slug}], GET /scrapers, GET /health)",
         host,
         port,
     )

@@ -52,9 +52,7 @@ class TestBudaHmacSigning:
         """Windows' clock can repeat a microsecond; the nonce must still grow."""
         monkeypatch.setattr(buda_mod.time, "time_ns", lambda: 1_000_000_000)
 
-        nonces = [
-            int(self.scraper._sign("GET", "/path")["X-SBTC-NONCE"]) for _ in range(3)
-        ]
+        nonces = [int(self.scraper._sign("GET", "/path")["X-SBTC-NONCE"]) for _ in range(3)]
 
         assert nonces == [1_000_000, 1_000_001, 1_000_002]
 
@@ -249,9 +247,7 @@ def _install(monkeypatch, fake: _Buda) -> None:
     monkeypatch.setattr(
         buda_mod.httpx,
         "AsyncClient",
-        lambda **kwargs: real_client(
-            transport=httpx.MockTransport(fake.handler), **kwargs
-        ),
+        lambda **kwargs: real_client(transport=httpx.MockTransport(fake.handler), **kwargs),
     )
 
 
@@ -281,9 +277,7 @@ class TestScrapeTransactions:
         monkeypatch.setattr(
             BudaScraper,
             "_sign",
-            lambda self, method, path, body="": original(
-                self, method, path.split("?")[0], body
-            ),
+            lambda self, method, path, body="": original(self, method, path.split("?")[0], body),
         )
         _install(monkeypatch, _Buda({("deposits", 1): _clp_page(1, 1)}))
 
@@ -319,9 +313,7 @@ class TestScrapeTransactions:
 
         txns = asyncio.run(BudaScraper().scrape_transactions())
 
-        deposit_pages = [
-            r.url.params["page"] for r in fake.requests if "deposits" in r.url.path
-        ]
+        deposit_pages = [r.url.params["page"] for r in fake.requests if "deposits" in r.url.path]
         assert deposit_pages == ["1", "2"]
         assert len(txns) == 57
 
@@ -355,9 +347,7 @@ class TestScrapeTransactions:
 
     def test_non_clp_item_on_the_clp_endpoint_is_dropped(self, monkeypatch):
         """A crypto amount on the CLP endpoint still never becomes a transaction."""
-        fake = _Buda(
-            {("deposits", 1): [_movement(1, "2500000.0"), _movement(2, "0.5", "BTC")]}
-        )
+        fake = _Buda({("deposits", 1): [_movement(1, "2500000.0"), _movement(2, "0.5", "BTC")]})
         _install(monkeypatch, fake)
 
         txns = asyncio.run(BudaScraper().scrape_transactions())

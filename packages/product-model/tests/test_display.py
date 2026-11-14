@@ -42,9 +42,7 @@ def _spec(*columns: ColumnSpec, family: str = "cash") -> FamilySpec:
 # so a spec routed into the wrong branch cannot pass on another branch's error.
 INVALID_SPECS: dict[str, tuple[FamilySpec, str]] = {
     "unknown metric field": (
-        _spec(
-            ColumnSpec(key="x", label_es="X", source=ColumnSource.METRIC, field="nope")
-        ),
+        _spec(ColumnSpec(key="x", label_es="X", source=ColumnSource.METRIC, field="nope")),
         "no kind of the family has a metrics.nope field",
     ),
     "metric field without denomination": (
@@ -99,11 +97,7 @@ INVALID_SPECS: dict[str, tuple[FamilySpec, str]] = {
         "has both metrics.installments_paid",
     ),
     "reserved key": (
-        _spec(
-            ColumnSpec(
-                key="producto", label_es="Producto", source=ColumnSource.HEADLINE
-            )
-        ),
+        _spec(ColumnSpec(key="producto", label_es="Producto", source=ColumnSource.HEADLINE)),
         "reserved for a universal column",
     ),
     "duplicate key": (
@@ -289,9 +283,7 @@ def test_resolve_columns_rejects_unknown_family():
         resolve_columns("bonds")
 
 
-@pytest.mark.parametrize(
-    ("spec", "message"), INVALID_SPECS.values(), ids=INVALID_SPECS.keys()
-)
+@pytest.mark.parametrize(("spec", "message"), INVALID_SPECS.values(), ids=INVALID_SPECS.keys())
 def test_resolver_rejects_inconsistent_spec(spec, message):
     """Inconsistent specs raise DisplaySpecError naming the actual problem."""
     with pytest.raises(DisplaySpecError, match=message):

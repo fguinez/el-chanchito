@@ -143,13 +143,17 @@ class TestParseMerchant:
 
     def test_merchant_without_amount(self):
         assert (
-            _parse_merchant("Compraste en COMERCIO SINTETICO.\nOtro texto", MACH_PATTERN.merchant_patterns)
+            _parse_merchant(
+                "Compraste en COMERCIO SINTETICO.\nOtro texto", MACH_PATTERN.merchant_patterns
+            )
             == "COMERCIO SINTETICO"
         )
 
     def test_runaway_capture_is_rejected(self):
         """A capture longer than any merchant name is not one."""
-        assert _parse_merchant("comercio: " + "A" * 200 + ".", MACH_PATTERN.merchant_patterns) is None
+        assert (
+            _parse_merchant("comercio: " + "A" * 200 + ".", MACH_PATTERN.merchant_patterns) is None
+        )
 
     def test_no_match(self):
         assert _parse_merchant("Notificacion de seguridad", MACH_PATTERN.merchant_patterns) is None
@@ -229,14 +233,50 @@ class TestParseTransaction:
         ("fixture", "pattern", "amount", "merchant", "tx_date"),
         [
             ("mach_purchase.eml", MACH_PATTERN, -999_999, "COMERCIO SINTETICO", date(2026, 9, 20)),
-            ("mach_transfer_in.eml", MACH_PATTERN, 1_000_000, "Persona Sintetica", date(2026, 9, 20)),
-            ("mach_transfer_out.eml", MACH_PATTERN, -2_500_000, "Persona Sintetica", date(2026, 9, 19)),
-            ("tenpo_purchase.eml", TENPO_PATTERN, -999_999, "COMERCIO SINTETICO", date(2026, 9, 20)),
-            ("tenpo_purchase_html.eml", TENPO_PATTERN, -999_999, "COMERCIO SINTETICO", date(2026, 9, 20)),
+            (
+                "mach_transfer_in.eml",
+                MACH_PATTERN,
+                1_000_000,
+                "Persona Sintetica",
+                date(2026, 9, 20),
+            ),
+            (
+                "mach_transfer_out.eml",
+                MACH_PATTERN,
+                -2_500_000,
+                "Persona Sintetica",
+                date(2026, 9, 19),
+            ),
+            (
+                "tenpo_purchase.eml",
+                TENPO_PATTERN,
+                -999_999,
+                "COMERCIO SINTETICO",
+                date(2026, 9, 20),
+            ),
+            (
+                "tenpo_purchase_html.eml",
+                TENPO_PATTERN,
+                -999_999,
+                "COMERCIO SINTETICO",
+                date(2026, 9, 20),
+            ),
             ("tenpo_refund.eml", TENPO_PATTERN, 999_999, "COMERCIO SINTETICO", date(2026, 9, 20)),
-            ("tenpo_transfer_in.eml", TENPO_PATTERN, 1_000_000, "Persona Sintetica", date(2026, 9, 20)),
+            (
+                "tenpo_transfer_in.eml",
+                TENPO_PATTERN,
+                1_000_000,
+                "Persona Sintetica",
+                date(2026, 9, 20),
+            ),
             ("tenpo_cashback.eml", TENPO_PATTERN, 999_999, "Recibiste cashback", date(2026, 9, 20)),
-            ("tenpo_cashback_purchase.eml", TENPO_PATTERN, -999_999, "COMERCIO SINTETICO", date(2026, 9, 20)),
+            (
+                "tenpo_cashback_purchase.eml",
+                TENPO_PATTERN,
+                -999_999,
+                "COMERCIO SINTETICO",
+                date(2026, 9, 20),
+            ),
         ],
         ids=lambda v: v if isinstance(v, str) and v.endswith(".eml") else None,
     )
@@ -294,7 +334,11 @@ class TestParseTransaction:
     def test_unanchored_figure_is_logged(self, caplog):
         """An email with a figure no rule anchors is skipped, visibly."""
         caplog.set_level(logging.INFO, logger=email_mod.__name__)
-        msg = build("MACH <notificaciones@somosmach.com>", "Compra aprobada", "Se hizo un cargo de $ 999.999")
+        msg = build(
+            "MACH <notificaciones@somosmach.com>",
+            "Compra aprobada",
+            "Se hizo un cargo de $ 999.999",
+        )
 
         tx = parse_transaction(msg, MACH_PATTERN)
 
@@ -303,7 +347,11 @@ class TestParseTransaction:
 
     def test_subject_decides_a_context_free_figure(self):
         """A bare "Monto:" is income when the subject says money came in."""
-        msg = build("MACH <notificaciones@somosmach.com>", "Recibiste una transferencia", "Monto: $ 1.000.000")
+        msg = build(
+            "MACH <notificaciones@somosmach.com>",
+            "Recibiste una transferencia",
+            "Monto: $ 1.000.000",
+        )
 
         assert parse_transaction(msg, MACH_PATTERN).amount == 1_000_000
 
@@ -331,8 +379,10 @@ class TestTransactionDate:
 
     def test_eight_bit_date_header(self):
         """A raw 8-bit byte in the header (a Header object) doesn't crash."""
-        raw = (FIXTURES / "mach_bad_date.eml").read_bytes().replace(
-            b"not a date", b"Sun, 20 Sep 2026 12:00:00 -0300 (Hora de Chile \xe9)"
+        raw = (
+            (FIXTURES / "mach_bad_date.eml")
+            .read_bytes()
+            .replace(b"not a date", b"Sun, 20 Sep 2026 12:00:00 -0300 (Hora de Chile \xe9)")
         )
 
         tx = parse_transaction(email.message_from_bytes(raw), MACH_PATTERN)
@@ -496,7 +546,9 @@ class TestFetchTransactions:
             ("[Gmail]/All Mail", "Finanzas", '"Finanzas"'),
         ],
     )
-    def test_mailbox_is_configurable_and_read_only(self, imap, monkeypatch, env, override, expected):
+    def test_mailbox_is_configurable_and_read_only(
+        self, imap, monkeypatch, env, override, expected
+    ):
         """EMAIL_IMAP_MAILBOX, else INBOX; a pattern's own mailbox wins."""
         if env:
             monkeypatch.setenv("EMAIL_IMAP_MAILBOX", env)
@@ -547,7 +599,9 @@ class TestFetchLatestCode:
         monkeypatch.setenv("EMAIL_IMAP_MAILBOX", "[Gmail]/All Mail")
 
         code = asyncio.run(
-            fetch_latest_code(sender_contains=["hola@fintual.com"], subject_contains=["código para entrar"])
+            fetch_latest_code(
+                sender_contains=["hola@fintual.com"], subject_contains=["código para entrar"]
+            )
         )
 
         assert code == "000000"

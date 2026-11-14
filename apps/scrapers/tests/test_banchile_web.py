@@ -20,7 +20,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from product_model import CheckingMetrics, CreditCardMetrics
-
 from scrapers.backends import banchile_web as banchile_web_mod
 from scrapers.backends.banchile_web import (
     BalanceFetchResult,
@@ -159,9 +158,7 @@ class TestCardSaldosFromText:
 
     def test_clp_only_page(self):
         text = "Nacional\nDisponible\n$ 4.000.000\nCupo total\n$ 5.000.000\n"
-        assert card_saldos_from_text(text) == {
-            "CLP": {"available": 4000000.0, "limit": 5000000.0}
-        }
+        assert card_saldos_from_text(text) == {"CLP": {"available": 4000000.0, "limit": 5000000.0}}
 
     def test_unparseable_section_is_omitted(self):
         # No CLP "$" figure to read -> the currency is dropped, not guessed.
@@ -409,8 +406,7 @@ class TestCardBalancesFromText:
         # owed just stays None (net worth falls back to límite − available).
         balances = card_balances_from_text(CARD_DETAIL.replace("Utilizado", "Ocupado"))
         assert [
-            (b.currency, b.metrics.available, b.metrics.limit, b.metrics.owed)
-            for b in balances
+            (b.currency, b.metrics.available, b.metrics.limit, b.metrics.owed) for b in balances
         ] == [
             ("CLP", 3600000.0, 4000000.0, None),
             ("USD", 1950.0, 2000.0, None),
@@ -429,11 +425,7 @@ class TestCardBalancesFromText:
 
 class TestLineaSaldo:
     def test_reads_available_authorized_and_utilizado(self):
-        text = (
-            "Monto autorizado\n$ 100.000\n"
-            "Saldo disponible\n$ 100.000\n"
-            "Monto utilizado\n$ 0\n"
-        )
+        text = "Monto autorizado\n$ 100.000\nSaldo disponible\n$ 100.000\nMonto utilizado\n$ 0\n"
         # An untouched line reports "Monto utilizado $ 0" — owed 0 is a real
         # figure worth recording, not a missing one.
         assert linea_saldo_from_text(text) == {
@@ -444,9 +436,7 @@ class TestLineaSaldo:
 
     def test_used_line_reads_monto_utilizado(self):
         text = (
-            "Monto autorizado\n$ 500.000\n"
-            "Saldo disponible\n$ 200.000\n"
-            "Monto utilizado\n$ 300.000\n"
+            "Monto autorizado\n$ 500.000\nSaldo disponible\n$ 200.000\nMonto utilizado\n$ 300.000\n"
         )
         assert linea_saldo_from_text(text) == {
             "available": 200000.0,
@@ -470,9 +460,7 @@ class TestLineaSaldo:
 class TestLineaBalances:
     def test_monto_utilizado_becomes_owed(self):
         text = (
-            "Monto autorizado\n$ 100.000\n"
-            "Saldo disponible\n$ 80.000\n"
-            "Monto utilizado\n$ 20.000\n"
+            "Monto autorizado\n$ 100.000\nSaldo disponible\n$ 80.000\nMonto utilizado\n$ 20.000\n"
         )
         balances = linea_balances_from_text(text)
         assert [
@@ -495,9 +483,7 @@ class TestLineaBalances:
         # debt — so nothing is emitted (issue #30), even with a utilizado.
         assert linea_balances_from_text("Saldo disponible\n$ 80.000") == []
         assert (
-            linea_balances_from_text(
-                "Saldo disponible\n$ 80.000\nMonto utilizado\n$ 20.000\n"
-            )
+            linea_balances_from_text("Saldo disponible\n$ 80.000\nMonto utilizado\n$ 20.000\n")
             == []
         )
 
@@ -1048,10 +1034,7 @@ class TestDepositosHeader:
 class TestDepositoCards:
     def test_parses_all_cards(self):
         cards = deposito_cards_from_text(DEPOSITOS_LISTADO)
-        assert [
-            (c["tipo_deposito"], c["vencimiento"], c["monto_a_recibir"])
-            for c in cards
-        ] == [
+        assert [(c["tipo_deposito"], c["vencimiento"], c["monto_a_recibir"]) for c in cards] == [
             ("Renovable", datetime.date(2026, 8, 1), 2600000),
             ("Renovable", datetime.date(2026, 9, 15), 1100000),
             ("Renovable", datetime.date(2026, 12, 30), 1111111),
@@ -1121,9 +1104,7 @@ class TestDepositoAside:
     def test_last_aside_block_wins(self):
         # If aside text accumulates in body.innerText, only the freshest
         # (last) block must be read.
-        aside = deposito_aside_from_text(
-            DEPOSITOS_LISTADO + DEPOSITO_ASIDE_1 + DEPOSITO_ASIDE_2
-        )
+        aside = deposito_aside_from_text(DEPOSITOS_LISTADO + DEPOSITO_ASIDE_1 + DEPOSITO_ASIDE_2)
         assert aside["numero"] == "00000000000000002"
         assert aside["monto_inicial"] == 1000000
 
@@ -1145,8 +1126,7 @@ class TestBuildDepositosProducts:
     def test_happy_path_builds_typed_products(self):
         products = build_depositos_products(DEPOSITOS_LISTADO, _deposito_asides(), 0)
         assert [
-            (p.kind, p.currency, p.external_ref, p.name, p.metrics.balance)
-            for p in products
+            (p.kind, p.currency, p.external_ref, p.name, p.metrics.balance) for p in products
         ] == [
             ("term_deposit", "CLP", "00000000000000001", "Depósito a Plazo 0001", 2500000),
             ("term_deposit", "CLP", "00000000000000002", "Depósito a Plazo 0002", 1000000),
@@ -1256,8 +1236,7 @@ class TestFondoCards:
     def test_parses_all_cards(self):
         cards = fondo_cards_from_text(FONDOS_LISTADO)
         assert [
-            (c["name"], c["serie"], c["invertido"], c["variacion"], c["saldo"])
-            for c in cards
+            (c["name"], c["serie"], c["invertido"], c["variacion"], c["saldo"]) for c in cards
         ] == [
             ("Banchile Fondo Sintético A", "Digital", 1000000, 99999, 1099999),
             ("Banchile Fondo Sintético B", "Digital", 500000, -50000, 450000),
@@ -1329,11 +1308,19 @@ def _fondo_asides():
 class TestBuildFondosProducts:
     def test_happy_path_builds_enriched_products(self):
         products = build_fondos_products(FONDOS_LISTADO, _fondo_asides(), 0)
-        assert [
-            (p.kind, p.currency, p.external_ref, p.name) for p in products
-        ] == [
-            ("investment", "CLP", "Banchile Fondo Sintético A|Digital", "Banchile Fondo Sintético A"),
-            ("investment", "CLP", "Banchile Fondo Sintético B|Digital", "Banchile Fondo Sintético B"),
+        assert [(p.kind, p.currency, p.external_ref, p.name) for p in products] == [
+            (
+                "investment",
+                "CLP",
+                "Banchile Fondo Sintético A|Digital",
+                "Banchile Fondo Sintético A",
+            ),
+            (
+                "investment",
+                "CLP",
+                "Banchile Fondo Sintético B|Digital",
+                "Banchile Fondo Sintético B",
+            ),
             ("investment", "CLP", "Banchile Fondo Sintético C|L", "Banchile Fondo Sintético C"),
         ]
         assert all(p.institution == "banchile" for p in products)
@@ -1485,9 +1472,7 @@ class TestMergeBalances:
 # de la línea" page; every figure is fabricated (autorizado 100.000 /
 # disponible 80.000 / utilizado 20.000).
 LINEA_DETAIL = (
-    "Monto autorizado\n$ 100.000\n"
-    "Saldo disponible\n$ 80.000\n"
-    "Monto utilizado\n$ 20.000\n"
+    "Monto autorizado\n$ 100.000\nSaldo disponible\n$ 80.000\nMonto utilizado\n$ 20.000\n"
 )
 
 
@@ -1510,8 +1495,7 @@ def _fake_portal_page(fondos_texts=None):
     """
     page = MagicMock()
     page.url = (
-        "https://portalpersonas.bancochile.cl/mibancochile-web/front/persona/"
-        "index.html#/home"
+        "https://portalpersonas.bancochile.cl/mibancochile-web/front/persona/index.html#/home"
     )
     state = {"route": "home", "asides": [], "fondos_visits": 0}
     deposito_asides = (DEPOSITO_ASIDE_1, DEPOSITO_ASIDE_2, DEPOSITO_ASIDE_3)
@@ -1551,8 +1535,7 @@ def _fake_portal_page(fondos_texts=None):
         return button
 
     detail_buttons = {
-        route: [_detail_button(route, i) for i in range(3)]
-        for route in ("depósitos", "fondos")
+        route: [_detail_button(route, i) for i in range(3)] for route in ("depósitos", "fondos")
     }
 
     card_link = MagicMock()
@@ -1563,9 +1546,7 @@ def _fake_portal_page(fondos_texts=None):
     def locator(selector):
         loc = MagicMock()
         if selector == "body":  # the page text every poll reads
-            loc.inner_text.side_effect = (
-                lambda **kwargs: base_text() + "".join(state["asides"])
-            )
+            loc.inner_text.side_effect = lambda **kwargs: base_text() + "".join(state["asides"])
         elif "ver-detalle" in selector or "Ver detalle" in selector:
             buttons = detail_buttons.get(state["route"], [])
 
@@ -1678,8 +1659,7 @@ class TestSurfaceRetries:
         assert result.failed_surfaces == ()
         cards = [b for b in result.products if b.kind == "credit_card"]
         assert [
-            (b.currency, b.metrics.available, b.metrics.limit, b.metrics.owed)
-            for b in cards
+            (b.currency, b.metrics.available, b.metrics.limit, b.metrics.owed) for b in cards
         ] == [
             ("CLP", 3600000.0, 4000000.0, 400000.0),
             ("USD", 1950.0, 2000.0, 50.0),
@@ -1786,9 +1766,7 @@ class TestSurfaceRetries:
         deposits = [b for b in result.products if b.kind == "term_deposit"]
         # Partial coverage (deposit #2's aside never opens) can't be attributed,
         # so the final attempt emits the roll-up total, not a lossy subset.
-        assert [(b.external_ref, b.metrics.balance) for b in deposits] == [
-            (None, 4499999)
-        ]
+        assert [(b.external_ref, b.metrics.balance) for b in deposits] == [(None, 4499999)]
 
 
 # --- Session cache (issue #28) -------------------------------------------------
@@ -2010,6 +1988,7 @@ class TestSessionCache:
         if failure == "storage_state":
             fresh.storage_state.side_effect = RuntimeError("context closed")
         else:
+
             def replace(src, dst):
                 raise PermissionError("read-only directory")
 
@@ -2050,9 +2029,7 @@ class TestSessionCache:
         os.name == "nt" or os.geteuid() == 0,
         reason="POSIX directory permissions (root ignores them)",
     )
-    def test_unwritable_directory_is_only_a_warning(
-        self, tmp_path, monkeypatch, login, caplog
-    ):
+    def test_unwritable_directory_is_only_a_warning(self, tmp_path, monkeypatch, login, caplog):
         locked = tmp_path / "locked"
         locked.mkdir(mode=0o500)
         monkeypatch.setenv("BANCHILE_SESSION_FILE", str(locked / ".banchile_session.json"))
@@ -2159,9 +2136,7 @@ class TestLoginCooldown:
         login.assert_called_once_with(page, RUT, PASSWORD)
         assert _last_attempt() > at
 
-    def test_a_hit_inside_the_window_reuses_the_session(
-        self, session_file, login, attempted_ago
-    ):
+    def test_a_hit_inside_the_window_reuses_the_session(self, session_file, login, attempted_ago):
         at = attempted_ago(60)
         session_file.write_text(json.dumps(CACHED_STATE))
         restored = _fake_context()
@@ -2263,9 +2238,7 @@ class TestLoginCooldownRetryAfter:
             "long-after",
         ],
     )
-    def test_truth_table(
-        self, session_file, login, monkeypatch, attempt, cached, now, expected
-    ):
+    def test_truth_table(self, session_file, login, monkeypatch, attempt, cached, now, expected):
         monkeypatch.setattr(banchile_web_mod, "_last_login_attempt", attempt)
         if cached == "dir":
             session_file.mkdir()
@@ -2280,9 +2253,7 @@ class TestLoginCooldownRetryAfter:
 
         assert login_cooldown_retry_after(now=1000.0) is None
 
-    def test_default_now_shares_the_attempts_time_base(
-        self, session_file, login, attempted_ago
-    ):
+    def test_default_now_shares_the_attempts_time_base(self, session_file, login, attempted_ago):
         attempted_ago(0)
 
         assert 0 < login_cooldown_retry_after() <= 600
@@ -2391,9 +2362,7 @@ class TestReadBudget:
         )
 
         with caplog.at_level(logging.WARNING, logger=banchile_web_mod.__name__):
-            result = _read_all_surfaces(
-                MagicMock(), deadline=banchile_web_mod._read_deadline()
-            )
+            result = _read_all_surfaces(MagicMock(), deadline=banchile_web_mod._read_deadline())
 
         assert calls == ["dashboard"]
         assert result.products == product  # what was read is kept
@@ -2408,9 +2377,7 @@ class TestReadBudget:
             return BalanceFetchResult(products=[], failed_surfaces=())
 
         session = MagicMock()
-        monkeypatch.setattr(
-            banchile_web_mod, "_authenticated_session", lambda *args: session
-        )
+        monkeypatch.setattr(banchile_web_mod, "_authenticated_session", lambda *args: session)
         monkeypatch.setattr(banchile_web_mod, "_launch_browser", lambda *a: MagicMock())
         monkeypatch.setattr(banchile_web_mod, "_refuse_a_certain_login", lambda: None)
         monkeypatch.setattr(banchile_web_mod, "_dismiss_popup", lambda page: None)
@@ -2428,8 +2395,8 @@ class TestReadBudget:
     ):
         """`storage_state` has no timeout; after a frozen portal it is skipped."""
         fresh = _fake_context()
-        fresh.new_page.return_value.locator.return_value.inner_text.side_effect = (
-            TimeoutError("frozen")
+        fresh.new_page.return_value.locator.return_value.inner_text.side_effect = TimeoutError(
+            "frozen"
         )
         browser = _fake_browser(fresh)
 

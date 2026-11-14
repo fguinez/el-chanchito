@@ -38,7 +38,6 @@ import urllib.request
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Union
 from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
@@ -193,15 +192,11 @@ def launch_chrome(
     # whole tree (renderers, GPU, zygote): a new session (one killpg) on POSIX,
     # a new process group (taskkill /T) on Windows, which has no killpg.
     if is_windows():
-        group = {
-            "creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
-        }
+        group = {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)}
     else:
         group = {"start_new_session": True}
     try:
-        return subprocess.Popen(
-            args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **group
-        )
+        return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **group)
     except OSError as exc:
         failure = type(exc).__name__
     # Raised outside the handler, so the OSError (which names the path it
@@ -218,7 +213,7 @@ def port_in_use(port: int) -> bool:
         return sock.connect_ex(("127.0.0.1", port)) == 0
 
 
-def has_exited(process: Optional[subprocess.Popen]) -> bool:
+def has_exited(process: subprocess.Popen | None) -> bool:
     """Whether a process `launch_chrome` returned has ended (never raises)."""
     if process is None:
         return False
@@ -234,7 +229,7 @@ def connect_over_cdp(
     *,
     deadline: float,
     attempt_timeout_ms: int = CONNECT_ATTEMPT_TIMEOUT_MS,
-    process: Optional[subprocess.Popen] = None,
+    process: subprocess.Popen | None = None,
 ):
     """Connect to a Chrome debug port, retrying until `deadline` (monotonic).
 
@@ -367,7 +362,7 @@ class TargetSummary:
     matching_key: str = ""
 
 
-def _targets_endpoint(cdp_url: str) -> Optional[str]:
+def _targets_endpoint(cdp_url: str) -> str | None:
     """Chrome's `/json/list` URL for the debug port `cdp_url` points at."""
     try:
         parts = urlsplit(cdp_url)
@@ -388,7 +383,7 @@ def _http_get_json(url: str, timeout_s: float):
 
 def summarize_targets(
     cdp_url: str, matches: Callable[[str], bool], *, timeout_s: float = 2.0
-) -> Optional[TargetSummary]:
+) -> TargetSummary | None:
     """Ask Chrome's own HTTP endpoint what is open; None when it does not answer.
 
     Independent of any Playwright connection, and ahead of it: Chrome lists a
@@ -544,7 +539,7 @@ def _terminate_windows(proc: subprocess.Popen) -> None:
 
 # What a command-line reader returns: the argv list (Linux /proc), one
 # space-joined string (`ps` on macOS), or None when it cannot be read.
-Cmdline = Optional[Union[Sequence[str], str]]
+Cmdline = Sequence[str] | str | None
 
 
 def managed_pidfile(profile_dir: Path) -> Path:
@@ -591,7 +586,7 @@ def forget_managed_launch(profile_dir: Path, pid: int) -> None:
         logger.warning("Could not clear the launched Chrome's record (%s)", type(exc).__name__)
 
 
-def _read_record(pidfile: Path) -> Optional[dict]:
+def _read_record(pidfile: Path) -> dict | None:
     """The pidfile's record; None when missing. Raises ValueError when corrupt."""
     try:
         raw = pidfile.read_text(encoding="utf-8")
@@ -633,7 +628,7 @@ def read_proc_cmdline(pid: int, proc_root: Path = Path("/proc")) -> Cmdline:
     return parts if len(parts) > 1 else parts[0]
 
 
-def _run_ps(pid: int, fields: str) -> Optional[str]:
+def _run_ps(pid: int, fields: str) -> str | None:
     """One `ps` column set for `pid`, stripped; None if `ps` fails or knows no such pid."""
     try:
         result = subprocess.run(
@@ -662,7 +657,7 @@ class ProcessStatus:
     state: str
 
 
-def read_proc_status(pid: int, proc_root: Path = Path("/proc")) -> Optional[ProcessStatus]:
+def read_proc_status(pid: int, proc_root: Path = Path("/proc")) -> ProcessStatus | None:
     """Linux: state and parent from /proc/<pid>/stat; None if unreadable."""
     try:
         raw = (proc_root / str(pid) / "stat").read_text(encoding="utf-8", errors="replace")
@@ -673,7 +668,7 @@ def read_proc_status(pid: int, proc_root: Path = Path("/proc")) -> Optional[Proc
         return None
 
 
-def read_ps_status(pid: int) -> Optional[ProcessStatus]:
+def read_ps_status(pid: int) -> ProcessStatus | None:
     """macOS: state and parent from `ps`; None if unreadable."""
     line = _run_ps(pid, "ppid=,stat=")
     try:
@@ -683,7 +678,7 @@ def read_ps_status(pid: int) -> Optional[ProcessStatus]:
         return None
 
 
-def _cmdline_reader(platform: str) -> Optional[Callable[[int], Cmdline]]:
+def _cmdline_reader(platform: str) -> Callable[[int], Cmdline] | None:
     if platform.startswith("linux"):
         return read_proc_cmdline
     if platform == "darwin":
@@ -691,7 +686,7 @@ def _cmdline_reader(platform: str) -> Optional[Callable[[int], Cmdline]]:
     return None
 
 
-def _status_reader(platform: str) -> Optional[Callable[[int], Optional[ProcessStatus]]]:
+def _status_reader(platform: str) -> Callable[[int], ProcessStatus | None] | None:
     if platform.startswith("linux"):
         return read_proc_status
     if platform == "darwin":
@@ -699,7 +694,7 @@ def _status_reader(platform: str) -> Optional[Callable[[int], Optional[ProcessSt
     return None
 
 
-def _has_whole_arg(cmdline: Union[Sequence[str], str], arg: str) -> bool:
+def _has_whole_arg(cmdline: Sequence[str] | str, arg: str) -> bool:
     """Whether `arg` is one whole argument of `cmdline`, never a prefix of one.
 
     An argv list is compared element by element. A `ps` line has lost the
@@ -719,7 +714,7 @@ def _has_whole_arg(cmdline: Union[Sequence[str], str], arg: str) -> bool:
     return False
 
 
-StatusReader = Optional[Callable[[int], Optional[ProcessStatus]]]
+StatusReader = Callable[[int], ProcessStatus | None] | None
 
 
 def _pid_state(pid: int, read_status: StatusReader = None) -> str:
@@ -812,7 +807,7 @@ def reclaim_orphaned_chrome(
     port: int,
     profile_dir: Path,
     platform: str = sys.platform,
-    read_cmdline: Optional[Callable[[int], Cmdline]] = None,
+    read_cmdline: Callable[[int], Cmdline] | None = None,
     read_status: StatusReader = None,
 ) -> bool:
     """Stop a managed Chrome a killed run left behind on `profile_dir`.
@@ -897,8 +892,8 @@ def _is_managed_chrome(
     *,
     profile_dir: Path,
     platform: str,
-    read_cmdline: Optional[Callable[[int], Cmdline]],
-) -> Optional[bool]:
+    read_cmdline: Callable[[int], Cmdline] | None,
+) -> bool | None:
     """Whether `pid` is the recorded Chrome; None when its command line cannot be read."""
     if record["profile_dir"] != str(Path(profile_dir).resolve()):
         return False

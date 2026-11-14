@@ -271,13 +271,25 @@ class TestParseMovements:
     @pytest.mark.parametrize(
         ("overrides", "reason"),
         [
-            pytest.param({"movementAmount": AMOUNT_999_999, "chargePaymentFlag": "D"}, web.SKIP_SIGN_MISMATCH, id="debit-without-minus"),
-            pytest.param({"movementAmount": AMOUNT_999_999 + "-", "chargePaymentFlag": "H"}, web.SKIP_SIGN_MISMATCH, id="credit-with-minus"),
+            pytest.param(
+                {"movementAmount": AMOUNT_999_999, "chargePaymentFlag": "D"},
+                web.SKIP_SIGN_MISMATCH,
+                id="debit-without-minus",
+            ),
+            pytest.param(
+                {"movementAmount": AMOUNT_999_999 + "-", "chargePaymentFlag": "H"},
+                web.SKIP_SIGN_MISMATCH,
+                id="credit-with-minus",
+            ),
             pytest.param({"movementAmount": "000000000000000"}, web.SKIP_ZERO, id="zero"),
             pytest.param({"movementAmount": ""}, web.SKIP_INVALID, id="no-amount"),
             pytest.param({"movementAmount": "ABC"}, web.SKIP_INVALID, id="unparseable"),
-            pytest.param({"movementAmount": "000000099999950-"}, web.SKIP_INVALID, id="clp-with-cents"),
-            pytest.param({"transactionDate": "", "accountingDate": ""}, web.SKIP_INVALID, id="no-date"),
+            pytest.param(
+                {"movementAmount": "000000099999950-"}, web.SKIP_INVALID, id="clp-with-cents"
+            ),
+            pytest.param(
+                {"transactionDate": "", "accountingDate": ""}, web.SKIP_INVALID, id="no-date"
+            ),
         ],
     )
     def test_skipped_rows(self, overrides, reason):
@@ -367,8 +379,12 @@ class TestExternalId:
 class TestLatestBalance:
     def test_picks_the_latest_posted_movement(self):
         """The newest posting date, then the highest number, wins."""
-        older = _movement(accountingDate="2026-07-01", movementNumber="000000009", newBalance="000000000100000000")
-        newer = _movement(accountingDate="2026-07-15", movementNumber="000000002", newBalance=BALANCE_2_500_000)
+        older = _movement(
+            accountingDate="2026-07-01", movementNumber="000000009", newBalance="000000000100000000"
+        )
+        newer = _movement(
+            accountingDate="2026-07-15", movementNumber="000000002", newBalance=BALANCE_2_500_000
+        )
 
         assert web.latest_balance([older, newer]) == Decimal("2500000.00")
 
@@ -713,9 +729,7 @@ class TestReadSession:
 
         result = web.read_session(self.page, self.capture, self.today)
 
-        assert result.warnings == [
-            "Santander: 1 movements skipped (no date or unreadable amount)"
-        ]
+        assert result.warnings == ["Santander: 1 movements skipped (no date or unreadable amount)"]
 
     def test_another_accounts_movements_are_partial(self, monkeypatch):
         """Movements the SPA loaded for another account are never ingested."""

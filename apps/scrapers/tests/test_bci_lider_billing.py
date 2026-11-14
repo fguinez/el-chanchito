@@ -248,9 +248,7 @@ class TestBillingMetrics:
     def test_a_statement_of_another_period_is_ignored(self):
         """Without the matching PDF the day before the portal's billing date
         stands in: the billed period ends the day before it is issued."""
-        older = _statement(
-            date(2026, 2, 11), date(2026, 2, 10), next_period_end=date(2026, 3, 10)
-        )
+        older = _statement(date(2026, 2, 11), date(2026, 2, 10), next_period_end=date(2026, 3, 10))
 
         fields = billing_metrics(_current(), [older])
 

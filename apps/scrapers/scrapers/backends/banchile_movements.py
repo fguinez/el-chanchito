@@ -87,9 +87,9 @@ import math
 import os
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
-from typing import Callable, Optional
 
 from scrapers.backends.banchile_fx import read_exchange_rate_surface
 from scrapers.backends.banchile_web import (
@@ -198,14 +198,14 @@ class BanChileMovement:
     description: str
     amount: Decimal
     transaction_date: datetime.date
-    accounting_date: Optional[datetime.date] = None
-    operation_id: Optional[str] = None
+    accounting_date: datetime.date | None = None
+    operation_id: str | None = None
     fingerprint: tuple[str, ...] = ()
     currency: str = "CLP"
     legacy_fingerprint: tuple[str, ...] = ()
-    legacy_amount: Optional[int] = None
+    legacy_amount: int | None = None
     statement_date: str = ""
-    location: Optional[TransactionLocation] = None
+    location: TransactionLocation | None = None
     later_installment: bool = False
     billing_unknown: bool = False
     reference_tag: str = ""
@@ -229,10 +229,10 @@ class BanChileStatement:
 
     currency: str
     statement_date: datetime.date
-    next_statement_date: Optional[datetime.date] = None
-    payment_due_date: Optional[datetime.date] = None
-    billed_amount: Optional[float] = None
-    minimum_payment: Optional[float] = None
+    next_statement_date: datetime.date | None = None
+    payment_due_date: datetime.date | None = None
+    billed_amount: float | None = None
+    minimum_payment: float | None = None
     leg_complete: bool = True
 
 
@@ -244,7 +244,7 @@ class BilledLegRead:
     """
 
     movements: list[BanChileMovement] = field(default_factory=list)
-    statement: Optional[BanChileStatement] = None
+    statement: BanChileStatement | None = None
 
 
 @dataclass(frozen=True)
@@ -294,7 +294,7 @@ def _text(value) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def _number(value) -> Optional[float]:
+def _number(value) -> float | None:
     """A payload field as a float, or None when it isn't a JSON number."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
@@ -304,7 +304,7 @@ def _number(value) -> Optional[float]:
 _CENTS = Decimal("0.01")
 
 
-def _usd(value) -> Optional[Decimal]:
+def _usd(value) -> Decimal | None:
     """A JSON number as a USD Decimal quantized to cents (None if it isn't one).
 
     Built from the float's shortest repr, so 12.34 is Decimal("12.34") and never
@@ -317,7 +317,7 @@ def _usd(value) -> Optional[Decimal]:
     return Decimal(repr(number)).quantize(_CENTS, rounding=ROUND_HALF_UP)
 
 
-def _usd_from_text(value) -> Optional[Decimal]:
+def _usd_from_text(value) -> Decimal | None:
     """A USD amount from a JSON number or a formatted string (None if neither).
 
     For the USD cartola, whose formatting has not been observed on a real row
@@ -351,9 +351,7 @@ def _usd_from_text(value) -> Optional[Decimal]:
                 "reading the comma as the decimal separator"
             )
         cleaned = cleaned.replace(",", "." if cleaned.count(",") == 1 else "")
-    elif cleaned.count(".") > 1 or (
-        "." in cleaned and len(cleaned.rsplit(".", 1)[-1]) == 3
-    ):
+    elif cleaned.count(".") > 1 or ("." in cleaned and len(cleaned.rsplit(".", 1)[-1]) == 3):
         cleaned = cleaned.replace(".", "")
     try:
         amount = Decimal(cleaned)
@@ -365,7 +363,7 @@ def _usd_from_text(value) -> Optional[Decimal]:
     return amount.quantize(_CENTS, rounding=ROUND_HALF_UP)
 
 
-def card_location(city, country) -> Optional[TransactionLocation]:
+def card_location(city, country) -> TransactionLocation | None:
     """A card row's merchant city and country as a location (None when neither).
 
     Both are stored as the portal spells them (trimmed, usually upper case),
@@ -381,8 +379,8 @@ def card_location(city, country) -> Optional[TransactionLocation]:
 
 
 def merge_locations(
-    primary: Optional[TransactionLocation], fallback: Optional[TransactionLocation]
-) -> Optional[TransactionLocation]:
+    primary: TransactionLocation | None, fallback: TransactionLocation | None
+) -> TransactionLocation | None:
     """`primary`'s location with its gaps filled from `fallback`, field by field.
 
     A field `primary` sets always wins; the coordinates are one value, taken
@@ -407,7 +405,7 @@ def _legacy_clp_amount(bank_signed: float) -> int:
     Python's `round` is banker's rounding on the float, so 12.5 gives 12; the
     cleanup of misrouted rows has to reproduce that exactly, never re-derive it.
     """
-    return -int(round(bank_signed))
+    return -round(bank_signed)
 
 
 def _fingerprint_value(value) -> str:
@@ -423,7 +421,7 @@ def _fingerprint_value(value) -> str:
     return _text(value)
 
 
-def _operation_id_or_none(raw) -> Optional[str]:
+def _operation_id_or_none(raw) -> str | None:
     """An operation id, unless it is blank or an all-zero placeholder.
 
     Mirrors `billed_reference`'s guard on the other leg: an id of nothing but
@@ -439,7 +437,7 @@ def _operation_id_or_none(raw) -> Optional[str]:
     return value
 
 
-def operation_id_from_glosa(detalle_glosa) -> Optional[str]:
+def operation_id_from_glosa(detalle_glosa) -> str | None:
     """The "Id transaccion: ..." value from a movement's inline glosa.
 
     Returns None when the glosa is absent, empty, or carries no id line: a
@@ -459,7 +457,7 @@ def operation_id_from_glosa(detalle_glosa) -> Optional[str]:
     return None
 
 
-def operation_id_from_detail(payload) -> Optional[str]:
+def operation_id_from_detail(payload) -> str | None:
     """The `transaccionId` from a `cartola/detalle-glosa` response.
 
     Only a 200 body carries one. The 501 ("Glosa aun no implementada", which is
@@ -485,9 +483,7 @@ def needs_detail_glosa(raw) -> bool:
         return False
     if raw.get("detalleGlosa"):
         return False
-    return bool(_text(raw.get("infoDataGlosaAdicional"))) and bool(
-        _text(raw.get("numeroCuenta"))
-    )
+    return bool(_text(raw.get("infoDataGlosaAdicional"))) and bool(_text(raw.get("numeroCuenta")))
 
 
 def detail_glosa_body(raw) -> dict:
@@ -514,7 +510,7 @@ def cartola_has_more_pages(payload) -> bool:
     return isinstance(first, dict) and _flag_set(first.get("masPaginas"))
 
 
-def _cartola_dates(raw) -> tuple[Optional[datetime.date], Optional[datetime.date]]:
+def _cartola_dates(raw) -> tuple[datetime.date | None, datetime.date | None]:
     """(occurred, posted) for one cartola row, from `fecha` and `fechaContable`.
 
     The bank reports both and they differ for most of the observed window: a
@@ -549,9 +545,7 @@ def _cartola_dates(raw) -> tuple[Optional[datetime.date], Optional[datetime.date
     return occurred, posted
 
 
-def parse_cartola_movement(
-    raw, operation_id: Optional[str] = None, currency: str = "CLP"
-):
+def parse_cartola_movement(raw, operation_id: str | None = None, currency: str = "CLP"):
     """One `getCartola` row -> a BanChileMovement (None when unusable).
 
     `monto` is unsigned and `tipo` carries the direction, so an unrecognised
@@ -578,10 +572,7 @@ def parse_cartola_movement(
     if not isinstance(raw, dict):
         return None
     usd = currency != "CLP"
-    if usd:
-        monto = _usd_from_text(raw.get("monto"))
-    else:
-        monto = parse_clp(_text(raw.get("monto")))
+    monto = _usd_from_text(raw.get("monto")) if usd else parse_clp(_text(raw.get("monto")))
     if monto is None:
         return None
     tipo = _text(raw.get("tipo")).lower()
@@ -713,7 +704,7 @@ def parse_unbilled_movement(raw):
         operation_id=None,
         fingerprint=tuple(
             str(usd) if key == "montoCompra" else value
-            for key, value in zip(_UNBILLED_IDENTITY, clp_fingerprint)
+            for key, value in zip(_UNBILLED_IDENTITY, clp_fingerprint, strict=False)
         ),
         currency="USD",
         legacy_fingerprint=clp_fingerprint,
@@ -760,11 +751,11 @@ def section_tag(section: str) -> str:
     """
     name = _text(section)
     if name.startswith("seccion"):
-        name = name[len("seccion"):]
+        name = name[len("seccion") :]
     return _ID_NOISE_RE.sub("", name).upper()
 
 
-def billed_reference(raw_reference) -> Optional[str]:
+def billed_reference(raw_reference) -> str | None:
     """A billed row's reference, or None when it isn't one.
 
     The national format is "DDMM NNNNNNNN" (`numReferencia`) and the USD one
@@ -783,9 +774,7 @@ def billed_reference(raw_reference) -> Optional[str]:
     return reference
 
 
-def parse_billed_movement(
-    raw, fecha_facturacion: str = "", section: str = _OPERATIONS_SECTION
-):
+def parse_billed_movement(raw, fecha_facturacion: str = "", section: str = _OPERATIONS_SECTION):
     """One `transaccionesTarjetas` row -> a BanChileMovement (or None).
 
     `totales: true` rows are the section summary lines the SPA prints under
@@ -836,11 +825,11 @@ def parse_billed_movement(
         return None
 
     if section != _OPERATIONS_SECTION:
-        amount = Decimal(-int(round(monto)))
+        amount = Decimal(-round(monto))
     elif _text(raw.get("grupo")).lower() == "pagos":
-        amount = Decimal(int(round(abs(monto))))
+        amount = Decimal(round(abs(monto)))
     else:
-        amount = Decimal(-int(round(monto)))
+        amount = Decimal(-round(monto))
     fingerprint = (
         _fingerprint_value(raw.get("fechaTransaccionString")),
         _fingerprint_value(raw.get("montoTransaccion")),
@@ -850,9 +839,7 @@ def parse_billed_movement(
     if section != _OPERATIONS_SECTION:
         fingerprint += (_text(section),)
 
-    description = (
-        _text(raw.get("descripcion")) or _text(raw.get("comercio")) or "Movimiento"
-    )
+    description = _text(raw.get("descripcion")) or _text(raw.get("comercio")) or "Movimiento"
     reference = billed_reference(raw.get("numReferencia"))
     tagged = reference is not None and section != _OPERATIONS_SECTION
     return BanChileMovement(
@@ -891,9 +878,7 @@ def _national_sections(payload: dict) -> list[str]:
     return sorted(names, key=lambda name: name != _OPERATIONS_SECTION)
 
 
-def _disambiguated(
-    movement: BanChileMovement, raw_reference, seen: set[tuple]
-) -> BanChileMovement:
+def _disambiguated(movement: BanChileMovement, raw_reference, seen: set[tuple]) -> BanChileMovement:
     """`movement` with a fingerprint no earlier row of its statement holds.
 
     Two reference-less rows can share every fallback field: two payments of
@@ -907,14 +892,11 @@ def _disambiguated(
     """
     fingerprint = movement.fingerprint
     if fingerprint in seen:
-        fingerprint = movement.fingerprint + (_text(raw_reference),)
+        fingerprint = (*movement.fingerprint, _text(raw_reference))
         occurrence = 1
         while fingerprint in seen:
             occurrence += 1
-            fingerprint = movement.fingerprint + (
-                _text(raw_reference),
-                f"#{occurrence}",
-            )
+            fingerprint = (*movement.fingerprint, _text(raw_reference), f"#{occurrence}")
     seen.add(fingerprint)
     if fingerprint == movement.fingerprint:
         return movement
@@ -986,9 +968,7 @@ def parse_billed_movements(payload, fecha_facturacion: str = "") -> list[BanChil
 _INTERNATIONAL_SECTIONS = ("seccionPagos", "seccionCompras", "seccionComisiones")
 
 
-def parse_international_billed_movement(
-    raw, fecha_facturacion: str = "", section: str = ""
-):
+def parse_international_billed_movement(raw, fecha_facturacion: str = "", section: str = ""):
     """One USD statement row -> a BanChileMovement (or None).
 
     Unlike the national leg, `montoDolar` is SIGNED from the bank's side, like
@@ -1124,7 +1104,7 @@ def _flag_set(value) -> bool:
     return _text(value).upper() in {"1", "S", "SI", "Y", "YES", "TRUE"}
 
 
-def _statement_amount(value, currency: str) -> Optional[float]:
+def _statement_amount(value, currency: str) -> float | None:
     """A `resumen` amount: whole pesos for CLP, cents for USD (None if absent)."""
     if currency == "USD":
         usd = _usd(value)
@@ -1135,7 +1115,7 @@ def _statement_amount(value, currency: str) -> Optional[float]:
     return float(round(number))
 
 
-def parse_statement_summary(payload, currency: str) -> Optional[BanChileStatement]:
+def parse_statement_summary(payload, currency: str) -> BanChileStatement | None:
     """The `resumen` of one `resumen-por-fecha` response (None when unusable).
 
     The national and the USD statement share the `resumen` keys; its dates are
@@ -1155,18 +1135,14 @@ def parse_statement_summary(payload, currency: str) -> Optional[BanChileStatemen
     return BanChileStatement(
         currency=currency,
         statement_date=statement_date,
-        next_statement_date=_parse_date_ddmmyyyy(
-            _text(resumen.get("fechaProximaFacturacion"))
-        ),
-        payment_due_date=_parse_date_ddmmyyyy(
-            _text(resumen.get("fechaVencimientoFacturacion"))
-        ),
+        next_statement_date=_parse_date_ddmmyyyy(_text(resumen.get("fechaProximaFacturacion"))),
+        payment_due_date=_parse_date_ddmmyyyy(_text(resumen.get("fechaVencimientoFacturacion"))),
         billed_amount=_statement_amount(resumen.get("montoFacturado"), currency),
         minimum_payment=_statement_amount(resumen.get("pagoMinimo"), currency),
     )
 
 
-def _iso_date(fecha: str) -> Optional[datetime.date]:
+def _iso_date(fecha: str) -> datetime.date | None:
     try:
         return datetime.date.fromisoformat(fecha)
     except ValueError:
@@ -1201,7 +1177,7 @@ def billed_leg_from_statements(
     no usable `resumen` or answered another closing date.
     """
     movements: list[BanChileMovement] = []
-    newest: Optional[BanChileStatement] = None
+    newest: BanChileStatement | None = None
     complete = missing == 0
     for fecha, payload in sorted(statements, key=lambda read: _statement_order(read[0])):
         rows = parse(payload, fecha)
@@ -1252,6 +1228,7 @@ def drop_unbilled_duplicates(
     any dropped row fills the gaps in the billed row's location
     (`merge_locations`).
     """
+
     def key_of(movement: BanChileMovement) -> tuple:
         return (
             movement.product_kind,
@@ -1337,9 +1314,7 @@ def _requested_currency(request_body) -> str:
     return _currency_code(selected.get("moneda"))
 
 
-def cartola_mismatch(
-    payload, currency: str, read_accounts=frozenset(), request_body=None
-) -> str:
+def cartola_mismatch(payload, currency: str, read_accounts=frozenset(), request_body=None) -> str:
     """Why a captured `getCartola` payload is not the one a drive asked for.
 
     "" when it is. Once the SPA remembers an account it fetches that
@@ -1392,8 +1367,7 @@ def dedupe_movements(movements: list[BanChileMovement]) -> list[BanChileMovement
 # the session cookie alone: no bearer token, no extra header.
 _CARTOLA_FRAGMENT = "movimientos/getCartola"
 _DETALLE_GLOSA_PATH = (
-    "/mibancochile/rest/persona/bff-pper-prd-cta-movimientos/movimientos/"
-    "cartola/detalle-glosa"
+    "/mibancochile/rest/persona/bff-pper-prd-cta-movimientos/movimientos/cartola/detalle-glosa"
 )
 _UNBILLED_FRAGMENT = "movimientos-no-facturados"
 _FECHAS_FACTURACION_FRAGMENT = "estadocuenta/fechas-facturacion"
@@ -1498,6 +1472,7 @@ def billed_statement_count() -> int:
         return _DEFAULT_BILLED_STATEMENTS
     return count
 
+
 # Two layers bound each in-page POST: `_evaluate_bounded` gives up on the
 # whole call after `_POST_JSON_CALL_TIMEOUT_MS`, even if the renderer stops
 # answering, and inside the page the fetch (body included) aborts after
@@ -1546,7 +1521,7 @@ class _JsonCapture:
         # counts every matching request, whatever its body, and `finished`
         # every one that ended: answered (200 or not) or failed (aborted,
         # cancelled), so a dropped call is never in flight forever.
-        self.payload_requests: list[Optional[dict]] = []
+        self.payload_requests: list[dict | None] = []
         self.started = 0
         self.finished = 0
 
@@ -1615,7 +1590,7 @@ class _JsonCapture:
         return False
 
 
-def _request_body(response) -> Optional[dict]:
+def _request_body(response) -> dict | None:
     """The JSON body of the request behind `response` (None when unknown)."""
     try:
         body = response.request.post_data_json
@@ -1624,7 +1599,7 @@ def _request_body(response) -> Optional[dict]:
     return body if isinstance(body, dict) else None
 
 
-def _wait_for_payload(page, capture: _JsonCapture, timeout_ms: int) -> Optional[dict]:
+def _wait_for_payload(page, capture: _JsonCapture, timeout_ms: int) -> dict | None:
     """Poll until `capture` has a payload, the budget runs out, or we go astray.
 
     Playwright's sync event handlers only run while the caller is inside a wait,
@@ -1643,7 +1618,7 @@ def _wait_for_payload(page, capture: _JsonCapture, timeout_ms: int) -> Optional[
 
 def _wait_for_cartola(
     page, capture: _JsonCapture, timeout_ms: int, currency: str, read_accounts
-) -> tuple[Optional[dict], str]:
+) -> tuple[dict | None, str]:
     """Wait for the drive's own `getCartola` payload; (None, reason) if none came.
 
     Payloads that `cartola_mismatch` rejects are skipped and the wait goes on,
@@ -1674,7 +1649,7 @@ def _wait_for_cartola(
         page.wait_for_timeout(500)
 
 
-def _post_json(page, url: str, body: dict) -> tuple[int, Optional[dict]]:
+def _post_json(page, url: str, body: dict) -> tuple[int, dict | None]:
     """POST `body` to `url` from inside the authenticated page.
 
     Returns (status, payload); (0, None) when the call could not be made at all.
@@ -1727,14 +1702,14 @@ class _RadioPick:
 class _CartolaDrive:
     """One dialog drive. `no_account` means the currency has no account at all."""
 
-    payload: Optional[dict] = None
+    payload: dict | None = None
     accounts: int = 0
     no_account: bool = False
     # The dialog answered with an account this attempt already read.
     repeated_account: bool = False
 
 
-def matching_option_index(option_texts: list[str], currency: str) -> Optional[int]:
+def matching_option_index(option_texts: list[str], currency: str) -> int | None:
     """Which currency option to click (None when no option is `currency`'s)."""
     option_re = _CURRENCY_OPTION_RES[currency]
     for index, text in enumerate(option_texts):
@@ -1823,9 +1798,7 @@ def _open_dialog(page, capture: "_JsonCapture", timeout_ms: int) -> _StepResult:
         if not _on_portal(page):
             return _StepResult(_STEP_FAILED, "left the portal")
         if time.monotonic() >= deadline:
-            return _StepResult(
-                _STEP_FAILED, "dialog did not open; reopen button not found"
-            )
+            return _StepResult(_STEP_FAILED, "dialog did not open; reopen button not found")
         page.wait_for_timeout(_DIALOG_POLL_MS)
 
     logger.debug("BanChile: an account is remembered; reopening the dialog")
@@ -1880,16 +1853,12 @@ def _select_currency(page, currency: str, timeout_ms: int) -> _StepResult:
         select.click()
         page.wait_for_timeout(_DIALOG_SETTLE_MS)
         options = page.locator(_CURRENCY_OPTION_SELECTOR)
-        texts = [
-            options.nth(i).inner_text() or "" for i in range(_visible_count(options))
-        ]
+        texts = [options.nth(i).inner_text() or "" for i in range(_visible_count(options))]
         # The count and the currencies recognised, never the raw option text.
         recognised = [
             c for c in _CURRENCY_OPTION_RES if matching_option_index(texts, c) is not None
         ]
-        logger.debug(
-            "BanChile: %d currency option(s); recognised: %s", len(texts), recognised
-        )
+        logger.debug("BanChile: %d currency option(s); recognised: %s", len(texts), recognised)
         if not texts:
             return _StepResult(_STEP_FAILED, "currency list did not open")
         if not recognised:
@@ -1927,9 +1896,7 @@ def _click_account_radio(
             except Exception:
                 logger.debug("BanChile: no account radio rendered", exc_info=True)
                 return _RadioPick(0, _STEP_FAILED, "no account radio rendered")
-            labels = [
-                radios.nth(i).inner_text() or "" for i in range(_visible_count(radios))
-            ]
+            labels = [radios.nth(i).inner_text() or "" for i in range(_visible_count(radios))]
             # Only the count is logged: a radio's label carries the account number.
             logger.debug("BanChile: %d account radio(s) rendered", len(labels))
             matching = matching_radio_indices(labels, currency)
@@ -1989,7 +1956,7 @@ def _leave_movements_view(page) -> None:
 _CHECKING_ROW_RE = dict(_PRODUCT_ROWS)["checking"]
 
 
-def dashboard_rendered(text: Optional[str]) -> bool:
+def dashboard_rendered(text: str | None) -> bool:
     """True when `text` is the rendered "Mis Productos" dashboard.
 
     Its checking row is the signal (every customer here has the account, card
@@ -2091,9 +2058,7 @@ def _open_cartola(
             logger.info("BanChile: no %s checking account (%s)", currency, selected.reason)
             return _CartolaDrive(no_account=True)
         if selected.status != _STEP_OK:
-            return _drive_failed(
-                currency, "currency select", selected.reason, index, attempt
-            )
+            return _drive_failed(currency, "currency select", selected.reason, index, attempt)
 
         pick = _click_account_radio(page, index, currency, timeout_ms)
         if pick.status != _STEP_OK:
@@ -2112,20 +2077,14 @@ def _open_cartola(
             return _drive_failed(
                 currency, "accept", "Aceptar not clickable", index, attempt, pick.count
             )
-        payload, reason = _wait_for_cartola(
-            page, capture, timeout_ms, currency, read_accounts
-        )
+        payload, reason = _wait_for_cartola(page, capture, timeout_ms, currency, read_accounts)
         if payload is None:
-            failed = _drive_failed(
-                currency, "cartola wait", reason, index, attempt, pick.count
-            )
+            failed = _drive_failed(currency, "cartola wait", reason, index, attempt, pick.count)
             return replace(failed, repeated_account=reason == _STALE_ACCOUNT)
         return _CartolaDrive(payload=payload, accounts=pick.count)
 
 
-def _operation_ids_for(
-    page, raw_movements: list, budget: int
-) -> tuple[list[Optional[str]], int]:
+def _operation_ids_for(page, raw_movements: list, budget: int) -> tuple[list[str | None], int]:
     """The operation id of each raw movement: inline first, then the XHR.
 
     The extra call only fires for movements whose `detalleGlosa` is empty (the
@@ -2135,7 +2094,7 @@ def _operation_ids_for(
     writer once one appears. Returns the ids alongside what is left of the
     budget, so reading a second account cannot restart it.
     """
-    ids: list[Optional[str]] = []
+    ids: list[str | None] = []
     remaining = budget
     for raw in raw_movements:
         if not isinstance(raw, dict):
@@ -2178,7 +2137,7 @@ def _movements_from_cartola(
         )
     ids, remaining = _operation_ids_for(page, raw_movements, budget)
     movements = []
-    for raw, operation_id in zip(raw_movements, ids):
+    for raw, operation_id in zip(raw_movements, ids, strict=False):
         movement = parse_cartola_movement(raw, operation_id, currency)
         if movement is not None:
             movements.append(movement)
@@ -2204,7 +2163,7 @@ def _movements_from_cartola(
 
 def _read_checking_movements(
     page, attempt: int, currency: str = "CLP"
-) -> Optional[list[BanChileMovement]]:
+) -> list[BanChileMovement] | None:
     """Read every `currency` checking account's cartola (one attempt).
 
     The dialog lists one radio per account of the chosen currency, and this
@@ -2227,9 +2186,7 @@ def _read_checking_movements(
         _leave_movements_view(page)
 
 
-def _read_checking_accounts(
-    page, attempt: int, currency: str
-) -> Optional[list[BanChileMovement]]:
+def _read_checking_accounts(page, attempt: int, currency: str) -> list[BanChileMovement] | None:
     """`_read_checking_movements`' account loop, before the page is cleaned up."""
     budget = _budget(_RENDER_TIMEOUTS_MS, attempt)
     collected: list[BanChileMovement] = []
@@ -2269,7 +2226,7 @@ def _read_checking_accounts(
     return dedupe_movements(collected)
 
 
-def _read_usd_checking_movements(page, attempt: int) -> Optional[list[BanChileMovement]]:
+def _read_usd_checking_movements(page, attempt: int) -> list[BanChileMovement] | None:
     """The USD checking cartola: the same dialog drive with USD picked.
 
     A surface of its own, so a failure here never costs the CLP cartola. Its
@@ -2307,7 +2264,7 @@ def _open_card_area(page, attempt: int) -> bool:
     return True
 
 
-def _read_card_unbilled(page, attempt: int) -> Optional[list[BanChileMovement]]:
+def _read_card_unbilled(page, attempt: int) -> list[BanChileMovement] | None:
     """Capture the unbilled movements the card page loads (one attempt).
 
     Nothing is composed here: opening the card page makes the SPA fetch
@@ -2331,7 +2288,7 @@ def _read_card_unbilled(page, attempt: int) -> Optional[list[BanChileMovement]]:
     return movements
 
 
-def _replay_statement(page, request: dict, fecha: str) -> Optional[dict]:
+def _replay_statement(page, request: dict, fecha: str) -> dict | None:
     """Re-issue the SPA's own `resumen-por-fecha` call for another period."""
     body = dict(request.get("body") or {})
     if not body:
@@ -2352,7 +2309,7 @@ def _read_billed_leg(
     dates_of: Callable,
     label: str,
     currency: str,
-) -> Optional[BilledLegRead]:
+) -> BilledLegRead | None:
     """Read one currency's newest statements (one attempt).
 
     The SPA loads the most recent statement itself when the facturados tab
@@ -2376,9 +2333,7 @@ def _read_billed_leg(
                 return None
             payload = _wait_for_payload(page, billed_capture, budget)
             if payload is None:
-                logger.info(
-                    "BanChile: %s did not load (attempt %d)", label, attempt + 1
-                )
+                logger.info("BanChile: %s did not load (attempt %d)", label, attempt + 1)
                 return None
             requests = list(billed_capture.requests)
             fechas_payloads = list(fechas_capture.payloads)
@@ -2387,9 +2342,7 @@ def _read_billed_leg(
         statements = [(loaded, payload)]
         missing = 0
 
-        dates = dates_of(
-            fechas_payloads[-1] if fechas_payloads else None, billed_statement_count()
-        )
+        dates = dates_of(fechas_payloads[-1] if fechas_payloads else None, billed_statement_count())
         for fecha in dates:
             if not fecha or fecha == loaded:
                 continue
@@ -2409,7 +2362,7 @@ def _read_billed_leg(
     return read
 
 
-def _read_card_billed(page, attempt: int) -> Optional[BilledLegRead]:
+def _read_card_billed(page, attempt: int) -> BilledLegRead | None:
     """The national (CLP) statements' billed movements and summary (one attempt)."""
     return _read_billed_leg(
         page,
@@ -2422,7 +2375,7 @@ def _read_card_billed(page, attempt: int) -> Optional[BilledLegRead]:
     )
 
 
-def _read_card_billed_usd(page, attempt: int) -> Optional[BilledLegRead]:
+def _read_card_billed_usd(page, attempt: int) -> BilledLegRead | None:
     """The international (USD) statements' billed movements and summary (one attempt).
 
     The same statements as the national leg (`listaInternacional` mirrors
@@ -2457,7 +2410,7 @@ CLP_CARD_SURFACES = ("tarjeta no facturados", "tarjeta facturados")
 
 
 def read_movement_surfaces(
-    page, deadline: Optional[float] = None
+    page, deadline: float | None = None
 ) -> tuple[list[BanChileMovement], tuple[str, ...], list[BanChileStatement]]:
     """Read every movements surface off an authenticated page, with retries.
 
@@ -2489,9 +2442,7 @@ def read_movement_surfaces(
             _skip_surfaces(skipped)
             failed.extend(skipped)
             break
-        found = _read_surface_with_retries(
-            page, surface, read, allow_empty=True, deadline=deadline
-        )
+        found = _read_surface_with_retries(page, surface, read, allow_empty=True, deadline=deadline)
         if found is None:
             failed.append(surface)
         elif isinstance(found, BilledLegRead):
@@ -2508,6 +2459,7 @@ def read_movement_surfaces(
 
 
 # --- The shared session -------------------------------------------------------
+
 
 def read_session(page) -> BanChileSessionResult:
     """Every read of one authenticated page: products, the rate, movements.
@@ -2550,9 +2502,7 @@ def _session_sync(rut: str, password: str, headless: bool) -> BanChileSessionRes
             browser.close()
 
 
-async def fetch_session(
-    rut: str, password: str, *, headless: bool = True
-) -> BanChileSessionResult:
+async def fetch_session(rut: str, password: str, *, headless: bool = True) -> BanChileSessionResult:
     """Log into Banco de Chile once and read its products, rate and movements.
 
     Runs the synchronous Playwright flow in a thread executor so it doesn't

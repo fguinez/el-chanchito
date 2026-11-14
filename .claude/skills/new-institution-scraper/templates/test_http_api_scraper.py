@@ -90,9 +90,7 @@ def _install(monkeypatch, fake: _Acme) -> None:
     monkeypatch.setattr(
         acme_mod.httpx,
         "AsyncClient",
-        lambda **kwargs: real_client(
-            transport=httpx.MockTransport(fake.handler), **kwargs
-        ),
+        lambda **kwargs: real_client(transport=httpx.MockTransport(fake.handler), **kwargs),
     )
 
 

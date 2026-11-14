@@ -110,9 +110,7 @@ class TestTheInPageScript:
         assert fx_mod._RATE_PATH.endswith("pago/calcular-pago-internacional")
 
     def test_it_never_touches_the_payment_flow(self):
-        everything = "\n".join(
-            (fx_mod._EXCHANGE_RATE_JS, fx_mod._PRODUCTS_PATH, fx_mod._RATE_PATH)
-        )
+        everything = "\n".join((fx_mod._EXCHANGE_RATE_JS, fx_mod._PRODUCTS_PATH, fx_mod._RATE_PATH))
 
         for forbidden in (
             "autorizacion-pago-internacional",
@@ -153,9 +151,7 @@ class TestTheInPageScript:
 
         ((_, arg),) = page.calls
         # The whole call outlives the in-page fetch budget only by a margin.
-        assert page.timeouts == [
-            fx_mod._RENDER_TIMEOUTS_MS[0] + fx_mod._PAGE_CALL_TIMEOUT_MS
-        ]
+        assert page.timeouts == [fx_mod._RENDER_TIMEOUTS_MS[0] + fx_mod._PAGE_CALL_TIMEOUT_MS]
         assert arg == {
             "productsPath": fx_mod._PRODUCTS_PATH,
             "ratePath": fx_mod._RATE_PATH,
@@ -179,8 +175,24 @@ class TestParseRate:
 
     @pytest.mark.parametrize(
         "raw",
-        [None, 0, 0.0, -950.0, "", "abc", "999,99", "1.234,56", "1e3", 1e20,
-         float("nan"), float("inf"), True, [950.0], {"valor": 950.0}, "1.123456789"],
+        [
+            None,
+            0,
+            0.0,
+            -950.0,
+            "",
+            "abc",
+            "999,99",
+            "1.234,56",
+            "1e3",
+            1e20,
+            float("nan"),
+            float("inf"),
+            True,
+            [950.0],
+            {"valor": 950.0},
+            "1.123456789",
+        ],
     )
     def test_anything_else_is_no_rate(self, raw):
         assert parse_rate(raw) is None
@@ -193,9 +205,7 @@ class TestExchangeRateFromResult:
         assert rate.institution == "banchile"
         assert (rate.base_currency, rate.quote_currency) == ("USD", "CLP")
         assert rate.rate == Decimal("999.99")
-        assert rate.product == ProductRef(
-            kind="credit_card", currency="USD", external_ref=None
-        )
+        assert rate.product == ProductRef(kind="credit_card", currency="USD", external_ref=None)
         assert rate.source == SOURCE_LABEL == "Pago internacional de tarjeta"
         assert rate.reported_as_of == datetime.date(2026, 1, 1)
 
@@ -221,8 +231,16 @@ class TestExchangeRateFromResult:
             {"tipoCambio": 950.0, "fechaConsultaTipoCambio": "01/01/2026"},
         ],
         ids=[
-            "none", "string", "list", "empty", "no-card", "http-500", "no-rate",
-            "zero", "text", "no-status",
+            "none",
+            "string",
+            "list",
+            "empty",
+            "no-card",
+            "http-500",
+            "no-rate",
+            "zero",
+            "text",
+            "no-status",
         ],
     )
     def test_no_rate_without_an_ok_status_and_a_usable_rate(self, result):
@@ -302,8 +320,16 @@ class TestSurface:
             _ok(rate="no disponible"),
             RuntimeError("evaluate failed"),
         ],
-        ids=["no-card", "off-portal", "rate-500", "products-401", "rate-error",
-             "no-rate", "bad-rate", "evaluate-raises"],
+        ids=[
+            "no-card",
+            "off-portal",
+            "rate-500",
+            "products-401",
+            "rate-error",
+            "no-rate",
+            "bad-rate",
+            "evaluate-raises",
+        ],
     )
     def test_a_read_that_never_succeeds_is_a_failed_surface(self, result):
         page = _FakeFxPage(result)
@@ -318,9 +344,7 @@ class TestSurface:
         page = _FakeFxPage(_ok())
 
         with caplog.at_level(logging.WARNING):
-            rates, failed = read_exchange_rate_surface(
-                page, deadline=time.monotonic() - 1
-            )
+            rates, failed = read_exchange_rate_surface(page, deadline=time.monotonic() - 1)
 
         assert (rates, failed) == ([], (SURFACE,))
         assert page.calls == []

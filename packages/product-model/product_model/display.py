@@ -147,12 +147,8 @@ _FAMILY_SPECS: tuple[FamilySpec, ...] = (
         family="revolving_credit",
         label_es="Tarjetas y líneas de crédito",
         columns=(
-            ColumnSpec(
-                key="disponible", label_es="Disponible", source=ColumnSource.HEADLINE
-            ),
-            ColumnSpec(
-                key="cupo", label_es="Cupo", source=ColumnSource.METRIC, field="limit"
-            ),
+            ColumnSpec(key="disponible", label_es="Disponible", source=ColumnSource.HEADLINE),
+            ColumnSpec(key="cupo", label_es="Cupo", source=ColumnSource.METRIC, field="limit"),
             ColumnSpec(
                 key="utilizado",
                 label_es="Utilizado",
@@ -330,9 +326,7 @@ _DENOMINATION_FORMATS = {
     "count": ColumnFormat.COUNT,
 }
 
-_NUMERIC_FORMATS = frozenset(
-    {ColumnFormat.CURRENCY, ColumnFormat.PERCENT, ColumnFormat.COUNT}
-)
+_NUMERIC_FORMATS = frozenset({ColumnFormat.CURRENCY, ColumnFormat.PERCENT, ColumnFormat.COUNT})
 
 _ATTRIBUTE_FORMATS: dict[str, frozenset[ColumnFormat]] = {
     "date": frozenset({ColumnFormat.DATE}),
@@ -363,33 +357,24 @@ def _schema_type(prop: dict[str, Any]) -> str | None:
     return type_ if type_ in ("string", "integer", "number", "boolean") else None
 
 
-def _fixed_format(
-    where: str, column: ColumnSpec, format_: ColumnFormat
-) -> ColumnFormat:
+def _fixed_format(where: str, column: ColumnSpec, format_: ColumnFormat) -> ColumnFormat:
     if column.field is not None:
         raise DisplaySpecError(f"{where}: {column.source.value} columns take no field")
     if column.format not in (None, format_):
-        raise DisplaySpecError(
-            f"{where}: {column.source.value} columns are always {format_.value}"
-        )
+        raise DisplaySpecError(f"{where}: {column.source.value} columns are always {format_.value}")
     return format_
 
 
-def _metric_format(
-    where: str, column: ColumnSpec, kinds: tuple[str, ...]
-) -> ColumnFormat:
+def _metric_format(where: str, column: ColumnSpec, kinds: tuple[str, ...]) -> ColumnFormat:
     if column.field is None:
         raise DisplaySpecError(f"{where}: metric columns need a field")
     denominations = {
         prop.get("denomination")
         for kind in kinds
-        if (prop := _properties(REGISTRY[kind].metrics_cls).get(column.field))
-        is not None
+        if (prop := _properties(REGISTRY[kind].metrics_cls).get(column.field)) is not None
     }
     if not denominations:
-        raise DisplaySpecError(
-            f"{where}: no kind of the family has a metrics.{column.field} field"
-        )
+        raise DisplaySpecError(f"{where}: no kind of the family has a metrics.{column.field} field")
     if len(denominations) > 1:
         raise DisplaySpecError(
             f"{where}: metrics.{column.field} has conflicting denominations "
@@ -410,9 +395,7 @@ def _metric_format(
     return derived
 
 
-def _attribute_format(
-    where: str, column: ColumnSpec, kinds: tuple[str, ...]
-) -> ColumnFormat:
+def _attribute_format(where: str, column: ColumnSpec, kinds: tuple[str, ...]) -> ColumnFormat:
     if column.field is None:
         raise DisplaySpecError(f"{where}: attribute columns need a field")
     if column.format is None:
@@ -420,8 +403,7 @@ def _attribute_format(
     types = {
         _schema_type(prop)
         for kind in kinds
-        if (prop := _properties(REGISTRY[kind].attributes_cls).get(column.field))
-        is not None
+        if (prop := _properties(REGISTRY[kind].attributes_cls).get(column.field)) is not None
     }
     if not types:
         raise DisplaySpecError(
@@ -436,9 +418,7 @@ def _attribute_format(
     return column.format
 
 
-def _installments_format(
-    where: str, column: ColumnSpec, kinds: tuple[str, ...]
-) -> ColumnFormat:
+def _installments_format(where: str, column: ColumnSpec, kinds: tuple[str, ...]) -> ColumnFormat:
     format_ = _fixed_format(where, column, ColumnFormat.COUNT)
     if not any(
         "installments_paid" in _properties(REGISTRY[kind].metrics_cls)
