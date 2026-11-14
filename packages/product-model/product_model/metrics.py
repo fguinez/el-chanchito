@@ -28,6 +28,37 @@ class BaseMetrics(BaseModel):
         raise NotImplementedError
 
 
+def _annual_rate_pct_field():
+    """`annual_rate_pct`: the yield rate an institution quotes for a balance."""
+    return Field(
+        None,
+        description=(
+            "Annual yield rate as a percent number, as reported by the institution."
+        ),
+        json_schema_extra={"denomination": "percent"},
+    )
+
+
+def _yield_profit_field():
+    """`profit`: the gain an institution reports a yielding balance has earned."""
+    return Field(
+        None,
+        description="Accumulated gain as reported by the institution.",
+        json_schema_extra={"denomination": "currency"},
+    )
+
+
+def _yield_profit_12m_field():
+    """`profit_12m`: the gain a yielding balance earned over the last 12 months."""
+    return Field(
+        None,
+        description=(
+            "Gain over the last 12 months, as reported by the institution."
+        ),
+        json_schema_extra={"denomination": "currency"},
+    )
+
+
 class BankAccountMetrics(BaseMetrics):
     """Shared observation fields for bank accounts (checking/savings/vista)."""
 
@@ -109,6 +140,8 @@ class SavingsMetrics(BankAccountMetrics):
     kind: Literal["savings"] = Field(
         "savings", description='Payload discriminator; always "savings".'
     )
+    annual_rate_pct: float | None = _annual_rate_pct_field()
+    profit: float | None = _yield_profit_field()
 
 
 class VistaMetrics(BankAccountMetrics):
@@ -129,6 +162,8 @@ class WalletMetrics(BaseMetrics):
         description="Wallet balance in the wallet currency (whole pesos for CLP).",
         json_schema_extra={"denomination": "currency"},
     )
+    annual_rate_pct: float | None = _annual_rate_pct_field()
+    profit_12m: float | None = _yield_profit_12m_field()
 
     def headline(self) -> float | None:
         return self.balance

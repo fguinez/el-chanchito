@@ -44,18 +44,26 @@ consumes it, re-raising a cached error without driving again):
   cashback rows are ordinary income rows.
 - `scrape_products()`: the singleton CLP `wallet` with its balance, and one
   CLP `savings` product per pot, told apart by `external_ref`
-  (`mp_pot_<uuid>`) and named after the pot. Pots have no movements on the
-  web, so no `savings` transaction is ever emitted (one without a ref would
-  create a roll-up product). When the pots page was read in full (success
-  status, no pot skipped; see `MercadoPagoAccount.pots_complete`), the leg
-  also declares the pots as a complete listing. A stored pot the first such
-  listing lacks is only flagged (`vanished_pending_since`); the second
-  complete listing in a row that still lacks it retires it (closed at the
-  source): inactive, with a zero-balance snapshot, its history kept, and a
-  `retired:` note in the run's message. A failed or partial pots read
-  neither flags, retires nor clears anything; a flagged or retired pot that
-  shows up again is cleared and reactivated. Toggling a pot's active flag
-  under Instituciones drops both markers, so a hand deactivation sticks.
+  (`mp_pot_<uuid>`) and named after the pot. Both carry the yield the pages
+  report: the wallet its yearly rate (`annual_rate_pct`) and its gain of the
+  last 12 months (`profit_12m`) from the balance page, each pot the hub's
+  shared yearly rate while the hub says the pots are invested. Per-pot gain
+  is not read (the pot page's server data has a `potDetail.investment.profit`
+  that stays 0 while the page shows a gain computed in the browser), so a
+  pot's `profit` stays empty. A rate or gain the
+  page does not carry readably is left empty; it never fails the run. Pots
+  have no movements on the web, so no `savings` transaction is ever emitted
+  (one without a ref would create a roll-up product). When the pots page was
+  read in full (success status, no pot skipped; see
+  `MercadoPagoAccount.pots_complete`), the leg also declares the pots as a
+  complete listing. A stored pot the first such listing lacks is only flagged
+  (`vanished_pending_since`); the second complete listing in a row that still
+  lacks it retires it (closed at the source): inactive, with a zero-balance
+  snapshot, its history kept, and a `retired:` note in the run's message. A
+  failed or partial pots read neither flags, retires nor clears anything; a
+  flagged or retired pot that shows up again is cleared and reactivated.
+  Toggling a pot's active flag under Instituciones drops both markers, so a
+  hand deactivation sticks.
 
 If the pots page or a ledger page fails after the balance was read, or a pot
 or a ledger row cannot be read, the run ends `partial` with a warning instead
@@ -262,7 +270,11 @@ class MercadoPagoScraper(BaseScraper):
                 institution=self.institution,
                 kind=WALLET_KIND,
                 currency=CURRENCY,
-                metrics=WalletMetrics(balance=account.balance),
+                metrics=WalletMetrics(
+                    balance=account.balance,
+                    annual_rate_pct=account.wallet_yield.rate_pct,
+                    profit_12m=account.wallet_yield.profit_12m,
+                ),
             )
         ]
         for pot in account.pots:
@@ -273,7 +285,10 @@ class MercadoPagoScraper(BaseScraper):
                     currency=CURRENCY,
                     external_ref=pot_ref(pot.id),
                     name=pot.name or None,
-                    metrics=SavingsMetrics(balance=pot.amount),
+                    metrics=SavingsMetrics(
+                        balance=pot.amount,
+                        annual_rate_pct=pot.rate_pct,
+                    ),
                 )
             )
         scopes: list[VanishedProductScope] = []

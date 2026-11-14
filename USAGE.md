@@ -476,6 +476,16 @@ Chrome you keep running yourself instead (started with
 `--remote-debugging-port`, with a signed-in Mercado Pago tab open), set
 `MERCADOPAGO_CDP_URL`; that Chrome is never closed.
 
+If the scraper service is killed mid-run, its managed Chrome can outlive it on
+the port. Each managed launch is recorded in a small pidfile inside the profile
+directory, and the next run stops that leftover Chrome before launching
+(this can take up to about 20 seconds), but only after confirming (on macOS
+and Linux) that the process still carries the managed debug port and profile
+in its command line and that the run which launched it is gone. A Chrome
+still owned by a live run (for example an open `make mercadopago-login`
+window) and anything else on the port are left alone, and the run fails with
+"Port ... is already in use".
+
 What it reads, every 6 hours:
 
 - the wallet **balance**, on the wallet product;

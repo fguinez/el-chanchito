@@ -532,7 +532,7 @@ apps/scrapers/scrapers/
     banchile_fx.py         # BdC USD card exchange rate (fetch-only surface)
     bci_lider_web.py       # real Chrome over CDP -> scrape_card() / save_login_session()
     bci_lider_billing.py   # Lider USD rate, last billed period, statement PDFs (in-page API)
-    real_chrome.py         # generic real-Chrome plumbing: find, launch, connect, terminate
+    real_chrome.py         # generic real-Chrome plumbing: find, launch, connect, terminate, reclaim orphans
     mercadopago_web.py     # real Chrome over CDP, in-page fetch only -> scrape_account()
     santander_web.py       # headless Santander login + the SPA's JSON -> fetch_session()
     banco_falabella_web.py # headless Banco Falabella login + the rendered DOM -> fetch_session()
@@ -739,14 +739,18 @@ browser: a Playwright-launched Chromium (headless or headed) gets an unsolvable
 interactive "Verifique que es un ser humano" check, and a captured session doesn't
 survive headless reuse (the auth token lives in tab-scoped sessionStorage and
 Cloudflare rebinds on a fresh browser). So both sign-in and scraping drive a *real*
-Chrome over CDP: an ordinary Chrome on a debug port (`_launch_real_chrome`, not a
-Playwright browser), driven to autofill the RUT + clave and submit once Turnstile
-clears (invisibly, or after the human ticks the check, which we never do). By
-default `scrape_card` runs *managed*: it launches a headed Chrome off-screen (with
+Chrome over CDP: an ordinary Chrome on a debug port (launched through
+`backends/real_chrome.py`, not a Playwright browser), driven to autofill the RUT +
+clave and submit once Turnstile clears (invisibly, or after the human ticks the
+check, which we never do).
+By default `scrape_card` runs *managed*: it launches a headed Chrome off-screen (with
 a visible-window fallback so it doesn't flash on the desktop), signs in, scrapes,
 and closes it, so scheduled runs are fully unattended (needs a machine with a
 display: Cloudflare blocks headless). Setting `LIDER_BCI_CDP_URL` switches to *reuse*
 mode, driving a long-running Chrome from `make bci-lider-login` instead.
+Its managed Chrome has no pidfile yet, so one orphaned by a killed service
+still blocks later runs until it is closed by hand; that arrives when BCI
+Lider moves onto `backends/real_chrome.py`.
 Either way it reuses an already-signed-in tab or re-logs-in via autofill, and raises
 a "run make bci-lider-login" error when Chrome is unreachable. Both legs share one
 drive per cycle: `scrape_transactions` opens it and caches the result for
@@ -802,8 +806,20 @@ Chrome off-screen on the profile, reads and terminates it (needs a machine
 with a display); `MERCADOPAGO_CDP_URL` switches to *reuse*, attaching to a
 Chrome that is already running with a signed-in tab and leaving it running.
 The generic real-Chrome plumbing (find the binary, launch, connect, find a
-tab, terminate) is `backends/real_chrome.py`; BCI Lider still carries its own
-copy.
+tab, terminate) is `backends/real_chrome.py`, shared with BCI Lider. Each
+managed Mercado Pago launch writes a pidfile inside the profile
+(`el-chanchito-managed-chrome.json`: pid, port, owner pid, profile, launch
+time) and the `finally` that terminates Chrome clears it once Chrome has
+stopped. If the service is killed before that `finally`, the next launch
+calls `real_chrome.reclaim_orphaned_chrome` first (up to about 20 s). A
+Chrome whose launching process is alive and still its parent (an open
+sign-in window, say) is not an orphan and is left running. Otherwise it
+terminates the recorded pid (browser SIGTERM, then the group) only when its
+command line still carries the exact recorded debug-port and profile
+arguments and it still leads its own process group; a zombie counts as
+gone. Anything else kills nothing and drops the stale record, except a
+command line that cannot be read, which keeps it for the next run. The
+busy-port check stays after it.
 
 The session is read under a fetch-only contract: the tab opens on
 `/banking/balance` and is never navigated, and the data comes from
@@ -847,7 +863,13 @@ Both legs share one drive per cycle: `scrape_transactions` opens it and
 caches the result for `scrape_products` (an error is re-raised, never
 retried). The products leg emits the singleton
 CLP `wallet` with its balance and one CLP `savings` product per pot
-(`external_ref` `mp_pot_<uuid>`, named after the pot). When the pots page
+(`external_ref` `mp_pot_<uuid>`, named after the pot). Both carry the yield
+the pages report as metrics: the wallet its yearly rate (`annual_rate_pct`,
+from the balance page's "... al X% anual" subtitle) and its gain of the last
+12 months (`profit_12m`), each pot the savings hub's shared rate while the hub
+flags the pots as invested. Per-pot gain is not read: the pot page computes it
+in the browser, and its server-side `investment.profit` stays 0. A missing or unreadable rate or gain
+is left empty and never fails the run. When the pots page
 was read in full (success status, no pot skipped), it also declares the pots
 as a complete listing (`VanishedProductScope`): once every product of the leg
 is written, `run_scraper` calls `db/writer.py::retire_vanished_products`.
@@ -882,9 +904,11 @@ Every Playwright call that takes a timeout gets one (the connection and each
 in-page fetch) and the reads share a time budget. Copying a fetch's result
 out of the page takes none, so a watchdog terminates the managed Chrome if a
 drive overruns, and in either mode the run gives up on a drive that does not
-finish in time. The e-mail leg this replaced read transactions only,
-heuristically, and also captured purchases where Mercado Pago was just the
-gateway; the rows it stored are not removed (see "Deduplication").
+finish in time. A managed Chrome orphaned by a killed service is reclaimed
+on the next run through its pidfile (see above). The e-mail leg this
+replaced read transactions only, heuristically, and also captured purchases
+where Mercado Pago was just the gateway; the rows it stored are not removed
+(see "Deduplication").
 
 Verified live, in managed mode with an off-screen Chrome on a real signed-in
 profile: a whole run end to end (launch, reattaching until the tab shows,

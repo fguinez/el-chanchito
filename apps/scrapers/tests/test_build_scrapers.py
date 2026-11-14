@@ -1,8 +1,8 @@
 """Tests for build_scrapers' env-var gating.
 
 A scraper is enabled only when every credential it needs is present, so each
-case clears all the variables first (main's import-time `load_dotenv()` may
-have filled some from a developer's .env) and sets only its own. The
+case clears all the variables first (some may be exported in the developer's
+shell) and sets only its own. The
 constructors just read env vars (no network, browser or file access), so the
 real classes are built. Every value is synthetic.
 """

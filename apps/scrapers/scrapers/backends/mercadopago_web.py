@@ -52,12 +52,20 @@ script, and under that JSON everything lives at `appProps.pageProps`. Three
 pages are read (shapes only; nothing here is a real value):
 
   * `/banking/balance`: `pageProps.initialResult.balance`, whose
-    `result.available.amount.raw` is the wallet balance in whole CLP. (The
-    same node also has the recent gain and the yearly rate of the fund the
-    balance is invested in; neither is stored today, a possible later metric.)
+    `result.available.amount.raw` is the wallet balance in whole CLP. The
+    same `result` has `invested.data`: `title.middle.raw` is the gain of the
+    last 12 months (whole CLP; the title reads "Los últimos 12 meses
+    obtuviste") and `subtitle` a sentence that
+    carries the yearly rate ("... al 1,0% anual", a decimal comma). Both are
+    optional: a missing or unreadable one is None and never fails the read.
   * `/savings/hub`: `pageProps.hub.result.potsDataHub.result.pots`, one entry
     per savings pot (`id` a uuid, `name`, `amount.raw` in CLP). The list can
-    be empty.
+    be empty. Beside it, `hub.result.investmentData.data` holds one `rate`
+    (a string like "1.0", a percent) for every pot and an `is_invested`
+    flag; the rate is applied to each pot only while that flag is true. No
+    per-pot gain is read: `/savings/detail/<uuid>` has a
+    `potDetail.investment.profit` that stays 0 while the page shows a gain
+    computed in the browser, so it is not the gain.
   * `/banking/balance/movements?limit=100&page=N` (N from 1):
     `pageProps.listData = {total, pages, groups: [{items: [...]}]}`, the
     wallet ledger, newest first. An item carries `movement_id` (unique per
@@ -264,6 +272,15 @@ _FRACTION_RE = re.compile(
     r"^([" + re.escape(_MINUS_SIGNS) + r"]?)\s*(\d{1,3}(?:\.\d{3})+|\d+)$"
 )
 _CENTS_RE = re.compile(r"^\d{2}$")
+# The rate in "Generando ganancias al 1,0% anual". The whole number must sit
+# between "al" and the percent sign, so "1.234,5%" never yields a partial match.
+_RATE_IN_TEXT_RE = re.compile(
+    r"\bal\s+([" + re.escape(_MINUS_SIGNS) + r"]?\d+(?:[.,]\d+)?)\s*%\s*anual\b",
+    re.IGNORECASE,
+)
+# A bare rate string as the savings hub prints it ("1.0" or "1,0"), signed
+# like the wallet's so a negative fund rate reads the same on both pages.
+_RATE_RE = re.compile(r"^[" + re.escape(_MINUS_SIGNS) + r"]?\d+(?:[.,]\d+)?$")
 
 
 class MercadoPagoWebError(RuntimeError):
@@ -296,11 +313,30 @@ def _session_lost(reason: str) -> MercadoPagoSessionError:
 
 @dataclass(frozen=True)
 class Pot:
-    """One savings pot: its uuid (lower-case), its name and its CLP balance."""
+    """One savings pot: its uuid (lower-case), its name and its CLP balance.
+
+    `rate_pct` is the yearly yield rate as a percent number (1.0 is 1%), None
+    when the page did not say. Per-pot gain is not read: no server-side
+    field carries the gain the pot page shows.
+    """
 
     id: str
     name: str
     amount: int
+    rate_pct: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class WalletYield:
+    """What the balance page says the wallet balance earns.
+
+    `rate_pct` is the yearly rate as a percent number (1.0 is 1%) and
+    `profit_12m` the gain of the last 12 months in whole CLP; either is None
+    when the page did not carry it in a readable form.
+    """
+
+    rate_pct: Optional[float] = None
+    profit_12m: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -331,6 +367,7 @@ class MercadoPagoAccount:
     """
 
     balance: int
+    wallet_yield: WalletYield = field(default_factory=WalletYield)
     pots: list[Pot] = field(default_factory=list)
     pots_complete: bool = False
     movements: list[Movement] = field(default_factory=list)
@@ -473,7 +510,69 @@ def parse_balance(props: dict) -> int:
     return pesos
 
 
-def _parse_pot(entry: Any) -> Optional[Pot]:
+def _rate_number(text: str) -> Optional[float]:
+    """A rate written with a comma or dot decimal ("1,0", "4.50") as a float."""
+    try:
+        value = Decimal(text.replace(",", ".").replace(chr(0x2212), "-"))
+    except InvalidOperation:
+        return None
+    return float(value) if value.is_finite() else None
+
+
+def parse_wallet_yield(props: Any) -> WalletYield:
+    """The wallet's yearly rate and gain from the `/banking/balance` page.
+
+    Never raises: these are extras next to the balance, so a missing node, a
+    gain that is not a number or a subtitle without a rate each leave that
+    value None.
+
+    The rate is read only from the earning phrasing "al X% anual": any other
+    percent in the sentence ("100% disponible") is skipped, and a promo such
+    as "gana hasta 1,0% anual" yields None, since "hasta" is an offer, not
+    the rate being earned. Only the invested-wallet subtitle has been seen; the
+    wording for a wallet that is not invested is unverified, which is why
+    the rule rejects rather than guesses.
+    """
+    data = props
+    for key in ("initialResult", "balance", "result", "invested", "data"):
+        data = data.get(key) if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return WalletYield()
+    middle = data.get("title")
+    for key in ("middle", "raw"):
+        middle = middle.get(key) if isinstance(middle, dict) else None
+    rate = None
+    subtitle = data.get("subtitle")
+    if isinstance(subtitle, str):
+        match = _RATE_IN_TEXT_RE.search(subtitle)
+        if match is not None:
+            rate = _rate_number(match.group(1))
+    return WalletYield(rate_pct=rate, profit_12m=_whole_pesos(middle))
+
+
+def parse_pots_rate(props: Any) -> Optional[float]:
+    """The savings hub's yearly rate for every pot, or None.
+
+    The hub prints one rate for all pots (`investmentData.data.rate`, a
+    string like "1.0") and an `is_invested` flag; the rate counts only while
+    that flag is true. Never raises: a missing or malformed node is None.
+    """
+    data = props
+    for key in ("hub", "result", "investmentData", "data"):
+        data = data.get(key) if isinstance(data, dict) else None
+    if not isinstance(data, dict) or data.get("is_invested") is not True:
+        return None
+    raw = data.get("rate")
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        raw = str(raw)
+    if not isinstance(raw, str) or not _RATE_RE.match(raw.strip()):
+        return None
+    return _rate_number(raw.strip())
+
+
+def _parse_pot(entry: Any, rate_pct: Optional[float] = None) -> Optional[Pot]:
     if not isinstance(entry, dict):
         return None
     pot_id = entry.get("id")
@@ -492,6 +591,7 @@ def _parse_pot(entry: Any) -> Optional[Pot]:
         id=pot_id.strip().lower(),
         name=name.strip() if isinstance(name, str) else "",
         amount=pesos,
+        rate_pct=rate_pct,
     )
 
 
@@ -501,16 +601,18 @@ def parse_pots(props: dict) -> tuple[list[Pot], int]:
     An empty list is a real reading (no pots). An entry that is not a CLP pot
     with a uuid and an amount, or that repeats an earlier id, is skipped and
     counted: the caller reports it, because a pot left out is money left out.
+    Every pot carries the hub's shared rate (`parse_pots_rate`) and no gain.
     """
     node = _dig(props, "hub", "result", "potsDataHub", what="pots")
     _require_success(node, "pots")
     entries = _dig(node, "result", "pots", what="pots")
     if not isinstance(entries, list):
         raise MercadoPagoPageError("pots: pots is not a list")
+    rate_pct = parse_pots_rate(props)
     pots: dict[str, Pot] = {}
     skipped = 0
     for entry in entries:
-        pot = _parse_pot(entry)
+        pot = _parse_pot(entry, rate_pct)
         if pot is None or pot.id in pots:
             skipped += 1
             continue
@@ -789,7 +891,8 @@ def read_account(page, movement_pages: int = DEFAULT_MOVEMENT_PAGES) -> MercadoP
     """
     deadline = time.monotonic() + READ_BUDGET_S
     try:
-        balance = parse_balance(_fetch_props(page, "balance"))
+        balance_props = _fetch_props(page, "balance")
+        balance = parse_balance(balance_props)
     except MercadoPagoPageError as exc:
         raise MercadoPagoWebError(
             f"Mercado Pago balance page not readable ({exc}): the page changed "
@@ -797,7 +900,9 @@ def read_account(page, movement_pages: int = DEFAULT_MOVEMENT_PAGES) -> MercadoP
         ) from exc
     except MercadoPagoFetchError as exc:
         raise MercadoPagoWebError(f"Mercado Pago balance page not fetched ({exc}).") from exc
-    account = MercadoPagoAccount(balance=balance)
+    account = MercadoPagoAccount(
+        balance=balance, wallet_yield=parse_wallet_yield(balance_props)
+    )
 
     try:
         account.pots, skipped = parse_pots(_fetch_props(page, "pots"))
@@ -1069,7 +1174,13 @@ def _require_playwright() -> None:
 
 
 def _launch(port: int, *, offscreen: bool):
-    """Launch the dedicated Chrome on `port`, opening the balance page."""
+    """Launch the dedicated Chrome on `port`, opening the balance page.
+
+    First reclaims a Chrome a killed run orphaned on the profile, which can
+    take up to about 20 s.
+    """
+    profile = profile_dir()
+    real_chrome.reclaim_orphaned_chrome(port=port, profile_dir=profile)
     # A Chrome already on this port would make the launch hand over to it and
     # exit, so the run would read (and then fail to close) someone else's.
     if real_chrome.port_in_use(port):
@@ -1079,14 +1190,17 @@ def _launch(port: int, *, offscreen: bool):
         )
     try:
         executable = real_chrome.find_chrome(CHROME_PATH_ENV)
-        return real_chrome.launch_chrome(
-            executable, port=port, profile_dir=profile_dir(), url=START_URL, offscreen=offscreen
+        proc = real_chrome.launch_chrome(
+            executable, port=port, profile_dir=profile, url=START_URL, offscreen=offscreen
         )
     except real_chrome.ChromeNotFoundError as exc:
         raise MercadoPagoWebError(str(exc)) from exc
     except real_chrome.ChromeLaunchError as exc:
         # The helper's message has no path; name the setting that holds one.
         raise MercadoPagoWebError(f"{exc} Check {CHROME_PATH_ENV}.") from exc
+    # Never raises, so the caller's launch-to-`try` gap stays raise-free.
+    real_chrome.record_managed_launch(proc, port=port, profile_dir=profile)
+    return proc
 
 
 def _drive_managed(movement_pages: int) -> MercadoPagoAccount:
@@ -1127,6 +1241,8 @@ def _drive_managed(movement_pages: int) -> MercadoPagoAccount:
         if watchdog is not None:
             watchdog.cancel()
         real_chrome.terminate_chrome(proc)
+        if real_chrome.has_exited(proc):
+            real_chrome.forget_managed_launch(profile_dir(), proc.pid)
 
 
 def _drive_reuse(cdp_url: str, movement_pages: int) -> MercadoPagoAccount:
@@ -1269,3 +1385,5 @@ def save_login_session(timeout_s: float = LOGIN_TIMEOUT_S) -> None:
         _await_sign_in(f"http://127.0.0.1:{port}", timeout_s, process=proc)
     finally:
         real_chrome.terminate_chrome(proc)
+        if real_chrome.has_exited(proc):
+            real_chrome.forget_managed_launch(profile_dir(), proc.pid)
