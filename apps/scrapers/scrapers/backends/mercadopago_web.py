@@ -48,21 +48,25 @@ only when it shows a tab on the portal:
 
 The pages are server-rendered HTML. Each one carries its data in an inline
 script as `_n.ctx.r={...JSON...}` followed by more JavaScript in the same
-script, and under that JSON everything lives at `appProps.pageProps`. Three
+script, and under that JSON everything lives at `appProps.pageProps`. Four
 pages are read (shapes only; nothing here is a real value):
 
   * `/banking/balance`: `pageProps.initialResult.balance`, whose
     `result.available.amount.raw` is the wallet balance in whole CLP. The
-    same `result` has `invested.data`: `title.middle.raw` is the gain the
-    invested balance has earned (whole CLP) and `subtitle` a sentence that
-    carries the yearly rate ("... al 1,0% anual", a decimal comma). Both are
-    optional: a missing or unreadable one is None and never fails the read.
+    same `result` has `invested.data`: `title.middle.raw` is the gain of the
+    last 12 months (whole CLP; the title reads "Los últimos 12 meses
+    obtuviste ...") and `subtitle` a sentence that carries the yearly rate
+    ("... al 1,0% anual", a decimal comma). Both are optional: a missing or
+    unreadable one is None and never fails the read.
   * `/savings/hub`: `pageProps.hub.result.potsDataHub.result.pots`, one entry
     per savings pot (`id` a uuid, `name`, `amount.raw` in CLP). The list can
     be empty. Beside it, `hub.result.investmentData.data` holds one `rate`
     (a string like "1.0", a percent) for every pot and an `is_invested`
-    flag; the rate is applied to each pot only while that flag is true. No
-    per-pot gain is read: the key that would carry it is unknown.
+    flag; the rate is applied to each pot only while that flag is true.
+  * `/savings/detail/<pot uuid>`, once per pot: `pageProps.potDetail.
+    investment.profit`, the pot's accumulated gain (a JSON number, read as
+    whole CLP). Optional per pot: a detail page that fails or carries no
+    readable gain leaves that pot's gain None and adds a warning.
   * `/banking/balance/movements?limit=100&page=N` (N from 1):
     `pageProps.listData = {total, pages, groups: [{items: [...]}]}`, the
     wallet ledger, newest first. An item carries `movement_id` (unique per
@@ -82,9 +86,9 @@ Failure policy:
     `MercadoPagoSessionError`. A balance page that answers 200 without a
     readable balance (a changed page, a widget that did not load) is a plain
     `MercadoPagoWebError`: it asks nobody to sign in again;
-  * once the balance is read, a pots or ledger page that fails (HTTP error,
-    timeout, changed shape) is a warning on the result, so the run ends
-    `partial` with what was read; a redirect still raises;
+  * once the balance is read, a pots, pot detail or ledger page that fails
+    (HTTP error, timeout, changed shape) is a warning on the result, so the
+    run ends `partial` with what was read; a redirect still raises;
   * a missing top-level node raises `MercadoPagoPageError`; one malformed pot
     or ledger row is skipped and counted, but a ledger page whose rows all
     fail raises, since that is a changed page and not a bad row.
@@ -116,7 +120,7 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Optional, TypeVar
@@ -131,10 +135,12 @@ T = TypeVar("T")
 
 LOCAL_TZ = ZoneInfo("America/Santiago")
 
-# --- The portal: one host, three pages ------------------------------------------
+# --- The portal: one host, four pages -------------------------------------------
 PORTAL_HOST = "www.mercadopago.cl"
 BALANCE_PATH = "/banking/balance"
 POTS_PATH = "/savings/hub"
+# One pot's detail page; the in-page script appends "/<pot uuid>".
+POT_DETAIL_PATH = "/savings/detail"
 MOVEMENTS_PATH = "/banking/balance/movements"
 # Where the tab opens. Nothing navigates it afterwards.
 START_URL = f"https://{PORTAL_HOST}{BALANCE_PATH}"
@@ -142,8 +148,13 @@ START_URL = f"https://{PORTAL_HOST}{BALANCE_PATH}"
 ALLOWED_PATHS = {
     "balance": BALANCE_PATH,
     "pots": POTS_PATH,
+    "pot_detail": POT_DETAIL_PATH,
     "movements": MOVEMENTS_PATH,
 }
+# The only pot id the in-page script appends to the detail path: a lower-case
+# uuid (parse_pots lower-cases every id), checked again inside the page.
+POT_ID_PATTERN = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+_POT_ID_RE = re.compile(POT_ID_PATTERN)
 MOVEMENTS_PAGE_SIZE = 100
 DEFAULT_MOVEMENT_PAGES = 1
 # Hard cap on the ledger pager, also when asked for every page.
@@ -313,14 +324,15 @@ class Pot:
     """One savings pot: its uuid (lower-case), its name and its CLP balance.
 
     `rate_pct` is the yearly yield rate as a percent number (1.0 is 1%), None
-    when the page did not say. Per-pot gain is not read: the key that would
-    carry it is unknown.
+    when the page did not say. `profit` is the pot's accumulated gain in whole
+    CLP from its detail page, None until read or when that page did not say.
     """
 
     id: str
     name: str
     amount: int
     rate_pct: Optional[float] = None
+    profit: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -328,12 +340,12 @@ class WalletYield:
     """What the balance page says the wallet balance earns.
 
     `rate_pct` is the yearly rate as a percent number (1.0 is 1%) and
-    `profit` the gain earned so far in whole CLP; either is None when the
-    page did not carry it in a readable form.
+    `profit_12m` the gain of the last 12 months in whole CLP; either is None
+    when the page did not carry it in a readable form.
     """
 
     rate_pct: Optional[float] = None
-    profit: Optional[int] = None
+    profit_12m: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -514,7 +526,7 @@ def _rate_number(text: str) -> Optional[float]:
 
 
 def parse_wallet_yield(props: Any) -> WalletYield:
-    """The wallet's yearly rate and gain from the `/banking/balance` page.
+    """The wallet's yearly rate and 12-month gain from the `/banking/balance` page.
 
     Never raises: these are extras next to the balance, so a missing node, a
     gain that is not a number or a subtitle without a rate each leave that
@@ -541,7 +553,7 @@ def parse_wallet_yield(props: Any) -> WalletYield:
         match = _RATE_IN_TEXT_RE.search(subtitle)
         if match is not None:
             rate = _rate_number(match.group(1))
-    return WalletYield(rate_pct=rate, profit=_whole_pesos(middle))
+    return WalletYield(rate_pct=rate, profit_12m=_whole_pesos(middle))
 
 
 def parse_pots_rate(props: Any) -> Optional[float]:
@@ -564,6 +576,19 @@ def parse_pots_rate(props: Any) -> Optional[float]:
     if not isinstance(raw, str) or not _RATE_RE.match(raw.strip()):
         return None
     return _rate_number(raw.strip())
+
+
+def parse_pot_profit(props: dict) -> Optional[int]:
+    """A pot's accumulated gain from its `/savings/detail/<uuid>` page.
+
+    `potDetail.investment.profit` is a JSON number, read as whole CLP. A
+    missing `potDetail` raises `MercadoPagoPageError` (a changed page); an
+    investment node or gain that is missing or not a number is None.
+    """
+    node = _dig(props, "potDetail", what="pot detail")
+    investment = node.get("investment") if isinstance(node, dict) else None
+    raw = investment.get("profit") if isinstance(investment, dict) else None
+    return _whole_pesos(raw)
 
 
 def _parse_pot(entry: Any, rate_pct: Optional[float] = None) -> Optional[Pot]:
@@ -595,7 +620,8 @@ def parse_pots(props: dict) -> tuple[list[Pot], int]:
     An empty list is a real reading (no pots). An entry that is not a CLP pot
     with a uuid and an amount, or that repeats an earlier id, is skipped and
     counted: the caller reports it, because a pot left out is money left out.
-    Every pot carries the hub's shared rate (`parse_pots_rate`) and no gain.
+    Every pot carries the hub's shared rate (`parse_pots_rate`); its gain
+    comes later, from its own detail page (`parse_pot_profit`).
     """
     node = _dig(props, "hub", "result", "potsDataHub", what="pots")
     _require_success(node, "pots")
@@ -714,7 +740,7 @@ def parse_movements(props: dict) -> tuple[list[Movement], int, int]:
 # redirect, and returns a `status` plus, on success, the page text. Safe to run
 # twice (a plain GET): Playwright may re-run it if the tab's context is swapped.
 _FETCH_JS = """
-async ({surface, pageNumber, timeoutMs}) => {
+async ({surface, pageNumber, potId, timeoutMs}) => {
   if (location.protocol !== 'https:' || location.host !== %(host)s) {
     return {status: 'off_portal'};
   }
@@ -726,6 +752,12 @@ async ({surface, pageNumber, timeoutMs}) => {
       return {status: 'not_allowed'};
     }
     path += '?limit=%(limit)d&page=' + pageNumber;
+  }
+  if (surface === 'pot_detail') {
+    if (typeof potId !== 'string' || !new RegExp(%(pot_id)s).test(potId)) {
+      return {status: 'not_allowed'};
+    }
+    path += '/' + potId;
   }
   const signal = typeof AbortSignal.timeout === 'function'
     ? AbortSignal.timeout(timeoutMs) : undefined;
@@ -745,6 +777,7 @@ async ({surface, pageNumber, timeoutMs}) => {
 """ % {
     "host": json.dumps(PORTAL_HOST),
     "paths": json.dumps(ALLOWED_PATHS),
+    "pot_id": json.dumps(POT_ID_PATTERN),
     "max_page": MAX_MOVEMENT_PAGES,
     "limit": MOVEMENTS_PAGE_SIZE,
     "max_chars": MAX_HTML_CHARS,
@@ -805,15 +838,31 @@ def _evaluate_bounded(page, script: str, arg: dict, timeout_ms: int) -> Any:
             pass
 
 
-def _fetch_props(page, surface: str, page_number: int = 1) -> dict:
-    """Fetch one allowed page from inside the tab and return its `pageProps`."""
+def _fetch_props(
+    page, surface: str, page_number: int = 1, pot_id: Optional[str] = None
+) -> dict:
+    """Fetch one allowed page from inside the tab and return its `pageProps`.
+
+    `pot_id` names the pot of a `pot_detail` fetch; one that is not a
+    lower-case uuid is refused here, before the page is touched (the in-page
+    script refuses it too).
+    """
+    if surface == "pot_detail" and (
+        not isinstance(pot_id, str) or not _POT_ID_RE.match(pot_id)
+    ):
+        raise MercadoPagoFetchError(f"{surface}: {_FETCH_FAILURES['not_allowed']}")
     failure: Optional[str] = None
     result = None
     try:
         result = _evaluate_bounded(
             page,
             _FETCH_JS,
-            {"surface": surface, "pageNumber": page_number, "timeoutMs": FETCH_TIMEOUT_MS},
+            {
+                "surface": surface,
+                "pageNumber": page_number,
+                "potId": pot_id,
+                "timeoutMs": FETCH_TIMEOUT_MS,
+            },
             EVALUATE_TIMEOUT_MS,
         )
     except Exception as exc:
@@ -823,6 +872,40 @@ def _fetch_props(page, surface: str, page_number: int = 1) -> dict:
         # call log) is neither the cause nor the context of this one.
         raise MercadoPagoFetchError(f"{surface}: in-page fetch failed ({failure})")
     return page_props_from_html(html_from_fetch(result, surface))
+
+
+def _read_pot_profits(page, account: MercadoPagoAccount, deadline: float) -> None:
+    """Set each pot's `profit` from its detail page, in the order listed.
+
+    A detail page that fails or carries no readable gain leaves that pot's
+    gain None and adds a warning; the other pots are still read. Once the
+    read budget is spent the pots not yet read are left as they are, with
+    one warning. A lost session raises, as on every other page.
+    """
+    total = len(account.pots)
+    for index, pot in enumerate(account.pots):
+        if time.monotonic() >= deadline:
+            account.warnings.append(
+                f"MercadoPago: savings pot gains stopped before pot {index + 1} "
+                f"of {total} (read budget spent)"
+            )
+            break
+        if index:
+            time.sleep(_PAGE_PAUSE_S)
+        try:
+            profit = parse_pot_profit(_fetch_props(page, "pot_detail", pot_id=pot.id))
+        except MercadoPagoWebError as exc:
+            logger.warning("MercadoPago: savings pot %d gain not read: %s", index + 1, exc)
+            account.warnings.append(
+                f"MercadoPago: gain of savings pot {index + 1} of {total} not read ({exc})"
+            )
+            continue
+        if profit is None:
+            account.warnings.append(
+                f"MercadoPago: gain of savings pot {index + 1} of {total} not readable"
+            )
+            continue
+        account.pots[index] = replace(pot, profit=profit)
 
 
 def _read_movements(
@@ -874,7 +957,9 @@ def _read_movements(
 
 
 def read_account(page, movement_pages: int = DEFAULT_MOVEMENT_PAGES) -> MercadoPagoAccount:
-    """Read balance, pots and ledger from a tab on the portal. Never navigates.
+    """Read balance, pots, their gains and ledger from a tab on the portal.
+
+    Never navigates.
 
     The balance page goes first and doubles as the session probe. Whatever
     goes wrong with it, nothing else is fetched: a redirect, a 401/403 or a
@@ -907,6 +992,7 @@ def read_account(page, movement_pages: int = DEFAULT_MOVEMENT_PAGES) -> MercadoP
         if skipped:
             account.warnings.append(f"MercadoPago: {skipped} savings pot(s) not read")
 
+    _read_pot_profits(page, account, deadline)
     _read_movements(page, account, movement_pages, deadline)
     logger.info(
         "MercadoPago: balance read, %d pot(s), %d movement(s), %d warning(s)",

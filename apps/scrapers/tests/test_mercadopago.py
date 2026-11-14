@@ -132,6 +132,16 @@ def _pots_props(pots: list, status="success", rate="1.0", is_invested=True) -> d
     }
 
 
+def _pot_detail_props(profit=999_999) -> dict:
+    return {
+        "potDetail": {
+            "id": POT_ID,
+            "name": "Reserva sintética",
+            "investment": {"id": 1, "profit": profit, "name": "Profit"},
+        }
+    }
+
+
 def _item(
     movement_id=MOVEMENT_ID,
     when=MIDDAY_UTC,
@@ -390,12 +400,12 @@ class TestParseBalance:
 
 class TestParseWalletYield:
     def test_rate_and_gain_are_read(self):
-        """The gain is title.middle.raw; the rate comes out of the subtitle."""
+        """The 12-month gain is title.middle.raw; the rate comes out of the subtitle."""
         props = _balance_props(gain=999_999, subtitle="Generando ganancias al 4,50% anual")
 
         result = web.parse_wallet_yield(props)
 
-        assert result == web.WalletYield(rate_pct=4.5, profit=999_999)
+        assert result == web.WalletYield(rate_pct=4.5, profit_12m=999_999)
 
     @pytest.mark.parametrize(
         ("subtitle", "expected"),
@@ -438,7 +448,7 @@ class TestParseWalletYield:
         """No rate beats a guessed one; the gain is still read."""
         result = web.parse_wallet_yield(_balance_props(subtitle=subtitle))
 
-        assert result == web.WalletYield(rate_pct=None, profit=999_999)
+        assert result == web.WalletYield(rate_pct=None, profit_12m=999_999)
 
     @pytest.mark.parametrize(
         ("gain", "expected"),
@@ -451,7 +461,7 @@ class TestParseWalletYield:
     )
     def test_gain_is_whole_pesos_or_empty(self, gain, expected):
         """A gain that is not a JSON number is left empty."""
-        assert web.parse_wallet_yield(_balance_props(gain=gain)).profit == expected
+        assert web.parse_wallet_yield(_balance_props(gain=gain)).profit_12m == expected
 
     @pytest.mark.parametrize(
         "props",
@@ -472,8 +482,60 @@ class TestParseWalletYield:
 
         result = web.parse_wallet_yield(props)
 
-        assert result == web.WalletYield(rate_pct=None, profit=None)
+        assert result == web.WalletYield(rate_pct=None, profit_12m=None)
         assert web.parse_balance(props) == 2_500_000
+
+
+class TestParsePotProfit:
+    @pytest.mark.parametrize(
+        ("profit", "expected"),
+        [
+            pytest.param(999_999, 999_999, id="int"),
+            pytest.param(0, 0, id="zero"),
+            pytest.param(999_999.5, 1_000_000, id="float-rounds-half-up"),
+            pytest.param(-999_999, -999_999, id="negative"),
+        ],
+    )
+    def test_gain_is_read_as_whole_pesos(self, profit, expected):
+        """`potDetail.investment.profit` is a JSON number, kept as whole CLP."""
+        assert web.parse_pot_profit(_pot_detail_props(profit=profit)) == expected
+
+    def test_through_the_html(self):
+        """The detail page decodes like the other pages."""
+        props = web.page_props_from_html(_page(_pot_detail_props()))
+
+        assert web.parse_pot_profit(props) == 999_999
+
+    @pytest.mark.parametrize(
+        "profit",
+        [
+            pytest.param("999999", id="text"),
+            pytest.param(True, id="bool"),
+            pytest.param(None, id="null"),
+            pytest.param({"raw": 999_999}, id="object"),
+        ],
+    )
+    def test_a_gain_that_is_not_a_number_is_none(self, profit):
+        """No gain beats a guessed one."""
+        assert web.parse_pot_profit(_pot_detail_props(profit=profit)) is None
+
+    @pytest.mark.parametrize(
+        "detail",
+        [
+            pytest.param({}, id="no-investment"),
+            pytest.param({"investment": None}, id="null-investment"),
+            pytest.param({"investment": {"id": 1}}, id="no-profit"),
+            pytest.param(None, id="null-detail"),
+        ],
+    )
+    def test_a_missing_investment_node_is_none(self, detail):
+        """A detail page without the gain node is read as no gain."""
+        assert web.parse_pot_profit({"potDetail": detail}) is None
+
+    def test_a_page_without_pot_detail_raises(self):
+        """A missing `potDetail` is a changed page."""
+        with pytest.raises(MercadoPagoPageError, match="pot detail: potDetail missing"):
+            web.parse_pot_profit({"synthetic": 1})
 
 
 class TestParsePots:
@@ -490,13 +552,13 @@ class TestParsePots:
         ]
         assert skipped == 0
 
-    def test_every_pot_gets_the_hub_rate_and_no_gain(self):
-        """One shared rate for all pots; the web shows no per-pot gain."""
+    def test_every_pot_gets_the_hub_rate_and_no_gain_yet(self):
+        """One shared rate for all pots; the gain comes from each detail page."""
         props = _pots_props([_pot(), _pot(pot_id=POT_ID_2, raw=999_999)], rate="4,50")
 
         pots, _ = web.parse_pots(props)
 
-        assert [pot.rate_pct for pot in pots] == [4.5, 4.5]
+        assert [(pot.rate_pct, pot.profit) for pot in pots] == [(4.5, None), (4.5, None)]
 
     @pytest.mark.parametrize(
         ("rate", "is_invested"),
@@ -793,8 +855,9 @@ class _FakeHandle:
 class _FakeTab:
     """A signed-in tab stand-in: answers the in-page fetch script from a table.
 
-    `responses` maps a page name ("balance", "pots") or a ("movements", N)
-    pair to the script's result, or to an exception the call raises.
+    `responses` maps a page name ("balance", "pots"), a ("movements", N) or a
+    ("pot_detail", uuid) pair to the script's result, or to an exception the
+    call raises.
     """
 
     url = web.START_URL
@@ -809,9 +872,10 @@ class _FakeTab:
     def wait_for_function(self, script, arg=None, timeout=None):
         self.scripts.append(script)
         self.timeouts.append(timeout)
-        surface, number = arg["surface"], arg["pageNumber"]
-        self.calls.append((surface, number) if surface == "movements" else surface)
-        result = self.responses.get((surface, number), self.responses.get(surface))
+        surface = arg["surface"]
+        key = {"movements": arg["pageNumber"], "pot_detail": arg["potId"]}.get(surface)
+        self.calls.append((surface, key) if key is not None else surface)
+        result = self.responses.get((surface, key), self.responses.get(surface))
         if isinstance(result, Exception):
             raise result
         handle = _FakeHandle(result)
@@ -824,10 +888,11 @@ def _ok(props: dict) -> dict:
 
 
 def _tab(**overrides) -> _FakeTab:
-    """A healthy account: a balance, one pot and a one-page ledger."""
+    """A healthy account: a balance, one pot with its gain and a one-page ledger."""
     responses = {
         "balance": _ok(_balance_props()),
         "pots": _ok(_pots_props([_pot()])),
+        ("pot_detail", POT_ID): _ok(_pot_detail_props()),
         ("movements", 1): _ok(_movements_props([_item()])),
     }
     responses.update(overrides)
@@ -840,14 +905,57 @@ def no_sleep(monkeypatch):
 
 
 class TestFetchScript:
-    def test_only_the_three_account_pages_can_be_fetched(self):
+    def test_only_the_four_account_pages_can_be_fetched(self):
         """The allowlist is fixed inside the script; Python only names a page."""
         assert web.ALLOWED_PATHS == {
             "balance": "/banking/balance",
             "pots": "/savings/hub",
+            "pot_detail": "/savings/detail",
             "movements": "/banking/balance/movements",
         }
         assert json.dumps(web.ALLOWED_PATHS) in web._FETCH_JS
+
+    def test_the_script_appends_only_a_uuid_to_the_detail_path(self):
+        """The pot id is checked inside the page against the same uuid pattern."""
+        script = web._FETCH_JS
+
+        assert f"new RegExp({json.dumps(web.POT_ID_PATTERN)}).test(potId)" in script
+        assert script.index(".test(potId)") < script.index("path += '/' + potId")
+
+    @pytest.mark.parametrize(
+        "pot_id",
+        [
+            pytest.param("../../home", id="path-traversal"),
+            pytest.param(f"{POT_ID}/../../home", id="uuid-then-traversal"),
+            pytest.param(f"{POT_ID}?next=/home", id="uuid-then-query"),
+            pytest.param("0000000A-0000-0000-0000-00000000000B", id="upper-case"),
+            pytest.param("synthetic", id="not-a-uuid"),
+            pytest.param("", id="blank"),
+            pytest.param(None, id="missing"),
+            pytest.param(1, id="not-text"),
+        ],
+    )
+    def test_a_detail_fetch_without_a_uuid_never_reaches_the_tab(self, pot_id):
+        """Python refuses a non-uuid pot id before the in-page script runs."""
+        tab = _tab()
+
+        with pytest.raises(MercadoPagoFetchError, match="pot_detail: page not allowed"):
+            web._fetch_props(tab, "pot_detail", pot_id=pot_id)
+
+        assert tab.calls == []
+
+    @pytest.mark.parametrize(
+        "pot_id",
+        [
+            pytest.param("../../home", id="path-traversal"),
+            pytest.param(f"{POT_ID}/x", id="uuid-then-path"),
+            pytest.param("0000000A-0000-0000-0000-00000000000B", id="upper-case"),
+        ],
+    )
+    def test_the_in_page_pattern_matches_only_a_lower_case_uuid(self, pot_id):
+        """The pattern the script uses accepts a pot uuid and nothing else."""
+        assert web._POT_ID_RE.match(POT_ID)
+        assert not web._POT_ID_RE.match(pot_id)
 
     def test_the_script_checks_the_host_and_never_follows_a_redirect(self):
         """Same origin only, with the session cookie, redirects left unfollowed."""
@@ -931,19 +1039,25 @@ class TestHtmlFromFetch:
 
 class TestReadAccount:
     def test_reads_balance_pots_and_one_ledger_page(self):
-        """The healthy path: three fetches, nothing to warn about."""
+        """The healthy path: four fetches, nothing to warn about."""
         tab = _tab()
 
         account = web.read_account(tab)
 
         assert account.balance == 2_500_000
-        assert account.wallet_yield == web.WalletYield(rate_pct=1.0, profit=999_999)
+        assert account.wallet_yield == web.WalletYield(rate_pct=1.0, profit_12m=999_999)
         assert account.pots == [
-            Pot(id=POT_ID, name="Reserva sintética", amount=1_000_000, rate_pct=1.0)
+            Pot(
+                id=POT_ID,
+                name="Reserva sintética",
+                amount=1_000_000,
+                rate_pct=1.0,
+                profit=999_999,
+            )
         ]
         assert [row.movement_id for row in account.movements] == [MOVEMENT_ID]
         assert account.warnings == []
-        assert tab.calls == ["balance", "pots", ("movements", 1)]
+        assert tab.calls == ["balance", "pots", ("pot_detail", POT_ID), ("movements", 1)]
 
     def test_every_page_call_is_bounded_and_uses_the_one_script(self):
         """Each read runs the fixed script under a timeout and frees its handle."""
@@ -952,7 +1066,7 @@ class TestReadAccount:
         web.read_account(tab)
 
         assert all(script is web._FETCH_JS for script in tab.scripts)
-        assert tab.timeouts == [web.EVALUATE_TIMEOUT_MS] * 3
+        assert tab.timeouts == [web.EVALUATE_TIMEOUT_MS] * 4
         assert all(handle.disposed for handle in tab.handles)
 
     @pytest.mark.parametrize(
@@ -1055,7 +1169,11 @@ class TestReadAccount:
         assert [pot.id for pot in account.pots] == [POT_ID]
         assert account.warnings == ["MercadoPago: 1 savings pot(s) not read"]
 
-    @pytest.mark.parametrize("surface", ["pots", ("movements", 1)], ids=["pots", "ledger"])
+    @pytest.mark.parametrize(
+        "surface",
+        ["pots", ("pot_detail", POT_ID), ("movements", 1)],
+        ids=["pots", "pot-detail", "ledger"],
+    )
     def test_a_redirect_after_the_balance_is_still_a_lost_session(self, surface):
         """A redirect anywhere ends the drive; it is never worked around."""
         tab = _tab()
@@ -1065,12 +1183,95 @@ class TestReadAccount:
             web.read_account(tab)
 
     def test_no_pots_is_not_a_warning(self):
-        """An account without pots reads clean."""
+        """An account without pots reads clean and fetches no detail page."""
         tab = _tab(pots=_ok(_pots_props([])))
 
         account = web.read_account(tab)
 
         assert (account.pots, account.warnings) == ([], [])
+        assert tab.calls == ["balance", "pots", ("movements", 1)]
+
+    def test_each_pot_gets_the_gain_of_its_own_detail_page(self, no_sleep):
+        """One detail fetch per pot, in the listed order, each keyed by its uuid."""
+        tab = _tab(
+            pots=_ok(_pots_props([_pot(), _pot(pot_id=POT_ID_2, raw=999_999)])),
+            **{"pot_detail": _ok(_pot_detail_props(profit=0))},
+        )
+        tab.responses[("pot_detail", POT_ID)] = _ok(_pot_detail_props(profit=999_999))
+
+        account = web.read_account(tab)
+
+        assert [(pot.id, pot.profit) for pot in account.pots] == [
+            (POT_ID, 999_999),
+            (POT_ID_2, 0),
+        ]
+        assert [call for call in tab.calls if call[0] == "pot_detail"] == [
+            ("pot_detail", POT_ID),
+            ("pot_detail", POT_ID_2),
+        ]
+        assert account.warnings == []
+
+    @pytest.mark.parametrize(
+        ("detail", "warning"),
+        [
+            pytest.param(
+                {"status": "http", "code": 500},
+                "MercadoPago: gain of savings pot 1 of 2 not read (pot_detail: HTTP 500)",
+                id="http-500",
+            ),
+            pytest.param(
+                {"status": "timeout"},
+                "MercadoPago: gain of savings pot 1 of 2 not read (pot_detail: timed out)",
+                id="timeout",
+            ),
+            pytest.param(
+                RuntimeError("synthetic playwright failure"),
+                "MercadoPago: gain of savings pot 1 of 2 not read "
+                "(pot_detail: in-page fetch failed (RuntimeError))",
+                id="call-raised",
+            ),
+            pytest.param(
+                _ok({"synthetic": 1}),
+                "MercadoPago: gain of savings pot 1 of 2 not read "
+                "(pot detail: potDetail missing)",
+                id="changed-page",
+            ),
+            pytest.param(
+                _ok(_pot_detail_props(profit="999999")),
+                "MercadoPago: gain of savings pot 1 of 2 not readable",
+                id="gain-not-a-number",
+            ),
+        ],
+    )
+    def test_a_failed_detail_page_is_a_warning_and_the_run_goes_on(
+        self, no_sleep, detail, warning
+    ):
+        """That pot keeps its balance without a gain; the next pot and the ledger still read."""
+        tab = _tab(pots=_ok(_pots_props([_pot(), _pot(pot_id=POT_ID_2, raw=999_999)])))
+        tab.responses[("pot_detail", POT_ID)] = detail
+        tab.responses[("pot_detail", POT_ID_2)] = _ok(_pot_detail_props(profit=999_999))
+
+        account = web.read_account(tab)
+
+        assert [(pot.amount, pot.profit) for pot in account.pots] == [
+            (1_000_000, None),
+            (999_999, 999_999),
+        ]
+        assert account.warnings == [warning]
+        assert len(account.movements) == 1
+
+    def test_a_spent_read_budget_stops_the_detail_pages(self, no_sleep, monkeypatch):
+        """Once the budget is gone no detail page is fetched; the pots keep no gain."""
+        monkeypatch.setattr(web, "READ_BUDGET_S", -1)
+        tab = _tab()
+
+        account = web.read_account(tab)
+
+        assert [pot.profit for pot in account.pots] == [None]
+        assert "pot_detail" not in [call[0] for call in tab.calls if isinstance(call, tuple)]
+        assert account.warnings[0] == (
+            "MercadoPago: savings pot gains stopped before pot 1 of 1 (read budget spent)"
+        )
 
 
 class TestLedgerPaging:
@@ -1981,7 +2182,7 @@ class TestRealDrives:
         account = web._drive_reuse("http://localhost:9333", 1)
 
         assert account.balance == 2_500_000
-        assert tab.calls == ["balance", "pots", ("movements", 1)]
+        assert tab.calls == ["balance", "pots", ("pot_detail", POT_ID), ("movements", 1)]
         assert (connections.opened, connections.closed) == (2, 2)
         assert set(connections.processes) == {None}
         assert chrome.launches == []
@@ -2668,17 +2869,26 @@ class TestLegs:
         ]
 
     def test_products_carry_the_yield_metrics(self, monkeypatch):
-        """The wallet's rate and gain, and each pot's rate, land in the metrics."""
+        """The wallet's rate and 12-month gain, and each pot's rate and gain, land in the metrics."""
         account = _account(
-            wallet_yield=web.WalletYield(rate_pct=1.0, profit=999_999),
-            pots=[Pot(id=POT_ID, name="Reserva sintética", amount=1_000_000, rate_pct=4.5)],
+            wallet_yield=web.WalletYield(rate_pct=1.0, profit_12m=999_999),
+            pots=[
+                Pot(
+                    id=POT_ID,
+                    name="Reserva sintética",
+                    amount=1_000_000,
+                    rate_pct=4.5,
+                    profit=999_999,
+                )
+            ],
         )
         _install(monkeypatch, account=account)
 
         wallet, pot = asyncio.run(self.scraper.scrape_products()).products
 
-        assert (wallet.metrics.annual_rate_pct, wallet.metrics.profit) == (1.0, 999_999)
-        assert (pot.metrics.annual_rate_pct, pot.metrics.profit) == (4.5, None)
+        assert (wallet.metrics.annual_rate_pct, wallet.metrics.profit_12m) == (1.0, 999_999)
+        assert not hasattr(wallet.metrics, "profit")
+        assert (pot.metrics.annual_rate_pct, pot.metrics.profit) == (4.5, 999_999)
 
     def test_missing_yield_leaves_the_metrics_empty(self, monkeypatch):
         """No rate or gain on the pages: the metrics stay None, never zero."""
@@ -2686,7 +2896,9 @@ class TestLegs:
 
         products = asyncio.run(self.scraper.scrape_products()).products
 
-        assert {(p.metrics.annual_rate_pct, p.metrics.profit) for p in products} == {(None, None)}
+        wallet, *pots = products
+        assert (wallet.metrics.annual_rate_pct, wallet.metrics.profit_12m) == (None, None)
+        assert {(p.metrics.annual_rate_pct, p.metrics.profit) for p in pots} == {(None, None)}
 
     def test_no_savings_product_is_ever_ref_less(self, monkeypatch):
         """A ref-less savings product would be a roll-up the writer retires."""
