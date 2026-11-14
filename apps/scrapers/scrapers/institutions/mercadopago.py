@@ -46,18 +46,20 @@ consumes it, re-raising a cached error without driving again):
   CLP `savings` product per pot, told apart by `external_ref`
   (`mp_pot_<uuid>`) and named after the pot. Both carry the yield the pages
   report: the wallet its yearly rate (`annual_rate_pct`) and its gain of the
-  last 12 months (`profit_12m`) from the balance page; each pot the hub's
-  shared yearly rate while the hub says the pots are invested, and its
-  accumulated gain (`profit`) from its own detail page. A rate or gain the
+  last 12 months (`profit_12m`) from the balance page, each pot the hub's
+  shared yearly rate while the hub says the pots are invested. Per-pot gain
+  is not read (the pot page's server data has a `potDetail.investment.profit`
+  that stays 0 while the page shows a gain computed in the browser), so a
+  pot's `profit` stays empty. A rate or gain the
   page does not carry readably is left empty; it never fails the run. Pots
   have no movements on the web, so no `savings` transaction is ever emitted
   (one without a ref would create a roll-up product). A pot that disappears
   from the page keeps its last balance: an absent pot cannot be told from a
   failed read.
 
-If the pots page, a pot's detail page or a ledger page fails after the
-balance was read, or a pot, a pot's gain or a ledger row cannot be read, the
-run ends `partial` with a warning instead of quietly storing less.
+If the pots page or a ledger page fails after the balance was read, or a pot
+or a ledger row cannot be read, the run ends `partial` with a warning instead
+of quietly storing less.
 
 Verified live (managed mode, off-screen, a real signed-in profile):
 
@@ -272,7 +274,6 @@ class MercadoPagoScraper(BaseScraper):
                     metrics=SavingsMetrics(
                         balance=pot.amount,
                         annual_rate_pct=pot.rate_pct,
-                        profit=pot.profit,
                     ),
                 )
             )

@@ -809,12 +809,11 @@ The session is read under a fetch-only contract: the tab opens on
 `/banking/balance` and is never navigated, and the data comes from
 same-origin `fetch()` calls made inside it with `credentials: 'include'` and
 `redirect: 'manual'`. The in-page script refuses any host but
-`www.mercadopago.cl` and can fetch only four server-rendered pages, whose
+`www.mercadopago.cl` and can fetch only three server-rendered pages, whose
 data sits in an inline script as `_n.ctx.r={...}` followed by more
 JavaScript (one JSON value is decoded from the marker on, then
 `appProps.pageProps`): `/banking/balance` (the wallet balance),
-`/savings/hub` (the savings pots), `/savings/detail/<uuid>` (one pot's gain;
-the script appends only an id that matches a lower-case uuid) and
+`/savings/hub` (the savings pots) and
 `/banking/balance/movements?limit=100&page=N` (the wallet ledger). `/home` is
 never fetched or opened (it redirects through the auth gateway), and a
 redirect is never followed: it means the session is gone, so the run raises
@@ -823,8 +822,8 @@ is the session probe: nothing else is fetched when it fails. Only a redirect,
 a 401/403 or a tab off the portal count as a lost session; a balance page
 that answers without a readable balance (a changed page, a widget that did
 not load) is a plain error that asks nobody to sign in. Once the balance
-reads, a pots, pot detail or ledger page that fails, or ledger rows that
-cannot be read, are warnings and the run ends `partial`.
+reads, a pots or ledger page that fails, or ledger rows that cannot be read,
+are warnings and the run ends `partial`.
 
 Finding the tab starts with Chrome's own target list (`/json/list`, plain
 HTTP on the debug port), because it shows the tab with its real URL from the
@@ -852,10 +851,9 @@ CLP `wallet` with its balance and one CLP `savings` product per pot
 the pages report as metrics: the wallet its yearly rate (`annual_rate_pct`,
 from the balance page's "... al X% anual" subtitle) and its gain of the last
 12 months (`profit_12m`), each pot the savings hub's shared rate while the hub
-flags the pots as invested and its accumulated gain (`profit`) from its own
-`/savings/detail/<uuid>` page. A missing or unreadable rate or gain is left
-empty and never fails the run; an unread pot gain adds a warning, so the run
-ends `partial`. The transactions leg
+flags the pots as invested. Per-pot gain is not read: the pot page computes it
+in the browser, and its server-side `investment.profit` stays 0. A missing or unreadable rate or gain
+is left empty and never fails the run. The transactions leg
 emits the ledger rows on the wallet (the newest
 `MERCADOPAGO_MOVEMENT_PAGES` pages of 100, default 1; 0 reads every page,
 capped at 50), with the ledger's sign (negative is money out) and its UTC
