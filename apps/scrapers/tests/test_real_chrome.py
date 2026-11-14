@@ -5,6 +5,7 @@ and the CDP connection are replaced by fakes. Every path, port and URL is
 synthetic.
 """
 
+import json
 import os
 import signal
 import subprocess
@@ -80,6 +81,12 @@ class _FakeChromium:
 class _FakePlaywright:
     def __init__(self, failures: int = 0):
         self.chromium = _FakeChromium(failures)
+
+
+class _Launched:
+    """What `record_managed_launch` reads from a launched process."""
+
+    pid = 4242
 
 
 class _Clock:
@@ -712,3 +719,595 @@ class TestTerminate:
         real_chrome.terminate_chrome(proc)
 
         assert proc.waits == 2
+
+
+_PORT = 9223
+
+
+def _argv(port=_PORT, profile="/synthetic/profile"):
+    return [
+        "/synthetic/chrome",
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={profile}",
+        "--no-first-run",
+    ]
+
+
+_OWNER = 5151
+
+
+class _Processes:
+    """The fake Chrome (pid 4242) and the run that launched it (pid 5151); nothing is signalled.
+
+    Replaces `os.kill`, `os.killpg`, `os.getpgid`, `os.waitpid` and the
+    platform's status reader; any other pid is gone.
+    """
+
+    def __init__(
+        self,
+        monkeypatch,
+        *,
+        state="alive",
+        pgid=4242,
+        dies_after=1,
+        owner_alive=False,
+        ppid=1,
+        zombie_after=None,
+    ):
+        self.state = state
+        self.pgid = pgid
+        self.dies_after = dies_after
+        self.owner_alive = owner_alive
+        self.ppid = ppid
+        self.zombie_after = zombie_after
+        self.zombie = False
+        self.signals: list[tuple] = []
+        monkeypatch.setattr(real_chrome.os, "kill", self.kill)
+        monkeypatch.setattr(real_chrome.os, "killpg", self.killpg, raising=False)
+        monkeypatch.setattr(real_chrome.os, "getpgid", lambda pid: self.pgid, raising=False)
+        monkeypatch.setattr(real_chrome.os, "waitpid", self.waitpid, raising=False)
+        monkeypatch.setattr(real_chrome, "_status_reader", lambda platform: self.read_status)
+
+    def _signalled(self, event):
+        self.signals.append(event)
+        if self.zombie_after is not None and len(self.signals) >= self.zombie_after:
+            self.zombie = True
+        elif len(self.signals) >= self.dies_after:
+            self.state = "gone"
+
+    def kill(self, pid, sig):
+        if pid == _OWNER:
+            if not self.owner_alive:
+                raise ProcessLookupError(pid)
+            return
+        if pid != 4242 or self.state == "gone":
+            raise ProcessLookupError(pid)
+        if self.state == "foreign":
+            raise PermissionError(pid)
+        if sig != 0:
+            self._signalled(("browser", pid, sig))
+
+    def killpg(self, pgid, sig):
+        if self.state == "gone":
+            raise ProcessLookupError(pgid)
+        self._signalled(("group", pgid, sig))
+
+    def waitpid(self, pid, options):
+        raise ChildProcessError(pid)
+
+    def read_status(self, pid):
+        return real_chrome.ProcessStatus(ppid=self.ppid, state="Z" if self.zombie else "S")
+
+
+class TestOrphanReclaim:
+    """The pidfile in a synthetic profile under tmp_path; no process is ever touched."""
+
+    def _profile(self, tmp_path):
+        profile = tmp_path / "profile"
+        profile.mkdir()
+        return profile
+
+    def _record(self, profile, pid=4242, port=_PORT, owner=_OWNER):
+        class _Proc:
+            pass
+
+        proc = _Proc()
+        proc.pid = pid
+        real_chrome.record_managed_launch(proc, port=port, profile_dir=profile)
+        pidfile = real_chrome.managed_pidfile(profile)
+        record = json.loads(pidfile.read_text())
+        if owner is None:
+            del record["owner_pid"]
+        else:
+            record["owner_pid"] = owner
+        pidfile.write_text(json.dumps(record))
+
+    def _reclaim(self, profile, cmdline=None, platform="linux", port=_PORT):
+        argv = _argv(port=port, profile=profile) if cmdline is None else cmdline
+        return real_chrome.reclaim_orphaned_chrome(
+            port=port, profile_dir=profile, platform=platform, read_cmdline=lambda pid: argv
+        )
+
+    def _patch_clock(self, monkeypatch):
+        clock = _Clock()
+        monkeypatch.setattr(real_chrome.time, "monotonic", clock.monotonic)
+        monkeypatch.setattr(real_chrome.time, "sleep", clock.sleep)
+        return clock
+
+    def test_record_then_forget_round_trip(self, tmp_path):
+        """The record names the pid, port, owner and resolved profile; forgetting removes it."""
+        profile = self._profile(tmp_path)
+
+        real_chrome.record_managed_launch(_Launched(), port=_PORT, profile_dir=profile)
+        record = json.loads(real_chrome.managed_pidfile(profile).read_text())
+        real_chrome.forget_managed_launch(profile, 4242)
+
+        assert (record["pid"], record["port"]) == (4242, _PORT)
+        assert record["owner_pid"] == os.getpid()
+        assert record["profile_dir"] == str(profile.resolve())
+        assert isinstance(record["launched_at"], float)
+        assert not real_chrome.managed_pidfile(profile).exists()
+        assert list(profile.iterdir()) == []
+
+    def test_the_pidfile_lives_inside_the_profile(self, tmp_path):
+        """Inside the gitignored profile, under a name Chrome never writes."""
+        profile = self._profile(tmp_path)
+
+        pidfile = real_chrome.managed_pidfile(profile)
+
+        assert pidfile.parent == profile
+        assert pidfile.name == "el-chanchito-managed-chrome.json"
+
+    def test_forget_ignores_another_pid(self, tmp_path):
+        """A newer launch's record survives an older run clearing up."""
+        profile = self._profile(tmp_path)
+        self._record(profile, pid=5151)
+
+        real_chrome.forget_managed_launch(profile, 4242)
+
+        assert json.loads(real_chrome.managed_pidfile(profile).read_text())["pid"] == 5151
+
+    def test_record_never_raises(self, tmp_path, caplog):
+        """A profile that cannot hold the file only logs, without the path."""
+        blocker = tmp_path / "not-a-dir"
+        blocker.write_text("synthetic")
+
+        real_chrome.record_managed_launch(_Launched(), port=_PORT, profile_dir=blocker / "profile")
+
+        assert "Could not record" in caplog.text
+        assert str(tmp_path) not in caplog.text
+
+    def test_no_pidfile_does_nothing(self, monkeypatch, tmp_path):
+        """No record: no process is even looked at."""
+        processes = _Processes(monkeypatch)
+        profile = self._profile(tmp_path)
+
+        assert self._reclaim(profile) is False
+        assert processes.signals == []
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            pytest.param("{not json", id="not-json"),
+            pytest.param("[]", id="not-an-object"),
+            pytest.param('{"pid": "4242", "port": 9223, "profile_dir": "/x"}', id="pid-not-int"),
+            pytest.param('{"pid": true, "port": 9223, "profile_dir": "/x"}', id="pid-bool"),
+            pytest.param('{"pid": 0, "port": 9223, "profile_dir": "/x"}', id="pid-zero"),
+            pytest.param('{"pid": 4242, "profile_dir": "/x"}', id="no-port"),
+        ],
+    )
+    def test_a_corrupt_pidfile_is_removed_and_nothing_killed(self, monkeypatch, tmp_path, content):
+        """A record that cannot be trusted is dropped."""
+        processes = _Processes(monkeypatch)
+        profile = self._profile(tmp_path)
+        real_chrome.managed_pidfile(profile).write_text(content)
+
+        assert self._reclaim(profile) is False
+        assert not real_chrome.managed_pidfile(profile).exists()
+        assert processes.signals == []
+
+    def test_a_dead_pid_drops_the_record(self, monkeypatch, tmp_path):
+        """The Chrome already ended: only the stale file goes."""
+        processes = _Processes(monkeypatch, state="gone")
+        profile = self._profile(tmp_path)
+        self._record(profile)
+
+        assert self._reclaim(profile) is False
+        assert not real_chrome.managed_pidfile(profile).exists()
+        assert processes.signals == []
+
+    @pytest.mark.parametrize(
+        "cmdline",
+        [
+            pytest.param(lambda profile: ["/usr/bin/synthetic-editor", "notes.txt"], id="another-program"),
+            pytest.param(lambda profile: _argv(port=9333, profile=profile), id="other-port"),
+            pytest.param(lambda profile: _argv(profile=f"{profile}-2"), id="other-profile"),
+            pytest.param(lambda profile: _argv(profile=profile)[:2], id="no-profile-arg"),
+            pytest.param(lambda profile: [], id="empty"),
+        ],
+    )
+    def test_an_alive_pid_that_is_not_the_managed_chrome_is_left_alone(
+        self, monkeypatch, tmp_path, cmdline
+    ):
+        """A reused pid is never signalled; the stale record is dropped."""
+        processes = _Processes(monkeypatch)
+        profile = self._profile(tmp_path)
+        self._record(profile)
+
+        reclaimed = real_chrome.reclaim_orphaned_chrome(
+            port=_PORT,
+            profile_dir=profile,
+            platform="linux",
+            read_cmdline=lambda pid: cmdline(profile),
+        )
+
+        assert reclaimed is False
+        assert processes.signals == []
+        assert not real_chrome.managed_pidfile(profile).exists()
+
+    def test_an_unreadable_command_line_keeps_the_record(self, monkeypatch, tmp_path):
+        """A slow or failing `ps` proves nothing: nothing is killed and the next run retries."""
+        processes = _Processes(monkeypatch)
+        profile = self._profile(tmp_path)
+        self._record(profile)
+
+        reclaimed = real_chrome.reclaim_orphaned_chrome(
+            port=_PORT, profile_dir=profile, platform="linux", read_cmdline=lambda pid: None
+        )
+
+        assert reclaimed is False
+        assert processes.signals == []
+        assert real_chrome.managed_pidfile(profile).exists()
+
+    def test_an_alive_pid_outside_its_own_group_is_left_alone(self, monkeypatch, tmp_path):
+        """Matching arguments are not enough: it must still lead the session we started."""
+        processes = _Processes(monkeypatch, pgid=1)
+        profile = self._profile(tmp_path)
+        self._record(profile)
+
+        assert self._reclaim(profile) is False
+        assert processes.signals == []
+        assert not real_chrome.managed_pidfile(profile).exists()
+
+    def test_a_pid_we_may_not_signal_is_left_alone(self, monkeypatch, tmp_path):
+        """PermissionError means someone else's process now holds that pid."""
+        processes = _Processes(monkeypatch, state="foreign")
+        profile = self._profile(tmp_path)
+        self._record(profile)
+
+        assert self._reclaim(profile) is False
+        assert processes.signals == []
+
+    def test_a_record_for_another_port_is_not_acted_on(self, monkeypatch, tmp_path):
+        """The record, the command line and the current call must all agree."""
+        processes = _Processes(monkeypatch)
+        profile = self._profile(tmp_path)
+        self._record(profile, port=9333)
+
+        assert self._reclaim(profile) is False
+        assert processes.signals == []
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+    def test_a_verified_orphan_that_exits_on_its_own_sigterm(self, monkeypatch, tmp_path):
+        """The browser alone is asked first, as in `terminate_chrome`."""
+        self._patch_clock(monkeypatch)
+        processes = _Processes(monkeypatch, dies_after=1)
+        profile = self._profile(tmp_path)
+        self._record(profile)
+
+        assert self._reclaim(profile) is True
+        assert processes.signals == [("browser", 4242, signal.SIGTERM)]
+        assert not real_chrome.managed_pidfile(profile).exists()
+
+    @pytest.mark.skipif(os.name == "nt", reason="SIGKILL does not exist on Windows")
+    def test_a_verified_orphan_escalates_to_its_group(self, monkeypatch, tmp_path):
+        """SIGTERM, the browser wait, then the group: SIGTERM, then SIGKILL."""
+        clock = self._patch_clock(monkeypatch)
+        processes = _Processes(monkeypatch, dies_after=3)
+        profile = self._profile(tmp_path)
+        self._record(profile)
+
+        assert self._reclaim(profile) is True
+        assert processes.signals == [
+            ("browser", 4242, signal.SIGTERM),
+            ("group", 4242, signal.SIGTERM),
+            ("group", 4242, signal.SIGKILL),
+        ]
+        assert clock.now >= real_chrome._BROWSER_EXIT_WAIT_S + real_chrome._GROUP_EXIT_WAIT_S
+        assert not real_chrome.managed_pidfile(profile).exists()
+
+    @pytest.mark.skipif(os.name == "nt", reason="SIGKILL does not exist on Windows")
+    def test_an_orphan_that_survives_sigkill_keeps_its_record(self, monkeypatch, tmp_path, caplog):
+        """Logged, not raised; the next run tries again."""
+        self._patch_clock(monkeypatch)
+        _Processes(monkeypatch, dies_after=99)
+        profile = self._profile(tmp_path)
+        self._record(profile)
+
+        assert self._reclaim(profile) is False
+        assert "did not exit after SIGKILL" in caplog.text
+        assert real_chrome.managed_pidfile(profile).exists()
+
+    @pytest.mark.parametrize(
+        ("owner", "ppid"),
+        [
+            pytest.param(_OWNER, _OWNER, id="sign-in-window-still-open"),
+            pytest.param(os.getpid(), os.getpid(), id="our-own-drive"),
+            pytest.param(_OWNER, None, id="parent-unreadable"),
+        ],
+    )
+    def test_a_chrome_its_live_owner_still_parents_is_not_an_orphan(
+        self, monkeypatch, tmp_path, owner, ppid
+    ):
+        """Its launching run is alive: nothing is killed and the record stays."""
+        processes = _Processes(monkeypatch, owner_alive=True, ppid=ppid)
+        if ppid is None:
+            monkeypatch.setattr(real_chrome, "_status_reader", lambda platform: lambda pid: None)
+        profile = self._profile(tmp_path)
+        self._record(profile, owner=owner)
+
+        assert self._reclaim(profile) is False
+        assert processes.signals == []
+        assert real_chrome.managed_pidfile(profile).exists()
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+    @pytest.mark.parametrize(
+        ("owner_alive", "ppid", "owner"),
+        [
+            pytest.param(False, _OWNER, _OWNER, id="owner-dead"),
+            pytest.param(True, 1, _OWNER, id="reparented-to-init"),
+            pytest.param(True, 1, os.getpid(), id="reparented-from-our-pid"),
+            pytest.param(False, 1, None, id="record-without-owner"),
+        ],
+    )
+    def test_a_chrome_without_its_owner_is_reclaimed(
+        self, monkeypatch, tmp_path, owner_alive, ppid, owner
+    ):
+        """A dead owner, or one that is no longer the parent, leaves a true orphan."""
+        self._patch_clock(monkeypatch)
+        processes = _Processes(monkeypatch, owner_alive=owner_alive, ppid=ppid)
+        profile = self._profile(tmp_path)
+        self._record(profile, owner=owner)
+
+        assert self._reclaim(profile) is True
+        assert processes.signals == [("browser", 4242, signal.SIGTERM)]
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+    def test_an_orphan_on_a_since_changed_port_is_still_reclaimed(self, monkeypatch, tmp_path):
+        """The command line is checked against the recorded port, not today's."""
+        self._patch_clock(monkeypatch)
+        processes = _Processes(monkeypatch)
+        profile = self._profile(tmp_path)
+        self._record(profile, port=9333)
+
+        reclaimed = real_chrome.reclaim_orphaned_chrome(
+            port=_PORT,
+            profile_dir=profile,
+            platform="linux",
+            read_cmdline=lambda pid: _argv(port=9333, profile=profile),
+        )
+
+        assert reclaimed is True
+        assert processes.signals == [("browser", 4242, signal.SIGTERM)]
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+    def test_a_zombie_counts_as_gone_without_escalating(self, monkeypatch, tmp_path, caplog):
+        """An exited but unreaped Chrome ends the wait at once, with no false warning."""
+        clock = self._patch_clock(monkeypatch)
+        processes = _Processes(monkeypatch, zombie_after=1)
+        profile = self._profile(tmp_path)
+        self._record(profile)
+
+        assert self._reclaim(profile) is True
+        assert processes.signals == [("browser", 4242, signal.SIGTERM)]
+        assert clock.now == 0
+        assert "did not exit" not in caplog.text
+
+    def test_a_zombie_record_is_dropped_without_signals(self, monkeypatch, tmp_path):
+        """Already a zombie when found: nothing to stop."""
+        processes = _Processes(monkeypatch)
+        processes.zombie = True
+        profile = self._profile(tmp_path)
+        self._record(profile)
+
+        assert self._reclaim(profile) is False
+        assert processes.signals == []
+        assert not real_chrome.managed_pidfile(profile).exists()
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+    def test_our_own_exited_child_is_reaped_as_gone(self, monkeypatch, tmp_path):
+        """`waitpid` reaping it is as good as the pid being gone."""
+        self._patch_clock(monkeypatch)
+        processes = _Processes(monkeypatch, dies_after=99)
+        monkeypatch.setattr(
+            real_chrome.os,
+            "waitpid",
+            lambda pid, options: (pid, 0) if processes.signals else (0, 0),
+            raising=False,
+        )
+        profile = self._profile(tmp_path)
+        self._record(profile)
+
+        assert self._reclaim(profile) is True
+        assert processes.signals == [("browser", 4242, signal.SIGTERM)]
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+    def test_a_reclaim_logs_what_it_stopped_without_paths(self, monkeypatch, tmp_path, caplog):
+        """An info line names the pid and port, never the profile."""
+        caplog.set_level("INFO", logger=real_chrome.logger.name)
+        self._patch_clock(monkeypatch)
+        _Processes(monkeypatch)
+        profile = self._profile(tmp_path)
+        self._record(profile)
+
+        self._reclaim(profile)
+
+        assert "Reclaimed an orphaned managed Chrome (pid 4242, debug port 9223)" in caplog.text
+        assert str(tmp_path) not in caplog.text
+
+    @pytest.mark.parametrize("platform", ["win32", "cygwin"])
+    def test_windows_is_skipped_and_keeps_the_record(self, monkeypatch, tmp_path, platform):
+        """Only macOS, Linux and WSL2 reclaim; nothing is looked at elsewhere."""
+        monkeypatch.delattr(real_chrome.os, "killpg", raising=False)
+        monkeypatch.delattr(real_chrome.os, "getpgid", raising=False)
+        profile = self._profile(tmp_path)
+        self._record(profile)
+
+        def never(pid):
+            raise AssertionError("read the command line on Windows")
+
+        reclaimed = real_chrome.reclaim_orphaned_chrome(
+            port=_PORT, profile_dir=profile, platform=platform, read_cmdline=never
+        )
+
+        assert reclaimed is False
+        assert real_chrome.managed_pidfile(profile).exists()
+
+    @pytest.mark.parametrize(
+        ("platform", "reader"),
+        [
+            ("linux", real_chrome.read_proc_cmdline),
+            ("darwin", real_chrome.read_ps_command),
+            ("freebsd14", None),
+        ],
+    )
+    def test_the_reader_follows_the_platform(self, platform, reader):
+        """/proc on Linux (and WSL2), `ps` on macOS, nothing elsewhere."""
+        assert real_chrome._cmdline_reader(platform) is reader
+
+
+class TestCmdlineReading:
+    def _write(self, tmp_path, argv):
+        (tmp_path / "4242").mkdir()
+        (tmp_path / "4242" / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
+
+    def test_proc_cmdline_splits_nul_separated_argv(self, tmp_path):
+        """Each NUL-terminated field is one argument, spaces included."""
+        argv = ["/synthetic/chrome", "--user-data-dir=/synthetic/My Profile", "--no-first-run"]
+        self._write(tmp_path, argv)
+
+        assert real_chrome.read_proc_cmdline(4242, proc_root=tmp_path) == argv
+
+    @pytest.mark.parametrize(
+        ("profile", "expected"),
+        [
+            pytest.param("/synthetic/profile", True, id="exact"),
+            pytest.param("/synthetic/profile-2", False, id="profile-prefix"),
+        ],
+    )
+    def test_proc_cmdline_rewritten_title_is_matched_as_one_line(self, tmp_path, profile, expected):
+        """Chrome's rewritten title is one space-joined field, still matched by whole argument."""
+        (tmp_path / "4242").mkdir()
+        title = " ".join(_argv(profile=profile)).encode() + b"\0\0\0"
+        (tmp_path / "4242" / "cmdline").write_bytes(title)
+        cmdline = real_chrome.read_proc_cmdline(4242, proc_root=tmp_path)
+
+        assert isinstance(cmdline, str)
+        matched = all(
+            real_chrome._has_whole_arg(cmdline, arg)
+            for arg in ("--remote-debugging-port=9223", "--user-data-dir=/synthetic/profile")
+        )
+        assert matched is expected
+
+    def test_proc_cmdline_of_a_missing_process_is_none(self, tmp_path):
+        """A pid with no /proc entry cannot be verified."""
+        assert real_chrome.read_proc_cmdline(4242, proc_root=tmp_path) is None
+
+    @pytest.mark.parametrize(
+        ("argv", "expected"),
+        [
+            pytest.param(_argv(), True, id="exact"),
+            pytest.param(_argv(port=92230), False, id="port-prefix"),
+            pytest.param(_argv(profile="/synthetic/profile-2"), False, id="profile-prefix"),
+            pytest.param(_argv(profile="/synthetic/profile/nested"), False, id="profile-parent"),
+        ],
+    )
+    def test_proc_argv_matches_whole_arguments_only(self, tmp_path, argv, expected):
+        """9223 is not 92230, and a profile path is not a prefix of another."""
+        self._write(tmp_path, argv)
+        cmdline = real_chrome.read_proc_cmdline(4242, proc_root=tmp_path)
+
+        matched = all(
+            real_chrome._has_whole_arg(cmdline, arg)
+            for arg in ("--remote-debugging-port=9223", "--user-data-dir=/synthetic/profile")
+        )
+
+        assert matched is expected
+
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            pytest.param("/synthetic/chrome --user-data-dir=/synthetic/My Profile --x", True, id="space-in-path"),
+            pytest.param("/synthetic/chrome --user-data-dir=/synthetic/My Profile", True, id="last-arg"),
+            pytest.param("/synthetic/chrome --user-data-dir=/synthetic/My Profile-2", False, id="prefix"),
+            pytest.param("/synthetic/chrome --user-data-dir=/synthetic/My Profile 2 --x", False, id="longer-path-with-space"),
+            pytest.param("/synthetic/chrome --user-data-dir=/synthetic/My Profile-2 --user-data-dir=/synthetic/My Profile", True, id="second-occurrence"),
+        ],
+    )
+    def test_a_ps_line_matches_arguments_between_spaces(self, line, expected):
+        """macOS `ps` loses argument boundaries; a match must end at a space or the line."""
+        assert real_chrome._has_whole_arg(line, "--user-data-dir=/synthetic/My Profile") is expected
+
+    @pytest.mark.parametrize(
+        ("stat", "expected"),
+        [
+            pytest.param("4242 (chrome) S 1 4242 4242 0", (1, "S"), id="sleeping"),
+            pytest.param("4242 (Chrome Helper) Z 5151 4242 4242 0", (5151, "Z"), id="zombie-spaces"),
+            pytest.param("4242 (a) b) R 77 4242 4242 0", (77, "R"), id="paren-in-name"),
+        ],
+    )
+    def test_proc_stat_gives_parent_and_state(self, tmp_path, stat, expected):
+        """Fields are read after the last ')', so the command name cannot shift them."""
+        (tmp_path / "4242").mkdir()
+        (tmp_path / "4242" / "stat").write_text(stat)
+
+        status = real_chrome.read_proc_status(4242, proc_root=tmp_path)
+
+        assert (status.ppid, status.state) == expected
+
+    @pytest.mark.parametrize(
+        ("stdout", "expected"),
+        [
+            pytest.param(" 5151 Ss\n", (5151, "Ss"), id="alive"),
+            pytest.param("1 Z+\n", (1, "Z+"), id="zombie"),
+            pytest.param("", None, id="unknown-pid"),
+        ],
+    )
+    def test_ps_status_gives_parent_and_state(self, monkeypatch, stdout, expected):
+        """macOS: `ps -o ppid=,stat=`, None when there is no such pid."""
+        monkeypatch.setattr(
+            real_chrome.subprocess,
+            "run",
+            lambda args, **kwargs: subprocess.CompletedProcess(args, 0, stdout=stdout, stderr=""),
+        )
+
+        status = real_chrome.read_ps_status(4242)
+
+        assert (None if status is None else (status.ppid, status.state)) == expected
+
+    def test_ps_reader_returns_none_when_ps_fails(self, monkeypatch):
+        """A pid `ps` does not know cannot be verified."""
+        monkeypatch.setattr(
+            real_chrome.subprocess,
+            "run",
+            lambda args, **kwargs: subprocess.CompletedProcess(args, 1, stdout="", stderr=""),
+        )
+
+        assert real_chrome.read_ps_command(4242) is None
+
+    def test_ps_reader_asks_for_the_full_untruncated_command(self, monkeypatch):
+        """`-ww` keeps a long profile path whole; the call is bounded."""
+        calls = []
+
+        def fake_run(args, **kwargs):
+            calls.append((args, kwargs))
+            return subprocess.CompletedProcess(args, 0, stdout=" /synthetic/chrome --x\n", stderr="")
+
+        monkeypatch.setattr(real_chrome.subprocess, "run", fake_run)
+
+        line = real_chrome.read_ps_command(4242)
+
+        (args, kwargs), = calls
+        assert line == "/synthetic/chrome --x"
+        assert args == ["ps", "-ww", "-o", "command=", "-p", "4242"]
+        assert kwargs["timeout"] == real_chrome._PS_TIMEOUT_S
