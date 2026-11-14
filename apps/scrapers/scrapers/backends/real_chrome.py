@@ -328,8 +328,9 @@ class DriverKillSwitch:
 def _driver_process(manager):
     """The driver subprocess behind a started `sync_playwright()` manager, or None.
 
-    Private Playwright attributes (`_connection` up to 1.61, `_client` from
-    1.65): a missing one disarms the switch instead of failing the drive.
+    Private Playwright attributes (`_connection` from 1.49 through 1.64,
+    `_client` from 1.65): a missing one disarms the switch instead of failing
+    the drive.
     """
     for holder in ("_connection", "_client"):
         transport = getattr(getattr(manager, holder, None), "_transport", None)
