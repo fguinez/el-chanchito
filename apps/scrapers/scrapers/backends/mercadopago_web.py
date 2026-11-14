@@ -127,6 +127,7 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from scrapers.backends import real_chrome
+from scrapers.backends.percent import parse_percent
 
 logger = logging.getLogger(__name__)
 
@@ -278,9 +279,6 @@ _RATE_IN_TEXT_RE = re.compile(
     r"\bal\s+([" + re.escape(_MINUS_SIGNS) + r"]?\d+(?:[.,]\d+)?)\s*%\s*anual\b",
     re.IGNORECASE,
 )
-# A bare rate string as the savings hub prints it ("1.0" or "1,0"), signed
-# like the wallet's so a negative fund rate reads the same on both pages.
-_RATE_RE = re.compile(r"^[" + re.escape(_MINUS_SIGNS) + r"]?\d+(?:[.,]\d+)?$")
 
 
 class MercadoPagoWebError(RuntimeError):
@@ -507,13 +505,10 @@ def parse_balance(props: dict) -> int:
     return pesos
 
 
-def _rate_number(text: str) -> Optional[float]:
-    """A rate written with a comma or dot decimal ("1,0", "4.50") as a float."""
-    try:
-        value = Decimal(text.replace(",", ".").replace(chr(0x2212), "-"))
-    except InvalidOperation:
-        return None
-    return float(value) if value.is_finite() else None
+def _rate_number(raw: Any) -> Optional[float]:
+    """A signed rate ("1,0", "4.50", "-0,5") as a float, or None."""
+    value = parse_percent(raw, signed=True)
+    return None if value is None else float(value)
 
 
 def parse_wallet_yield(props: Any) -> WalletYield:
@@ -564,9 +559,7 @@ def parse_pots_rate(props: Any) -> Optional[float]:
         return None
     if isinstance(raw, (int, float)):
         raw = str(raw)
-    if not isinstance(raw, str) or not _RATE_RE.match(raw.strip()):
-        return None
-    return _rate_number(raw.strip())
+    return _rate_number(raw)
 
 
 def _parse_pot(entry: Any, rate_pct: Optional[float] = None) -> Optional[Pot]:

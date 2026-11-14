@@ -760,23 +760,6 @@ class TestLineFromText:
 
 
 class TestDailyRate:
-    @pytest.mark.parametrize(
-        ("raw", "expected"),
-        [
-            pytest.param("1.23 %", Decimal("1.23"), id="dot"),
-            pytest.param("1,23 %", Decimal("1.23"), id="comma"),
-            pytest.param("1.23", Decimal("1.23"), id="bare"),
-        ],
-    )
-    def test_parse_percent(self, raw, expected):
-        """The rate field's text parses with either decimal separator."""
-        assert web.parse_percent(raw) == expected
-
-    @pytest.mark.parametrize("raw", [None, "", "abc %", "1,23 % diario"])
-    def test_parse_percent_rejects_junk(self, raw):
-        """Anything but a lone percent figure is None."""
-        assert web.parse_percent(raw) is None
-
     def test_from_the_detail_text(self):
         """The label's figure is read, not the movements column header."""
         assert web.daily_rate_from_text(_LINE_DETAIL_TEXT) == Decimal("1.23")
