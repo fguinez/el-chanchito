@@ -177,6 +177,26 @@ def test_family_kinds_match_the_design(family):
     assert family_kinds(family) == EXPECTED_KINDS[family]
 
 
+def test_cash_columns_add_an_optional_rate_and_two_signed_gains():
+    """Tasa anual is a percent; Ganancia and Ganancia 12 meses signed amounts; all hidden when empty."""
+    columns = {column.key: column for column in resolve_columns("cash")}
+
+    assert tuple(columns) == ("saldo", "saldo_contable", "tasa", "ganancia", "ganancia_12m")
+    assert (columns["tasa"].field, columns["tasa"].format) == (
+        "annual_rate_pct",
+        ColumnFormat.PERCENT,
+    )
+    assert columns["tasa"].signed is False
+    for key, field, label in (
+        ("ganancia", "profit", "Ganancia"),
+        ("ganancia_12m", "profit_12m", "Ganancia 12 meses"),
+    ):
+        assert (columns[key].field, columns[key].label_es) == (field, label)
+        assert columns[key].format is ColumnFormat.CURRENCY
+        assert columns[key].signed is True
+    assert all(columns[key].optional for key in ("tasa", "ganancia", "ganancia_12m"))
+
+
 def test_revolving_credit_columns_are_right_aligned_currency():
     """Cards and lines show Disponible, Cupo and Utilizado as currency."""
     columns = resolve_columns("revolving_credit")

@@ -863,7 +863,13 @@ Both legs share one drive per cycle: `scrape_transactions` opens it and
 caches the result for `scrape_products` (an error is re-raised, never
 retried). The products leg emits the singleton
 CLP `wallet` with its balance and one CLP `savings` product per pot
-(`external_ref` `mp_pot_<uuid>`, named after the pot). The transactions leg
+(`external_ref` `mp_pot_<uuid>`, named after the pot). Both carry the yield
+the pages report as metrics: the wallet its yearly rate (`annual_rate_pct`,
+from the balance page's "... al X% anual" subtitle) and its gain of the last
+12 months (`profit_12m`), each pot the savings hub's shared rate while the hub
+flags the pots as invested. Per-pot gain is not read: the pot page computes it
+in the browser, and its server-side `investment.profit` stays 0. A missing or unreadable rate or gain
+is left empty and never fails the run. The transactions leg
 emits the ledger rows on the wallet (the newest
 `MERCADOPAGO_MOVEMENT_PAGES` pages of 100, default 1; 0 reads every page,
 capped at 50), with the ledger's sign (negative is money out) and its UTC
