@@ -11,13 +11,11 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from typing import TypeVar
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
-T = TypeVar("T")
 
 DEFAULT_ATTEMPTS = 3
 BASE_DELAY_SECONDS = 1.0
@@ -47,7 +45,7 @@ def _log_retry(label: str, attempt: int, attempts: int, reason: str) -> float:
     return delay
 
 
-def retry_sync(
+def retry_sync[T](
     operation: Callable[[], T],
     *,
     is_transient: Callable[[BaseException], bool],
