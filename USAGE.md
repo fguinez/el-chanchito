@@ -495,10 +495,11 @@ inside it, three pages and nothing else, without following redirects. When the
 session is lost (Mercado Pago signed the profile out), the run fails with a
 message asking for `make mercadopago-login`. The scraper never retries and
 never tries to sign in by itself: run the command and sign in again. In managed
-mode the lost session also leaves a marker next to the profile
-(`apps/scrapers/.mercadopago_chrome_profile.needs-sign-in`, gitignored), so
-later runs fail at once with the same request without opening Chrome; a
-successful `make mercadopago-login` removes it.
+mode a session lost on the balance page also leaves a marker next to the
+profile (`apps/scrapers/.mercadopago_chrome_profile.needs-sign-in`,
+gitignored), so later runs fail at once with the same request without opening
+Chrome. The way out is a successful `make mercadopago-login`, which removes it
+(deleting the file also works).
 
 **What has been checked against a live account.** In managed mode: a whole
 run, the wallet and pot balances against what the account shows, the
