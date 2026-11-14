@@ -27,13 +27,15 @@ multi-arch, and Playwright ships its Chromium for Linux ARM64, so the headless
 scrapers (Banco de Chile, Santander, Banco Falabella) run in the container on any
 of these hosts.
 
-**Real-Chrome scrapers need a display.** Tarjeta Lider Bci drives a genuine,
-headed Chrome (see [Tarjeta Lider Bci](#tarjeta-lider-bci)), so it runs on the host
-with a desktop session, never in the headless container. On a headless Pi it
-needs a desktop session or a virtual display (for example Xvfb), and unattended
-runs there are not promised. Google Chrome has no Linux ARM64 build, so a Pi uses
-Debian's `chromium`; whether Cloudflare Turnstile passes for Debian Chromium as it
-does for Google Chrome is **unverified**.
+**Real-Chrome scrapers need a display.** Tarjeta Lider Bci and Mercado Pago
+drive a genuine, headed Chrome (see [Tarjeta Lider Bci](#tarjeta-lider-bci) and
+[Mercado Pago](#mercado-pago)), so they run on the host with a desktop session,
+never in the headless container. On a headless Pi they need a desktop session
+or a virtual display (for example Xvfb), and unattended runs there are not
+promised. Google Chrome has no Linux ARM64 build, so a Pi uses Debian's
+`chromium`; whether Cloudflare Turnstile passes for Debian Chromium as it does
+for Google Chrome, and whether Mercado Pago keeps its session in it, is
+**unverified**.
 
 ### Raspberry Pi
 
@@ -129,10 +131,11 @@ DATABASE_URL=postgres://finance:finance@localhost:5435/finance
 BANCHILE_RUT=12345678-9          # Banco de Chile (via Playwright)
 LIDER_BCI_RUT=12345678-9         # Tarjeta Lider Bci (real Chrome over CDP)
 # LIDER_BCI_CDP_URL=http://localhost:9222  # optional: reuse the make bci-lider-login Chrome
+MERCADOPAGO_ENABLED=1            # Mercado Pago (real Chrome; run `make mercadopago-login` once)
 SANTANDER_RUT=00.000.000-0       # Banco Santander (headless Playwright login)
 BANCO_FALABELLA_RUT=00.000.000-0 # Banco Falabella (headless Playwright login)
 FINTUAL_EMAIL=your@email.com     # Fintual (web session; run `make fintual-login` once)
-EMAIL_IMAP_HOST=imap.gmail.com   # Email parser (MercadoPago, MACH, Tenpo)
+EMAIL_IMAP_HOST=imap.gmail.com   # Email parser (MACH, Tenpo)
 EMAIL_IMAP_USER=your@gmail.com
 ```
 
@@ -140,7 +143,10 @@ EMAIL_IMAP_USER=your@gmail.com
 host port (`POSTGRES_PORT`), the e-mail tuning (`EMAIL_LOOKBACK_DAYS`,
 `EMAIL_MAX_MESSAGES`, `EMAIL_IMAP_MAILBOX`), the Fintual session cache
 (`FINTUAL_SESSION_FILE`), the Tarjeta Lider Bci Chrome
-(`LIDER_BCI_CDP_PORT`, `LIDER_BCI_CHROME_PATH`), the visible-browser debug switches
+(`LIDER_BCI_CDP_PORT`, `LIDER_BCI_CHROME_PATH`), the Mercado Pago Chrome and
+ledger depth (`MERCADOPAGO_CDP_URL`, `MERCADOPAGO_CDP_PORT`,
+`MERCADOPAGO_CHROME_PATH`, `MERCADOPAGO_CHROME_PROFILE`,
+`MERCADOPAGO_MOVEMENT_PAGES`), the visible-browser debug switches
 for Santander (`SANTANDER_HEADLESS=0`) and Banco Falabella
 (`BANCO_FALABELLA_HEADLESS=0`), the scraper service mode
 (`SCRAPER_MODE`), the on-demand refresh wiring and the dashboard login.
@@ -177,7 +183,8 @@ Secrets and their meaning:
 | `chanchito.EMAIL_IMAP_PASSWORD` | Gmail App Password (see below) |
 | `chanchito.DASHBOARD_PASSWORD` | Dashboard login password (see "Deployment"; required in production, not exported to `make dev`) |
 
-A scraper is enabled only when its credentials are present:
+A scraper is enabled only when its credentials are present (Mercado Pago has
+none to store, so it is switched on by a flag):
 
 | Scraper | Enabled when set |
 |---|---|
@@ -188,7 +195,8 @@ A scraper is enabled only when its credentials are present:
 | Tarjeta Lider Bci | `LIDER_BCI_RUT` |
 | Banco Santander | `SANTANDER_RUT` + `SANTANDER_PASSWORD` |
 | Banco Falabella | `BANCO_FALABELLA_RUT` + `BANCO_FALABELLA_PASSWORD` |
-| MACH, MercadoPago, Tenpo | `EMAIL_IMAP_HOST` + `EMAIL_IMAP_USER` + `EMAIL_IMAP_PASSWORD` |
+| Mercado Pago | `MERCADOPAGO_ENABLED=1` (and a sign-in with `make mercadopago-login`) |
+| MACH, Tenpo | `EMAIL_IMAP_HOST` + `EMAIL_IMAP_USER` + `EMAIL_IMAP_PASSWORD` |
 
 A value already exported in your shell wins over the store, so you can also
 export the secret env vars directly (e.g. in a CI or Docker-only deploy).
@@ -441,6 +449,71 @@ with the statement's closing date, older stored ones included. The card's
 minimum payment) come from the last billed period, and the USD card is valued
 at the dollar the card applies ("Valor del dólar hoy").
 
+### Mercado Pago
+
+Mercado Pago's login cannot be automated (it asks for a reCAPTCHA and an extra
+verification step), so the scraper never logs in. You sign in once, by hand, in
+a **real Chrome** on a dedicated profile, and every run reuses that profile:
+
+```bash
+make mercadopago-login     # opens Chrome on Mercado Pago; sign in, it closes by itself
+MERCADOPAGO_ENABLED=1      # add to .env to enable the scraper
+```
+
+`make mercadopago-login` opens a visible Chrome window on the balance page.
+Sign in there (nothing is typed for you); once the balance page loads, the
+command reports success and closes Chrome. The session stays in the profile
+directory (`apps/scrapers/.mercadopago_chrome_profile`, gitignored; move it
+with `MERCADOPAGO_CHROME_PROFILE`). Treat that directory like a password: it
+holds your signed-in session.
+
+Each run then launches that Chrome off-screen, reads and closes it (*managed*
+mode). Like Tarjeta Lider Bci it needs a genuine Chrome and a display, so it
+runs on a desktop session and not inside the headless Docker container. Set
+`MERCADOPAGO_CHROME_PATH` if Chrome is not in a standard location and
+`MERCADOPAGO_CDP_PORT` (default 9223) if that port is taken. To attach to a
+Chrome you keep running yourself instead (started with
+`--remote-debugging-port`, with a signed-in Mercado Pago tab open), set
+`MERCADOPAGO_CDP_URL`; that Chrome is never closed.
+
+What it reads, every 6 hours:
+
+- the wallet **balance**, on the wallet product;
+- each **savings pot**, as its own savings product named after the pot;
+- the wallet **movements** (the newest 100 per run, daily yield and cashback
+  rows included), as transactions on the wallet. To backfill older history,
+  set `MERCADOPAGO_MOVEMENT_PAGES` for one run (a number of pages of 100, or 0
+  for all of them) and unset it afterwards.
+
+What it does not read: crypto (Meli Dólar, Bitcoin: on the web it only shows
+on the home page, which the scraper never opens) and movements of the savings
+pots (the web shows none). A pot you close keeps its last balance on the
+dashboard; deactivate it under Instituciones.
+
+It only reads. The tab stays on the balance page and the data is fetched from
+inside it, three pages and nothing else, without following redirects. When the
+session is lost (Mercado Pago signed the profile out), the run fails with a
+message asking for `make mercadopago-login`. The scraper never retries and
+never tries to sign in by itself: run the command and sign in again.
+
+**What has been checked against a live account.** In managed mode: a whole
+run, the wallet and pot balances against what the account shows, the
+movements read as a single page and as the whole history (no duplicates,
+nothing skipped), movement ids staying the same from one run to the next, and
+the session surviving repeated runs. Not checked yet: `make
+mercadopago-login` on a fresh sign-in, movement ids across separate sign-ins,
+what a lost session looks like in practice, how long a sign-in lasts, and
+attaching with `MERCADOPAGO_CDP_URL`. Movements between your own products
+are not recognised as such: tick **Transferencia interna** on them in the
+transaction panel.
+
+**Coming from the e-mail parser.** Mercado Pago used to be read from its
+notification e-mails. That leg is retired, because a product takes its
+movements from one source only. Transactions the e-mail parser stored (their
+ids start with `email_mercadopago_`) are not removed automatically, so a
+movement both sources saw shows up twice: delete the old e-mail rows in
+Gastos once the ledger rows are in.
+
 ### Skipo API key
 
 Skipo is read through its official API with a personal key. Create one in
@@ -526,7 +599,8 @@ Schedule per scraper:
 - **BCI Lider**: every 24 hours
 - **Santander**: every 24 hours
 - **Banco Falabella**: every 24 hours
-- **MACH, MercadoPago, Tenpo** (e-mail): every 30 minutes
+- **Mercado Pago**: every 6 hours
+- **MACH, Tenpo** (e-mail): every 30 minutes
 
 `make scrapers-start` (like `make dev` and the Compose service) also runs every
 enabled scraper once at startup, then follows the schedule.

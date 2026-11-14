@@ -30,10 +30,10 @@ transactions) and **separately for auth and data**.
 | 1 | **Official API**: open finance, developer API, user-issued keys | `open_banking` / `http_api` | Documented contract, unattended, cheapest. Precedent: Buda. |
 | 2 | **Maintained library or aggregator** already covering it | `fintself` / the library's technique | Someone else maintains it. Rank it by the library's own technique. |
 | 3 | **Private web API over plain HTTP**, login reproduced in httpx | `http_api` | No browser; cached session plus IMAP 2FA keeps it unattended. Precedent: Fintual. |
-| 4 | **Passive feeds**: notification or statement e-mails over IMAP | `email` | Zero login risk, but transactions only and heuristic. Precedent: MACH, Mercado Pago, Tenpo. |
+| 4 | **Passive feeds**: notification or statement e-mails over IMAP | `email` | Zero login risk, but transactions only and heuristic. Precedent: MACH, Tenpo. |
 | 5 | **Headless browser for login, JSON for data** | `web` | Browser only where needed; data stays structured. Precedent: BanChile movements. |
 | 6 | **Headless browser DOM scraping** (incl. mobile-web device emulation) | `web` | Breaks on redesigns; heavy runtime. Precedent: BanChile balances. |
-| 7 | **Real Chrome over CDP** (genuine browser for anti-bot or browser-bound sessions) | `web` | Needs a display, sometimes a human login. Precedent: BCI Lider. |
+| 7 | **Real Chrome over CDP** (genuine browser for anti-bot or browser-bound sessions) | `web` | Needs a display, sometimes a human login. Precedent: BCI Lider, Mercado Pago. |
 | 8 | **Mobile app private API**, reverse-engineered | `http_api` / new `mobile_api` | Cheap at runtime, costly and fragile to build: pinning, signing, attestation. |
 | 9 | **Native app UI automation** on an emulator or device (Appium) | new `mobile_app` | Heaviest, slowest, flakiest. Last resort for app-only institutions. |
 | - | **Escape hatch**: no scraper (manual entry, statement import) | - | A documented "won't scrape, here's why" is a valid outcome. |
@@ -130,7 +130,10 @@ Read `references/architecture.md`, then decide and write down:
     plus `.eml` fixtures.
   - Rungs 5 to 7: model the backend on `backends/banchile_movements.py`
     (XHR capture, in-page fetch) or `backends/bci_lider_web.py` (CDP, managed
-    and reuse modes, per-cycle cache in `institutions/bci_lider.py`).
+    and reuse modes, per-cycle cache in `institutions/bci_lider.py`). For
+    rung 7 start from `backends/real_chrome.py` (the generic Chrome
+    plumbing) and `backends/mercadopago_web.py` (a human-signed-in profile,
+    read by in-page fetch only).
   - Rungs 8 and 9: no precedent. Keep the same envelope boundary so the
     transport can later run elsewhere.
 - Write the pure parsers and their tests first. They hold the institution's
@@ -230,7 +233,6 @@ it and mention the drift. Changes in flight at the time of writing:
 - a shared `scrapers/retry.py` for idempotent GETs and partial-aware run
   outcomes (scraper reliability work);
 - a BanChile `storage_state` session cache with a login cooldown;
-- Mercado Pago balances via its official API;
 - a root `.dockerignore` (bundled with the BanChile session-cache work).
 
 Reuse whichever of them has landed rather than re-implementing it.

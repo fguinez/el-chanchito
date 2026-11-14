@@ -54,9 +54,9 @@
 │  │                        APScheduler                        │  │
 │  │                                                           │  │
 │  │  ┌─────────┐ ┌──────┐ ┌───────────┐ ┌───────────────────┐ │  │
-│  │  │ Fintual │ │ Buda │ │ BanChile  │ │ MACH / MP / Tenpo │ │  │
-│  │  │  (6h)   │ │Skipo │ │ BCI Lider │ │  shared IMAP 30m  │ │  │
-│  │  │         │ │ (1h) │ │ Santander │ │                   │ │  │
+│  │  │ Fintual │ │ Buda │ │ BanChile  │ │    MACH / Tenpo   │ │  │
+│  │  │Merc.Pago│ │Skipo │ │ BCI Lider │ │  shared IMAP 30m  │ │  │
+│  │  │  (6h)   │ │ (1h) │ │ Santander │ │                   │ │  │
 │  │  │         │ │      │ │ Falabella │ │                   │ │  │
 │  │  │         │ │      │ │   (24h)   │ │                   │ │  │
 │  │  └────┬────┘ └──┬───┘ └─────┬─────┘ └─────────┬─────────┘ │  │
@@ -83,9 +83,10 @@
              ▼             ▼             ▼
         ┌──────────┐ ┌───────────┐ ┌───────────┐
         │ Fintual  │ │ BanChile  │ │   MACH    │
-        │Buda Skipo│ │ BCI Lider │ │ MP, Tenpo │
+        │Buda Skipo│ │ BCI Lider │ │   Tenpo   │
         │  (APIs)  │ │ Santander │ │  (IMAP)   │
         │          │ │ Falabella │ │           │
+        │          │ │ Merc.Pago │ │           │
         │          │ │ (browser) │ │           │
         └────┬─────┘ └─────┬─────┘ └─────┬─────┘
              │             │             │
@@ -531,11 +532,14 @@ apps/scrapers/scrapers/
     banchile_fx.py         # BdC USD card exchange rate (fetch-only surface)
     bci_lider_web.py       # real Chrome over CDP -> scrape_card() / save_login_session()
     bci_lider_billing.py   # Lider USD rate, last billed period, statement PDFs (in-page API)
+    real_chrome.py         # generic real-Chrome plumbing: find, launch, connect, terminate
+    mercadopago_web.py     # real Chrome over CDP, in-page fetch only -> scrape_account()
     santander_web.py       # headless Santander login + the SPA's JSON -> fetch_session()
     banco_falabella_web.py # headless Banco Falabella login + the rendered DOM -> fetch_session()
     fintual_stocks.py      # Fintual's WalletMovements query + pure ledger parsers (no I/O)
   institutions/
-    mach.py  mercadopago.py  tenpo.py       -> consume backends/email
+    mach.py  tenpo.py                        -> consume backends/email
+    mercadopago.py                           -> mercadopago_web (one CDP drive: tx + balances)
     banchile.py                              -> banchile_movements (one login: tx + balances)
     bci_lider.py                             -> bci_lider_web (one CDP drive: tx + balances)
     santander.py                             -> santander_web (one headless login: tx + balance)
@@ -783,6 +787,105 @@ from the movements list keys differently and stays unmarked. The payment
 gateway (pasarelapagos.retailcard.cl) is never opened: its "Facturado
 pendiente" needs the payment hand-off, and the dashboard derives the same
 figure (billed amount minus payments since the closing).
+
+Mercado Pago (Chile) has no official API a personal account can use for its
+balance (the balance endpoint is missing from the Chilean reference and is
+reported to refuse personal tokens; the Reports API may carry the ledger, but
+that is unverified and it covers neither the savings pots nor crypto), no
+library or aggregator covers it, and its login cannot be automated (a
+reCAPTCHA on the e-mail step, a step-up on the password step). So a human
+signs in once, in a real Chrome on a dedicated persistent profile
+(`make mercadopago-login`: a visible window, nothing typed by the code, closed
+once the balance page reads), and `backends/mercadopago_web.py` drives that
+Chrome over CDP. By default `scrape_account` runs *managed*: it launches
+Chrome off-screen on the profile, reads and terminates it (needs a machine
+with a display); `MERCADOPAGO_CDP_URL` switches to *reuse*, attaching to a
+Chrome that is already running with a signed-in tab and leaving it running.
+The generic real-Chrome plumbing (find the binary, launch, connect, find a
+tab, terminate) is `backends/real_chrome.py`; BCI Lider still carries its own
+copy.
+
+The session is read under a fetch-only contract: the tab opens on
+`/banking/balance` and is never navigated, and the data comes from
+same-origin `fetch()` calls made inside it with `credentials: 'include'` and
+`redirect: 'manual'`. The in-page script refuses any host but
+`www.mercadopago.cl` and can fetch only three server-rendered pages, whose
+data sits in an inline script as `_n.ctx.r={...}` followed by more
+JavaScript (one JSON value is decoded from the marker on, then
+`appProps.pageProps`): `/banking/balance` (the wallet balance),
+`/savings/hub` (the savings pots) and
+`/banking/balance/movements?limit=100&page=N` (the wallet ledger). `/home` is
+never fetched or opened (it redirects through the auth gateway), and a
+redirect is never followed: it means the session is gone, so the run raises
+a "run make mercadopago-login" error and nothing is retried. The balance page
+is the session probe: nothing else is fetched when it fails. Only a redirect,
+a 401/403 or a tab off the portal count as a lost session; a balance page
+that answers without a readable balance (a changed page, a widget that did
+not load) is a plain error that asks nobody to sign in. Once the balance
+reads, a pots or ledger page that fails, or ledger rows that cannot be read,
+are warnings and the run ends `partial`.
+
+Finding the tab starts with Chrome's own target list (`/json/list`, plain
+HTTP on the debug port), because it shows the tab with its real URL from the
+start, while a CDP connection made during the load holds the tab with an
+empty URL and never learns the real one. So the target list decides, and
+Playwright attaches only when it shows a tab on the portal. A tab on another
+site and none on the portal, on two looks in a row, is the lost session: no
+Playwright connection is made at all, so automation never attaches to the
+sign-in pages. A tab on the portal is attached to with a fresh connection;
+one that only shows the empty URL is dropped and, after a growing pause,
+another is made, for up to 90 seconds in managed mode (20 in reuse mode), and
+the read runs on the connection that shows the tab. A page that is listed but
+never attached to, or no tab at all, ends as a plain error that says which
+(in reuse mode: open the balance page in that Chrome). `make
+mercadopago-login` looks the same way, so nothing is attached while the human
+is on the sign-in site. Teardown asks the browser process alone to quit
+before touching its process group, so the child that owns the cookie store
+can write it.
+
+Both legs share one drive per cycle: `scrape_transactions` opens it and
+caches the result for `scrape_products` (an error is re-raised, never
+retried). The products leg emits the singleton
+CLP `wallet` with its balance and one CLP `savings` product per pot
+(`external_ref` `mp_pot_<uuid>`, named after the pot). The transactions leg
+emits the ledger rows on the wallet (the newest
+`MERCADOPAGO_MOVEMENT_PAGES` pages of 100, default 1; 0 reads every page,
+capped at 50), with the ledger's sign (negative is money out) and its UTC
+timestamp converted to an America/Santiago date; daily yield and cashback
+rows are ordinary income rows. This ledger is the only source: `/activities`
+also lists purchases paid with other cards where Mercado Pago was only the
+gateway, and `/banking/movements` is a seller-style report that splits one
+operation into several rows. Not covered: crypto (Meli Dólar, Bitcoin: on
+the web only on `/home`, and the units only in the mobile app) and movements
+of the pots (the web shows none, so no `savings` transaction is ever
+emitted).
+
+Every Playwright call that takes a timeout gets one (the connection and each
+in-page fetch) and the reads share a time budget. Copying a fetch's result
+out of the page takes none, so a watchdog terminates the managed Chrome if a
+drive overruns, and in either mode the run gives up on a drive that does not
+finish in time. The e-mail leg this replaced read transactions only,
+heuristically, and also captured purchases where Mercado Pago was just the
+gateway; the rows it stored are not removed (see "Deduplication").
+
+Verified live, in managed mode with an off-screen Chrome on a real signed-in
+profile: a whole run end to end (launch, reattaching until the tab shows,
+both legs, teardown), with the in-page read working under the portal's
+content security policy; the ref-less CLP wallet and a `savings` pot with
+its ref and name, both balances equal to what the account shows; the ledger
+read as the default single page and as the whole history (several pages),
+without duplicates or skipped rows, in whole CLP amounts, every row with its
+`scheduled_month`, and as many rows as the page reports in total;
+`movement_id` unchanged across separate Chrome launches of one signed-in
+profile; the session surviving repeated launch and SIGTERM teardown cycles;
+and the empty-URL stale connection, which reattaching resolves. Not verified
+live: `make mercadopago-login` against a live window (no fresh sign-in was
+performed) and where the portal lands the tab afterwards; `movement_id`
+across separate sign-ins; how a lost session presents (a tab bounced off the
+portal or a redirect on the fetch: both are handled, neither was observed);
+how long a sign-in lasts; which ledger rows are movements between the user's
+own products (none is flagged `internal_transfer`); and reuse mode against a
+live Chrome.
 
 Banco Santander has no API for individuals (Chile's Open Finance system is not
 operating yet), `fintself` reads its rendered DOM without movement ids, and its
@@ -1106,13 +1209,13 @@ is the one place a scraped timestamp is not dated in Chile.
 | `skipo` | `http_api` | REST API (`/v2`) | Read-only API key (bearer) | 1h |
 | `banchile` | `web` | Browser (Playwright: `banchile_web` + `banchile_movements`) | RUT + password | 24h |
 | `mach` | `email` | IMAP (Gmail) | Shared IMAP session | 30m |
-| `mercadopago` | `email` | IMAP (Gmail) | Shared IMAP session | 30m |
+| `mercadopago` | `web` | Real Chrome over CDP, in-page fetch of three server-rendered pages (`mercadopago_web`) | A Chrome profile a human signed in to (`make mercadopago-login`; managed by default, reuse via `MERCADOPAGO_CDP_URL`) | 6h |
 | `tenpo` | `email` | IMAP (Gmail) | Shared IMAP session | 30m |
 | `bci_lider` | `web` | Real Chrome over CDP (`bci_lider_web`) | Autofill in a real Chrome (managed by default; reuse via `LIDER_BCI_CDP_URL` + `make bci-lider-login`; Cloudflare Turnstile) | 24h |
 | `santander` | `web` | Headless Playwright login, the SPA's own JSON (`santander_web`) | RUT + password, one login per run | 24h |
 | `banco_falabella` | `web` | Headless Playwright login, the rendered DOM (`banco_falabella_web`) | RUT + 6-digit clave, one login per run | 24h |
 
-The three email-based scrapers reuse one `ImapSession`: it runs `NOOP` on
+The email-based scrapers reuse one `ImapSession`: it runs `NOOP` on
 each acquire and only re-logs-in when the mailbox has been dropped. imaplib is
 synchronous, so every IMAP round trip runs in `asyncio.to_thread` while the
 session lock is held: the email scrapers take turns on the connection without
@@ -1288,6 +1391,11 @@ Transactions are deduplicated via `UNIQUE(product_id, external_id)`:
   bank re-sorts same-day rows (an earlier-booked movement listed later) or a
   hold or reversal changes a row's printed Saldo, that movement gets a new key
   and is stored a second time
+- Mercado Pago: `mp_{movement_id}`, the wallet ledger's own per-row id.
+  Savings pots are products, not transactions, told apart by `external_ref`
+  `mp_pot_{uuid}`. Rows its retired e-mail leg stored keep their
+  `email_mercadopago_` keys and are not removed, so a movement both sources
+  saw is stored twice until the old row is deleted by hand
 - Email: `email_{institution}_{sha1(Message-ID)[:8]}` (`hashlib`, not Python's
   per-process salted `hash()`); an email without a Message-ID hashes
   `Date|From|Subject|body` instead
@@ -1618,7 +1726,8 @@ el-chanchito/
 │   └── scrapers/                     # Python scraper service
 │       ├── scrapers/
 │       │   ├── backends/             # email, banchile_web, banchile_movements, bci_lider_web,
-│       │   │                         #   santander_web, banco_falabella_web, fintual_stocks
+│       │   │                         #   real_chrome, mercadopago_web, santander_web,
+│       │   │                         #   banco_falabella_web, fintual_stocks
 │       │   └── institutions/         # 10 scrapers: banchile, banco_falabella, bci_lider, buda,
 │       │                             #   fintual, mach, mercadopago, santander, skipo, tenpo
 │       ├── db/                       # Connection pool + writer + slug
