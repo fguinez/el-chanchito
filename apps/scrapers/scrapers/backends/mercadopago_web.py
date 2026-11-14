@@ -848,7 +848,7 @@ def _fetch_props(
     script refuses it too).
     """
     if surface == "pot_detail" and (
-        not isinstance(pot_id, str) or not _POT_ID_RE.match(pot_id)
+        not isinstance(pot_id, str) or not _POT_ID_RE.fullmatch(pot_id)
     ):
         raise MercadoPagoFetchError(f"{surface}: {_FETCH_FAILURES['not_allowed']}")
     failure: Optional[str] = None
@@ -884,6 +884,9 @@ def _read_pot_profits(page, account: MercadoPagoAccount, deadline: float) -> Non
     """
     total = len(account.pots)
     for index, pot in enumerate(account.pots):
+        if pot.rate_pct is None:
+            # The hub says the pots are not invested: no gain to read.
+            continue
         if time.monotonic() >= deadline:
             account.warnings.append(
                 f"MercadoPago: savings pot gains stopped before pot {index + 1} "
@@ -992,8 +995,9 @@ def read_account(page, movement_pages: int = DEFAULT_MOVEMENT_PAGES) -> MercadoP
         if skipped:
             account.warnings.append(f"MercadoPago: {skipped} savings pot(s) not read")
 
-    _read_pot_profits(page, account, deadline)
+    # The ledger first: pot gains are extras and must not spend its budget.
     _read_movements(page, account, movement_pages, deadline)
+    _read_pot_profits(page, account, deadline)
     logger.info(
         "MercadoPago: balance read, %d pot(s), %d movement(s), %d warning(s)",
         len(account.pots),

@@ -1057,7 +1057,7 @@ class TestReadAccount:
         ]
         assert [row.movement_id for row in account.movements] == [MOVEMENT_ID]
         assert account.warnings == []
-        assert tab.calls == ["balance", "pots", ("pot_detail", POT_ID), ("movements", 1)]
+        assert tab.calls == ["balance", "pots", ("movements", 1), ("pot_detail", POT_ID)]
 
     def test_every_page_call_is_bounded_and_uses_the_one_script(self):
         """Each read runs the fixed script under a timeout and frees its handle."""
@@ -1269,9 +1269,20 @@ class TestReadAccount:
 
         assert [pot.profit for pot in account.pots] == [None]
         assert "pot_detail" not in [call[0] for call in tab.calls if isinstance(call, tuple)]
-        assert account.warnings[0] == (
+        assert (
             "MercadoPago: savings pot gains stopped before pot 1 of 1 (read budget spent)"
+            in account.warnings
         )
+
+    def test_pots_that_are_not_invested_skip_the_detail_pages(self, no_sleep):
+        """With the hub saying the pots are not invested, no gain is fetched or warned about."""
+        tab = _tab(pots=_ok(_pots_props([_pot()], is_invested=False)))
+
+        account = web.read_account(tab)
+
+        assert [pot.profit for pot in account.pots] == [None]
+        assert "pot_detail" not in [call[0] for call in tab.calls if isinstance(call, tuple)]
+        assert account.warnings == []
 
 
 class TestLedgerPaging:
@@ -2182,7 +2193,7 @@ class TestRealDrives:
         account = web._drive_reuse("http://localhost:9333", 1)
 
         assert account.balance == 2_500_000
-        assert tab.calls == ["balance", "pots", ("pot_detail", POT_ID), ("movements", 1)]
+        assert tab.calls == ["balance", "pots", ("movements", 1), ("pot_detail", POT_ID)]
         assert (connections.opened, connections.closed) == (2, 2)
         assert set(connections.processes) == {None}
         assert chrome.launches == []
