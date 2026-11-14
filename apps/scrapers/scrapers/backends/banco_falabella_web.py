@@ -72,6 +72,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
+from scrapers.backends.percent import parse_percent
 from scrapers.backends.user_agent import user_agent_for
 
 logger = logging.getLogger(__name__)
@@ -288,7 +289,6 @@ _STATEMENT_AMOUNT_LABELS = {
 # The línea detail's "Tasa diaria" field, read off the accent-free, lower-cased
 # page text (label and value render with no space between them).
 _DAILY_RATE_RE = re.compile(r"tasa diaria\s*:?\s*(\d+(?:[.,]\d+)?)\s*%")
-_PERCENT_RE = re.compile(r"^\s*(\d+(?:[.,]\d+)?)\s*%?\s*$")
 
 
 def _normalize(text: str) -> str:
@@ -573,16 +573,6 @@ def line_from_text(text: Optional[str]) -> RawLineBalance:
         owed=_amount_before(lines, _LABEL_SALDO_UTILIZADO),
         available=_amount_before(lines, _LABEL_SALDO_DISPONIBLE),
     )
-
-
-def parse_percent(raw: Any) -> Optional[Decimal]:
-    """Parse a percent figure ("1.23 %", "1,23 %", "1.23") into a Decimal."""
-    if not isinstance(raw, str):
-        return None
-    match = _PERCENT_RE.match(raw)
-    if match is None:
-        return None
-    return Decimal(match.group(1).replace(",", "."))
 
 
 def daily_rate_from_text(text: Optional[str]) -> Optional[Decimal]:
