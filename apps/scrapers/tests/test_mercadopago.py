@@ -22,13 +22,14 @@ import logging
 import sys
 import threading
 import types
-from datetime import date
+from datetime import date, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
 
 import main as main_mod
 from db.writer import TransactionWriteResult
+from scrapers import sign_in_marker
 from scrapers.backends import mercadopago_web as web
 from scrapers.backends import real_chrome
 from scrapers.backends.mercadopago_web import (
@@ -2311,6 +2312,188 @@ class TestManualSignIn:
             web.save_login_session(timeout_s=60)
 
         assert chrome.terminated == ["proc"]
+
+
+SYNTHETIC_SINCE = "2026-01-01T00:00:00+00:00"
+
+
+class TestSignInMarker:
+    """A lost managed session is remembered, so later runs skip Chrome until a sign-in."""
+
+    def _marker(self, tmp_path):
+        return tmp_path / "profile.needs-sign-in"
+
+    def test_the_marker_sits_next_to_the_profile(self, monkeypatch, tmp_path):
+        """`<profile>.needs-sign-in`, a sibling of the managed profile directory."""
+        monkeypatch.setenv("MERCADOPAGO_CHROME_PROFILE", str(tmp_path / "profile"))
+
+        assert web.sign_in_marker_path() == self._marker(tmp_path)
+
+    @pytest.mark.parametrize(
+        "reason",
+        ["the portal redirected to sign in", "the tab left the portal", "HTTP 401"],
+    )
+    def test_a_lost_session_leaves_a_private_timestamped_marker(
+        self, monkeypatch, tmp_path, reason
+    ):
+        """Redirect, bounced tab or 401/403: the marker holds when it happened."""
+        chrome = _Chrome(monkeypatch, tmp_path)
+        chrome.outcome = web._session_lost(reason)
+
+        with pytest.raises(MercadoPagoSessionError):
+            asyncio.run(web.scrape_account())
+
+        marker = self._marker(tmp_path)
+        written = datetime.fromisoformat(marker.read_text())
+        assert written.utcoffset() == timedelta(0)
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            MercadoPagoPageError("balance: missing initialResult"),
+            MercadoPagoFetchError("balance: HTTP 500"),
+            MercadoPagoConnectError("Chrome did not start"),
+            MercadoPagoWebError("Mercado Pago read did not finish in time."),
+        ],
+        ids=["page-looks-wrong", "fetch-failed", "connect-failed", "plain-web-error"],
+    )
+    def test_other_failures_leave_no_marker(self, monkeypatch, tmp_path, error):
+        """Only a lost session asks for a sign-in; a broken page or Chrome does not."""
+        chrome = _Chrome(monkeypatch, tmp_path)
+        chrome.outcome = error
+
+        with pytest.raises(MercadoPagoWebError):
+            asyncio.run(web.scrape_account())
+
+        assert not self._marker(tmp_path).exists()
+
+    def test_a_missing_profile_leaves_no_marker(self, monkeypatch, tmp_path):
+        """Nothing was signed in to lose, and nothing was launched."""
+        _Chrome(monkeypatch, tmp_path, profile_exists=False)
+
+        with pytest.raises(MercadoPagoSessionError):
+            asyncio.run(web.scrape_account())
+
+        assert not self._marker(tmp_path).exists()
+
+    def test_a_marked_run_skips_without_launching_or_probing_the_port(
+        self, monkeypatch, tmp_path
+    ):
+        """No port probe, no launch, no drive: the error names when and the login."""
+        chrome = _Chrome(monkeypatch, tmp_path)
+        self._marker(tmp_path).write_text(SYNTHETIC_SINCE)
+        probes = []
+        monkeypatch.setattr(web.real_chrome, "port_in_use", probes.append)
+
+        with pytest.raises(MercadoPagoSessionError) as info:
+            asyncio.run(web.scrape_account())
+
+        assert str(info.value) == (
+            f"Mercado Pago needs sign-in since {SYNTHETIC_SINCE}; skipped without "
+            "opening Chrome. Run `make mercadopago-login` and sign in again."
+        )
+        assert probes == []
+        assert chrome.launches == []
+        assert chrome.drives == []
+        assert self._marker(tmp_path).exists()
+
+    def test_an_empty_marker_still_skips(self, monkeypatch, tmp_path):
+        """A marker without a time is still a marker."""
+        chrome = _Chrome(monkeypatch, tmp_path)
+        self._marker(tmp_path).write_text("")
+
+        with pytest.raises(MercadoPagoSessionError, match="since an earlier run"):
+            asyncio.run(web.scrape_account())
+
+        assert chrome.launches == []
+
+    def test_a_successful_run_clears_the_marker(self, monkeypatch, tmp_path):
+        """A read that works proves the session is back."""
+        chrome = _Chrome(monkeypatch, tmp_path)
+        monkeypatch.setattr(web.sign_in_marker, "marked_since", lambda path: None)
+        self._marker(tmp_path).write_text(SYNTHETIC_SINCE)
+
+        account = asyncio.run(web.scrape_account())
+
+        assert account is chrome.outcome
+        assert not self._marker(tmp_path).exists()
+
+    def test_reuse_mode_ignores_the_marker(self, monkeypatch, tmp_path):
+        """The user signs in in their own Chrome there, so a marker would block forever."""
+        chrome = _Chrome(monkeypatch, tmp_path)
+        self._marker(tmp_path).write_text(SYNTHETIC_SINCE)
+
+        account = asyncio.run(web.scrape_account(cdp_url="http://localhost:9333"))
+
+        assert account is chrome.outcome
+        assert self._marker(tmp_path).read_text() == SYNTHETIC_SINCE
+
+    def test_a_lost_session_in_reuse_mode_leaves_no_marker(self, monkeypatch, tmp_path):
+        """Only the managed Chrome's sign-in (`make mercadopago-login`) can clear one."""
+        chrome = _Chrome(monkeypatch, tmp_path)
+        chrome.outcome = web._session_lost("HTTP 403")
+
+        with pytest.raises(MercadoPagoSessionError):
+            asyncio.run(web.scrape_account(cdp_url="http://localhost:9333"))
+
+        assert not self._marker(tmp_path).exists()
+
+    def test_a_marker_that_cannot_be_written_only_warns(self, monkeypatch, tmp_path, caplog):
+        """The run still ends with the lost-session error, not a filesystem one."""
+        chrome = _Chrome(monkeypatch, tmp_path)
+        chrome.outcome = web._session_lost("HTTP 401")
+
+        def unwritable(**kwargs):
+            raise PermissionError("synthetic")
+
+        monkeypatch.setattr(sign_in_marker.tempfile, "mkstemp", unwritable)
+
+        with caplog.at_level(logging.WARNING, logger="scrapers.sign_in_marker"):
+            with pytest.raises(MercadoPagoSessionError, match="HTTP 401"):
+                asyncio.run(web.scrape_account())
+
+        assert "Could not write the sign-in marker" in caplog.text
+        assert not self._marker(tmp_path).exists()
+        assert chrome.terminated == ["proc"]
+
+    def test_a_successful_sign_in_clears_the_marker(self, monkeypatch, tmp_path):
+        """`make mercadopago-login` that reads the balance lifts the skip."""
+        _Chrome(monkeypatch, tmp_path)
+        self._marker(tmp_path).write_text(SYNTHETIC_SINCE)
+        monkeypatch.setattr(web, "_await_sign_in", lambda url, timeout, process=None: None)
+
+        web.save_login_session(timeout_s=60)
+
+        assert not self._marker(tmp_path).exists()
+
+    def test_a_failed_sign_in_keeps_the_marker(self, monkeypatch, tmp_path):
+        """Runs keep skipping until a sign-in actually works."""
+        _Chrome(monkeypatch, tmp_path)
+        self._marker(tmp_path).write_text(SYNTHETIC_SINCE)
+
+        def never(url, timeout, process=None):
+            raise MercadoPagoSessionError("Sign-in not detected in time.")
+
+        monkeypatch.setattr(web, "_await_sign_in", never)
+
+        with pytest.raises(MercadoPagoSessionError):
+            web.save_login_session(timeout_s=60)
+
+        assert self._marker(tmp_path).read_text() == SYNTHETIC_SINCE
+
+    def test_a_skipped_run_still_finishes_its_run_row_in_error(self, monkeypatch, tmp_path):
+        """The web poller waits for a finished row: it gets one, with the hint."""
+        chrome = _Chrome(monkeypatch, tmp_path)
+        self._marker(tmp_path).write_text(SYNTHETIC_SINCE)
+        finish = _patched_writer(monkeypatch)
+
+        asyncio.run(main_mod.run_scraper(MercadoPagoScraper()))
+
+        (run_id, status), kwargs = finish.call_args
+        assert (run_id, status) == ("run-1", "error")
+        assert f"needs sign-in since {SYNTHETIC_SINCE}" in kwargs["error_message"]
+        assert "make mercadopago-login" in kwargs["error_message"]
+        assert chrome.launches == []
 
 
 # --- The scraper: both legs through a faked backend facade ----------------------

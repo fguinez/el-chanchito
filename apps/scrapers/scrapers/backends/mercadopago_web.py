@@ -18,7 +18,10 @@ Hard contract (each line is a way the session was or could be lost):
     gateway);
   * a redirect is never followed: it means the session is gone, the run
     stops with `MercadoPagoSessionError` and nothing is retried. A human
-    signs in again.
+    signs in again. In managed mode that error also leaves a marker next to
+    the profile (`<profile>.needs-sign-in`), and later runs fail at once
+    without opening Chrome until `make mercadopago-login` (or a run that
+    reads) clears it.
 
 Two modes (`scrape_account`):
 
@@ -118,6 +121,7 @@ from typing import Any, Optional, TypeVar
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
+from scrapers import sign_in_marker
 from scrapers.backends import real_chrome
 
 logger = logging.getLogger(__name__)
@@ -834,6 +838,12 @@ def profile_dir() -> Path:
     return Path(override).expanduser() if override else DEFAULT_PROFILE_DIR
 
 
+def sign_in_marker_path() -> Path:
+    """The marker a lost managed session leaves, next to the profile."""
+    profile = profile_dir()
+    return profile.with_name(profile.name + ".needs-sign-in")
+
+
 def on_portal(url: str) -> bool:
     """Whether `url` is an https page of the portal host, exactly."""
     try:
@@ -1090,13 +1100,24 @@ def _drive_managed(movement_pages: int) -> MercadoPagoAccount:
     One attempt, never a retry: a failure here is either a lost session or a
     machine problem, and neither improves by launching again. The watchdog
     terminates the Chrome if the drive overruns, so a Playwright call stuck on
-    a frozen browser cannot hold the scraper service.
+    a frozen browser cannot hold the scraper service. A lost session leaves
+    the needs-sign-in marker, which makes later runs fail before launching;
+    a read that succeeds clears it.
     """
     _require_playwright()
     if not profile_dir().is_dir():
         raise MercadoPagoSessionError(
             "No signed-in Chrome profile for Mercado Pago yet. "
             "Run `make mercadopago-login` and sign in."
+        )
+    marker = sign_in_marker_path()
+    since = sign_in_marker.marked_since(marker)
+    if since is not None:
+        # The session was lost earlier: opening Chrome again only re-learns
+        # that (and a lost session must never be retried).
+        raise MercadoPagoSessionError(
+            f"Mercado Pago needs sign-in since {since or 'an earlier run'}; skipped "
+            "without opening Chrome. Run `make mercadopago-login` and sign in again."
         )
     port = cdp_port()
     proc = _launch(port, offscreen=True)
@@ -1109,7 +1130,7 @@ def _drive_managed(movement_pages: int) -> MercadoPagoAccount:
         )
         watchdog.daemon = True
         watchdog.start()
-        return _drive_over_cdp(
+        account = _drive_over_cdp(
             f"http://127.0.0.1:{port}",
             movement_pages,
             connect_wait_s=CONNECT_WAIT_S,
@@ -1118,10 +1139,15 @@ def _drive_managed(movement_pages: int) -> MercadoPagoAccount:
             no_tab=_MANAGED_NO_TAB,
             process=proc,
         )
+    except MercadoPagoSessionError:
+        sign_in_marker.mark(marker)
+        raise
     finally:
         if watchdog is not None:
             watchdog.cancel()
         real_chrome.terminate_chrome(proc)
+    sign_in_marker.clear(marker)
+    return account
 
 
 def _drive_reuse(cdp_url: str, movement_pages: int) -> MercadoPagoAccount:
@@ -1264,3 +1290,4 @@ def save_login_session(timeout_s: float = LOGIN_TIMEOUT_S) -> None:
         _await_sign_in(f"http://127.0.0.1:{port}", timeout_s, process=proc)
     finally:
         real_chrome.terminate_chrome(proc)
+    sign_in_marker.clear(sign_in_marker_path())
