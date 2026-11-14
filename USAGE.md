@@ -461,14 +461,17 @@ MERCADOPAGO_ENABLED=1      # add to .env to enable the scraper
 ```
 
 `make mercadopago-login` opens a visible Chrome window on the balance page.
-Sign in there (nothing is typed for you); once the balance page loads and
-Mercado Pago has saved a lasting session (its `ssid` cookie with an expiry),
-the command reports success and closes Chrome. If it says it is waiting for
-the session to be saved, leave the window open. If it then fails, run it again
-and stay on the balance page until the command closes Chrome itself (if the
+Sign in there (nothing is typed for you). The command then waits for three
+things, in order: the balance page loads; Chrome holds a lasting session (its
+`ssid` cookie with an expiry); and Chrome has written a fresh copy of that
+cookie to the profile on disk (one left from an earlier sign-in does not
+count), which Chrome does in batches, so this can take a while. Only then does it close Chrome (asking it to quit, as closing the
+window would), check the profile on disk once more, and report success. While
+it says it is waiting, leave the window open. If it fails, run it again and
+stay on the balance page until the command closes Chrome itself (if the
 sign-in page offers a "keep me signed in" option, tick it). The session stays
-in the profile directory (`apps/scrapers/.mercadopago_chrome_profile`, gitignored; move it
-with `MERCADOPAGO_CHROME_PROFILE`). Treat that directory like a password: it
+in the profile directory (`apps/scrapers/.mercadopago_chrome_profile`,
+gitignored; move it with `MERCADOPAGO_CHROME_PROFILE`). Treat that directory like a password: it
 holds your signed-in session.
 
 Each run then launches that Chrome off-screen, reads and closes it (*managed*
@@ -515,9 +518,13 @@ run, the wallet and pot balances against what the account shows, the
 movements read as a single page and as the whole history (no duplicates,
 nothing skipped), movement ids staying the same from one run to the next, the
 session surviving repeated runs, and a fresh sign-in whose login cookie was
-already lasting surviving a SIGTERM close and relaunch. Not checked yet:
-`make mercadopago-login` waiting for the lasting session (diagnosed live; the
-fix itself not yet run live), movement ids across separate sign-ins, what a
+already lasting surviving a SIGTERM close and relaunch. An earlier version of
+the command, which waited only for the lasting cookie in Chrome, failed live:
+it closed Chrome seconds later with a signal and the cookie never reached the
+profile on disk. The current command (waiting for the disk and closing Chrome
+by asking it to quit) passed live on a new profile: after the sign-in, two
+later runs read the account. Not checked yet: signing in again on a profile
+that already held a session, movement ids across separate sign-ins, what a
 lost session looks like in practice, how long a sign-in lasts, and attaching
 with `MERCADOPAGO_CDP_URL`. Movements between your own products
 are not recognised as such: tick **Transferencia interna** on them in the

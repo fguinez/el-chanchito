@@ -32,6 +32,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from collections.abc import Callable, Sequence
@@ -50,6 +51,17 @@ _CONNECT_RETRY_PAUSE_S = 1.0
 # SIGTERM, and how long after each signal to its whole process group.
 _BROWSER_EXIT_WAIT_S = 10
 _GROUP_EXIT_WAIT_S = 5
+# Orderly close through CDP `Browser.close`: the connect gets its own short
+# timeout and the whole attempt (driver start, connect, send) a bound well
+# above it, so an abandoned attempt cannot connect late and overlap the
+# SIGTERM; then the browser gets this long to exit by itself.
+_CDP_CLOSE_CONNECT_TIMEOUT_MS = 5_000
+_CDP_CLOSE_ATTEMPT_S = 10
+_CDP_CLOSE_EXIT_WAIT_S = 15
+# The longest `terminate_chrome` can take (CDP close, then the POSIX signals).
+TERMINATE_WORST_CASE_S = (
+    _CDP_CLOSE_ATTEMPT_S + _CDP_CLOSE_EXIT_WAIT_S + _BROWSER_EXIT_WAIT_S + 2 * _GROUP_EXIT_WAIT_S
+)
 # How often an orphan's pid is polled while it is asked to exit.
 _ORPHAN_POLL_S = 0.1
 # The state reader may spawn `ps` (macOS), so it is consulted every Nth poll.
@@ -371,23 +383,82 @@ def summarize_targets(
     )
 
 
-def terminate_chrome(proc: subprocess.Popen) -> None:
+def terminate_chrome(proc: subprocess.Popen, cdp_url: Optional[str] = None) -> None:
     """Stop a Chrome started by `launch_chrome`, including its child processes.
 
-    Asks first (SIGTERM to the browser process alone, or taskkill without
-    /F), which lets Chrome flush its profile, then forces. Never raises. A Chrome that has already exited is
-    left alone, so calling this twice is safe: once the process is reaped its
-    pid may belong to something else.
+    With `cdp_url` (its debug endpoint) it is first asked to quit through CDP
+    `Browser.close`, the same orderly shutdown as closing its window, which
+    writes the cookie store to disk; a SIGTERM was seen live to cut that
+    write short. Then, if it is still running: SIGTERM to the browser process
+    alone (or taskkill without /F), then forced. Never raises. A Chrome that
+    has already exited is left alone, so calling this twice is safe: once the
+    process is reaped its pid may belong to something else.
     """
     try:
         if proc.poll() is not None:
             return
     except Exception:
         logger.warning("Could not tell whether the launched Chrome is running", exc_info=True)
+    if cdp_url is not None and close_via_cdp(proc, cdp_url):
+        return
     if is_windows():
         _terminate_windows(proc)
     else:
         _terminate_posix(proc)
+
+
+def _send_browser_close(
+    cdp_url: str, connect_timeout_ms: int = _CDP_CLOSE_CONNECT_TIMEOUT_MS
+) -> None:
+    """Send CDP `Browser.close` to the Chrome at `cdp_url` (raises on failure).
+
+    The connection drops as Chrome quits, so an error after the command was
+    sent is expected and ignored; only failing to get that far raises.
+    """
+    from playwright.sync_api import sync_playwright  # lazy: keeps tests browser-free
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.connect_over_cdp(cdp_url, timeout=connect_timeout_ms)
+        session = browser.new_browser_cdp_session()
+        try:
+            session.send("Browser.close")
+        except Exception as exc:
+            logger.info("CDP Browser.close: connection ended (%s)", type(exc).__name__)
+
+
+def close_via_cdp(
+    proc: subprocess.Popen, cdp_url: str, exit_wait_s: float = _CDP_CLOSE_EXIT_WAIT_S
+) -> bool:
+    """Ask a Chrome we launched to quit through CDP; True once it has exited.
+
+    The CDP call runs in a daemon thread joined for at most
+    `_CDP_CLOSE_ATTEMPT_S`, so a frozen browser cannot hold the caller (a
+    sync Playwright call has no timeout of its own), and so it never runs on
+    a thread with an asyncio loop. Failures are logged by type only.
+    """
+    if has_exited(proc):
+        return True
+    failure: list[str] = []
+
+    def send() -> None:
+        try:
+            _send_browser_close(cdp_url)
+        except Exception as exc:
+            failure.append(type(exc).__name__)
+
+    worker = threading.Thread(target=send, name="chrome-cdp-close", daemon=True)
+    worker.start()
+    worker.join(_CDP_CLOSE_ATTEMPT_S)
+    if worker.is_alive():
+        logger.warning("CDP Browser.close did not return in time; falling back to signals")
+        return has_exited(proc)
+    if failure:
+        logger.warning("CDP Browser.close failed (%s); falling back to signals", failure[0])
+        return has_exited(proc)
+    if _reaped(proc, exit_wait_s):
+        return True
+    logger.warning("Chrome did not exit after CDP Browser.close; falling back to signals")
+    return False
 
 
 def _reaped(proc: subprocess.Popen, timeout_s: float) -> bool:

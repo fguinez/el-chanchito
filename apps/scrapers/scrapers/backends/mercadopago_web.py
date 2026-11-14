@@ -115,6 +115,9 @@ import json
 import logging
 import os
 import re
+import shutil
+import sqlite3
+import tempfile
 import threading
 import time
 from collections import Counter
@@ -213,6 +216,8 @@ MANAGED_HARD_LIMIT_S = (
 # Either mode: the run gives up on a drive after this long, so a call stuck on
 # a frozen browser (reuse mode has no Chrome of its own to terminate) cannot
 # hold the scraper service. Later than the watchdog, which ends it cleanly.
+# The 60 s past the watchdog must cover a whole teardown
+# (`real_chrome.TERMINATE_WORST_CASE_S`); a test pins that.
 DRIVE_TIMEOUT_S = MANAGED_HARD_LIMIT_S + 60
 # Pause between ledger pages.
 _PAGE_PAUSE_S = 0.5
@@ -233,6 +238,23 @@ _LOGIN_PROBE_INTERVAL_S = 15.0
 LASTING_SESSION_COOKIE = "ssid"
 # Cookie-jar reads that may fail in a row before the wait gives up on Chrome.
 _MAX_JAR_READ_FAILURES = 5
+# Where Chrome keeps the cookie store inside the profile (newer builds use
+# `Network/`), and the portal hosts whose persistent `ssid` row must be there.
+# Found live: the jar held a persistent `ssid` and a SIGTERM close seconds
+# later left none on disk, so the next launch was signed out. Chromium
+# writes the store in batches (its interval is about 30 s; not timed live).
+_COOKIE_DB_PATHS = ("Default/Network/Cookies", "Default/Cookies")
+_PORTAL_COOKIE_HOSTS = (".mercadopago.cl", "www.mercadopago.cl")
+# Chrome stores cookie times as microseconds since 1601-01-01 UTC.
+_CHROME_EPOCH_OFFSET_S = 11_644_473_600
+# The disk wait gets at least this long after the jar check passes, even past
+# the sign-in deadline: a sign-in finished near the deadline still needs one
+# batch write.
+_DISK_WAIT_FLOOR_S = 60.0
+# After Chrome closes, its network service may still hold the store for a
+# moment (a lock or a hot journal): the post-close check retries this long.
+_POST_CLOSE_DISK_WAIT_S = 10.0
+_POST_CLOSE_DISK_POLL_S = 0.5
 
 _SIGN_IN_HINT = (
     "Run `make mercadopago-login` and sign in again (with MERCADOPAGO_CDP_URL "
@@ -1244,7 +1266,9 @@ def _drive_managed(movement_pages: int) -> MercadoPagoAccount:
     finally:
         if watchdog is not None:
             watchdog.cancel()
-        real_chrome.terminate_chrome(proc)
+        # Through CDP first, so cookies the portal rotated during the read are
+        # written to the profile.
+        real_chrome.terminate_chrome(proc, cdp_url=f"http://127.0.0.1:{port}")
         if real_chrome.has_exited(proc):
             real_chrome.forget_managed_launch(profile_dir(), proc.pid)
 
@@ -1378,6 +1402,110 @@ def _await_lasting_session(page, deadline: float, process=None) -> None:
         time.sleep(_LOGIN_POLL_S)
 
 
+def chrome_time_to_unix(chrome_us: int) -> float:
+    """Chrome's cookie time (microseconds since 1601-01-01 UTC) as Unix seconds."""
+    return chrome_us / 1_000_000 - _CHROME_EPOCH_OFFSET_S
+
+
+def _lasting_session_in_db(db: Path, since: float, now: float) -> bool:
+    """Whether the cookie DB at `db` holds a fresh persistent portal `ssid`.
+
+    Fresh: created at or after `since` (Unix seconds, the login's start) and
+    expiring after `now`, so a cookie left from an earlier sign-in does not
+    count. Opened read-only, and only `host_key`, `name`, `is_persistent`,
+    `creation_utc` and `expires_utc` are selected: never a value column.
+    Raises on a sqlite error.
+    """
+    conn = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            "SELECT host_key, name, is_persistent, creation_utc, expires_utc FROM cookies "
+            "WHERE name = ? AND host_key IN (?, ?)",
+            (LASTING_SESSION_COOKIE, *_PORTAL_COOKIE_HOSTS),
+        ).fetchall()
+    finally:
+        conn.close()
+    return any(
+        is_persistent == 1
+        and chrome_time_to_unix(created) >= since
+        and chrome_time_to_unix(expires) > now
+        for _host, _name, is_persistent, created, expires in rows
+    )
+
+
+def _file_stamp(path: Path) -> Optional[tuple[int, int]]:
+    """Size and mtime (ns) of `path`, or None when it is not there."""
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return None
+    return st.st_size, st.st_mtime_ns
+
+
+def _session_on_disk(profile: Path, since: float) -> bool:
+    """Whether the profile's cookie store on disk holds a fresh persistent portal `ssid`.
+
+    Chrome's own file is never opened: it is copied, with its `-journal` /
+    `-wal` if present, to a temp dir, the copy is opened read-only, and the
+    copy is deleted. The copy is not atomic, so the files are stamped (size,
+    mtime) before and after it, and any change means "not yet"; so do a
+    missing file, a sqlite error (a copied hot journal is one) and an OS
+    error. `since` is the login's start (Unix seconds).
+    """
+    for relative in _COOKIE_DB_PATHS:
+        db = profile / relative
+        if not db.is_file():
+            continue
+        sides = [db.with_name(db.name + suffix) for suffix in ("-journal", "-wal")]
+        try:
+            with tempfile.TemporaryDirectory(prefix="mp-cookies-") as tmp:
+                before = [_file_stamp(path) for path in (db, *sides)]
+                snapshot = Path(tmp) / db.name
+                shutil.copyfile(db, snapshot)
+                for side in sides:
+                    if side.is_file():
+                        shutil.copyfile(side, Path(tmp) / side.name)
+                if [_file_stamp(path) for path in (db, *sides)] != before:
+                    logger.info("MercadoPago: cookie store changed while copied; not yet")
+                    continue
+                found = _lasting_session_in_db(snapshot, since, time.time())
+        except (sqlite3.Error, OSError) as exc:
+            logger.info("MercadoPago: cookie store not readable yet: %s", type(exc).__name__)
+            continue
+        if found:
+            return True
+    return False
+
+
+def _await_session_on_disk(deadline: float, since: float, process=None) -> None:
+    """After the jar holds the lasting cookie, wait until it reaches the disk.
+
+    Chrome stays open meanwhile; one read of a copy of the cookie store every
+    `_LOGIN_POLL_S` seconds, until the sign-in `deadline` or
+    `_DISK_WAIT_FLOOR_S` from now, whichever is later. Nothing is sent to
+    Mercado Pago.
+    """
+    deadline = max(deadline, time.monotonic() + _DISK_WAIT_FLOOR_S)
+    told = False
+    while not _session_on_disk(profile_dir(), since):
+        if not told:
+            print(
+                "Session saved in Chrome; waiting for it to reach the profile on disk...",
+                flush=True,
+            )
+            told = True
+        if real_chrome.has_exited(process):
+            raise _chrome_exited()
+        if time.monotonic() >= deadline:
+            raise MercadoPagoSessionError(
+                "Signed in, but Chrome did not write the session to the profile on disk "
+                "in time, so it would not survive Chrome closing. Re-run `make "
+                "mercadopago-login` and stay on the balance page until the login closes "
+                "Chrome itself."
+            )
+        time.sleep(_LOGIN_POLL_S)
+
+
 def _log_portal_cookie_names(page) -> None:
     """Log which portal cookies Chrome holds: names and persistence, never values."""
     try:
@@ -1391,7 +1519,9 @@ def _log_portal_cookie_names(page) -> None:
     logger.info("MercadoPago: portal cookies at the sign-in deadline: %s", ", ".join(names))
 
 
-def _await_sign_in(cdp_url: str, timeout_s: float, process=None) -> None:
+def _await_sign_in(
+    cdp_url: str, timeout_s: float, process=None, since: Optional[float] = None
+) -> None:
     """Wait until a portal tab reads the balance page and the session lasts.
 
     Only looks while the human signs in: it never types, clicks or navigates.
@@ -1417,11 +1547,19 @@ def _await_sign_in(cdp_url: str, timeout_s: float, process=None) -> None:
     cookies carry the session, and closing Chrome then loses it. So once it
     reads, that connection stays open, for local cookie-jar reads only
     (`_await_lasting_session`), until the persistent login cookie is in
-    Chrome's jar or `timeout_s` runs out.
+    Chrome's jar or `timeout_s` runs out. A cookie in the jar is still not on
+    disk (Chrome writes the store in batches), so the wait then reads copies
+    of the profile's cookie store (`_await_session_on_disk`) until the cookie
+    is there, still within `timeout_s`.
 
     `process` is the Chrome `save_login_session` launched: once it has ended
-    (the window was closed) the wait ends with it.
+    (the window was closed) the wait ends with it. `since` is when the login
+    started (Unix seconds; default now): only a cookie created after it
+    counts on disk. The jar check has no such rule: Playwright reports no
+    creation time.
     """
+    if since is None:
+        since = time.time()
     summary = _await_chrome(cdp_url, CONNECT_WAIT_S, _CHROME_START_HINT, process)
     deadline = time.monotonic() + timeout_s
     probed_key: Optional[str] = None
@@ -1446,6 +1584,7 @@ def _await_sign_in(cdp_url: str, timeout_s: float, process=None) -> None:
                             probed_key, probed_at = summary.matching_key, time.monotonic()
                             if _balance_readable(page):
                                 _await_lasting_session(page, deadline, process)
+                                _await_session_on_disk(deadline, since, process)
                                 return
                 except MercadoPagoConnectError as exc:
                     # The tab may be mid-load; the next look tries again.
@@ -1457,16 +1596,35 @@ def _await_sign_in(cdp_url: str, timeout_s: float, process=None) -> None:
     raise MercadoPagoSessionError("Sign-in not detected in time. Re-run `make mercadopago-login`.")
 
 
+def _session_on_disk_after_close(profile: Path, since: float) -> bool:
+    """The post-close check: read a copy, retrying briefly while Chrome lets go.
+
+    Chrome's network service can still hold the store (an exclusive lock, a
+    hot journal) a moment after the browser process exits.
+    """
+    deadline = time.monotonic() + _POST_CLOSE_DISK_WAIT_S
+    while True:
+        if _session_on_disk(profile, since):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(_POST_CLOSE_DISK_POLL_S)
+
+
 def save_login_session(timeout_s: float = LOGIN_TIMEOUT_S) -> None:
     """Open a visible Chrome on the dedicated profile for a human to sign in.
 
     The code never types a credential and never touches the login form: it
     opens the balance page, waits (bounded) until that page reads and the
-    login cookie is persistent, and closes Chrome. The session stays in the
-    profile, which every later run reuses.
+    persistent login cookie is in Chrome's jar and then in the profile's
+    cookie store on disk, closes Chrome through CDP (falling back to signals),
+    and checks the disk once more. The session stays in the profile, which
+    every later run reuses.
     """
     _require_playwright()
     port = cdp_port()
+    cdp_url = f"http://127.0.0.1:{port}"
+    started = time.time()
     proc = _launch(port, offscreen=False)
     # Nothing may raise between the launch and this `try` (see `_drive_managed`).
     try:
@@ -1476,8 +1634,13 @@ def save_login_session(timeout_s: float = LOGIN_TIMEOUT_S) -> None:
             f"to {int(timeout_s // 60)} min for the balance page to load.",
             flush=True,
         )
-        _await_sign_in(f"http://127.0.0.1:{port}", timeout_s, process=proc)
+        _await_sign_in(cdp_url, timeout_s, process=proc, since=started)
     finally:
-        real_chrome.terminate_chrome(proc)
+        real_chrome.terminate_chrome(proc, cdp_url=cdp_url)
         if real_chrome.has_exited(proc):
             real_chrome.forget_managed_launch(profile_dir(), proc.pid)
+    if not _session_on_disk_after_close(profile_dir(), started):
+        raise MercadoPagoSessionError(
+            "Signed in, but after Chrome closed the session was not in the profile on "
+            "disk, so later runs would be signed out. Re-run `make mercadopago-login`."
+        )

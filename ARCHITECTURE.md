@@ -800,9 +800,16 @@ library or aggregator covers it, and its login cannot be automated (a
 reCAPTCHA on the e-mail step, a step-up on the password step). So a human
 signs in once, in a real Chrome on a dedicated persistent profile
 (`make mercadopago-login`: a visible window, nothing typed by the code, closed
-once the balance page reads and the `ssid` login cookie is persistent; a
-balance read alone can pass while only session cookies hold the session, which
-closing Chrome then loses), and `backends/mercadopago_web.py` drives that
+once the balance page reads, the persistent `ssid` login cookie is in Chrome's
+jar, and the profile's cookie store on disk holds a persistent `ssid` created
+since the login started and not expired (read from a copy that is discarded
+if the files change while copied; the disk wait gets at least 60 s); then
+closed through CDP `Browser.close` and a copy of the disk store checked again,
+retried for about 10 s while Chrome's network service lets go of it. A
+balance read alone can pass while only session cookies hold the session, and
+a cookie in the jar is not yet on disk: Chromium writes the store in batches,
+and the jar-only version failed live when a SIGTERM close seconds later left
+no login cookie on disk), and `backends/mercadopago_web.py` drives that
 Chrome over CDP. By default `scrape_account` runs *managed*: it launches
 Chrome off-screen on the profile, reads and terminates it (needs a machine
 with a display); `MERCADOPAGO_CDP_URL` switches to *reuse*, attaching to a
@@ -857,9 +864,11 @@ the read runs on the connection that shows the tab. A page that is listed but
 never attached to, or no tab at all, ends as a plain error that says which
 (in reuse mode: open the balance page in that Chrome). `make
 mercadopago-login` looks the same way, so nothing is attached while the human
-is on the sign-in site. Teardown asks the browser process alone to quit
-before touching its process group, so the child that owns the cookie store
-can write it.
+is on the sign-in site. Teardown (managed runs and the login) first asks
+Chrome to quit through CDP `Browser.close`, the orderly shutdown that writes
+the cookie store, then, if it is still running, sends SIGTERM to the browser
+process alone before touching its process group, so the child that owns the
+cookie store can write it.
 
 Both legs share one drive per cycle: `scrape_transactions` opens it and
 caches the result for `scrape_products` (an error is re-raised, never
@@ -907,9 +916,12 @@ profile; the session surviving repeated launch and SIGTERM teardown cycles;
 the empty-URL stale connection, which reattaching resolves; and a fresh
 sign-in on a new profile whose login cookie was already lasting surviving a
 SIGTERM close and relaunch (an earlier sign-in, closed before `ssid` was set,
-was lost). Not verified live: `make mercadopago-login` waiting for the lasting
-session (diagnosed live; the fix itself not yet run live); where the portal
-lands the tab after a sign-in; `movement_id` across separate sign-ins; how a
+was lost); and the jar-only login failing (the persistent `ssid` was in the
+jar, a SIGTERM close seconds later left none on disk and the relaunch was
+signed out); and the current login on a new profile (a human sign-in, the
+disk wait, the CDP close and the disk recheck; two managed relaunches then read
+balance, pots and movements, each closed through CDP with no signal fallback).
+Not verified live: where the portal lands the tab after a sign-in; `movement_id` across separate sign-ins; how a
 lost session presents (a tab bounced off the portal or a redirect on the fetch: both are handled, neither was observed);
 how long a sign-in lasts; which ledger rows are movements between the user's
 own products (none is flagged `internal_transfer`); and reuse mode against a

@@ -9,6 +9,7 @@ import json
 import os
 import signal
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -797,6 +798,117 @@ class _Processes:
 
     def read_status(self, pid):
         return real_chrome.ProcessStatus(ppid=self.ppid, state="Z" if self.zombie else "S")
+
+
+class TestCdpClose:
+    """`terminate_chrome(proc, cdp_url)`: CDP `Browser.close` first, then signals."""
+
+    CDP = "http://127.0.0.1:9999"
+
+    def _posix(self, monkeypatch, events):
+        monkeypatch.setattr(real_chrome, "is_windows", lambda: False)
+        monkeypatch.setattr(real_chrome.os, "getpgid", lambda pid: 777, raising=False)
+        monkeypatch.setattr(
+            real_chrome.os,
+            "killpg",
+            lambda pgid, sig: events.append(("group", pgid, sig)),
+            raising=False,
+        )
+
+    def _send(self, monkeypatch, events, error=None):
+        def send(cdp_url):
+            events.append(("cdp-close", cdp_url))
+            if error is not None:
+                raise error
+
+        monkeypatch.setattr(real_chrome, "_send_browser_close", send)
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+    def test_an_orderly_close_needs_no_signal(self, monkeypatch):
+        """Chrome quits on `Browser.close`: it is only waited for, never signalled."""
+        events = []
+        self._posix(monkeypatch, events)
+        self._send(monkeypatch, events)
+        proc = _FakeChrome(exits_after=1, events=events)
+
+        real_chrome.terminate_chrome(proc, cdp_url=self.CDP)
+
+        assert events == [("cdp-close", self.CDP), ("wait", real_chrome._CDP_CLOSE_EXIT_WAIT_S)]
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+    def test_a_failed_cdp_close_falls_back_to_sigterm(self, monkeypatch, caplog):
+        """The failure is logged by type only, then today's teardown runs."""
+        events = []
+        self._posix(monkeypatch, events)
+        self._send(monkeypatch, events, error=RuntimeError("synthetic detail"))
+        proc = _FakeChrome(exits_after=1, events=events)
+
+        real_chrome.terminate_chrome(proc, cdp_url=self.CDP)
+
+        assert events == [
+            ("cdp-close", self.CDP),
+            ("browser", signal.SIGTERM),
+            ("wait", real_chrome._BROWSER_EXIT_WAIT_S),
+        ]
+        assert "RuntimeError" in caplog.text
+        assert "synthetic detail" not in caplog.text
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+    def test_a_chrome_that_ignores_the_cdp_close_gets_sigterm(self, monkeypatch):
+        """Still running after the wait: the signal path takes over."""
+        events = []
+        self._posix(monkeypatch, events)
+        self._send(monkeypatch, events)
+        proc = _FakeChrome(exits_after=2, events=events)
+
+        real_chrome.terminate_chrome(proc, cdp_url=self.CDP)
+
+        assert events == [
+            ("cdp-close", self.CDP),
+            ("wait", real_chrome._CDP_CLOSE_EXIT_WAIT_S),
+            ("browser", signal.SIGTERM),
+            ("wait", real_chrome._BROWSER_EXIT_WAIT_S),
+        ]
+
+    def test_a_hung_cdp_close_is_abandoned_after_its_bound(self, monkeypatch):
+        """A frozen browser cannot hold the caller: the attempt is joined with a bound."""
+        release = threading.Event()
+        monkeypatch.setattr(real_chrome, "_send_browser_close", lambda cdp_url: release.wait(5))
+        monkeypatch.setattr(real_chrome, "_CDP_CLOSE_ATTEMPT_S", 0.01)
+        proc = _FakeChrome(events=[])
+
+        try:
+            assert real_chrome.close_via_cdp(proc, self.CDP) is False
+        finally:
+            release.set()
+
+    def test_the_connect_is_bounded_well_inside_the_attempt(self):
+        """An abandoned attempt must not connect late and overlap the SIGTERM."""
+        connect_s = real_chrome._CDP_CLOSE_CONNECT_TIMEOUT_MS / 1000
+
+        assert connect_s * 2 <= real_chrome._CDP_CLOSE_ATTEMPT_S
+
+    def test_an_exited_chrome_is_left_alone(self, monkeypatch):
+        """Nothing is sent and nothing is signalled."""
+        events = []
+        self._send(monkeypatch, events)
+        proc = _FakeChrome(exited=True, events=events)
+
+        real_chrome.terminate_chrome(proc, cdp_url=self.CDP)
+
+        assert events == []
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+    def test_without_a_cdp_url_nothing_is_sent(self, monkeypatch):
+        """Callers that pass no endpoint keep today's teardown."""
+        events = []
+        self._posix(monkeypatch, events)
+        self._send(monkeypatch, events)
+        proc = _FakeChrome(exits_after=1, events=events)
+
+        real_chrome.terminate_chrome(proc)
+
+        assert ("cdp-close", self.CDP) not in events
 
 
 class TestOrphanReclaim:
