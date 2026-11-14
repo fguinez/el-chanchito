@@ -2389,8 +2389,8 @@ class TestSignInMarker:
             asyncio.run(web.scrape_account())
 
         assert str(info.value) == (
-            f"Mercado Pago needs sign-in since {SYNTHETIC_SINCE}; skipped without "
-            "opening Chrome. Run `make mercadopago-login` and sign in again."
+            "Mercado Pago needs sign-in: run `make mercadopago-login` "
+            "(skipped without opening Chrome; lost since 2026-01-01 00:00 UTC)."
         )
         assert probes == []
         assert chrome.launches == []
@@ -2402,7 +2402,7 @@ class TestSignInMarker:
         chrome = _Chrome(monkeypatch, tmp_path)
         self._marker(tmp_path).write_text("")
 
-        with pytest.raises(MercadoPagoSessionError, match="since an earlier run"):
+        with pytest.raises(MercadoPagoSessionError, match="lost since an earlier run"):
             asyncio.run(web.scrape_account())
 
         assert chrome.launches == []
@@ -2517,7 +2517,7 @@ class TestSignInMarker:
         (record,) = [r for r in caplog.records if r.name == mp_mod.__name__]
         assert record.levelno == logging.WARNING
         assert record.exc_info is None
-        assert "needs sign-in since" in record.getMessage()
+        assert "needs sign-in" in record.getMessage()
 
     def test_a_skipped_run_still_finishes_its_run_row_in_error(self, monkeypatch, tmp_path):
         """The web poller waits for a finished row: it gets one, with the hint."""
@@ -2529,8 +2529,7 @@ class TestSignInMarker:
 
         (run_id, status), kwargs = finish.call_args
         assert (run_id, status) == ("run-1", "error")
-        assert f"needs sign-in since {SYNTHETIC_SINCE}" in kwargs["error_message"]
-        assert "make mercadopago-login" in kwargs["error_message"]
+        assert "make mercadopago-login" in kwargs["error_message"][:120]
         assert chrome.launches == []
 
 

@@ -1129,9 +1129,12 @@ def _drive_managed(movement_pages: int) -> MercadoPagoAccount:
     if since is not None:
         # The session was lost earlier: opening Chrome again only re-learns
         # that (and a lost session must never be retried).
+        # The hint leads: the dashboard shows only a run message's first 120
+        # characters, and the time is cut to the minute.
+        when = since[:16].replace("T", " ") + " UTC" if since else "an earlier run"
         raise MercadoPagoSignInPending(
-            f"Mercado Pago needs sign-in since {since or 'an earlier run'}; skipped "
-            "without opening Chrome. Run `make mercadopago-login` and sign in again."
+            "Mercado Pago needs sign-in: run `make mercadopago-login` "
+            f"(skipped without opening Chrome; lost since {when})."
         )
     port = cdp_port()
     proc = _launch(port, offscreen=True)
