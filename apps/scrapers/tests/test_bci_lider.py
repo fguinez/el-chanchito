@@ -619,7 +619,7 @@ class TestRealChromeWiring:
         """A connect that never succeeds keeps Lider's error type, URL and hint."""
         deadlines = []
 
-        def unreachable(playwright, cdp_url, *, deadline):
+        def unreachable(playwright, cdp_url, *, deadline, process=None):
             deadlines.append(deadline)
             raise web.real_chrome.ChromeUnreachableError("synthetic")
 
@@ -632,13 +632,70 @@ class TestRealChromeWiring:
         assert "http://localhost:9222" in str(info.value)
         assert "make bci-lider-login" in str(info.value)
 
+    def test_exited_chrome_is_a_lider_session_error_with_the_profile_hint(self, monkeypatch):
+        """A launched Chrome that exits surfaces at once with the profile hint."""
+        passed = []
+
+        def exited(playwright, cdp_url, *, deadline, process=None):
+            passed.append(process)
+            raise web.real_chrome.ChromeExitedError("synthetic exit.")
+
+        monkeypatch.setattr(web.real_chrome, "connect_over_cdp", exited)
+
+        with pytest.raises(web.BciLiderSessionError) as info:
+            web._connect_cdp(object(), "http://localhost:9222", deadline=123.0, process="proc")
+
+        assert passed == ["proc"]
+        assert "Lider profile" in str(info.value)
+
+    def test_sign_in_chrome_that_exits_is_a_lider_web_error_with_the_profile_hint(
+        self, monkeypatch,
+    ):
+        """The interactive sign-in watches the Chrome it launched and names the profile."""
+        import contextlib
+
+        import playwright.sync_api
+
+        passed = []
+
+        def exited(playwright, cdp_url, *, deadline, process=None):
+            passed.append(process)
+            raise web.real_chrome.ChromeExitedError("synthetic exit.")
+
+        monkeypatch.setattr(web, "_launch_real_chrome", lambda port, url: "proc")
+        monkeypatch.setattr(web.real_chrome, "connect_over_cdp", exited)
+        monkeypatch.setattr(
+            playwright.sync_api, "sync_playwright", lambda: contextlib.nullcontext(object())
+        )
+
+        with pytest.raises(web.BciLiderWebError) as info:
+            web.save_login_session(timeout_s=60)
+
+        assert passed == ["proc"]
+        assert "Lider profile" in str(info.value)
+
+    def test_managed_attempt_passes_its_chrome_to_the_scrape(self, monkeypatch):
+        """The managed run hands the Chrome it launched to the CDP attach."""
+        seen = []
+        monkeypatch.setattr(web, "_launch_real_chrome", lambda port, url, offscreen: "proc")
+        monkeypatch.setattr(web.real_chrome, "terminate_chrome", lambda proc: None)
+        monkeypatch.setattr(
+            web, "_scrape_over_cdp",
+            lambda cdp_url, rut, password, process=None: seen.append(process) or "result",
+        )
+
+        result = web._scrape_managed_once(9222, "http://localhost:9222", None, None, offscreen=True)
+
+        assert result == "result"
+        assert seen == ["proc"]
+
     def test_managed_attempt_terminates_its_chrome_even_on_failure(self, monkeypatch):
         """The Chrome a managed run launched is torn down by the shared helper."""
         terminated = []
         monkeypatch.setattr(web, "_launch_real_chrome", lambda port, url, offscreen: "proc")
         monkeypatch.setattr(web.real_chrome, "terminate_chrome", terminated.append)
 
-        def broken_scrape(cdp_url, rut, password):
+        def broken_scrape(cdp_url, rut, password, process=None):
             raise web.BciLiderSessionError("synthetic")
 
         monkeypatch.setattr(web, "_scrape_over_cdp", broken_scrape)

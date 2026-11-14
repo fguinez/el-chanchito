@@ -98,6 +98,12 @@ def _cdp_port() -> int:
     return int(os.environ.get("LIDER_BCI_CDP_PORT", _DEFAULT_CDP_PORT))
 
 
+_CHROME_EXITED_HINT = (
+    "It exits at once when another Chrome already uses the Lider profile "
+    "(close that one), and when its window is closed."
+)
+
+
 def _launch_real_chrome(port: int, url: str, offscreen: bool = False) -> subprocess.Popen:
     """Launch a genuine Chrome with remote debugging on `port`, opening `url`.
 
@@ -521,7 +527,7 @@ def save_login_session(
     password = password or os.environ.get("LIDER_BCI_PASSWORD")
     port = _cdp_port()
     cdp_url = f"http://localhost:{port}"
-    _launch_real_chrome(port, LOGIN_URL)
+    proc = _launch_real_chrome(port, LOGIN_URL)
     print(
         "\nA Chrome window opened and the login is being autofilled. If Cloudflare "
         "shows a 'Verifique que es un ser humano' check, tick it (I won't); the "
@@ -533,7 +539,11 @@ def save_login_session(
     deadline = time.monotonic() + timeout_s
     with sync_playwright() as playwright:
         try:
-            browser = real_chrome.connect_over_cdp(playwright, cdp_url, deadline=deadline)
+            browser = real_chrome.connect_over_cdp(
+                playwright, cdp_url, deadline=deadline, process=proc
+            )
+        except real_chrome.ChromeExitedError as exc:
+            raise BciLiderWebError(f"{exc} {_CHROME_EXITED_HINT}") from exc
         except real_chrome.RealChromeError as exc:
             raise BciLiderWebError(f"Could not reach the Chrome debug port {cdp_url}.") from exc
 
@@ -805,14 +815,22 @@ def _ensure_logged_in(page, rut: Optional[str], password: Optional[str], deadlin
         _login_via_autofill(page, rut, password, deadline)
 
 
-def _connect_cdp(playwright, cdp_url: str, deadline: float):
+def _connect_cdp(
+    playwright, cdp_url: str, deadline: float, process: Optional[subprocess.Popen] = None,
+):
     """Connect to a Chrome debug port, retrying until it's up or `deadline`.
 
     Managed mode launches Chrome and connects immediately, so the port needs a few
-    seconds to come up; attended mode connects on the first try.
+    seconds to come up; attended mode connects on the first try. Managed mode
+    passes the Chrome it launched as `process`, so a Chrome that exits before its
+    port opens fails at once instead of waiting out the deadline.
     """
     try:
-        return real_chrome.connect_over_cdp(playwright, cdp_url, deadline=deadline)
+        return real_chrome.connect_over_cdp(
+            playwright, cdp_url, deadline=deadline, process=process
+        )
+    except real_chrome.ChromeExitedError as exc:
+        raise BciLiderSessionError(f"{exc} {_CHROME_EXITED_HINT}") from exc
     except real_chrome.RealChromeError as exc:
         raise BciLiderSessionError(
             f"Could not reach the Chrome debug port {cdp_url}. In managed mode Chrome "
@@ -821,7 +839,10 @@ def _connect_cdp(playwright, cdp_url: str, deadline: float):
         ) from exc
 
 
-def _scrape_over_cdp(cdp_url: str, rut: Optional[str], password: Optional[str]) -> BciLiderCardResult:
+def _scrape_over_cdp(
+    cdp_url: str, rut: Optional[str], password: Optional[str],
+    process: Optional[subprocess.Popen] = None,
+) -> BciLiderCardResult:
     """Read the card by driving a Chrome reachable at `cdp_url`; never closes it.
 
     Reuses an existing tab (an already-signed-in one keeps its tab-scoped
@@ -833,7 +854,9 @@ def _scrape_over_cdp(cdp_url: str, rut: Optional[str], password: Optional[str]) 
     result = BciLiderCardResult()
     deadline = time.monotonic() + _LOGIN_WAIT_S
     with sync_playwright() as playwright:
-        browser = _connect_cdp(playwright, cdp_url, min(deadline, time.monotonic() + 30))
+        browser = _connect_cdp(
+            playwright, cdp_url, min(deadline, time.monotonic() + 30), process=process
+        )
         # Prefer an already-authenticated tab (keeps its sessionStorage), else any
         # existing tab, else a new one; then ensure it's signed in before reading.
         page = (
@@ -898,7 +921,7 @@ def _scrape_managed_once(
     """Launch Chrome, scrape, and terminate it (one managed attempt)."""
     proc = _launch_real_chrome(port, LOGIN_URL, offscreen=offscreen)
     try:
-        return _scrape_over_cdp(cdp_url, rut, password)
+        return _scrape_over_cdp(cdp_url, rut, password, process=proc)
     finally:
         real_chrome.terminate_chrome(proc)
 
