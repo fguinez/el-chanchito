@@ -817,8 +817,12 @@ JavaScript (one JSON value is decoded from the marker on, then
 `/banking/balance/movements?limit=100&page=N` (the wallet ledger). `/home` is
 never fetched or opened (it redirects through the auth gateway), and a
 redirect is never followed: it means the session is gone, so the run raises
-a "run make mercadopago-login" error and nothing is retried. The balance page
-is the session probe: nothing else is fetched when it fails. Only a redirect,
+a "run make mercadopago-login" error and nothing is retried. In managed mode
+that error also writes `<profile>.needs-sign-in` (an ISO UTC time, 0600, via
+`scrapers/sign_in_marker.py`); while it exists a run raises the same kind of
+error before launching Chrome, so it still finishes an `error` run row. A
+successful login or managed read clears it; reuse mode ignores it. The
+balance page is the session probe: nothing else is fetched when it fails. Only a redirect,
 a 401/403 or a tab off the portal count as a lost session; a balance page
 that answers without a readable balance (a changed page, a widget that did
 not load) is a plain error that asks nobody to sign in. Once the balance
