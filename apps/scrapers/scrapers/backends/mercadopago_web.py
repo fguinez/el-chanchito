@@ -94,7 +94,10 @@ fetch's result out of the page (`json_value`) takes none, so two outer bounds
 cover it: a watchdog ends any call still waiting if the drive overruns (in
 managed mode it terminates the Chrome it launched; in reuse mode it kills the
 Playwright driver, leaving the user's Chrome running), and in both modes the
-run gives up on a drive that does not finish in time.
+run gives up on a drive that does not finish in time. A call that fails
+because the tab or its connection is gone (the driver crashed, Chrome or the
+tab closed, the watchdog fired) stops the read there instead of moving on to
+the next page.
 
 Nothing in an exception message comes from a page: they name fields, counts
 and HTTP codes only, because they end up in `scraper_runs.error_message`.
@@ -287,6 +290,10 @@ class MercadoPagoFetchError(MercadoPagoWebError):
 
 class MercadoPagoConnectError(MercadoPagoWebError):
     """The Chrome debug port did not accept a connection in time."""
+
+
+class MercadoPagoConnectionLostError(MercadoPagoWebError):
+    """The connection to the tab ended mid-read; nothing more can be fetched."""
 
 
 class MercadoPagoSessionError(RuntimeError):
@@ -697,8 +704,8 @@ def html_from_fetch(result: Any, surface: str) -> str:
 def _check_killed(kill_switch) -> None:
     """Raise `DriverKilledError` once the drive's watchdog has killed the driver.
 
-    After that the first pending Playwright call fails, and any later one
-    spins forever (Playwright 1.61), so none may follow.
+    After that the first pending Playwright call fails, and before 1.64 any
+    later one spun forever, so none may follow.
     """
     if kill_switch is not None:
         kill_switch.raise_if_fired()
@@ -713,23 +720,45 @@ def _evaluate_bounded(
     once right away, and when that returns a promise (always truthy) it waits
     for the promise inside its timeout, so the script is bounded. `json_value`
     (copying the settled result out) and `dispose` have no timeout of their
-    own; the drive's watchdog and the drive timeout cover that window.
+    own; the drive's watchdog and the drive timeout cover that window. A
+    failed `json_value` is not followed by `dispose`: the connection may be
+    dead, and the handle goes with it.
     """
     _check_killed(kill_switch)
     handle = page.wait_for_function(script, arg=arg, timeout=timeout_ms)
-    try:
-        return handle.json_value()
-    finally:
-        if kill_switch is None or not kill_switch.fired:
-            try:
-                handle.dispose()
-            except Exception:
-                pass
+    value = handle.json_value()
+    if kill_switch is None or not kill_switch.fired:
+        try:
+            handle.dispose()
+        except Exception:
+            pass
+    return value
+
+
+def _connection_lost(exc: Exception) -> bool:
+    """Whether a failed Playwright call means the tab or its connection is gone.
+
+    A dead driver raises a bare `Exception` (1.64) or `TargetClosedError`
+    (1.65, also for a closed tab or Chrome); `TargetClosedError` is not public,
+    so it is matched by name. Any other Playwright `Error` (a timeout, a
+    navigation that destroyed the script's context) leaves the tab usable.
+    """
+    from playwright.sync_api import Error as PlaywrightError
+
+    return not isinstance(exc, PlaywrightError) or type(exc).__name__ == "TargetClosedError"
 
 
 def _fetch_props(page, surface: str, page_number: int = 1, kill_switch=None) -> dict:
-    """Fetch one allowed page from inside the tab and return its `pageProps`."""
+    """Fetch one allowed page from inside the tab and return its `pageProps`.
+
+    The in-page script turns every fetch failure into a status, so a call that
+    raises is either a page failure to carry on from (`MercadoPagoFetchError`:
+    the script outlived its timeout, the tab navigated) or a lost tab or
+    connection (`MercadoPagoConnectionLostError`, see `_connection_lost`),
+    which ends the read: further calls would only fail the same way.
+    """
     failure: Optional[str] = None
+    lost = False
     result = None
     try:
         result = _evaluate_bounded(
@@ -741,11 +770,16 @@ def _fetch_props(page, surface: str, page_number: int = 1, kill_switch=None) -> 
         )
     except Exception as exc:
         failure = type(exc).__name__
+        lost = _connection_lost(exc)
     if failure is not None:
         # A killed driver is not a page failure to carry on from.
         _check_killed(kill_switch)
         # Raised outside the handler: the Playwright error (its text carries a
         # call log) is neither the cause nor the context of this one.
+        if lost:
+            raise MercadoPagoConnectionLostError(
+                f"Mercado Pago read lost its connection to the tab ({surface}: {failure})."
+            )
         raise MercadoPagoFetchError(f"{surface}: in-page fetch failed ({failure})")
     return page_props_from_html(html_from_fetch(result, surface))
 
@@ -777,7 +811,7 @@ def _read_movements(
             rows, pages, unread = parse_movements(
                 _fetch_props(page, "movements", number, kill_switch)
             )
-        except MercadoPagoWebError as exc:
+        except (MercadoPagoPageError, MercadoPagoFetchError) as exc:
             logger.warning("MercadoPago: movements page %d not read: %s", number, exc)
             account.warnings.append(f"MercadoPago: movements page {number} not read ({exc})")
             break
@@ -811,7 +845,8 @@ def read_account(
     by the fetch); a page that answers 200 without a readable balance (a
     changed page, a balance widget that did not load) or that cannot be
     fetched is a plain `MercadoPagoWebError`, which asks nobody to sign in.
-    Once `kill_switch` has fired, `DriverKilledError` ends the read instead.
+    A lost connection (`MercadoPagoConnectionLostError`) ends the read at any
+    page; once `kill_switch` has fired, `DriverKilledError` does instead.
     """
     deadline = time.monotonic() + READ_BUDGET_S
     try:
@@ -827,7 +862,7 @@ def read_account(
 
     try:
         account.pots, skipped = parse_pots(_fetch_props(page, "pots", kill_switch=kill_switch))
-    except MercadoPagoWebError as exc:
+    except (MercadoPagoPageError, MercadoPagoFetchError) as exc:
         logger.warning("MercadoPago: savings pots not read: %s", exc)
         account.warnings.append(f"MercadoPago: savings pots not read ({exc})")
     else:
@@ -1162,10 +1197,16 @@ def _drive_managed(movement_pages: int) -> MercadoPagoAccount:
             no_tab=_MANAGED_NO_TAB,
             process=proc,
         )
+    except MercadoPagoConnectionLostError:
+        # The watchdog terminating Chrome is what cut the connection.
+        if watchdog is None or not watchdog.finished.is_set():
+            raise
     finally:
         if watchdog is not None:
             watchdog.cancel()
         real_chrome.terminate_chrome(proc)
+    # Raised outside the handler: the lost connection is the timeout itself.
+    raise MercadoPagoWebError(_TIMED_OUT)
 
 
 def _drive_reuse(cdp_url: str, movement_pages: int) -> MercadoPagoAccount:
@@ -1213,7 +1254,7 @@ async def scrape_account(
     `MercadoPagoWebError` when Chrome or the balance page could not be
     reached, and `ImportError` when Playwright is not installed. A pots or
     ledger page that fails after the balance was read is a warning on the
-    result instead.
+    result instead, unless the tab or its connection was lost.
     """
     cdp = cdp_url if cdp_url is not None else os.environ.get(CDP_URL_ENV)
     drive = (
