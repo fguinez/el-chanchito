@@ -1064,7 +1064,13 @@ def _require_playwright() -> None:
 
 
 def _launch(port: int, *, offscreen: bool):
-    """Launch the dedicated Chrome on `port`, opening the balance page."""
+    """Launch the dedicated Chrome on `port`, opening the balance page.
+
+    First reclaims a Chrome a killed run orphaned on the profile, which can
+    take up to about 20 s.
+    """
+    profile = profile_dir()
+    real_chrome.reclaim_orphaned_chrome(port=port, profile_dir=profile)
     # A Chrome already on this port would make the launch hand over to it and
     # exit, so the run would read (and then fail to close) someone else's.
     if real_chrome.port_in_use(port):
@@ -1074,14 +1080,17 @@ def _launch(port: int, *, offscreen: bool):
         )
     try:
         executable = real_chrome.find_chrome(CHROME_PATH_ENV)
-        return real_chrome.launch_chrome(
-            executable, port=port, profile_dir=profile_dir(), url=START_URL, offscreen=offscreen
+        proc = real_chrome.launch_chrome(
+            executable, port=port, profile_dir=profile, url=START_URL, offscreen=offscreen
         )
     except real_chrome.ChromeNotFoundError as exc:
         raise MercadoPagoWebError(str(exc)) from exc
     except real_chrome.ChromeLaunchError as exc:
         # The helper's message has no path; name the setting that holds one.
         raise MercadoPagoWebError(f"{exc} Check {CHROME_PATH_ENV}.") from exc
+    # Never raises, so the caller's launch-to-`try` gap stays raise-free.
+    real_chrome.record_managed_launch(proc, port=port, profile_dir=profile)
+    return proc
 
 
 def _drive_managed(movement_pages: int) -> MercadoPagoAccount:
@@ -1122,6 +1131,8 @@ def _drive_managed(movement_pages: int) -> MercadoPagoAccount:
         if watchdog is not None:
             watchdog.cancel()
         real_chrome.terminate_chrome(proc)
+        if real_chrome.has_exited(proc):
+            real_chrome.forget_managed_launch(profile_dir(), proc.pid)
 
 
 def _drive_reuse(cdp_url: str, movement_pages: int) -> MercadoPagoAccount:
@@ -1264,3 +1275,5 @@ def save_login_session(timeout_s: float = LOGIN_TIMEOUT_S) -> None:
         _await_sign_in(f"http://127.0.0.1:{port}", timeout_s, process=proc)
     finally:
         real_chrome.terminate_chrome(proc)
+        if real_chrome.has_exited(proc):
+            real_chrome.forget_managed_launch(profile_dir(), proc.pid)
