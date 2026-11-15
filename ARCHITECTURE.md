@@ -392,7 +392,7 @@ scraper_runs
   institution  (mach|mercadopago|tenpo|banchile|bci_lider|santander|...)
   started_at
   finished_at
-  status       (running|success|partial|error)
+  status       (running|success|partial|error|needs_sign_in)
   transactions_imported
   error_message
 
@@ -850,11 +850,10 @@ writes `<profile>.needs-sign-in` (an ISO UTC time, 0600, via
 `scrapers/sign_in_marker.py`); a loss on the pots or ledger page fails the run
 the same way but writes nothing, since the login checks the balance page only.
 While the marker exists a run raises `MercadoPagoSignInPending` (a session
-error; the scraper logs it as a one-line warning, though `run_scraper` still
-logs it with a traceback) before launching Chrome, so it still
-finishes an `error` run row. Only a successful `make mercadopago-login` (or
-deleting the file) clears it; reuse mode ignores it. The balance page is the
-session probe: nothing else is fetched when it fails. Only a redirect, a
+error, so a `SignInRequired`, logged as a one-line warning) before launching
+Chrome, so it still finishes a `needs_sign_in` run row. Only a successful
+`make mercadopago-login` (or deleting the file) clears it; reuse mode ignores
+it. The balance page is the session probe: nothing else is fetched when it fails. Only a redirect, a
 401/403 or a tab off the portal count as a lost session; a balance page
 that answers without a readable balance (a changed page, a widget that did
 not load) is a plain error that asks nobody to sign in. Once the balance
@@ -1191,8 +1190,8 @@ class BaseScraper(ABC):
 ```
 
 Both `method` and `institution` are stored per `scraper_runs` row, and
-`run_scraper` finishes the row as `success`, `partial`, or `error`, with every
-failure and warning joined into `error_message`:
+`run_scraper` finishes the row as `success`, `partial`, `error`, or
+`needs_sign_in`, with every failure and warning joined into `error_message`:
 
 - `partial`: something went wrong but part of the data landed (one leg raised
   while the other wrote, or some products or transactions failed to write
@@ -1203,13 +1202,23 @@ failure and warning joined into `error_message`:
   the database doesn't have yet are a warning too, and don't count as landed:
   the next run writes them. So is a price history that can't be written.
 - `error`: something failed and nothing landed.
+- `needs_sign_in`: nothing landed and the only failures were legs that raised
+  `SignInRequired` (`scrapers/base.py`): the session is gone and only a human
+  sign-in brings it back. `MercadoPagoSessionError` and `FintualSessionError`
+  subclass it. Such a leg is logged as one warning line without a traceback,
+  and its message is stored once (both legs usually raise the same one),
+  first and without the `transactions: ` / `products: ` prefix, so the
+  dashboard's 120-character summary keeps the command to run. Alongside
+  another failure it counts as an error (`error`, or `partial` when something
+  landed).
 
 Writes are isolated per row: `run_scraper` writes each product separately, and
 `write_transactions` runs each transaction (and each product resolution) in
 its own `conn.transaction()` block, so a row that fails is rolled back alone
 instead of aborting the transaction for every row after it. The dashboard's
 `ScraperStatus` widget shows `partial` runs with an amber badge and banner,
-and failed and partial rows expand to their `error_message`.
+`needs_sign_in` runs with a violet badge and banner, and every finished row
+with a message expands to its `error_message`.
 
 **Retries.** `scrapers/retry.py` retries idempotent work only, three attempts
 with 1 s / 2 s backoff: Buda's and Fintual's GETs, Fintual's read-only `/gql/`

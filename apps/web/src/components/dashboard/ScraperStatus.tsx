@@ -51,6 +51,12 @@ const BANNER_TONES = {
     title: "text-red-800 dark:text-red-200",
     body: "text-red-600 dark:text-red-400",
   },
+  needsSignIn: {
+    box: "border-violet-200 bg-violet-50 dark:border-violet-900 dark:bg-violet-950",
+    icon: "text-violet-600",
+    title: "text-violet-800 dark:text-violet-200",
+    body: "text-violet-700 dark:text-violet-300",
+  },
   partial: {
     box: "border-amber-200 bg-amber-50 dark:border-amber-900 dark:bg-amber-950",
     icon: "text-amber-600",
@@ -105,6 +111,8 @@ export function ScraperStatus() {
   const errors = runs.filter((r) => r.status === "error");
   // A partial run is no outage, but its numbers may be partly stale.
   const partials = runs.filter((r) => r.status === "partial");
+  // Nothing is broken: the session is gone and only a sign-in brings it back.
+  const signIns = runs.filter((r) => r.status === "needs_sign_in");
 
   return (
     <div className="space-y-3">
@@ -118,6 +126,18 @@ export function ScraperStatus() {
           }
           runs={errors}
           fallback="Error desconocido"
+        />
+      )}
+      {signIns.length > 0 && (
+        <RunBanner
+          tone="needsSignIn"
+          title={
+            signIns.length === 1
+              ? `${runLabel(signIns[0])} necesita que inicies sesión`
+              : `${signIns.length} scrapers necesitan que inicies sesión`
+          }
+          runs={signIns}
+          fallback="Sesión perdida"
         />
       )}
       {partials.length > 0 && (

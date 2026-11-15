@@ -518,12 +518,12 @@ reappears.
 
 It only reads. The tab stays on the balance page and the data is fetched from
 inside it, three pages and nothing else, without following redirects. When the
-session is lost (Mercado Pago signed the profile out), the run fails with a
-message asking for `make mercadopago-login`. The scraper never retries and
-never tries to sign in by itself: run the command and sign in again. In managed
-mode a session lost on the balance page also leaves a marker next to the
+session is lost (Mercado Pago signed the profile out), the run ends as
+`needs_sign_in` with a message asking for `make mercadopago-login`. The
+scraper never retries and never tries to sign in by itself: run the command
+and sign in again. In managed mode a session lost on the balance page also leaves a marker next to the
 profile (`apps/scrapers/.mercadopago_chrome_profile.needs-sign-in`,
-gitignored), so later runs fail at once with the same request without opening
+gitignored), so later runs end the same way at once without opening
 Chrome. The way out is a successful `make mercadopago-login`, which removes it
 (deleting the file also works).
 
@@ -640,9 +640,11 @@ enabled scraper once at startup, then follows the schedule.
 The **Estado de scrapers** card on **Inicio** shows the latest run of each
 scraper (one row per method and institution):
 - How long ago it ran
-- A status badge: `success`, `partial` (it finished with warnings), `error`, or
-  `running`
-- Error messages (click a failed row to expand)
+- A status badge: `success`, `partial` (it finished with warnings), `error`,
+  `inicia sesión` (`needs_sign_in`: the session is gone and the message names
+  the `make <institution>-login` command to run), or `running`. Runs that need a
+  sign-in also get a violet banner of their own, apart from the red error one.
+- Error messages (click any finished row that has one to expand it)
 
 ### On-demand refresh (from the dashboard)
 
