@@ -136,6 +136,7 @@ def test_dashboard_fixture_opens():
 # --- Key file -------------------------------------------------------------------
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
 def test_creates_an_owner_only_key(tmp_path):
     path = tmp_path / "state" / "credentials_key"
     key = load_or_create_key(path)
@@ -144,6 +145,7 @@ def test_creates_an_owner_only_key(tmp_path):
     assert list(path.parent.iterdir()) == [path]  # no temp file left behind
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
 def test_refuses_a_key_readable_by_others(tmp_path):
     path = tmp_path / "credentials_key"
     load_or_create_key(path)
@@ -152,6 +154,7 @@ def test_refuses_a_key_readable_by_others(tmp_path):
         load_or_create_key(path)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="O_NOFOLLOW is POSIX")
 def test_refuses_a_symlinked_key(tmp_path):
     real = tmp_path / "real_key"
     load_or_create_key(real)
@@ -316,6 +319,7 @@ def test_manager_keeps_the_overlay_when_the_db_is_down(tmp_path, store):
     assert environ["SKIPO_API_KEY"] == SECRET
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
 def test_manager_with_a_loose_key_file_uses_env_only(tmp_path, store):
     path = tmp_path / "credentials_key"
     load_or_create_key(path)
