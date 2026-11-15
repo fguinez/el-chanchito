@@ -31,7 +31,8 @@ we never do) and to read pages.
   * reuse: when `LIDER_BCI_CDP_URL` points at an already-running debuggable Chrome
     (`make bci-lider-login`, or one you manage), it drives that and leaves it open.
 Either way it reuses an already-signed-in tab or re-logs-in via autofill, and
-raises `BciLiderSessionError` when Chrome is unreachable or sign-in can't complete.
+raises `BciLiderSessionError` when Chrome is unreachable, or its subclass
+`BciLiderSignInRequired` (a `needs_sign_in` run) when sign-in can't complete.
 
 Design note (why DOM scraping, not the XHR API): the balances are bootstrapped
 into the Angular app state at login and never re-fetched on a route change, and
@@ -62,7 +63,7 @@ from scrapers.backends.bci_lider_billing import (
     billing_metrics,
     read_billing,
 )
-from scrapers.base import ScrapedExchangeRate, ScrapedProduct
+from scrapers.base import ScrapedExchangeRate, ScrapedProduct, SignInRequired
 
 logger = logging.getLogger(__name__)
 
@@ -397,12 +398,21 @@ class BciLiderCardResult:
     statements: list[LiderStatement] = field(default_factory=list)
 
 
+# Managed runs launch their own Chrome on the debug port, so after a manual
+# sign-in the scraper must be pointed at that Chrome instead.
+_REUSE_HINT = f"then set {CDP_URL_ENV} so scrapes reuse that Chrome."
+
+
 class BciLiderWebError(RuntimeError):
     """Raised when the Lider Bci web session hits an unexpected page/layout."""
 
 
 class BciLiderSessionError(RuntimeError):
     """Raised when the debuggable Chrome is unreachable or sign-in didn't complete."""
+
+
+class BciLiderSignInRequired(BciLiderSessionError, SignInRequired):
+    """Chrome was reachable but the portal stayed signed out: a human must sign in."""
 
 
 def _first_visible(page, selectors: list[str], timeout: int = 5000):
@@ -588,7 +598,7 @@ def _inner_text(page) -> str:
 def _read_balances(page) -> list[ScrapedProduct]:
     """Open the Saldos page and read the card cupos, polling for the async render.
 
-    An expired session bounces to /login; that raises `BciLiderSessionError` so the
+    An expired session bounces to /login; that raises `BciLiderSignInRequired` so the
     caller can re-log-in (or prompt one) instead of recording an empty scrape.
     """
     page.goto(BALANCES_URL, timeout=LOGIN_TIMEOUT, wait_until="domcontentloaded")
@@ -596,9 +606,9 @@ def _read_balances(page) -> list[ScrapedProduct]:
     deadline = time.monotonic() + RENDER_TIMEOUT_MS / 1000
     while time.monotonic() < deadline:
         if "/login" in page.url:
-            raise BciLiderSessionError(
+            raise BciLiderSignInRequired(
                 "BciLider not signed in (redirected to /login). "
-                "Run `make bci-lider-login` to sign in again."
+                f"Run `make bci-lider-login`; {_REUSE_HINT}"
             )
         text = _inner_text(page)
         if card_saldos_from_text(text):  # quiet check while the widget renders
@@ -775,7 +785,7 @@ def _login_via_autofill(page, rut: str | None, password: str | None, deadline: f
     """Drive the login form on `page` and wait for the private area.
 
     Autofill clears Cloudflare because this is a genuine Chrome. Raises
-    BciLiderSessionError if sign-in can't complete (e.g. Cloudflare shows the human
+    BciLiderSignInRequired if sign-in can't complete (e.g. Cloudflare shows the human
     check with nobody to tick it, or the credentials are wrong).
     """
     if "/login" not in (page.url or ""):
@@ -785,10 +795,28 @@ def _login_via_autofill(page, rut: str | None, password: str | None, deadline: f
         if "/private-home" in page.url:
             return
         page.wait_for_timeout(1000)
-    raise BciLiderSessionError(
-        "Could not sign in via the debuggable Chrome (Cloudflare may need a human "
-        "to tick the check, or the credentials are wrong). Run `make bci-lider-login`."
+    if not _login_form_visible(page):
+        # No login form to sign in on (a maintenance or error page, or a portal too
+        # slow to render it): a human sign-in would not help.
+        raise BciLiderSessionError(
+            "BciLider sign-in page did not load (the portal may be down or slow); "
+            "the next run retries."
+        )
+    raise BciLiderSignInRequired(
+        "BciLider sign-in didn't complete: run `make bci-lider-login` (Cloudflare may "
+        f"need a human to tick the check, or the clave is wrong); {_REUSE_HINT}"
     )
+
+
+def _login_form_visible(page) -> bool:
+    """Whether `page` shows the portal's clave field right now (no waiting)."""
+    for selector in _PASSWORD_SELECTORS:
+        try:
+            if page.locator(selector).first.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def _ensure_logged_in(page, rut: str | None, password: str | None, deadline: float) -> None:
@@ -950,8 +978,9 @@ async def scrape_card(
         scrapes, and closes it, so scheduled runs are fully unattended (needs a
         machine with a display; Cloudflare blocks headless).
     Either way the login autofill is the only path past the portal's Cloudflare
-    check. Raises `ImportError` if Playwright isn't installed and
-    `BciLiderSessionError` when Chrome is unreachable or sign-in can't complete. A
+    check. Raises `ImportError` if Playwright isn't installed,
+    `BciLiderSignInRequired` when sign-in can't complete, and
+    `BciLiderSessionError` when Chrome is unreachable. A
     flaky movements leg after a valid session is a warning on the result instead.
     """
     import asyncio

@@ -6,17 +6,21 @@ CLP/USD amounts); no real portal capture appears here.
 
 import asyncio
 import os
+import time
 from datetime import date
+from unittest.mock import MagicMock
 
 import pytest
 
 os.environ.setdefault("LIDER_BCI_RUT", "00000000-0")
 os.environ.setdefault("LIDER_BCI_PASSWORD", "test")
 
+import main as main_mod
+from db.writer import TransactionWriteResult, VanishedProductsResult
 from scrapers.backends import bci_lider_web as web
 from scrapers.backends.bci_lider_billing import LiderStatement
 from scrapers.backends.bci_lider_web import BciLiderCardResult
-from scrapers.base import ProductRef, ScrapedExchangeRate, ScrapedProduct
+from scrapers.base import ProductRef, ScrapedExchangeRate, ScrapedProduct, SignInRequired
 from scrapers.institutions import bci_lider as bci_lider_mod
 from scrapers.institutions.bci_lider import BciLiderScraper
 
@@ -649,6 +653,7 @@ class TestRealChromeWiring:
         assert deadlines == [123.0]
         assert "http://localhost:9222" in str(info.value)
         assert "make bci-lider-login" in str(info.value)
+        assert not isinstance(info.value, SignInRequired)
 
     def test_exited_chrome_is_a_lider_session_error_with_the_profile_hint(self, monkeypatch):
         """A launched Chrome that exits surfaces at once with the profile hint."""
@@ -728,3 +733,106 @@ class TestRealChromeWiring:
             web._scrape_managed_once(9222, "http://localhost:9222", None, None, offscreen=True)
 
         assert terminated == [("proc", "http://localhost:9222")]
+
+
+class _Locator:
+    def __init__(self, visible):
+        self.first = self
+        self._visible = visible
+
+    def is_visible(self):
+        return self._visible
+
+
+class _SignedOutPage:
+    """A tab the portal keeps on /login: every navigation is a no-op."""
+
+    url = "https://example.invalid/login"
+
+    def __init__(self, login_form=True):
+        self._login_form = login_form
+
+    def goto(self, url, **kwargs):
+        pass
+
+    def wait_for_timeout(self, ms):
+        pass
+
+    def locator(self, selector):
+        return _Locator(self._login_form)
+
+
+class TestSignInRequired:
+    """A portal that stays signed out needs a human; an unreachable Chrome does not."""
+
+    def test_an_autofill_that_never_lands_needs_a_sign_in(self, monkeypatch):
+        """The login timeout names the login command and is a SignInRequired."""
+        monkeypatch.setattr(web, "_autofill_and_submit", lambda *args: None)
+
+        with pytest.raises(web.BciLiderSignInRequired) as info:
+            web._login_via_autofill(_SignedOutPage(), None, None, time.monotonic() - 1)
+
+        assert isinstance(info.value, SignInRequired)
+        assert "make bci-lider-login" in str(info.value)[:120]
+        assert "LIDER_BCI_CDP_URL" in str(info.value)
+
+    def test_a_login_page_without_its_form_is_an_error(self, monkeypatch):
+        """A maintenance or error page at /login is not a sign-in a human can fix."""
+        monkeypatch.setattr(web, "_autofill_and_submit", lambda *args: None)
+
+        with pytest.raises(web.BciLiderSessionError) as info:
+            web._login_via_autofill(
+                _SignedOutPage(login_form=False), None, None, time.monotonic() - 1
+            )
+
+        assert not isinstance(info.value, SignInRequired)
+
+    def test_a_bounce_to_login_while_reading_needs_a_sign_in(self, monkeypatch):
+        """It stays a BciLiderSessionError, so the mid-read retry still catches it."""
+        monkeypatch.setattr(web, "_dismiss_popup", lambda page: None)
+
+        with pytest.raises(web.BciLiderSignInRequired) as info:
+            web._read_balances(_SignedOutPage())
+
+        assert isinstance(info.value, web.BciLiderSessionError)
+
+    @pytest.mark.parametrize(
+        ("exc", "status"),
+        [
+            pytest.param(
+                web.BciLiderSignInRequired("Could not sign in. Run `make bci-lider-login`."),
+                "needs_sign_in",
+                id="signed-out",
+            ),
+            pytest.param(
+                web.BciLiderSessionError("Could not reach the Chrome debug port."),
+                "error",
+                id="chrome-unreachable",
+            ),
+        ],
+    )
+    def test_the_run_status_follows_the_failure(self, monkeypatch, exc, status):
+        """Both legs share the one failure; only a sign-in one ends `needs_sign_in`."""
+        calls = []
+
+        async def failing(rut=None, password=None, cdp_url=None):
+            calls.append(1)
+            raise exc
+
+        monkeypatch.setattr(bci_lider_mod, "scrape_card", failing)
+        finish = MagicMock()
+        monkeypatch.setattr(main_mod, "start_scraper_run", MagicMock(return_value="run-1"))
+        monkeypatch.setattr(
+            main_mod, "write_transactions", MagicMock(return_value=TransactionWriteResult())
+        )
+        monkeypatch.setattr(main_mod, "upsert_product", MagicMock())
+        monkeypatch.setattr(
+            main_mod, "retire_vanished_products", MagicMock(return_value=VanishedProductsResult())
+        )
+        monkeypatch.setattr(main_mod, "finish_scraper_run", finish)
+
+        asyncio.run(main_mod.run_scraper(BciLiderScraper()))
+
+        (_, recorded), _ = finish.call_args
+        assert recorded == status
+        assert calls == [1]
