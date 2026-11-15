@@ -29,7 +29,8 @@ import os
 import re
 import secrets
 import stat
-from collections.abc import Iterable, Mapping, MutableMapping
+from collections.abc import Iterable, Iterator, Mapping, MutableMapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -183,11 +184,25 @@ def load_key(path: Path) -> CredentialKey:
     return CredentialKey.from_private(private_key)
 
 
-def _create_key(path: Path) -> CredentialKey:
-    """Write a new key, owner-only from the first byte, without replacing one
-    another process created meanwhile (that one is loaded instead)."""
-    private_key = X25519PrivateKey.generate()
-    pem = private_key.private_bytes(
+def generate_key() -> CredentialKey:
+    return CredentialKey.from_private(X25519PrivateKey.generate())
+
+
+def _fsync_dir(path: Path) -> None:
+    if os.name == "nt":
+        return
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _write_new_file(path: Path, key: CredentialKey) -> bool:
+    """Write `key` to `path` owner-only from the first byte, durably, only if
+    nothing is there yet (link() is an atomic create-if-absent). False when
+    another file was already in place."""
+    pem = key.private_key.private_bytes(
         serialization.Encoding.PEM,
         serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption(),
@@ -208,17 +223,26 @@ def _create_key(path: Path) -> CredentialKey:
             handle.flush()
             os.fsync(handle.fileno())
         try:
-            # link() fails if the target exists: an atomic create-if-absent.
             os.link(tmp, path)
         except FileExistsError:
-            return load_key(path)
+            return False
     finally:
         try:
             os.unlink(tmp)
         except FileNotFoundError:
             pass
+    _fsync_dir(path.parent)
+    return True
+
+
+def _create_key(path: Path) -> CredentialKey:
+    """Write a new key without replacing one another process created
+    meanwhile (that one is loaded instead)."""
+    key = generate_key()
+    if not _write_new_file(path, key):
+        return load_key(path)
     logger.info("Created a new credentials key at %s", path)
-    return CredentialKey.from_private(private_key)
+    return key
 
 
 def load_or_create_key(path: Path) -> CredentialKey:
@@ -228,6 +252,79 @@ def load_or_create_key(path: Path) -> CredentialKey:
         return load_key(path)
     except FileNotFoundError:
         return _create_key(path)
+
+
+class KeyFile:
+    """Where the service's private key lives, and the one seam through which
+    it is read or written (a secret manager can replace this class later).
+
+    Rotation writes the new key to `<file>.next` first, then, once the
+    database has switched to it, renames it over `<file>`, which deletes the
+    old private key. `<file>.lock` serializes that between the service and
+    the `make credentials-*` commands.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.next_path = path.with_name(f"{path.name}.next")
+        self.lock_path = path.with_name(f"{path.name}.lock")
+
+    def __repr__(self) -> str:
+        return f"KeyFile({str(self.path)!r})"
+
+    def load(self) -> CredentialKey:
+        return load_key(self.path)
+
+    def load_or_create(self) -> CredentialKey:
+        return load_or_create_key(self.path)
+
+    def load_pending(self) -> CredentialKey | None:
+        """The key a rotation left in `.next`; None when there is none. An
+        unusable one raises CredentialKeyError."""
+        try:
+            return load_key(self.next_path)
+        except FileNotFoundError:
+            return None
+
+    def write_pending(self, key: CredentialKey) -> None:
+        if not _write_new_file(self.next_path, key):
+            raise CredentialKeyError(f"{self.next_path} already exists")
+
+    def promote_pending(self) -> None:
+        """Make `.next` the key file; the old private key is gone after this."""
+        os.replace(self.next_path, self.path)
+        _fsync_dir(self.path.parent)
+
+    def discard_pending(self) -> None:
+        try:
+            os.unlink(self.next_path)
+        except FileNotFoundError:
+            return
+        _fsync_dir(self.path.parent)
+
+    def replace(self, key: CredentialKey) -> None:
+        """Make `key` the key file through `.next`, so a crash leaves either
+        file whole."""
+        self.discard_pending()
+        self.write_pending(key)
+        self.promote_pending()
+
+    @contextmanager
+    def lock(self) -> Iterator[None]:
+        """An exclusive lock on `<file>.lock` (no-op where flock is missing)."""
+        try:
+            import fcntl
+        except ImportError:  # Windows: one process per key file is assumed
+            yield
+            return
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        fd = os.open(self.lock_path, flags, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
 
 
 # --- Stored rows ----------------------------------------------------------------
@@ -384,6 +481,78 @@ def open_rows(
                 suppressed.add(field.env_var)
                 reentry.add(field.env_var)
     return OpenedCredentials(values, frozenset(reentry), frozenset(suppressed))
+
+
+@dataclass(frozen=True)
+class ResealedCredential:
+    institution_slug: str
+    field_key: str
+    sealed: bytes
+
+    def __repr__(self) -> str:
+        return f"ResealedCredential({self.institution_slug}.{self.field_key})"
+
+
+def reseal_rows(
+    old: CredentialKey,
+    new: CredentialKey,
+    rows: Iterable[SealedCredential],
+    fallback: Mapping[str, str | None] | None = None,
+) -> tuple[list[ResealedCredential], list[SealedCredential]]:
+    """Open every row sealed to `old` and seal its value to `new`, in the same
+    context (a binding secret keeps its binding). Returns the re-sealed rows
+    and the ones left as they were: sealed to another key or scheme, or not
+    openable (they already needed re-entry)."""
+    fallback = fallback or {}
+    rows = list(rows)
+    plain: dict[tuple[str, str], str] = {}
+    resealed: list[ResealedCredential] = []
+    skipped: list[SealedCredential] = []
+
+    def field_of(row: SealedCredential):
+        spec = CREDENTIALS_BY_SLUG.get(row.institution_slug)
+        return next((f for f in spec.fields if f.key == row.field_key), None) if spec else None
+
+    def reseal(row: SealedCredential, binding: str | None) -> None:
+        value = old.open(row.institution_slug, row.field_key, row.key_id, row.sealed, binding)
+        plain[(row.institution_slug, row.field_key)] = value
+        resealed.append(
+            ResealedCredential(
+                row.institution_slug,
+                row.field_key,
+                new.seal(row.institution_slug, row.field_key, value, binding),
+            )
+        )
+
+    ours = [r for r in rows if r.scheme == SCHEME and r.key_id == old.key_id]
+    skipped.extend(r for r in rows if r not in ours)
+    binding_rows = []
+    for row in ours:
+        field = field_of(row)
+        if field is not None and field.binds:
+            binding_rows.append((row, field))
+            continue
+        try:
+            reseal(row, None)
+        except CredentialOpenError:
+            skipped.append(row)
+    for row, field in binding_rows:
+        spec = CREDENTIALS_BY_SLUG[row.institution_slug]
+        bound = [next(f for f in spec.fields if f.key == k) for k in field.binds]
+        values = [
+            plain.get((row.institution_slug, b.key), fallback.get(b.env_var) or "") for b in bound
+        ]
+        try:
+            reseal(row, binding_digest(values))
+        except CredentialOpenError:
+            skipped.append(row)
+    for row in skipped:
+        logger.warning(
+            "Stored credential %s.%s was not re-sealed (it could not be opened); it needs re-entry",
+            row.institution_slug,
+            row.field_key,
+        )
+    return resealed, skipped
 
 
 # --- Environment overlay --------------------------------------------------------

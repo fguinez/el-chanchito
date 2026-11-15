@@ -1,16 +1,27 @@
 """Wire the sealed credentials into the scraper service.
 
-`CredentialManager` owns the service's key and the env overlay: on start it
-loads (or creates) the key file, publishes the public key to the database for
-the dashboard, and lays every stored credential it can open over
-`os.environ`; `reload()` does the last step again after the dashboard saves
-or deletes one, and `tick()` (a scheduler job) keeps retrying until the key
-is published and the rows are read, and republishes the key if another
-process replaced it. See scrapers/credentials.py for the scheme.
+`CredentialManager` owns the service's key and the env overlay. `start()`
+only loads (or creates) the key file, so the service comes up without the
+database; `reload()` and `tick()` (a scheduler job, also kicked in the
+background) then sync the key with the database's key ring and lay every
+stored credential it can open over `os.environ`.
+
+One key per database: a service never replaces an active key it does not
+hold. If the database seals to another key that owns rows, the service
+reports `key_mismatch`, opens nothing and logs the fix (use that key file, or
+`make credentials-reset-key`). Before it has ever published in this process
+it may take over an active key no row is sealed to, since nothing is lost.
+
+Rotation (`rotate_key_file`, shared by the service's periodic check and
+`credentials_admin.py rotate`) writes the new key to `<file>.next`, re-seals
+every row and swaps the active key in one transaction, then renames `.next`
+over the key file, which deletes the old private key. A crash leaves `.next`
+behind; `recover_pending` finishes or rolls it back by whether the database
+knows that key. Both run under the key file's lock.
 
 Only the long-running service creates or publishes a key. One-off runs
 (`make scrapers-once`) and the login CLIs load an existing key read-only and
-use the stored credentials only when the database's published key is theirs.
+use the stored credentials only when the database's active key is theirs.
 """
 
 from __future__ import annotations
@@ -18,27 +29,201 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from collections.abc import Callable, MutableMapping
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from db.connection import close_pool
-from db.credentials import (
-    fetch_published_key_id,
-    fetch_sealed_credentials,
-    publish_public_key,
-)
+from db import credentials as db_credentials
+from db.connection import close_pool, is_transient_db_error
+from db.credentials import ActiveKey, KeyRingConflict, KeySync
 from scrapers.credentials import (
     CredentialKey,
     CredentialKeyError,
     CredentialOverlay,
+    KeyFile,
+    OpenedCredentials,
+    ResealedCredential,
     SealedCredential,
+    generate_key,
     key_file_path,
-    load_key,
-    load_or_create_key,
     open_rows,
+    reseal_rows,
 )
 
 logger = logging.getLogger("scraper-service.credentials")
+
+MAX_AGE_ENV = "CREDENTIALS_KEY_MAX_AGE_DAYS"
+DEFAULT_MAX_AGE_DAYS = 90
+# After a failed periodic rotation, wait this long before trying again.
+ROTATION_RETRY_SECONDS = 60 * 60
+
+RESET_HINT = (
+    "use the key file of the service that saved them (one key file per database), "
+    "or run `make credentials-reset-key` to start over (stored credentials must then "
+    "be entered again)"
+)
+
+
+class DatabaseKeyRing:
+    """The key ring and rows in Postgres (db/credentials.py)."""
+
+    def sync_key(self, key: CredentialKey, allow_takeover: bool) -> KeySync:
+        return db_credentials.sync_key(key, allow_takeover)
+
+    def active_key(self) -> ActiveKey | None:
+        return db_credentials.fetch_active_key()
+
+    def key_in_ring(self, key_id: str) -> bool:
+        return db_credentials.key_in_ring(key_id)
+
+    def fetch_rows(self) -> list[SealedCredential]:
+        return db_credentials.fetch_sealed_credentials()
+
+    def rotate(
+        self,
+        old: CredentialKey,
+        new: CredentialKey,
+        reseal: Callable[
+            [list[SealedCredential]], tuple[list[ResealedCredential], list[SealedCredential]]
+        ],
+    ) -> tuple[int, int]:
+        return db_credentials.rotate_key(old, new, reseal)
+
+    def reset(self, key: CredentialKey) -> tuple[str | None, int]:
+        return db_credentials.reset_active_key(key)
+
+    def record_rotation_failure(self, key_id: str, reason: str) -> None:
+        db_credentials.record_rotation_failure(key_id, reason)
+
+
+class RotationError(Exception):
+    """A rotation that did not happen; the message never carries a value."""
+
+
+class RotationPending(RotationError):
+    """The outcome is unknown until the database answers; `.next` stays and
+    the next sync finishes or rolls it back."""
+
+
+@dataclass(frozen=True)
+class RotationResult:
+    old_key_id: str
+    new_key: CredentialKey
+    resealed: int | None
+    skipped: int | None
+
+
+def recover_pending(key_file: KeyFile, ring) -> str | None:
+    """Finish or roll back a rotation a crash interrupted; call it with the
+    key file's lock held. The rotation committed exactly when the database
+    knows the pending key. Returns "promoted", "discarded" or None (nothing
+    pending); raises when the database cannot say (`.next` then stays)."""
+    pending = key_file.load_pending()
+    if pending is None:
+        return None
+    if ring.key_in_ring(pending.key_id):
+        key_file.promote_pending()
+        logger.warning(
+            "Finished an interrupted credentials key rotation: %s is now the key file "
+            "and the old private key is deleted",
+            pending.key_id[:12],
+        )
+        return "promoted"
+    key_file.discard_pending()
+    logger.warning("Rolled back an interrupted credentials key rotation; the key is unchanged")
+    return "discarded"
+
+
+def rotate_key_file(
+    key_file: KeyFile, ring, fallback: dict[str, str | None] | None = None
+) -> RotationResult:
+    """Rotate the database's active key, which must be `key_file`'s."""
+    with key_file.lock():
+        try:
+            recover_pending(key_file, ring)
+        except CredentialKeyError:
+            raise
+        except Exception as exc:
+            raise RotationPending(
+                f"could not check an interrupted rotation ({type(exc).__name__})"
+            ) from None
+        old = key_file.load()
+        try:
+            active = ring.active_key()
+        except Exception as exc:
+            raise RotationError(f"could not read the active key ({type(exc).__name__})") from None
+        if active is None or active.key_id != old.key_id:
+            raise RotationError(f"{key_file.path} does not hold the database's active key")
+        new = generate_key()
+        key_file.write_pending(new)
+        try:
+            resealed, skipped = ring.rotate(
+                old, new, lambda rows: reseal_rows(old, new, rows, fallback)
+            )
+        except Exception as exc:
+            reason = str(exc) if isinstance(exc, KeyRingConflict) else type(exc).__name__
+            try:
+                outcome = recover_pending(key_file, ring)
+            except Exception:
+                raise RotationPending(
+                    f"the database did not confirm the rotation ({reason})"
+                ) from None
+            if outcome != "promoted":
+                raise RotationError(f"the database refused the rotation ({reason})") from None
+            return RotationResult(old.key_id, new, None, None)
+        key_file.promote_pending()
+    logger.info(
+        "Rotated the credentials key %s -> %s: %d row(s) re-sealed, %d left as they were; "
+        "the old private key is deleted",
+        old.key_id[:12],
+        new.key_id[:12],
+        resealed,
+        skipped,
+    )
+    return RotationResult(old.key_id, new, resealed, skipped)
+
+
+def reset_key_file(key_file: KeyFile, ring) -> tuple[CredentialKey, str | None, int]:
+    """Make the local key file's key the database's active one, retiring
+    whatever was active. Rows sealed to that one can no longer be opened."""
+    with key_file.lock():
+        try:
+            recover_pending(key_file, ring)
+        except CredentialKeyError:
+            raise
+        except Exception as exc:
+            raise RotationPending(
+                f"could not check an interrupted rotation ({type(exc).__name__})"
+            ) from None
+        key = key_file.load_or_create()
+        retired, orphaned = ring.reset(key)
+    return key, retired, orphaned
+
+
+def max_age_days_from_env(environ=os.environ) -> int:
+    raw = (environ.get(MAX_AGE_ENV) or "").strip()
+    if not raw:
+        return DEFAULT_MAX_AGE_DAYS
+    try:
+        days = int(raw)
+    except ValueError:
+        days = -1
+    if days < 0:
+        logger.warning(
+            "%s=%r is not a number of days; using %d", MAX_AGE_ENV, raw, DEFAULT_MAX_AGE_DAYS
+        )
+        return DEFAULT_MAX_AGE_DAYS
+    return days
+
+
+def _transient(exc: BaseException) -> bool:
+    return is_transient_db_error(exc) or isinstance(exc, OSError)
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value else None
 
 
 class CredentialManager:
@@ -46,19 +231,33 @@ class CredentialManager:
         self,
         key_path: Path | None = None,
         environ: MutableMapping[str, str] | None = None,
-        fetch: Callable[[], list[SealedCredential]] = fetch_sealed_credentials,
-        publish: Callable[[CredentialKey], tuple[str | None, int]] = publish_public_key,
-        published_key_id: Callable[[], str | None] = fetch_published_key_id,
+        ring=None,
+        max_age_days: int | None = None,
+        now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
-        self.key_path = key_path or key_file_path()
+        self.key_file = KeyFile(key_path or key_file_path())
+        self.key_path = self.key_file.path
         # Snapshots the environment as it is now: the fallback for every field.
         self.overlay = CredentialOverlay(environ)
+        self.ring = ring or DatabaseKeyRing()
+        self.max_age_days = max_age_days_from_env() if max_age_days is None else max_age_days
+        self._now = now
         self.key: CredentialKey | None = None
-        self._fetch = fetch
-        self._publish = publish
-        self._published_key_id = published_key_id
+        self._key_error = False
         self._published = False
+        self._ever_published = False
         self._loaded = False
+        self._mismatch: str | None = None
+        self._active: ActiveKey | None = None
+        self._orphaned = 0
+        self._opened = OpenedCredentials({}, frozenset())
+        self._rotation_failure: tuple[datetime, str] | None = None
+        self._next_rotation_attempt = 0.0
+        self._rows_read = False
+        # Set once the stored credentials are applied or known to be unusable
+        # (no key, key mismatch, schema missing): the first scrape waits on it,
+        # so it never logs in with credentials the dashboard has replaced.
+        self.settled = threading.Event()
         # `_io_lock` serializes the database work (which may sit through
         # retries for ~30 s); `_lock` guards the state and is only ever held
         # briefly, so status() never waits on the database.
@@ -69,24 +268,24 @@ class CredentialManager:
     # -- startup ---------------------------------------------------------------
 
     def start(self) -> None:
-        """Service mode: load or create the key, publish it, apply the stored
-        credentials. Never raises: without a key or a database the env
-        fallback still works, and `tick()` keeps retrying."""
+        """Service mode: load or create the key, nothing else; the database
+        work happens in `reload()` / `tick()`. Never raises: without a key the
+        env fallback still works."""
         try:
-            self.key = load_or_create_key(self.key_path)
+            self.key = self.key_file.load_or_create()
         except (CredentialKeyError, OSError) as exc:
             logger.error(
                 "Stored credentials are disabled (%s); only the secret store and env are used",
                 exc,
             )
-            return
-        self.reload()
+            self._key_error = True
+            self.settled.set()
 
     def start_readonly(self) -> None:
-        """One-off mode: use an existing key only if it is the published one.
-        Never creates, publishes or replaces a key."""
+        """One-off mode: use an existing key only if it is the active one.
+        Never creates, publishes, rotates or replaces a key."""
         try:
-            self.key = load_key(self.key_path)
+            candidates = [self.key_file.load()]
         except FileNotFoundError:
             logger.warning(
                 "No credentials key at %s: stored credentials are not used. Start the "
@@ -98,115 +297,213 @@ class CredentialManager:
             logger.error("Stored credentials are disabled (%s)", exc)
             return
         try:
-            published = self._published_key_id()
+            pending = self.key_file.load_pending()
+        except CredentialKeyError:
+            pending = None
+        if pending is not None:
+            candidates.append(pending)
+        try:
+            active = self.ring.active_key()
         except Exception as exc:
-            logger.warning("Could not read the published key: %s", type(exc).__name__)
-            self.key = None
+            logger.warning("Could not read the active credentials key: %s", type(exc).__name__)
             return
-        if published != self.key.key_id:
+        key = next((k for k in candidates if active and k.key_id == active.key_id), None)
+        if key is None:
             logger.warning(
                 "The database seals to another key (%s) than %s (%s): stored credentials "
                 "are not used by this run",
-                (published or "none")[:12],
+                (active.key_id if active else "none")[:12],
                 self.key_path,
-                self.key.key_id[:12],
+                candidates[0].key_id[:12],
             )
-            self.key = None
             return
+        self.key = key
         self._published = True
-        self.reload()
-
-    # -- key publication -----------------------------------------------------------
-
-    def _publish_key(self) -> None:
-        assert self.key is not None
         try:
-            replaced, orphaned = self._publish(self.key)
-        except Exception as exc:
-            logger.warning("Could not publish the credentials key yet: %s", type(exc).__name__)
-            return
-        with self._lock:
-            self._published = True
-        if replaced:
-            logger.warning(
-                "The credentials key in the database was %s; now %s (%s). If another "
-                "scraper service shares this database with its own key file, the two "
-                "keep replacing each other: give them one key file",
-                replaced[:12],
-                self.key.key_id[:12],
-                self.key_path,
-            )
-        if orphaned:
-            logger.warning(
-                "%d stored credential(s) were sealed to another key and cannot be opened; "
-                "restore that key file or enter them again in Credenciales",
-                orphaned,
-            )
-
-    def _check_published(self) -> None:
-        """Republish when the database's key is no longer ours."""
-        assert self.key is not None
-        try:
-            published = self._published_key_id()
-        except Exception as exc:
-            logger.warning("Could not read the published key: %s", type(exc).__name__)
-            return
-        if published != self.key.key_id:
-            if published:
-                logger.warning(
-                    "Another process published key %s over ours; publishing ours again",
-                    published[:12],
-                )
-            with self._lock:
-                self._published = False
-            self._publish_key()
-
-    # -- rows ----------------------------------------------------------------------
-
-    def _reload_locked(self) -> bool:
-        """Called with `_io_lock` held; takes `_lock` only to apply."""
-        if self.key is None:
-            return False
-        if not self._published:
-            self._publish_key()
-            if not self._published:
-                # The database is down: reading the rows would sit
-                # through the same retries for nothing.
-                return False
-        try:
-            rows = self._fetch()
+            rows = self.ring.fetch_rows()
         except Exception as exc:
             logger.warning("Could not read stored credentials: %s", type(exc).__name__)
+            return
+        self._apply(open_rows(key, rows, self.overlay.baseline))
+
+    # -- sync ------------------------------------------------------------------------
+
+    def _adopt_key_file(self) -> bool:
+        """With the key file's lock held: finish an interrupted rotation and
+        pick up a key `credentials_admin.py` rotated or reset on disk. True
+        when the key changed."""
+        assert self.key is not None
+        recover_pending(self.key_file, self.ring)
+        try:
+            disk = self.key_file.load()
+        except FileNotFoundError:
+            logger.warning(
+                "The credentials key file %s is gone; keeping the loaded key", self.key_path
+            )
             return False
-        opened = open_rows(self.key, rows, self.overlay.baseline)
-        with self._lock:
-            self.overlay.apply(opened)
-            self._loaded = True
-        if opened.values:
-            logger.info("Applied %d stored credential field(s)", len(opened.values))
+        except CredentialKeyError as exc:
+            logger.error("The credentials key file is unusable (%s); keeping the loaded key", exc)
+            return False
+        if disk.key_id == self.key.key_id:
+            return False
+        logger.info("Loaded the new credentials key %s from %s", disk.key_id[:12], self.key_path)
+        self.key = disk
         return True
 
+    def _apply(self, opened: OpenedCredentials) -> bool:
+        with self._lock:
+            changed = opened != self._opened or not self._loaded
+            self._opened = opened
+            self.overlay.apply(opened)
+            self._loaded = True
+        if changed and opened.values:
+            logger.info("Applied %d stored credential field(s)", len(opened.values))
+        self.settled.set()
+        return changed
+
+    def _db_failed(self, what: str, exc: BaseException) -> None:
+        logger.warning("Could not %s: %s", what, type(exc).__name__)
+        if not _transient(exc):
+            # A missing table or similar: the env fallback is what there is.
+            self.settled.set()
+
+    def _sync_locked(self, read_rows: bool) -> bool:
+        """Called with `_io_lock` held. Syncs the key with the ring and, when
+        published and asked to (or the state changed), re-applies the rows.
+        True when the overlay changed."""
+        if self.key is None:
+            return False
+        try:
+            with self.key_file.lock():
+                key_changed = self._adopt_key_file()
+                sync = self.ring.sync_key(self.key, allow_takeover=not self._ever_published)
+        except CredentialKeyError as exc:
+            logger.error("Stored credentials are disabled (%s)", exc)
+            self.settled.set()
+            return False
+        except Exception as exc:
+            self._db_failed("sync the credentials key with the database", exc)
+            return False
+
+        if sync.outcome == "mismatch":
+            newly = self._mismatch != sync.active.key_id
+            with self._lock:
+                self._published = False
+                self._mismatch = sync.active.key_id
+                self._active = sync.active
+            if newly:
+                logger.warning(
+                    "key_mismatch: the database seals credentials to key %s, which owns "
+                    "stored rows, but %s holds %s. Stored credentials are not opened and the "
+                    "dashboard cannot save new ones until you %s",
+                    sync.active.key_id[:12],
+                    self.key_path,
+                    self.key.key_id[:12],
+                    RESET_HINT,
+                )
+            changed = (
+                self._apply(OpenedCredentials({}, frozenset())) if self._opened.values else False
+            )
+            self.settled.set()
+            return changed
+
+        if sync.outcome == "published":
+            logger.info("Published credentials key %s", self.key.key_id[:12])
+        elif sync.outcome == "took_over":
+            logger.warning(
+                "Took over the credentials key: no stored credential was sealed to the "
+                "previous key, so %s (%s) is now the one the dashboard seals to",
+                self.key.key_id[:12],
+                self.key_path,
+            )
+        state_changed = self._mismatch is not None or not self._published or key_changed
+        with self._lock:
+            self._published = True
+            self._ever_published = True
+            self._mismatch = None
+            self._active = sync.active
+        if sync.orphaned and sync.orphaned != self._orphaned:
+            logger.warning(
+                "%d stored credential(s) were sealed to another key and cannot be opened; "
+                "enter them again in Credenciales",
+                sync.orphaned,
+            )
+        self._orphaned = sync.orphaned
+        if not (read_rows or state_changed or not self._loaded):
+            return False
+        try:
+            rows = self.ring.fetch_rows()
+        except Exception as exc:
+            self._db_failed("read stored credentials", exc)
+            return False
+        self._rows_read = True
+        return self._apply(open_rows(self.key, rows, self.overlay.baseline))
+
     def reload(self) -> bool:
-        """Read the rows again and re-apply the overlay; False when the rows
-        could not be read (the previous overlay stays)."""
+        """Sync the key and re-read the rows. True when they were read and
+        applied; False when not (the previous overlay stays, or the env
+        fallback alone on a key mismatch)."""
         with self._io_lock:
-            return self._reload_locked()
+            self._rows_read = False
+            self._sync_locked(read_rows=True)
+            return self._rows_read
+
+    # -- rotation ----------------------------------------------------------------------
+
+    def _rotation_due(self) -> bool:
+        if self.max_age_days <= 0 or not (self._published and self._loaded):
+            return False
+        if self._active is None or time.monotonic() < self._next_rotation_attempt:
+            return False
+        return self._now() - self._active.created_at >= timedelta(days=self.max_age_days)
+
+    def _rotate_locked(self) -> bool:
+        assert self.key is not None
+        logger.info(
+            "The credentials key is older than %d days (%s); rotating it",
+            self.max_age_days,
+            MAX_AGE_ENV,
+        )
+        try:
+            result = rotate_key_file(self.key_file, self.ring, self.overlay.baseline)
+        except Exception as exc:
+            reason = str(exc) if isinstance(exc, RotationError) else type(exc).__name__
+            self._next_rotation_attempt = time.monotonic() + ROTATION_RETRY_SECONDS
+            with self._lock:
+                self._rotation_failure = (self._now(), reason)
+            logger.warning(
+                "Credentials key rotation failed (%s); retrying in %d minutes",
+                reason,
+                ROTATION_RETRY_SECONDS // 60,
+            )
+            try:
+                self.ring.record_rotation_failure(self.key.key_id, reason)
+            except Exception as record_exc:
+                logger.warning(
+                    "Could not record the rotation failure: %s", type(record_exc).__name__
+                )
+            return False
+        self.key = result.new_key
+        with self._lock:
+            self._rotation_failure = None
+        return self._sync_locked(read_rows=True)
 
     def tick(self) -> bool:
-        """The periodic job: publish the key until it sticks, put it back if
-        replaced, and read the rows until they load. True when the rows were
-        loaded just now (the caller then rebuilds its scrapers)."""
+        """The periodic job: sync the key (publish, adopt a rotated key file,
+        detect a mismatch), read the rows until they load, and rotate a key
+        older than the configured age. True when the overlay changed (the
+        caller then rebuilds its scrapers)."""
         with self._io_lock:
             if self.key is None:
                 return False
-            if self._published:
-                self._check_published()
-            if self._published and self._loaded:
-                return False
-            return self._reload_locked()
+            changed = self._sync_locked(read_rows=False)
+            if self._rotation_due():
+                changed = self._rotate_locked() or changed
+            return changed
 
     def retry_in_background(self, on_loaded: Callable[[], object] | None = None) -> None:
-        """Run one `tick()` on a thread unless one is already running."""
+        """Run one `tick()` on a thread unless one is already running or there
+        is nothing pending."""
         if self.key is None or (self._published and self._loaded):
             return
         if self._retry_thread is not None and self._retry_thread.is_alive():
@@ -219,15 +516,33 @@ class CredentialManager:
         self._retry_thread = threading.Thread(target=run, name="credentials-retry", daemon=True)
         self._retry_thread.start()
 
+    # -- status ------------------------------------------------------------------------
+
     def status(self) -> dict:
-        """Booleans and the public key id only; never a value. Never waits on
+        """Booleans, key ids and dates only; never a value. Never waits on
         the database."""
         with self._lock:
+            if self.key is None:
+                state = "key_unavailable"
+            elif self._mismatch:
+                state = "key_mismatch"
+            elif self._published and self._loaded:
+                state = "ok"
+            else:
+                state = "starting"
+            failure = self._rotation_failure
             return {
+                "state": state,
                 "key_available": self.key is not None,
                 "key_id": self.key.key_id if self.key else None,
                 "published": self._published,
                 "loaded": self._loaded,
+                "key_mismatch": self._mismatch is not None,
+                "active_key_id": self._active.key_id if self._active else None,
+                "key_created_at": _iso(self._active.created_at) if self._active else None,
+                "max_age_days": self.max_age_days,
+                "rotation_failed_at": _iso(failure[0]) if failure else None,
+                "rotation_error": failure[1] if failure else None,
                 "fields": self.overlay.status(),
             }
 

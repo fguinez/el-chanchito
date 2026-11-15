@@ -16,7 +16,7 @@ export async function readSealingKey(): Promise<SealingKey | null> {
       publicKey: credentialKeys.publicKey,
     })
     .from(credentialKeys)
-    .where(eq(credentialKeys.id, 1))
+    .where(eq(credentialKeys.status, "active"))
     .limit(1);
   return rows[0] ?? null;
 }

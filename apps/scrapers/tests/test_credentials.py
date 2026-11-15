@@ -39,6 +39,7 @@ from scrapers.credentials import (
     open_rows,
     sealing_info,
 )
+from tests.fakes_credentials import FakeRing as FakeStore
 
 FIXTURE = Path(__file__).parent / "fixtures" / "credentials" / "ts_sealed.json"
 SECRET = "synthetic-password-1234"
@@ -254,51 +255,24 @@ def test_fingerprint_tracks_changes_only():
 # --- Manager --------------------------------------------------------------------
 
 
-class FakeStore:
-    """Rows and published keys in memory, in place of the database."""
-
-    def __init__(self):
-        self.rows: list[SealedCredential] = []
-        self.published: list[str] = []
-        self.fail_fetch = False
-        self.fail_publish = False
-
-    def fetch(self):
-        if self.fail_fetch:
-            raise ConnectionError("db down")
-        return list(self.rows)
-
-    def publish(self, key):
-        if self.fail_publish:
-            raise ConnectionError("db down")
-        self.published.append(key.key_id)
-        return None, 0
-
-    def published_key_id(self):
-        return self.published[-1] if self.published else None
-
-
 @pytest.fixture
 def store():
     return FakeStore()
 
 
-def _manager(tmp_path, store, environ):
+def _manager(tmp_path, store, environ, **kwargs):
     manager = CredentialManager(
-        key_path=tmp_path / "credentials_key",
-        environ=environ,
-        fetch=store.fetch,
-        publish=store.publish,
-        published_key_id=store.published_key_id,
+        key_path=tmp_path / "credentials_key", environ=environ, ring=store, **kwargs
     )
     manager.start()
+    manager.reload()
     return manager
 
 
 def test_manager_creates_publishes_and_applies(tmp_path, store):
     environ = {"BANCHILE_PASSWORD": "synthetic-from-keychain"}
     manager = _manager(tmp_path, store, environ)
-    assert store.published == [manager.key.key_id]
+    assert store.activated == [manager.key.key_id]
 
     store.rows = [_row(manager.key, "banchile", "password", SECRET)]
     assert manager.reload()
@@ -327,8 +301,10 @@ def test_manager_with_a_loose_key_file_uses_env_only(tmp_path, store):
     environ = {"SKIPO_API_KEY": "synthetic-env"}
     manager = _manager(tmp_path, store, environ)
     assert manager.key is None
-    assert store.published == []
+    assert store.activated == []
     assert manager.status()["key_available"] is False
+    assert manager.status()["state"] == "key_unavailable"
+    assert manager.settled.is_set()
     assert environ == {"SKIPO_API_KEY": "synthetic-env"}
 
 
@@ -531,23 +507,15 @@ def test_credentials_endpoints_404_without_a_manager():
 
 
 def test_manager_skips_the_rows_while_the_key_cannot_be_published(tmp_path, store):
-    """A database that refused the key is down: reading the rows would only
-    sit through the same retries."""
-    fetched = []
-
-    def publish(key):
-        raise ConnectionError("db down")
-
-    manager = CredentialManager(
-        key_path=tmp_path / "credentials_key",
-        environ={},
-        fetch=lambda: fetched.append(1) or [],
-        publish=publish,
-    )
+    """A database that refused the key sync is down: reading the rows would
+    only sit through the same retries."""
+    store.fail = True
+    manager = CredentialManager(key_path=tmp_path / "credentials_key", environ={}, ring=store)
     manager.start()
     assert manager.key is not None
     assert manager.reload() is False
-    assert fetched == []
+    assert store.fetches == 0
+    assert not manager.settled.is_set()
 
 
 # --- Bound secrets (IMAP password -> host + user) -------------------------------
@@ -633,56 +601,40 @@ def test_control_characters_are_refused(key, bad):
 
 
 def test_tick_retries_until_published_and_loaded(tmp_path, store):
-    store.fail_publish = True
+    store.fail = True
     manager = _manager(tmp_path, store, {})
     assert manager.status()["published"] is False
+    assert manager.status()["state"] == "starting"
     store.rows = [_row(manager.key, "skipo", "api_key", SECRET)]
     assert manager.tick() is False  # still down
-    store.fail_publish = False
-    assert manager.tick() is True
+    store.fail = False
+    assert manager.tick() is True  # loaded just now: the caller rebuilds
     assert manager.overlay.status()["SKIPO_API_KEY"]["stored"] is True
     assert manager.tick() is False  # nothing left to do
-
-
-def test_tick_republishes_a_replaced_key(tmp_path, store):
-    manager = _manager(tmp_path, store, {})
-    store.published.append("0" * 64)  # another process took over
-    manager.tick()
-    assert store.published[-1] == manager.key.key_id
+    assert manager.status()["state"] == "ok"
 
 
 def test_readonly_never_creates_a_key(tmp_path, store):
-    manager = CredentialManager(
-        key_path=tmp_path / "credentials_key",
-        environ={},
-        fetch=store.fetch,
-        publish=store.publish,
-        published_key_id=store.published_key_id,
-    )
+    manager = CredentialManager(key_path=tmp_path / "credentials_key", environ={}, ring=store)
     manager.start_readonly()
     assert manager.key is None
     assert not (tmp_path / "credentials_key").exists()
-    assert store.published == []
+    assert store.activated == []
 
 
-def test_readonly_skips_rows_when_another_key_is_published(tmp_path, store):
+def test_readonly_skips_rows_when_another_key_is_active(tmp_path, store):
     path = tmp_path / "credentials_key"
     key = load_or_create_key(path)
+    other = CredentialKey.from_private(X25519PrivateKey.generate())
+    store.activate(other)
     store.rows = [_row(key, "skipo", "api_key", SECRET)]
-    store.published.append("0" * 64)
     environ: dict[str, str] = {}
-    manager = CredentialManager(
-        key_path=path,
-        environ=environ,
-        fetch=store.fetch,
-        publish=store.publish,
-        published_key_id=store.published_key_id,
-    )
+    manager = CredentialManager(key_path=path, environ=environ, ring=store)
     manager.start_readonly()
     assert environ == {}
-    assert store.published == ["0" * 64]
+    assert store.activated == [other.key_id]
 
-    store.published.append(key.key_id)
+    store.activate(key)
     manager.start_readonly()
     assert environ == {"SKIPO_API_KEY": SECRET}
 
@@ -726,7 +678,7 @@ def test_status_never_waits_on_the_database(tmp_path, store):
         release.wait(5)
         return []
 
-    manager._fetch = slow_fetch
+    store.fetch_rows = slow_fetch
     worker = threading.Thread(target=manager.reload)
     worker.start()
     assert entered.wait(2)
