@@ -37,8 +37,10 @@ export const SAVE_BLOCKED_MESSAGES: Record<SaveBlocker, string> = {
   key_mismatch:
     "La base de datos cifra las credenciales con la clave de otro servicio de scrapers (por " +
     "ejemplo, `make dev` y `make up` sobre la misma base), así que este no puede abrirlas ni " +
-    "guardar nuevas. Usa en ambos el mismo archivo de clave o, si esa clave se perdió, ejecuta " +
-    "`make credentials-reset-key` para partir de cero (habrá que volver a ingresarlas).",
+    "guardar nuevas. Deja corriendo un solo servicio de scrapers por base de datos (el que las " +
+    "guardó) y detén el otro; no copies su archivo de clave, porque tras una rotación la copia " +
+    "conserva la clave antigua. Si esa clave se perdió, ejecuta `make credentials-reset-key` " +
+    "para partir de cero (habrá que volver a ingresarlas).",
   no_key:
     "El servicio de scrapers aún no ha publicado su clave de cifrado; suele tardar mientras " +
     "espera la base de datos. Vuelve a intentarlo en un minuto.",

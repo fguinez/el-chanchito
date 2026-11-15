@@ -268,9 +268,12 @@ How it is protected:
   `/data/credentials_key` on its volume, never your host's
   `CREDENTIALS_KEY_FILE`), it opens nothing, the Credenciales page shows the
   key mismatch and disables Guardar, and the service log names the fix: run
-  the stack whose key file sealed them, or give both the same key file. The
-  only exception is an active key no stored credential is sealed to (nothing
-  is lost): a service that has not published yet takes it over.
+  one scraper service per database, the one whose key file sealed them, and
+  stop the other. Do not copy the key file from one stack to the other: after
+  a rotation the copy still holds the old key, which keeps old backups
+  readable and leaves the other service in mismatch. The only exception is an
+  active key no stored credential is sealed to (nothing is lost): a service
+  that has not published yet takes it over.
 - **Lost key file.** If the key file that sealed your credentials is gone for
   good, `make credentials-reset-key` (`STACK=up` for the Compose stack) makes
   the local key file the active key and retires the old one. It asks you to
@@ -299,9 +302,16 @@ the database currently seals to; they never create, publish or rotate a key.
 ### Rotating the credentials key
 
 Rotating makes a new key pair, re-seals every stored credential to it in one
-database transaction, and then deletes the old private key. Old database
-backups (which hold the old ciphertext) can no longer be opened by anyone:
-that is the point. Nothing has to be typed again.
+database transaction, and then deletes the old private key file. Old
+database backups (which hold the old ciphertext) then no longer open with
+anything the app keeps: that is the point. Nothing has to be typed again.
+
+Deleting the file unlinks it; it does not erase the disk. A filesystem
+snapshot (APFS local snapshots, Time Machine), a backup of the Docker volume
+or of the key file, or a copy of the key file in another stack still holds
+the old key, and together with an old database backup still opens it. Keep
+the key file out of backups you cannot delete, or treat those backups as
+being as sensitive as the credentials.
 
 - **Automatic.** The scraper service rotates the key once it is older than
   `CREDENTIALS_KEY_MAX_AGE_DAYS` (default 90; `0` turns it off), checked every
@@ -319,9 +329,12 @@ that is the point. Nothing has to be typed again.
   only after the switch commits. If anything stops halfway, the service's
   next start (or sync) keeps whichever key the database ended up with, so no
   credential is ever left unopenable. A save in the dashboard that races a
-  rotation is either re-sealed by it or sealed again to the new key.
-- Back the key file up privately, but know that a backup of it plus an old
-  database backup is exactly what rotation is meant to make useless.
+  rotation is either re-sealed by it or sealed again to the new key. A
+  leftover new key is deleted only when the database shows the old key still
+  active without it; if the database cannot tell (for example `DATABASE_URL`
+  points elsewhere), both files are kept and the log says so.
+- Rotating and resetting need file locking, so they are refused on native
+  Windows (WSL2 works).
 
 ### Secret store backends
 

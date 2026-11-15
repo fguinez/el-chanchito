@@ -81,9 +81,10 @@ export default function CredentialsPage() {
           {keyLines.schedule && <p className="text-muted-foreground">{keyLines.schedule}</p>}
           {keyLines.failure && <p className="text-destructive">{keyLines.failure}</p>}
           <p className="text-xs text-muted-foreground">
-            Rotar la clave vuelve a cifrar todo con una nueva y borra la anterior, así que los
-            respaldos antiguos de la base de datos ya no se pueden leer. También puedes rotarla a
-            mano con <code>make credentials-rotate</code>.
+            Rotar la clave vuelve a cifrar todo con una nueva y borra el archivo de la anterior,
+            así que los respaldos antiguos de la base de datos ya no se pueden leer con ella (salvo
+            que esa clave siga en una instantánea del disco, un respaldo del volumen o una copia
+            del archivo). También puedes rotarla a mano con <code>make credentials-rotate</code>.
           </p>
         </section>
       )}

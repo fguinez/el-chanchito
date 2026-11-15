@@ -1759,12 +1759,18 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
   active key row FOR UPDATE, open every row sealed to it and seal it to the
   new key (the `info` binds the key id, so this is a full re-encrypt; binding
   secrets keep their binding), retire the old key and insert the new active
-  one; then `rename(.next, key file)`, which deletes the old private key, so
-  older database backups open nothing. Rows that cannot be opened stay as
-  they were and need re-entry. Recovery (`recover_pending`, on every sync and
-  before every rotation or reset): a leftover `.next` whose key the ring
-  knows means the commit happened, so it is promoted; otherwise it is
-  discarded; with the database unreachable both files stay. The running
+  one; then `rename(.next, key file)`, which unlinks the old private key, so
+  older database backups open with nothing the app keeps (snapshots, volume
+  backups or copies of the key file still hold it: the rename does not erase
+  the disk). Rows that cannot be opened stay as they were and need re-entry.
+  Recovery (`recover_pending`, on every sync and before every rotation or
+  reset, under the key file lock): stale key temp files are swept; then,
+  after taking the ring's advisory lock (so an in-flight rotation's COMMIT is
+  visible first), a `.next` whose key the ring knows is promoted, one is
+  discarded only when the ring shows the key file's current key active
+  without it, and anything else (another database, no key file) keeps both
+  files and logs an error; with the database unreachable both stay too.
+  Rotation and reset are refused where flock is missing (native Windows). The running
   service picks up a key the CLI rotated or reset on disk at its next sync
   (the CLI also calls `POST /credentials/reload` best effort).
 - **Concurrent saves.** The dashboard seals to the active key, checks the
@@ -1787,7 +1793,8 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
 - **Threat model.** Database dump or leaked `DATABASE_URL`: nothing opens. Key
   file plus database, or the scraper process's memory: everything opens. An
   old database backup plus a key file stolen after the next rotation: nothing
-  opens. Out of scope for now: moving the existing secret store into the
+  opens, unless the old key survives in a filesystem snapshot, a volume
+  backup or a copy of the key file. Out of scope for now: moving the existing secret store into the
   database automatically, and a secret manager (Docker secrets, a KMS) behind
   `KeyFile`.
 
