@@ -85,6 +85,10 @@ services:
       EMAIL_LOOKBACK_DAYS: ${EMAIL_LOOKBACK_DAYS:-7}
       EMAIL_MAX_MESSAGES: ${EMAIL_MAX_MESSAGES:-100}
       EMAIL_IMAP_MAILBOX: ${EMAIL_IMAP_MAILBOX:-INBOX}
+      # Private key that opens the credentials saved from the dashboard's
+      # Credenciales page; created owner-only on first start, on the volume so
+      # it survives rebuilds. Without it they must be entered again.
+      CREDENTIALS_KEY_FILE: ${CREDENTIALS_KEY_FILE:-/data/credentials_key}
       # Cached Fintual web session (see `make fintual-login`); persisted in the
       # scraper_state volume so 2FA isn't re-triggered on every container start.
       FINTUAL_SESSION_FILE: ${FINTUAL_SESSION_FILE:-/data/fintual_session.json}

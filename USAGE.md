@@ -83,13 +83,12 @@ make install
 
 # 2. Set up environment
 cp .env.example .env
-# Edit .env with your identifiers (see "Configuration" below)
-make secrets-init   # store passwords and API keys in the secret store
 
 # 3. Start everything: postgres + migrations + scrapers (with on-demand refresh) + dashboard
 make dev
 
-# Open http://localhost:3000
+# Open http://localhost:3000 and enter each institution's credentials in
+# Credenciales (see "Configuration" below)
 ```
 
 `make dev` brings up PostgreSQL (Docker), runs migrations, starts the scraper
@@ -103,22 +102,26 @@ dashboard on `127.0.0.1:3000`), so other machines on your network cannot reach
 it. To open the dashboard from your phone, see
 [Reaching the dashboard from another device](#reaching-the-dashboard-from-another-device).
 
-With no scraper configured the scraper service exits right away: `make dev`
-says so and keeps the dashboard running, but it stays empty and on-demand
-refresh is unavailable until at least one scraper is enabled.
+With no scraper configured the scraper service keeps running with nothing
+scheduled, waiting for credentials from the Credenciales page; each one you
+save there enables its scraper without a restart.
 
 ## Configuration
 
-Configuration is split in two:
+Scraper credentials (RUTs, e-mails, passwords, API keys) are best entered in
+the dashboard's **Credenciales** page; see
+[Credentials from the dashboard](#credentials-from-the-dashboard). The older
+path still works and is the fallback for any field not stored there:
 
-- **`.env`** — non-secret config: Postgres settings and scraper identifiers.
+- **`.env`**: non-secret config: Postgres settings and scraper identifiers.
 - **The secret store**: secrets (passwords, tokens, API keys): the macOS
   Keychain, the system keyring or an owner-only file (see "Secret store
   backends" below). Loaded automatically by `make dev`, `make scrapers-once`,
   `make scrapers-start`, `make up`, `make fintual-login` and
   `make bci-lider-login` via `scripts/load-secrets.sh`.
 
-Copy `.env.example` to `.env` and fill in the identifiers:
+Copy `.env.example` to `.env` and, if you are not using Credenciales, fill in
+the identifiers:
 
 ```bash
 # Required - PostgreSQL (defaults work out of the box)
@@ -199,7 +202,55 @@ none to store, so it is switched on by a flag):
 | MACH, Tenpo | `EMAIL_IMAP_HOST` + `EMAIL_IMAP_USER` + `EMAIL_IMAP_PASSWORD` |
 
 A value already exported in your shell wins over the store, so you can also
-export the secret env vars directly (e.g. in a CI or Docker-only deploy).
+export the secret env vars directly (e.g. in a CI or Docker-only deploy). A
+credential saved in Credenciales wins over all of these.
+
+### Credentials from the dashboard
+
+The **Credenciales** page has one card per institution with the fields its
+scraper needs: RUT and clave for the banks, e-mail and password for Fintual,
+API key and secret for Buda, the read-only API key for Skipo, and the IMAP
+server, user and app password for the e-mail parser (Tenpo). Mercado Pago has
+nothing to store: its card explains the manual sign-in
+(`make mercadopago-login`) and `MERCADOPAGO_ENABLED`.
+
+The page is write-only. Each field shows only its state: **Guardado aquí**
+(stored from the dashboard), **Desde almacén local** (the secret store, `.env`
+or the environment provides it), **Falta**, or **Requiere reingreso** (stored,
+but the scraper service can no longer open it), plus when it was last saved.
+No API ever returns a stored value, not even masked: to fix one, type it
+again. You can save a single field (e.g. only the clave) and delete one field
+or all of a card's; a deleted field falls back to the secret store. Saving or
+deleting applies at once (the scraper service rebuilds its scrapers without a
+restart; a scrape already running finishes with the old values).
+
+How it is protected:
+
+- The scraper service owns an X25519 key pair. The private key lives in an
+  owner-only (`0600`) file, `apps/scrapers/.credentials_key` (gitignored; in
+  Compose `/data/credentials_key` on the `scraper_state` volume; move it with
+  `CREDENTIALS_KEY_FILE`). It is created on first start, and the service
+  refuses a key file that other users can read. Only the public key goes to
+  the database.
+- The dashboard's server seals each field to that public key with HPKE
+  (RFC 9180: DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, AES-256-GCM) and stores
+  only the ciphertext. Each ciphertext is bound to its institution, field and
+  key, so it cannot be moved to another field. The dashboard can write a
+  credential but never read one back.
+- **Threat model.** The database alone (a dump, a backup, a leaked
+  `DATABASE_URL`) opens nothing. The database together with the key file opens
+  everything, as does the running scraper service's memory. Keep the key file
+  out of shared backups, but do back it up somewhere private: without it every
+  stored credential has to be entered again.
+- A key file that changes (deleted, or a different one, such as `make dev` and
+  `make up` each with their own) makes the rows sealed to the old one show
+  **Requiere reingreso**; the service log says how many. Restore the old key
+  file or enter them again. Key rotation is not automated yet.
+
+Saving needs the scraper service to have started once (it publishes its key);
+otherwise the API answers `503` asking you to run `make dev`.
+`make fintual-login` and `make bci-lider-login` also use the credentials
+stored here.
 
 ### Secret store backends
 
@@ -676,6 +727,11 @@ instead of spinning forever.
     are enabled)
   - `GET /health`: liveness check; `503` once the scheduler's heartbeat has
     stalled for 10 minutes (the Compose healthcheck reads it)
+  - `GET /credentials/status`: per credential env var, booleans only
+    (`fallback`, `stored`, `needs_reentry`) plus the public key id; never a value
+  - `POST /credentials/reload`: re-read the credentials stored from the
+    dashboard and add, drop or rebuild scrapers to match (`added`, `removed`,
+    `updated`, `scrapers`)
 - **Dashboard** — set `SCRAPER_CONTROL_URL` to reach that server; the web route
   `POST /api/institutions/refresh` (optional body `{"institution":"<slug>"}`) proxies
   to it and returns `503` when it's unavailable.
@@ -958,6 +1014,8 @@ All API routes are under `/api/`:
 | GET/PATCH | `/api/institutions/[slug]/products/[product]` | One product (with its `defaultName`) plus its balance history, recent transactions (shown `description` and original `rawDescription`) and, for a stock, its daily closes (`prices`: `{date, price}` oldest first, empty without a ticker); edit `name` (`null` resets it to `defaultName`), `slug`, `parentProductId`, `isActive`, `displayOrder`, and for a credit card `statementDay` / `dueDay` (1 to 31, `null` clears; merged into `attributes`) |
 | PATCH | `/api/accounts/[id]` | Rename an account (`name`) |
 | POST | `/api/institutions/refresh` | Trigger a scrape (all, or `{institution}`) |
+| GET | `/api/credentials` | Per institution and field: `stored`, `needsReentry`, `fallback` (`null` when the scraper service is down) and `updatedAt`; never a value |
+| PUT/DELETE | `/api/credentials/[slug]` | PUT `{ fields: { key: value } }` seals and stores some or all fields (`503` until the scraper service has published its key); DELETE forgets every field, or one with `?field=`. Both answer `applied` (whether the scraper service picked the change up; `null` when unreachable) |
 | GET | `/api/scrapers` | Latest run per scraper |
 | GET | `/api/scrapers/available` | Enabled scraper slugs, from the scraper service |
 | GET/POST | `/api/transactions` | Transactions (list, create; create takes an optional `location`); the list filters by `month`, `from`/`to`, `productId`, `institution`, `categoryId` and `q` (every word in the original or the displayed description, ignoring case and accents) |

@@ -8,7 +8,7 @@ Personal finance tracker for Chilean banks and fintechs: automated scrapers, for
 
 ## Overview
 
-El Chanchito (“the piggy bank”) is a self-hosted personal finance tracker. Python scrapers pull balances and transactions from Chilean financial institutions (Banco de Chile, Banco Santander, Banco Falabella, Tarjeta Lider Bci, Fintual, Buda, Skipo, MACH, MercadoPago and Tenpo) into PostgreSQL, and a Next.js dashboard turns them into monitors (budget drift and other alerts over your balances), a spending history, and a net-worth timeline. Everything runs locally via the Makefile or Docker Compose, and credentials stay on your machine in its secret store (the macOS Keychain, a Linux keyring, or an owner-only file on a headless host such as a Raspberry Pi). It runs on macOS, Linux and Windows (via WSL2), and the Docker Compose stack runs on a Raspberry Pi 4/5 (see [Supported platforms](USAGE.md#supported-platforms)).
+El Chanchito (“the piggy bank”) is a self-hosted personal finance tracker. Python scrapers pull balances and transactions from Chilean financial institutions (Banco de Chile, Banco Santander, Banco Falabella, Tarjeta Lider Bci, Fintual, Buda, Skipo, MACH, MercadoPago and Tenpo) into PostgreSQL, and a Next.js dashboard turns them into monitors (budget drift and other alerts over your balances), a spending history, and a net-worth timeline. Everything runs locally via the Makefile or Docker Compose, and credentials stay on your machine: entered in the dashboard's Credenciales page they are stored encrypted (HPKE) so only the local scraper service can open them, and the older secret store (the macOS Keychain, a Linux keyring, or an owner-only file on a headless host such as a Raspberry Pi) still works as a fallback. It runs on macOS, Linux and Windows (via WSL2), and the Docker Compose stack runs on a Raspberry Pi 4/5 (see [Supported platforms](USAGE.md#supported-platforms)).
 
 ## Highlights
 
@@ -27,10 +27,14 @@ Requires Node.js 20+ with pnpm 9 (`corepack enable`), Python 3.12+ and Docker; s
 git clone https://github.com/fguinez/el-chanchito.git
 cd el-chanchito
 make install           # Node deps + Python venv + Playwright Chromium
-cp .env.example .env   # then fill in your identifiers (see Configuration)
-make secrets-init      # store scraper secrets in the secret store
+cp .env.example .env
 make dev               # PostgreSQL (port 5435) + migrations + scrapers + dashboard at http://localhost:3000
 ```
+
+Then enter each institution's credentials in **Credenciales**. They are sealed
+to a key only the scraper service holds (`apps/scrapers/.credentials_key`; back
+it up privately), and the page never shows them again. See
+[USAGE.md](USAGE.md#credentials-from-the-dashboard).
 
 ## Usage
 
@@ -61,7 +65,8 @@ A scraper is enabled only when its credentials are present (Mercado Pago, which 
 | `FINTUAL_EMAIL` | no | Fintual account e-mail; enables the Fintual scraper (run `make fintual-login` once) |
 | `MERCADOPAGO_ENABLED` | no | Set to `1` to enable the Mercado Pago scraper: wallet balance, savings pots and wallet movements, read by driving a real Chrome on a profile you sign in to with `make mercadopago-login` (needs a machine with a display; no crypto) |
 | `EMAIL_IMAP_HOST` / `EMAIL_IMAP_USER` | no | Gmail IMAP identifiers; enable the e-mail parsers (MACH, Tenpo) |
-| `chanchito.*` | scrapers only | Secrets (bank passwords, Buda and Skipo API keys, Gmail App Password) live in the secret store (macOS Keychain, system keyring, or owner-only `local/secrets.env`): `make secrets-init` / `make secrets-status`. Values exported in your shell win over the store |
+| `chanchito.*` | scrapers only | Secrets (bank passwords, Buda and Skipo API keys, Gmail App Password) can also live in the secret store (macOS Keychain, system keyring, or owner-only `local/secrets.env`): `make secrets-init` / `make secrets-status`. Values exported in your shell win over the store; a value saved in Credenciales wins over both |
+| `CREDENTIALS_KEY_FILE` | no | Where the scraper service keeps the private key for the credentials saved in Credenciales (default `apps/scrapers/.credentials_key`, Compose `/data/credentials_key`) |
 
 `.env.example` documents every other setting the code reads, with its default (e-mail lookback window, Fintual session cache, the real-Chrome settings of Tarjeta Lider Bci and Mercado Pago, scraper mode, dashboard login, on-demand refresh wiring).
 

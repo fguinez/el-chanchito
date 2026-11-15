@@ -508,6 +508,7 @@ suggested category, cascading with the category.
 | `V044__transactions_billing_status.sql` | transactions gain `billing_status` (`unbilled` / `billed`, NULL = not reported; CHECK) and `statement_date` (only on billed rows; CHECK); the writer only moves them forward (see "Card billing status"); no backfill |
 | `V045__transactions_deleted_by.sql` | transactions gain `deleted_by` (`scraper` when a scraper cleanup soft-deleted the row, NULL when visible or deleted by the user; CHECK): scraper-deleted rows are never adopted and are restored when a scrape lists their key again; scraper logic only, no backfill |
 | `V046__category_subcategories.sql` | subcategories one level deep on the existing `categories.parent_id`: index on `parent_id` and a `BEFORE INSERT OR UPDATE OF parent_id` trigger (`trg_categories_one_level`) rejecting a self parent, a parent that is itself a subcategory, and re-parenting a category that has subcategories; no backfill |
+| `V048__institution_credentials.sql` | `credential_keys` (the scraper service's single X25519 public key, `key_id` = hex SHA-256 of it) and `institution_credentials` (one HPKE-sealed field per `(institution_slug, field_key)`, with its `scheme` and `key_id`); see "Sealed credentials" |
 
 ## Scraper Architecture
 
@@ -1598,6 +1599,71 @@ Browser → web POST /api/institutions/refresh {institution?}
 | `BANCHILE_LOGIN_COOLDOWN_MINUTES` | scrapers | Minimum minutes between full BanChile logins, which also gates manual refreshes (default `10`; `0` disables) |
 | `BANCHILE_BILLED_STATEMENTS` | scrapers | Card statements per currency each BanChile run reads, newest first (default `2`, at most `12`); raise it for a one-off backfill of older billed history |
 
+### Sealed credentials (V048)
+
+Scraper credentials can be entered in the dashboard (Credenciales) instead of
+the host secret store. The design goal is that the dashboard can **write** a
+credential but never **read** one, and that the database alone opens nothing:
+
+```
+Browser → web PUT /api/credentials/{slug} { fields }        (validated vs registry)
+        → seal each field with HPKE to credential_keys.public_key
+        → institution_credentials (slug, field, scheme, key_id, sealed)
+        → scrapers POST /credentials/reload
+        → open rows with the private key file → overlay os.environ → rebuild jobs
+```
+
+- **Keys.** The scraper service owns an X25519 key pair. The private key is a
+  PKCS#8 PEM file (`CREDENTIALS_KEY_FILE`, default
+  `apps/scrapers/.credentials_key`, Compose `/data/credentials_key`), created on
+  first start with `O_EXCL` + mode `0600` and linked into place atomically (a
+  concurrent creator's key wins). It is opened with `O_NOFOLLOW` and refused
+  when group/others can read it or another user owns it; the service then
+  runs on the env fallback only. The public key and its id (hex SHA-256 of the
+  32 raw bytes) are upserted into the single `credential_keys` row on start.
+- **Scheme.** HPKE (RFC 9180) base mode, DHKEM(X25519, HKDF-SHA256),
+  HKDF-SHA256, AES-256-GCM: `@hpke/core` on the web (WebCrypto), Python
+  `cryptography`'s `hazmat.primitives.hpke` in the scraper. The HPKE `info`
+  is `el-chanchito/credential \0 scheme \0 slug \0 field \0 key_id`, so a
+  ciphertext opens only for its own institution, field and key; `sealed` is
+  `enc || ciphertext`. A checked-in fixture sealed by the TypeScript code
+  (with a throwaway key) is opened by the Python tests to keep both sides in
+  step.
+- **Registry.** `packages/product-model/product_model/credentials.py` lists
+  each institution's fields (label, env var, identifier or secret, input
+  hints, pattern) and is generated into the TS index, so the form, the API
+  validation and the scraper overlay share one list. Identifiers (RUT,
+  e-mail) are sealed too.
+- **Overlay.** At startup (both modes) and on `POST /credentials/reload`, the
+  service opens every row and writes the values over `os.environ` under the
+  registry's env var names, the ones the scrapers already read. Stored values
+  win; a field with no row gets the environment's original value back (a
+  snapshot taken before the first overlay), so deleting a stored credential
+  restores the secret store's. Rows sealed to another key, or that fail to
+  open, are skipped with a warning naming slug and field only and reported as
+  needing re-entry.
+- **Reload.** `ScraperSet.rebuild()` re-runs `build_scrapers()`: a scraper that
+  lost its credentials loses its job, a new one gets one, and one whose
+  credential env changed (compared by an in-memory keyed digest, never the
+  values) gets a fresh instance through `job.modify(args=...)`. A run in
+  flight keeps its instance; `max_instances=1` still prevents overlap. A Tenpo
+  change resets the IMAP session. With the control port set, the scheduled
+  service stays up with no scrapers, waiting for credentials.
+- **Never a value out.** `GET /api/credentials` selects metadata columns only
+  and merges the control server's `GET /credentials/status` (booleans per env
+  var and the key id). No route, log line, error message or exception text
+  carries a value; responses are `no-store`. The routes sit behind the same
+  proxy guards (session, cross-site write refusal) as every other API route.
+- **Threat model.** Database dump or leaked `DATABASE_URL`: nothing opens. Key
+  file plus database, or the scraper process's memory: everything opens. Out of
+  scope for now: key rotation (re-sealing rows to a new key needs the
+  plaintext, so it has to happen in the scraper service), and moving the
+  existing secret store into the database automatically.
+
+| Var | Service | Meaning |
+|---|---|---|
+| `CREDENTIALS_KEY_FILE` | scrapers | Private key file for the sealed credentials (default `apps/scrapers/.credentials_key`; Compose `/data/credentials_key`) |
+
 ## Dashboard authentication
 
 The dashboard is single-user by design, so auth is a **shared secret**, not a
@@ -1819,14 +1885,16 @@ el-chanchito/
 │   │
 │   └── scrapers/                     # Python scraper service
 │       ├── scrapers/
+│       │   ├── credentials.py        # HPKE open, key file, env overlay (sealed credentials)
 │       │   ├── backends/             # email, banchile_web, banchile_movements, bci_lider_web,
 │       │   │                         #   real_chrome, mercadopago_web, santander_web,
 │       │   │                         #   banco_falabella_web, fintual_stocks
 │       │   └── institutions/         # 10 scrapers: banchile, banco_falabella, bci_lider, buda,
 │       │                             #   fintual, mach, mercadopago, santander, skipo, tenpo
-│       ├── db/                       # Connection pool + writer + slug
+│       ├── db/                       # Connection pool + writer + slug + credentials
 │       ├── tests/                    # pytest (conftest.py: per-test DB fixtures)
 │       ├── main.py                   # Entry point + scheduler + control endpoint
+│       ├── credential_manager.py     # Key + overlay lifecycle for the stored credentials
 │       ├── requirements.txt
 │       ├── requirements-dev.txt     # + pytest
 │       ├── pyproject.toml           # pytest config only
