@@ -646,8 +646,11 @@ scraper (one row per method and institution):
 - How long ago it ran
 - A status badge: `success`, `partial` (it finished with warnings), `error`,
   `inicia sesión` (`needs_sign_in`: the session is gone and the message names
-  the `make <institution>-login` command to run), or `running`. Runs that need a
-  sign-in also get a violet banner of their own, apart from the red error one.
+  the `make <institution>-login` command to run), `omitido` (`skipped`: the
+  scraper chose not to read this time, e.g. BanChile's login cooldown refused a
+  full login; nothing is broken and the previous data stands), or `running`.
+  Runs that need a sign-in also get a violet banner of their own, apart from
+  the red error one; skipped runs get no banner.
 - Error messages (click any finished row that has one to expand it)
 
 ### On-demand refresh (from the dashboard)
