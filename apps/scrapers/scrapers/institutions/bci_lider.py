@@ -37,6 +37,7 @@ import os
 from scrapers.backends.bci_lider_billing import LiderStatement
 from scrapers.backends.bci_lider_web import (
     BciLiderCardResult,
+    BciLiderSignInRequired,
     save_login_session,
     scrape_card,
 )
@@ -144,9 +145,14 @@ class BciLiderScraper(BaseScraper):
             logger.exception("Playwright not installed. Run: pip install -r requirements.txt")
             self._error = exc
             raise
+        except BciLiderSignInRequired as exc:
+            # A human must sign in again: no traceback. Cached like any failure.
+            logger.warning("%s", exc)
+            self._error = exc
+            raise
         except Exception as exc:
-            # BciLiderSessionError (Chrome unreachable / sign-in failed) and any
-            # other failure land here; cache so the products leg doesn't re-drive.
+            # BciLiderSessionError (Chrome unreachable) and any other failure
+            # land here; cache so the products leg doesn't re-drive.
             logger.exception("BciLider scrape failed")
             self._error = exc
             raise

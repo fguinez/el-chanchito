@@ -753,8 +753,16 @@ mode, driving a long-running Chrome from `make bci-lider-login` instead.
 Its managed Chrome has no pidfile yet, so one orphaned by a killed service
 still blocks later runs until it is closed by hand; that arrives when BCI
 Lider moves onto `backends/real_chrome.py`.
-Either way it reuses an already-signed-in tab or re-logs-in via autofill, and raises
-a "run make bci-lider-login" error when Chrome is unreachable. Both legs share one
+Either way it reuses an already-signed-in tab or re-logs-in via autofill. A portal
+that stays signed out (the autofill times out with the login form still showing,
+or a read bounces to /login after the retry) raises `BciLiderSignInRequired`, so
+the run is `needs_sign_in` and the message asks for `make bci-lider-login` plus
+`LIDER_BCI_CDP_URL` (a managed run would otherwise collide with that Chrome's
+port). A clave the portal rejected off-screen is never resent by the visible
+retry, and a retry that dies otherwise keeps the run `needs_sign_in`.
+Everything else stays a plain `BciLiderSessionError`, an `error` run: an
+unreachable or exited Chrome, a busy debug port, and a `/login` page that never
+showed its form (portal down or slow). Both legs share one
 drive per cycle: `scrape_transactions` opens it and caches the result for
 `scrape_products` (a session error is re-raised, never retried). The "Mi Tarjeta
 -> Saldos" page yields the CLP "Nacional" and USD "Internacional" `credit_card`
@@ -1206,13 +1214,13 @@ Both `method` and `institution` are stored per `scraper_runs` row, and
 - `error`: something failed and nothing landed.
 - `needs_sign_in`: nothing landed and the only failures were legs that raised
   `SignInRequired` (`scrapers/base.py`): the session is gone and only a human
-  sign-in brings it back. `MercadoPagoSessionError` and `FintualSessionError`
-  subclass it. Such a leg is logged as one warning line without a traceback,
-  and its message is stored once (both legs usually raise the same one),
-  first and without the `transactions: ` / `products: ` prefix, so the
-  dashboard's 120-character summary keeps the command to run. Alongside
-  another failure it counts as an error (`error`, or `partial` when something
-  landed).
+  sign-in brings it back. `MercadoPagoSessionError`, `FintualSessionError`
+  and `BciLiderSignInRequired` subclass it. Such a leg is logged as one
+  warning line without a traceback, and its message is stored once (both
+  legs usually raise the same one), first and without the `transactions: ` /
+  `products: ` prefix, so the dashboard's 120-character summary keeps the
+  command to run. Alongside another failure it counts as an error (`error`,
+  or `partial` when something landed).
 
 Writes are isolated per row: `run_scraper` writes each product separately, and
 `write_transactions` runs each transaction (and each product resolution) in

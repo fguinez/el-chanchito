@@ -6,17 +6,22 @@ CLP/USD amounts); no real portal capture appears here.
 
 import asyncio
 import os
+import time
 from datetime import date
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
 os.environ.setdefault("LIDER_BCI_RUT", "00000000-0")
 os.environ.setdefault("LIDER_BCI_PASSWORD", "test")
 
+import main as main_mod
+from db.writer import TransactionWriteResult, VanishedProductsResult
 from scrapers.backends import bci_lider_web as web
 from scrapers.backends.bci_lider_billing import LiderStatement
 from scrapers.backends.bci_lider_web import BciLiderCardResult
-from scrapers.base import ProductRef, ScrapedExchangeRate, ScrapedProduct
+from scrapers.base import ProductRef, ScrapedExchangeRate, ScrapedProduct, SignInRequired
 from scrapers.institutions import bci_lider as bci_lider_mod
 from scrapers.institutions.bci_lider import BciLiderScraper
 
@@ -649,6 +654,7 @@ class TestRealChromeWiring:
         assert deadlines == [123.0]
         assert "http://localhost:9222" in str(info.value)
         assert "make bci-lider-login" in str(info.value)
+        assert not isinstance(info.value, SignInRequired)
 
     def test_exited_chrome_is_a_lider_session_error_with_the_profile_hint(self, monkeypatch):
         """A launched Chrome that exits surfaces at once with the profile hint."""
@@ -728,3 +734,208 @@ class TestRealChromeWiring:
             web._scrape_managed_once(9222, "http://localhost:9222", None, None, offscreen=True)
 
         assert terminated == [("proc", "http://localhost:9222")]
+
+
+class _Locator:
+    def __init__(self, visible):
+        self.first = self
+        self._visible = visible
+
+    def is_visible(self):
+        return self._visible
+
+
+class _SignedOutPage:
+    """A tab the portal keeps on /login: every navigation is a no-op."""
+
+    url = "https://example.invalid/login"
+
+    def __init__(self, login_form=True):
+        self._login_form = login_form
+
+    def goto(self, url, **kwargs):
+        pass
+
+    def wait_for_timeout(self, ms):
+        pass
+
+    def locator(self, selector):
+        return _Locator(self._login_form)
+
+
+class TestSignInRequired:
+    """A portal that stays signed out needs a human; an unreachable Chrome does not."""
+
+    def test_an_autofill_that_never_lands_needs_a_sign_in(self, monkeypatch):
+        """The login timeout names the login command and is a SignInRequired."""
+        monkeypatch.setattr(web, "_autofill_and_submit", lambda *args: None)
+
+        with pytest.raises(web.BciLiderSignInRequired) as info:
+            web._login_via_autofill(_SignedOutPage(), None, None, time.monotonic() - 1)
+
+        assert isinstance(info.value, SignInRequired)
+        assert "make bci-lider-login" in str(info.value)[:120]
+        assert "LIDER_BCI_CDP_URL" in str(info.value)
+
+    @pytest.mark.parametrize(
+        ("submitted", "hint"),
+        [(True, "clave may be wrong"), (False, "Cloudflare")],
+        ids=["rejected", "never-submitted"],
+    )
+    def test_the_error_says_whether_the_clave_was_sent(self, monkeypatch, submitted, hint):
+        """A submitted login that never lands blames the clave; an unsent one, Cloudflare."""
+        monkeypatch.setattr(web, "_autofill_and_submit", lambda *args: submitted)
+
+        with pytest.raises(web.BciLiderSignInRequired) as info:
+            web._login_via_autofill(_SignedOutPage(), None, None, time.monotonic() - 1)
+
+        assert info.value.submitted is submitted
+        assert hint in str(info.value)
+        assert "make bci-lider-login" in str(info.value)[:120]
+
+    @pytest.mark.parametrize("clicked", [True, False], ids=["clicked", "click-failed"])
+    def test_submitted_means_ingresar_was_clicked(self, monkeypatch, clicked):
+        """The autofill only reports a submit when the Ingresar click went through."""
+        monkeypatch.setattr(web, "_submit_enabled", lambda page: True)
+        monkeypatch.setattr(web, "_click_first", lambda *args, **kwargs: clicked)
+        page = SimpleNamespace(evaluate=lambda js: True, wait_for_timeout=lambda ms: None)
+
+        submitted = web._autofill_and_submit(page, None, None, time.monotonic() + 60)
+
+        assert submitted is clicked
+
+    def test_a_rejected_clave_without_its_form_still_blames_the_clave(self, monkeypatch):
+        """Once the clave went out, a page hiding the form is still a rejection."""
+        monkeypatch.setattr(web, "_autofill_and_submit", lambda *args: True)
+
+        with pytest.raises(web.BciLiderSignInRequired) as info:
+            web._login_via_autofill(
+                _SignedOutPage(login_form=False), None, None, time.monotonic() - 1
+            )
+
+        assert info.value.submitted is True
+
+    def test_a_login_page_without_its_form_is_an_error(self, monkeypatch):
+        """A maintenance or error page at /login is not a sign-in a human can fix."""
+        monkeypatch.setattr(web, "_autofill_and_submit", lambda *args: None)
+
+        with pytest.raises(web.BciLiderSessionError) as info:
+            web._login_via_autofill(
+                _SignedOutPage(login_form=False), None, None, time.monotonic() - 1
+            )
+
+        assert not isinstance(info.value, SignInRequired)
+
+    def test_a_bounce_to_login_while_reading_needs_a_sign_in(self, monkeypatch):
+        """It stays a BciLiderSessionError, so the mid-read retry still catches it."""
+        monkeypatch.setattr(web, "_dismiss_popup", lambda page: None)
+
+        with pytest.raises(web.BciLiderSignInRequired) as info:
+            web._read_balances(_SignedOutPage())
+
+        assert isinstance(info.value, web.BciLiderSessionError)
+
+    @pytest.mark.parametrize(
+        ("exc", "status"),
+        [
+            pytest.param(
+                web.BciLiderSignInRequired("Could not sign in. Run `make bci-lider-login`."),
+                "needs_sign_in",
+                id="signed-out",
+            ),
+            pytest.param(
+                web.BciLiderSessionError("Could not reach the Chrome debug port."),
+                "error",
+                id="chrome-unreachable",
+            ),
+        ],
+    )
+    def test_the_run_status_follows_the_failure(self, monkeypatch, exc, status):
+        """Both legs share the one failure; only a sign-in one ends `needs_sign_in`."""
+        calls = []
+
+        async def failing(rut=None, password=None, cdp_url=None):
+            calls.append(1)
+            raise exc
+
+        monkeypatch.setattr(bci_lider_mod, "scrape_card", failing)
+        finish = MagicMock()
+        monkeypatch.setattr(main_mod, "start_scraper_run", MagicMock(return_value="run-1"))
+        monkeypatch.setattr(
+            main_mod, "write_transactions", MagicMock(return_value=TransactionWriteResult())
+        )
+        monkeypatch.setattr(main_mod, "upsert_product", MagicMock())
+        monkeypatch.setattr(
+            main_mod, "retire_vanished_products", MagicMock(return_value=VanishedProductsResult())
+        )
+        monkeypatch.setattr(main_mod, "finish_scraper_run", finish)
+
+        asyncio.run(main_mod.run_scraper(BciLiderScraper()))
+
+        (_, recorded), _ = finish.call_args
+        assert recorded == status
+        assert calls == [1]
+
+
+class TestManagedFallback:
+    """The visible-window retry never resends a rejected clave nor hides a sign-in."""
+
+    @pytest.fixture
+    def attempts(self, monkeypatch):
+        monkeypatch.setattr(web.real_chrome, "port_in_use", lambda port: False)
+        calls = []
+        outcomes = []
+
+        def fake_once(port, cdp_url, rut, password, offscreen):
+            calls.append(offscreen)
+            outcome = outcomes.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        monkeypatch.setattr(web, "_scrape_managed_once", fake_once)
+        return calls, outcomes
+
+    def test_a_rejected_clave_is_not_retried(self, attempts):
+        """A submitted sign-in the portal rejected propagates without a second attempt."""
+        calls, outcomes = attempts
+        rejected = web.BciLiderSignInRequired("synthetic", submitted=True)
+        outcomes.append(rejected)
+
+        with pytest.raises(web.BciLiderSignInRequired) as info:
+            web._scrape_managed_sync(None, None)
+
+        assert info.value is rejected
+        assert calls == [True]
+
+    def test_an_unsent_sign_in_retries_visibly(self, attempts):
+        """A sign-in Cloudflare never let through is retried in a visible window."""
+        calls, outcomes = attempts
+        outcomes.extend([web.BciLiderSignInRequired("synthetic"), "result"])
+
+        result = web._scrape_managed_sync(None, None)
+
+        assert result == "result"
+        assert calls == [True, False]
+
+    def test_a_retry_failing_otherwise_keeps_the_sign_in_error(self, attempts):
+        """A visible retry that dies for another reason still reports the sign-in."""
+        calls, outcomes = attempts
+        unsent = web.BciLiderSignInRequired("synthetic")
+        outcomes.extend([unsent, web.BciLiderSessionError("Chrome exited")])
+
+        with pytest.raises(web.BciLiderSignInRequired) as info:
+            web._scrape_managed_sync(None, None)
+
+        assert info.value is unsent
+        assert calls == [True, False]
+
+    def test_a_plain_failure_falls_back_to_a_visible_window(self, attempts):
+        """Any other off-screen failure is retried once, and the retry's result wins."""
+        calls, outcomes = attempts
+        outcomes.extend([web.BciLiderSessionError("synthetic"), "result"])
+
+        result = web._scrape_managed_sync(None, None)
+
+        assert result == "result"
+        assert calls == [True, False]
