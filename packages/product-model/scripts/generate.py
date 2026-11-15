@@ -19,12 +19,16 @@ from pydantic import BaseModel
 from pydantic.json_schema import models_json_schema
 
 from product_model import (
+    CREDENTIAL_SPECS,
     FAMILIES,
     PRODUCT_FAMILIES,
     PRODUCT_KINDS,
     REGISTRY,
     ColumnFormat,
     ColumnSource,
+    CredentialField,
+    CredentialFieldKind,
+    CredentialInputMode,
     ResolvedColumn,
     ScrapedExchangeRate,
     ScrapedPriceHistory,
@@ -32,6 +36,7 @@ from product_model import (
     ScrapedTransaction,
     family_kinds,
     resolve_columns,
+    validate_credential_specs,
     validate_display_specs,
 )
 
@@ -299,6 +304,88 @@ def _emit_family_info() -> str:
     return "\n".join(lines)
 
 
+def _ts_str(value: str | None) -> str:
+    return "null" if value is None else json.dumps(value, ensure_ascii=False)
+
+
+def _ts_credential_field(f: CredentialField) -> str:
+    fallbacks = ", ".join(json.dumps(env) for env in f.fallback_env_vars)
+    return "\n".join(
+        [
+            "      {",
+            f"        key: {json.dumps(f.key)},",
+            f"        labelEs: {_ts_str(f.label_es)},",
+            f"        envVar: {json.dumps(f.env_var)},",
+            f"        kind: {json.dumps(str(f.kind))},",
+            f"        required: {json.dumps(f.required)},",
+            f"        inputMode: {json.dumps(str(f.input_mode))},",
+            f"        placeholder: {_ts_str(f.placeholder)},",
+            f"        pattern: {_ts_str(f.pattern)},",
+            f"        patternHintEs: {_ts_str(f.pattern_hint_es)},",
+            f"        defaultValue: {_ts_str(f.default)},",
+            f"        helpEs: {_ts_str(f.help_es)},",
+            f"        maxLength: {f.max_length},",
+            f"        fallbackEnvVars: [{fallbacks}],",
+            "      },",
+        ]
+    )
+
+
+def _emit_credential_specs() -> str:
+    validate_credential_specs()
+    kinds = " | ".join(json.dumps(str(k)) for k in CredentialFieldKind)
+    modes = " | ".join(json.dumps(str(m)) for m in CredentialInputMode)
+    lines = [
+        f"export type CredentialFieldKind = {kinds};",
+        f"export type CredentialInputMode = {modes};",
+        "",
+        "export interface CredentialFieldSpec {",
+        "  key: string;",
+        "  labelEs: string;",
+        "  envVar: string;",
+        "  kind: CredentialFieldKind;",
+        "  required: boolean;",
+        "  inputMode: CredentialInputMode;",
+        "  placeholder: string | null;",
+        "  /** Full-match pattern (no anchors), enforced on save. */",
+        "  pattern: string | null;",
+        "  patternHintEs: string | null;",
+        "  defaultValue: string | null;",
+        "  helpEs: string | null;",
+        "  maxLength: number;",
+        "  fallbackEnvVars: readonly string[];",
+        "}",
+        "",
+        "export interface InstitutionCredentialSpec {",
+        "  slug: string;",
+        "  labelEs: string;",
+        "  logoSlug: string;",
+        "  scraperSlugs: readonly string[];",
+        "  noteEs: string | null;",
+        "  fields: readonly CredentialFieldSpec[];",
+        "}",
+        "",
+        "export const CREDENTIAL_SPECS: readonly InstitutionCredentialSpec[] = [",
+    ]
+    for spec in CREDENTIAL_SPECS:
+        scrapers = ", ".join(json.dumps(slug) for slug in spec.scraper_slugs)
+        lines.append("  {")
+        lines.append(f"    slug: {json.dumps(spec.slug)},")
+        lines.append(f"    labelEs: {_ts_str(spec.label_es)},")
+        lines.append(f"    logoSlug: {json.dumps(spec.logo_slug)},")
+        lines.append(f"    scraperSlugs: [{scrapers}],")
+        lines.append(f"    noteEs: {_ts_str(spec.note_es)},")
+        if spec.fields:
+            lines.append("    fields: [")
+            lines.extend(_ts_credential_field(f) for f in spec.fields)
+            lines.append("    ],")
+        else:
+            lines.append("    fields: [],")
+        lines.append("  },")
+    lines.append("];")
+    return "\n".join(lines)
+
+
 def _render_index_ts() -> str:
     validate_display_specs()
     kinds_const = "\n".join(
@@ -353,6 +440,7 @@ def _render_index_ts() -> str:
         '  (kind) => KIND_INFO[kind].role === "liability",\n'
         ");"
     )
+    blocks.append(_emit_credential_specs())
     return "\n\n".join(blocks) + "\n"
 
 
