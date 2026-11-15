@@ -1764,13 +1764,20 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
   backups or copies of the key file still hold it: the rename does not erase
   the disk). Rows that cannot be opened stay as they were and need re-entry.
   Recovery (`recover_pending`, on every sync and before every rotation or
-  reset, under the key file lock): stale key temp files are swept; then,
+  reset, under the key file lock): key temp files are swept (every key write,
+  first start included, happens under that lock, so any temp is stale); then,
   after taking the ring's advisory lock (so an in-flight rotation's COMMIT is
   visible first), a `.next` whose key the ring knows is promoted, one is
   discarded only when the ring shows the key file's current key active
-  without it, and anything else (another database, no key file) keeps both
-  files and logs an error; with the database unreachable both stay too.
-  Rotation and reset are refused where flock is missing (native Windows). The running
+  without it, and anything else (another database, a recreated one, no key
+  file) keeps both files: status `pending_unresolved`, logged once, Guardar
+  disabled. `make credentials-reset-key` then renames it to
+  `.next.aside-<time>` (never deleted; the sweep ignores it). A rotation the
+  database refused (`KeyRingConflict`, rolled back) discards its `.next` at
+  once. With the database unreachable both files stay. A key or lock file
+  error (EACCES, EROFS, ENOLCK) settles on the env fallback as
+  `key_unavailable` instead of being retried as an outage. Rotation and reset
+  are refused where flock is missing (native Windows). The running
   service picks up a key the CLI rotated or reset on disk at its next sync
   (the CLI also calls `POST /credentials/reload` best effort).
 - **Concurrent saves.** The dashboard seals to the active key, checks the

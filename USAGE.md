@@ -331,8 +331,13 @@ being as sensitive as the credentials.
   credential is ever left unopenable. A save in the dashboard that races a
   rotation is either re-sealed by it or sealed again to the new key. A
   leftover new key is deleted only when the database shows the old key still
-  active without it; if the database cannot tell (for example `DATABASE_URL`
-  points elsewhere), both files are kept and the log says so.
+  active without it; if the database cannot tell (`DATABASE_URL` points
+  elsewhere, or the database was recreated), both files are kept, the page
+  shows the interrupted rotation and disables Guardar, and the log says what
+  to do once: fix `DATABASE_URL`, or run `make credentials-reset-key`, which
+  moves the leftover to `<key file>.next.aside-<time>` instead of deleting
+  it. That file still holds a private key: delete it yourself once you are
+  sure nothing was sealed to it.
 - Rotating and resetting need file locking, so they are refused on native
   Windows (WSL2 works).
 
@@ -860,7 +865,8 @@ instead of spinning forever.
     stalled for 10 minutes (the Compose healthcheck reads it)
   - `GET /credentials/status`: per credential env var, booleans only
     (`fallback`, `stored`, `needs_reentry`), plus the key state (`state`:
-    `ok`, `starting`, `key_mismatch` or `key_unavailable`), the public key
+    `ok`, `starting`, `key_mismatch`, `pending_unresolved` or
+    `key_unavailable`), the public key
     ids, the active key's creation date, `max_age_days` and the last
     rotation failure; never a value
   - `POST /credentials/reload`: re-read the credentials stored from the
