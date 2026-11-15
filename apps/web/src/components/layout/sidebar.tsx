@@ -13,6 +13,7 @@ import {
   ArrowLeftRight,
   Tags,
   Replace,
+  KeyRound,
   LogOut,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -27,6 +28,7 @@ const navItems = [
   { href: "/aliases", label: "Alias", icon: Replace },
   { href: "/budget", label: "Presupuesto", icon: ChartPie },
   { href: "/transfers", label: "Transferencias", icon: ArrowLeftRight },
+  { href: "/credentials", label: "Credenciales", icon: KeyRound },
 ];
 
 export function Sidebar() {
