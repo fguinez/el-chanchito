@@ -123,11 +123,26 @@ def fetch_active_key() -> ActiveKey | None:
 
 
 @with_db_retry
-def key_in_ring(key_id: str) -> bool:
-    """Whether `key_id` was ever published (active or retired)."""
-    with get_pool().connection() as conn:
-        row = conn.execute("SELECT 1 FROM credential_keys WHERE key_id = %s", (key_id,)).fetchone()
-    return row is not None
+def pending_outcome(pending_key_id: str, current_key_id: str | None) -> str:
+    """Whether a rotation from `current_key_id` to `pending_key_id` committed.
+
+    Takes the ring's advisory lock first, so a rotation whose COMMIT is still
+    in flight finishes (and becomes visible) before this reads. Returns
+    `committed` (the pending key is in the ring), `not_committed` (it is not,
+    and the current key is still the active one: the rotation never landed
+    here) or `unknown` (anything else, e.g. another database): only
+    `not_committed` lets the caller delete the pending key."""
+    with get_pool().connection() as conn, conn.transaction():
+        conn.execute(_RING_LOCK)
+        pending = conn.execute(
+            "SELECT 1 FROM credential_keys WHERE key_id = %s", (pending_key_id,)
+        ).fetchone()
+        if pending is not None:
+            return "committed"
+        active = _active(conn)
+    if current_key_id is not None and active is not None and active.key_id == current_key_id:
+        return "not_committed"
+    return "unknown"
 
 
 def _rows(conn, where: str = "", params: tuple = (), lock: bool = False) -> list[SealedCredential]:

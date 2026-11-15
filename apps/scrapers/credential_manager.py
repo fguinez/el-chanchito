@@ -8,8 +8,8 @@ stored credential it can open over `os.environ`.
 
 One key per database: a service never replaces an active key it does not
 hold. If the database seals to another key that owns rows, the service
-reports `key_mismatch`, opens nothing and logs the fix (use that key file, or
-`make credentials-reset-key`). Before it has ever published in this process
+reports `key_mismatch`, opens nothing and logs the fix (run only the service
+that saved them, never a copy of its key file, or `make credentials-reset-key`). Before it has ever published in this process
 it may take over an active key no row is sealed to, since nothing is lost.
 
 Rotation (`rotate_key_file`, shared by the service's periodic check and
@@ -60,9 +60,11 @@ DEFAULT_MAX_AGE_DAYS = 90
 ROTATION_RETRY_SECONDS = 60 * 60
 
 RESET_HINT = (
-    "use the key file of the service that saved them (one key file per database), "
-    "or run `make credentials-reset-key` to start over (stored credentials must then "
-    "be entered again)"
+    "run only the scraper service that saved them against this database (stop this one; "
+    "one service per database). Do not copy its key file here: after a rotation a copy "
+    "keeps the old key, which rotation is meant to delete. If that key file is lost, run "
+    "`make credentials-reset-key` to start over (stored credentials must then be entered "
+    "again)"
 )
 
 
@@ -75,8 +77,8 @@ class DatabaseKeyRing:
     def active_key(self) -> ActiveKey | None:
         return db_credentials.fetch_active_key()
 
-    def key_in_ring(self, key_id: str) -> bool:
-        return db_credentials.key_in_ring(key_id)
+    def pending_outcome(self, pending_key_id: str, current_key_id: str | None) -> str:
+        return db_credentials.pending_outcome(pending_key_id, current_key_id)
 
     def fetch_rows(self) -> list[SealedCredential]:
         return db_credentials.fetch_sealed_credentials()
@@ -107,6 +109,18 @@ class RotationPending(RotationError):
     the next sync finishes or rolls it back."""
 
 
+class PendingUnresolved(RotationPending):
+    """A leftover `.next` the database neither confirms nor rules out (for
+    example DATABASE_URL points at another database). It is kept, never
+    deleted, until a database that can decide is reachable."""
+
+
+NO_LOCK_REASON = (
+    "rotating or resetting the key needs file locking (macOS, Linux or WSL2); "
+    "native Windows is not supported"
+)
+
+
 @dataclass(frozen=True)
 class RotationResult:
     old_key_id: str
@@ -117,13 +131,24 @@ class RotationResult:
 
 def recover_pending(key_file: KeyFile, ring) -> str | None:
     """Finish or roll back a rotation a crash interrupted; call it with the
-    key file's lock held. The rotation committed exactly when the database
-    knows the pending key. Returns "promoted", "discarded" or None (nothing
-    pending); raises when the database cannot say (`.next` then stays)."""
+    key file's lock held. Returns "promoted", "discarded" or None (nothing
+    pending).
+
+    The pending key is promoted when the ring knows it (the commit landed),
+    and deleted only when the ring positively shows the key file's current
+    key still active without it. Anything else (another database, no current
+    key file) raises PendingUnresolved and keeps it; a database error
+    propagates and keeps it too."""
+    key_file.sweep_stale_tmp()
     pending = key_file.load_pending()
     if pending is None:
         return None
-    if ring.key_in_ring(pending.key_id):
+    try:
+        current: str | None = key_file.load().key_id
+    except FileNotFoundError:
+        current = None
+    outcome = ring.pending_outcome(pending.key_id, current)
+    if outcome == "committed":
         key_file.promote_pending()
         logger.warning(
             "Finished an interrupted credentials key rotation: %s is now the key file "
@@ -131,19 +156,30 @@ def recover_pending(key_file: KeyFile, ring) -> str | None:
             pending.key_id[:12],
         )
         return "promoted"
-    key_file.discard_pending()
-    logger.warning("Rolled back an interrupted credentials key rotation; the key is unchanged")
-    return "discarded"
+    if outcome == "not_committed":
+        key_file.discard_pending()
+        logger.warning("Rolled back an interrupted credentials key rotation; the key is unchanged")
+        return "discarded"
+    logger.error(
+        "%s holds the key of an interrupted rotation (%s) that this database neither "
+        "confirms nor rules out; it is kept. Check that DATABASE_URL is the database the "
+        "rotation ran against; the service resolves it once it is",
+        key_file.next_path,
+        pending.key_id[:12],
+    )
+    raise PendingUnresolved("an interrupted rotation could not be resolved against this database")
 
 
 def rotate_key_file(
     key_file: KeyFile, ring, fallback: dict[str, str | None] | None = None
 ) -> RotationResult:
     """Rotate the database's active key, which must be `key_file`'s."""
+    if not key_file.locking_available:
+        raise RotationError(NO_LOCK_REASON)
     with key_file.lock():
         try:
             recover_pending(key_file, ring)
-        except CredentialKeyError:
+        except (CredentialKeyError, RotationPending):
             raise
         except Exception as exc:
             raise RotationPending(
@@ -152,13 +188,20 @@ def rotate_key_file(
         try:
             old = key_file.load()
         except FileNotFoundError:
-            raise RotationError(f"there is no key file at {key_file.path}") from None
+            logger.warning("No credentials key file at %s to rotate", key_file.path)
+            raise RotationError("there is no key file to rotate") from None
         try:
             active = ring.active_key()
         except Exception as exc:
             raise RotationError(f"could not read the active key ({type(exc).__name__})") from None
         if active is None or active.key_id != old.key_id:
-            raise RotationError(f"{key_file.path} does not hold the database's active key")
+            logger.warning(
+                "%s holds key %s, not the database's active key %s",
+                key_file.path,
+                old.key_id[:12],
+                (active.key_id if active else "none")[:12],
+            )
+            raise RotationError("the key file does not hold the database's active key")
         new = generate_key()
         key_file.write_pending(new)
         try:
@@ -191,10 +234,12 @@ def rotate_key_file(
 def reset_key_file(key_file: KeyFile, ring) -> tuple[CredentialKey, str | None, int]:
     """Make the local key file's key the database's active one, retiring
     whatever was active. Rows sealed to that one can no longer be opened."""
+    if not key_file.locking_available:
+        raise RotationError(NO_LOCK_REASON)
     with key_file.lock():
         try:
             recover_pending(key_file, ring)
-        except CredentialKeyError:
+        except (CredentialKeyError, RotationPending):
             raise
         except Exception as exc:
             raise RotationPending(
@@ -257,6 +302,7 @@ class CredentialManager:
         self._rotation_failure: tuple[datetime, str] | None = None
         self._next_rotation_attempt = 0.0
         self._rows_read = False
+        self._warned_no_lock = False
         # Set once the stored credentials are applied or known to be unusable
         # (no key, key mismatch, schema missing): the first scrape waits on it,
         # so it never logs in with credentials the dashboard has replaced.
@@ -455,6 +501,11 @@ class CredentialManager:
 
     def _rotation_due(self) -> bool:
         if self.max_age_days <= 0 or not (self._published and self._loaded):
+            return False
+        if not self.key_file.locking_available:
+            if not self._warned_no_lock:
+                self._warned_no_lock = True
+                logger.warning("Automatic key rotation is off: %s", NO_LOCK_REASON)
             return False
         if self._active is None or time.monotonic() < self._next_rotation_attempt:
             return False

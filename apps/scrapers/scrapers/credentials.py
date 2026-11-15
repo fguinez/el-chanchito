@@ -29,6 +29,7 @@ import os
 import re
 import secrets
 import stat
+import time
 from collections.abc import Iterable, Iterator, Mapping, MutableMapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -308,6 +309,37 @@ class KeyFile:
         self.discard_pending()
         self.write_pending(key)
         self.promote_pending()
+
+    def sweep_stale_tmp(self, min_age_seconds: float = 60.0) -> int:
+        """Delete key temp files a killed writer left behind (each holds a
+        private key, or is a second link to one that rotation would then
+        never delete). `.next` temps are written under the lock, so any is
+        stale; a first-start temp is only once it is older than a minute."""
+        removed = 0
+        now = time.time()
+        for tmp in self.path.parent.glob(f"{self.path.name}.*.tmp"):
+            under_lock = tmp.name.startswith(f"{self.next_path.name}.")
+            try:
+                if not under_lock and now - tmp.lstat().st_mtime < min_age_seconds:
+                    continue
+                tmp.unlink()
+                removed += 1
+            except FileNotFoundError:
+                continue
+        if removed:
+            _fsync_dir(self.path.parent)
+            logger.warning("Deleted %d stale credentials key temp file(s)", removed)
+        return removed
+
+    @property
+    def locking_available(self) -> bool:
+        """Whether `lock()` really excludes other processes (not on native
+        Windows, which has no flock; WSL2 does)."""
+        try:
+            import fcntl  # noqa: F401
+        except ImportError:
+            return False
+        return True
 
     @contextmanager
     def lock(self) -> Iterator[None]:

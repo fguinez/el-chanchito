@@ -51,9 +51,13 @@ class FakeRing:
         self._check()
         return self.active
 
-    def key_in_ring(self, key_id):
+    def pending_outcome(self, pending_key_id, current_key_id):
         self._check()
-        return key_id in self.statuses
+        if pending_key_id in self.statuses:
+            return "committed"
+        if current_key_id and self.active and self.active.key_id == current_key_id:
+            return "not_committed"
+        return "unknown"
 
     def fetch_rows(self):
         self._check()
