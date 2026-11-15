@@ -55,10 +55,12 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlparse
 
 from product_model import CreditCardAttributes, CreditCardMetrics
 from scrapers.backends import real_chrome
 from scrapers.backends.bci_lider_billing import (
+    PORTAL_HOST,
     LiderStatement,
     billing_metrics,
     read_billing,
@@ -757,7 +759,7 @@ def _read_movements(page) -> list[dict]:
     return movements
 
 
-def _read_card(page, result: BciLiderCardResult) -> None:
+def _read_card(page, result: BciLiderCardResult, browser=None) -> None:
     """Read balances + movements into `result` from an authenticated tab.
 
     The balances leg doubles as a final auth check: a session that bounced to
@@ -772,12 +774,44 @@ def _read_card(page, result: BciLiderCardResult) -> None:
     except Exception as exc:
         logger.exception("BciLider: movements leg failed")
         result.warnings.append(f"BciLider: movements failed: {exc}")
-    _read_billing_into(page, result)
+    reacquire = (lambda: _live_portal_tab(browser, page)) if browser is not None else None
+    _read_billing_into(page, result, reacquire)
 
 
-def _read_billing_into(page, result: BciLiderCardResult) -> None:
+def _live_portal_tab(browser, failed=None):
+    """A still-open signed-in portal tab on a connected `browser`, or None.
+
+    Only a tab already in the private area qualifies: the portal keeps its
+    auth in tab-scoped sessionStorage, so a fresh tab would need a new login,
+    and this never submits the clave again. `failed`, the tab whose call just
+    lost its target, is skipped even while Playwright still reports it open.
+    """
+    try:
+        if not browser.is_connected():
+            return None
+        pages = [page for context in browser.contexts for page in context.pages]
+    except Exception:
+        logger.info("BciLider: could not look for a live portal tab", exc_info=True)
+        return None
+    for page in pages:
+        if page is failed:
+            continue
+        try:
+            url = page.url or ""
+            if (
+                not page.is_closed()
+                and urlparse(url).hostname == PORTAL_HOST
+                and "/private-home" in url
+            ):
+                return page
+        except Exception:
+            continue
+    return None
+
+
+def _read_billing_into(page, result: BciLiderCardResult, reacquire=None) -> None:
     """Add the USD rate, the statements and the CLP card's statement metrics."""
-    billing = read_billing(page)
+    billing = read_billing(page, reacquire)
     result.exchange_rates = billing.exchange_rates
     result.statements = billing.statements
     result.warnings.extend(billing.warnings)
@@ -919,14 +953,14 @@ def _scrape_over_cdp(
             page = context.pages[0] if context.pages else context.new_page()
         _ensure_logged_in(page, rut, password, deadline)
         try:
-            _read_card(page, result)  # navigates the authenticated tab in place
+            _read_card(page, result, browser)  # navigates the authenticated tab in place
         except BciLiderSessionError:
             # A late route-guard redirect bounced us to /login mid-read: sign in
             # and retry once (belt-and-braces with _ensure_logged_in's probe).
             logger.info("BciLider: session bounced mid-read; re-logging in and retrying")
             _login_via_autofill(page, rut, password, time.monotonic() + _LOGIN_WAIT_S)
             result = BciLiderCardResult()
-            _read_card(page, result)
+            _read_card(page, result, browser)
         # Do NOT close the browser here: in reuse mode it's the user's live Chrome;
         # in managed mode _scrape_managed_sync terminates the process it launched.
     return result
