@@ -1694,7 +1694,11 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
   values) gets a fresh instance through `job.modify(args=...)`. A run in
   flight keeps its instance; `max_instances=1` still prevents overlap. A
   change clears Fintual's `.login-failed` marker and a Tenpo change resets the
-  IMAP session. Cached sessions (Fintual cookies, BanChile storage state) carry
+  IMAP session. That marker also holds a salted scrypt fingerprint of the
+  Fintual and IMAP credentials the failed sign-in used, so the scraper itself
+  lifts the block when any of them differs (an IMAP fix included); a legacy
+  timestamp-only marker keeps blocking and is rewritten with the current
+  fingerprint. Cached sessions (Fintual cookies, BanChile storage state) carry
   a `<session>.account` marker (0600, a salted SHA-256 of the RUT or e-mail,
   never the identifier; normalized first, so `11.111.111-1` and `11111111-1`
   are one account, and a marker from before normalization still matches and

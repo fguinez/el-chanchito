@@ -63,10 +63,13 @@ budget. The rest of the run never depends on it.
 """
 
 import asyncio
+import hashlib
+import hmac
 import inspect
 import json
 import logging
 import os
+import secrets
 import tempfile
 from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -152,6 +155,14 @@ _CODE_POLL_INTERVAL_SECONDS = 2
 _CODE_CLOCK_SKEW = timedelta(seconds=30)
 
 _RELOGIN_HINT = "Run `make fintual-login` to sign in again."
+
+# What an automatic sign-in depends on besides the Fintual e-mail and password:
+# the IMAP mailbox its code is read from. The `.login-failed` marker keeps a
+# salted fingerprint of all of them, so fixing any one unblocks the guard.
+_IMAP_LOGIN_ENV = ("EMAIL_IMAP_HOST", "EMAIL_IMAP_USER", "EMAIL_IMAP_PASSWORD")
+_FINGERPRINT_LABEL = b"el-chanchito/fintual-login-failed/v1"
+# scrypt, so the marker (0600, next to the session) is no cheap password oracle.
+_FINGERPRINT_SCRYPT = {"n": 2**14, "r": 8, "p": 1, "dklen": 32}
 
 STOCKS_WALLET_NAME = "Acciones: saldo disponible"
 # Per-share costs keep more places: a quote can be under a dollar.
@@ -668,10 +679,12 @@ class FintualScraper(BaseScraper):
     async def _auto_login(self) -> None:
         """Sign in unattended, reading the 2FA code from the IMAP inbox.
 
-        Gives up after one failure until a manual login succeeds: retrying on
-        every run would e-mail a new code each time, which looks like an attack.
+        Gives up after one failure until a manual login succeeds or the
+        credentials it used change (`_login_blocked`): retrying on every run
+        with the same ones would e-mail a new code each time, which looks like
+        an attack.
         """
-        if self._login_failed_file.exists():
+        if self._login_blocked():
             raise FintualSessionError(f"Fintual automatic sign-in failed earlier. {_RELOGIN_HINT}")
         # Taken before initiate_login: only a code e-mailed after this point is
         # valid, and the inbox may still hold the previous login's spent one.
@@ -688,12 +701,69 @@ class FintualScraper(BaseScraper):
             )
             raise FintualSessionError(f"{reason} {_RELOGIN_HINT}") from exc
 
-    def _mark_login_failed(self) -> None:
+    def _credentials_fingerprint(self, salt: bytes) -> str:
+        """A salted scrypt digest of everything the automatic sign-in uses:
+        never the values themselves."""
+        values = (
+            session_account.normalize(self.email),
+            self.password,
+            *(os.environ.get(name) or "" for name in _IMAP_LOGIN_ENV),
+        )
+        material = _FINGERPRINT_LABEL
+        for value in values:
+            encoded = value.encode("utf-8")
+            material += len(encoded).to_bytes(4, "big") + encoded
+        return hashlib.scrypt(material, salt=salt, **_FINGERPRINT_SCRYPT).hex()
+
+    def _login_blocked(self) -> bool:
+        """Whether an earlier automatic sign-in failed with the credentials in
+        effect now. A marker whose fingerprint differs is removed: something
+        changed (Fintual's or the mailbox's credentials), so one new attempt
+        is fair. A marker from before fingerprints (a bare timestamp) or a
+        corrupt one keeps blocking and is rewritten with the current
+        fingerprint: the credentials in effect now are taken as the ones that
+        failed, so the next change unblocks it."""
         try:
-            self._login_failed_file.write_text(datetime.now(UTC).isoformat())
-            os.chmod(self._login_failed_file, 0o600)
+            raw = self._login_failed_file.read_bytes()
+        except FileNotFoundError:
+            return False
         except OSError:
-            logger.warning("Fintual: could not write %s", self._login_failed_file)
+            return True
+        try:
+            record = json.loads(raw)
+            salt = bytes.fromhex(record["salt"])
+            recorded = record["credentials"]
+            if not isinstance(recorded, str):
+                raise TypeError
+        except (ValueError, TypeError, KeyError):
+            self._mark_login_failed()
+            return True
+        if hmac.compare_digest(recorded, self._credentials_fingerprint(salt)):
+            return True
+        logger.info("Fintual: the sign-in credentials changed since the failed attempt; retrying")
+        self._login_failed_file.unlink(missing_ok=True)
+        return False
+
+    def _mark_login_failed(self) -> None:
+        """Record the failure with a fingerprint of the credentials it used,
+        in a private (0600) file swapped in whole."""
+        salt = secrets.token_bytes(16)
+        record = {
+            "failed_at": datetime.now(UTC).isoformat(),
+            "salt": salt.hex(),
+            "credentials": self._credentials_fingerprint(salt),
+        }
+        marker = self._login_failed_file
+        tmp = None
+        try:
+            fd, tmp = tempfile.mkstemp(dir=marker.parent, prefix=marker.name + ".")
+            with os.fdopen(fd, "w") as fh:
+                json.dump(record, fh)
+            os.replace(tmp, marker)
+        except OSError:
+            logger.warning("Fintual: could not write %s", marker)
+            if tmp is not None:
+                Path(tmp).unlink(missing_ok=True)
 
     async def _ensure_session(self, client: httpx.AsyncClient) -> bool:
         """Load a cached session, or auto-login via IMAP when possible.

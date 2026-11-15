@@ -421,9 +421,15 @@ Scheduled scrapes refresh the cached session the way the website does, with no
   (`EMAIL_IMAP_USER`); the scraper reports ``Fintual session expired. Run
   `make fintual-login`…``. When the account *is* the IMAP mailbox, the scraper
   reads the e-mailed code and signs in by itself.
-- an automatic sign-in failed. It is not retried (each attempt e-mails you a
-  new code) until a manual login succeeds; the scraper reports `Fintual
-  automatic sign-in failed earlier…`.
+- an automatic sign-in failed. It is not retried with the same credentials
+  (each attempt e-mails you a new code) until a manual login succeeds; the
+  scraper reports `Fintual automatic sign-in failed earlier…`. Correcting the
+  Fintual e-mail or password, or the IMAP server, user or password (in
+  Credenciales or your secrets), allows one new attempt: the
+  `.login-failed` marker keeps a salted fingerprint of those values (never
+  the values). A marker written before fingerprints existed keeps blocking
+  and takes the credentials in effect as the failed ones, so the next change
+  unblocks it.
 
 Don't let two scraper processes share one session cache at the same time (for
 example `make scrapers-once` while `make dev` or `make scrapers-start` runs):
