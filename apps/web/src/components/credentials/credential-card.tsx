@@ -16,6 +16,8 @@ import {
 import { Input } from "@/components/ui/input";
 import {
   FIELD_STATE_LABELS,
+  bindingGroups,
+  bindingProblem,
   checkCredentialValue,
   fieldState,
   type CredentialFieldSpec,
@@ -95,12 +97,18 @@ export function CredentialCard({
     for (const [key, raw] of typed) {
       const field = spec.fields.find((f) => f.key === key);
       if (!field) continue;
-      const checked = checkCredentialValue(field, raw);
+      // Known-value lists are the server's call (it reads the opt-out env).
+      const checked = checkCredentialValue(field, raw, true);
       if (!checked.ok) {
         setMessage({ kind: "error", text: checked.error });
         return;
       }
       fields[key] = checked.value;
+    }
+    const grouping = bindingProblem(spec, Object.keys(fields));
+    if (grouping) {
+      setMessage({ kind: "error", text: grouping });
+      return;
     }
     setBusy(true);
     setMessage(null);
@@ -115,13 +123,22 @@ export function CredentialCard({
         setMessage({ kind: "error", text: await errorText(response, "No se pudo guardar.") });
         return;
       }
-      const body = (await response.json()) as { saved: string[]; applied: boolean | null };
+      const body = (await response.json()) as {
+        saved: string[];
+        applied: boolean | null;
+        triggered?: string[];
+      };
       // Drop what was typed as soon as it is stored.
       setValues({});
       setRevealed({});
       setMessage({
         kind: "ok",
-        text: `Guardado (${body.saved.length} ${body.saved.length === 1 ? "campo" : "campos"}). ${appliedNote(body.applied)}`,
+        text:
+          `Guardado (${body.saved.length} ${body.saved.length === 1 ? "campo" : "campos"}). ` +
+          appliedNote(body.applied) +
+          (body.triggered && body.triggered.length > 0
+            ? " El scraper quedó activo y ya empezó una primera lectura; revisa su resultado en Instituciones."
+            : ""),
       });
       onChanged();
     } catch {
@@ -132,8 +149,14 @@ export function CredentialCard({
   }
 
   async function remove(field?: CredentialFieldSpec) {
+    const group = field ? bindingGroups(spec).find((keys) => keys.includes(field.key)) : undefined;
+    const groupLabels = group
+      ?.map((key) => spec.fields.find((f) => f.key === key)?.labelEs ?? key)
+      .join(", ");
     const question = field
-      ? `¿Borrar ${field.labelEs} de ${spec.labelEs}? El scraper volverá a usar el almacén local, si tiene uno.`
+      ? group
+        ? `¿Borrar ${groupLabels} de ${spec.labelEs}? Se guardan juntos, así que se borran juntos. El scraper volverá a usar el almacén local, si tiene uno.`
+        : `¿Borrar ${field.labelEs} de ${spec.labelEs}? El scraper volverá a usar el almacén local, si tiene uno.`
       : `¿Borrar todas las credenciales guardadas de ${spec.labelEs}? El scraper volverá a usar el almacén local, si tiene uno.`;
     if (busy || !window.confirm(question)) return;
     setBusy(true);
@@ -195,7 +218,11 @@ export function CredentialCard({
                       <label htmlFor={inputId} className="text-sm font-medium">
                         {field.labelEs}
                       </label>
-                      <Badge variant={STATE_BADGE[state]}>{FIELD_STATE_LABELS[state]}</Badge>
+                      <Badge variant={STATE_BADGE[state]}>
+                        {state === "missing" && !field.required
+                          ? "Opcional, vacío"
+                          : FIELD_STATE_LABELS[state]}
+                      </Badge>
                       {s?.updatedAt && (
                         <span className="text-xs text-muted-foreground">
                           Actualizado {formatDateTimeEs(s.updatedAt)}

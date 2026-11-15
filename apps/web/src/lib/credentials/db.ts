@@ -1,7 +1,8 @@
 // Data access for the sealed credentials (V048). The read path selects the
 // metadata columns only: no query here ever returns `sealed` to a caller.
 
-import { and, eq } from "drizzle-orm";
+import "server-only";
+import { and, eq, inArray } from "drizzle-orm";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { credentialKeys, institutionCredentials } from "@/lib/db/schema";
@@ -75,15 +76,16 @@ export async function upsertSealedFields(
     });
 }
 
-/** Delete one field, or every field of the institution; the number deleted. */
+/** Delete the given fields, or every field of the institution; the number
+ *  deleted. */
 export async function deleteSealedFields(
   institutionSlug: string,
-  fieldKey?: string
+  fieldKeys?: readonly string[]
 ): Promise<number> {
-  const where = fieldKey
+  const where = fieldKeys
     ? and(
         eq(institutionCredentials.institutionSlug, institutionSlug),
-        eq(institutionCredentials.fieldKey, fieldKey)
+        inArray(institutionCredentials.fieldKey, [...fieldKeys])
       )
     : eq(institutionCredentials.institutionSlug, institutionSlug);
   const deleted = await db

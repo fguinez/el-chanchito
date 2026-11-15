@@ -11,6 +11,7 @@ import { proxy } from "@/proxy";
 import {
   CREDENTIAL_ALGORITHM,
   CREDENTIAL_SCHEME,
+  bindingDigest,
   keyIdFor,
   sealingInfo,
   type SealingKey,
@@ -43,8 +44,9 @@ const state = {
   deletes: [] as { slug: string; field?: string }[],
   control: null as ControlCredentialStatus | null,
   enabled: null as string[] | null,
-  reload: null as { applied: boolean; scrapers: string[] } | null,
+  reload: null as { applied: boolean; added: string[]; scrapers: string[] } | null,
   reloads: 0,
+  refreshed: [] as string[],
 };
 
 vi.mock("@/lib/credentials/db", () => ({
@@ -53,8 +55,8 @@ vi.mock("@/lib/credentials/db", () => ({
   upsertSealedFields: async (slug: string, scheme: string, keyId: string, fields: SealedField[]) => {
     state.upserts.push({ slug, scheme, keyId, fields });
   },
-  deleteSealedFields: async (slug: string, field?: string) => {
-    state.deletes.push({ slug, field });
+  deleteSealedFields: async (slug: string, fields?: readonly string[]) => {
+    state.deletes.push({ slug, field: fields?.join(",") });
     return 1;
   },
 }));
@@ -65,6 +67,10 @@ vi.mock("@/lib/credentials/control", () => ({
   reloadControlCredentials: async () => {
     state.reloads += 1;
     return state.reload;
+  },
+  triggerControlRefresh: async (slug: string) => {
+    state.refreshed.push(slug);
+    return true;
   },
 }));
 
@@ -102,15 +108,17 @@ beforeEach(() => {
   state.meta = [];
   state.upserts = [];
   state.deletes = [];
-  state.control = null;
+  state.control = { key_available: true, key_id: KEY.keyId, fields: {} };
   state.enabled = null;
   state.reload = null;
   state.reloads = 0;
+  state.refreshed = [];
+  delete process.env.EMAIL_IMAP_ALLOW_CUSTOM_HOST;
 });
 
 describe("PUT /api/credentials/[slug]", () => {
   it("seals each field to the published key and never echoes a value", async () => {
-    state.reload = { applied: true, scrapers: ["banchile"] };
+    state.reload = { applied: true, added: [], scrapers: ["banchile"] };
     const response = await put("banchile", { fields: { rut: ` ${RUT} `, password: PASSWORD } });
 
     expect(response.status).toBe(200);
@@ -118,7 +126,7 @@ describe("PUT /api/credentials/[slug]", () => {
     const body = await text(response);
     expect(body).not.toContain(PASSWORD);
     expect(body).not.toContain(RUT);
-    expect(JSON.parse(body)).toEqual({ saved: ["rut", "password"], applied: true });
+    expect(JSON.parse(body)).toEqual({ saved: ["rut", "password"], applied: true, triggered: [] });
 
     const [upsert] = state.upserts;
     expect(upsert.slug).toBe("banchile");
@@ -144,7 +152,7 @@ describe("PUT /api/credentials/[slug]", () => {
   it("accepts a partial update and reports an unreachable service as null", async () => {
     const response = await put("banchile", { fields: { password: PASSWORD } });
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ saved: ["password"], applied: null });
+    expect(await response.json()).toEqual({ saved: ["password"], applied: null, triggered: [] });
   });
 
   it.each([
@@ -193,6 +201,53 @@ describe("PUT /api/credentials/[slug]", () => {
     expect(state.upserts).toHaveLength(0);
   });
 
+  it("refuses to seal when the service cannot confirm the key", async () => {
+    state.control = null;
+    const response = await put("banchile", { fields: { password: PASSWORD } });
+    expect(response.status).toBe(503);
+    expect((await response.json()).error).toContain("no responde");
+    expect(state.upserts).toHaveLength(0);
+  });
+
+  it("runs a scraper the save just enabled", async () => {
+    state.reload = { applied: true, added: ["skipo"], scrapers: ["skipo"] };
+    const response = await put("skipo", { fields: { api_key: PASSWORD } });
+    expect(await response.json()).toEqual({ saved: ["api_key"], applied: true, triggered: ["skipo"] });
+    expect(state.refreshed).toEqual(["skipo"]);
+  });
+
+  it.each([
+    ["a lone surrogate", "synthetic\ud800"],
+    ["a C1 control", "synthetic\u0085"],
+  ])("refuses %s", async (_label, value) => {
+    const response = await put("skipo", { fields: { api_key: value } });
+    expect(response.status).toBe(400);
+    expect(state.upserts).toHaveLength(0);
+  });
+
+  it("refuses a chunked body past the cap without buffering it all", async () => {
+    let pulled = 0;
+    const chunk = new TextEncoder().encode("x".repeat(4096));
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled += 1;
+        if (pulled > 100) controller.close();
+        else controller.enqueue(chunk);
+      },
+    });
+    const response = await PUT(
+      new NextRequest("http://localhost:3000/api/credentials/skipo", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: stream,
+        duplex: "half",
+      } as ConstructorParameters<typeof NextRequest>[1]),
+      { params: Promise.resolve({ slug: "skipo" }) }
+    );
+    expect(response.status).toBe(413);
+    expect(pulled).toBeLessThan(10);
+  });
+
   it("refuses to seal when the service holds another key or none", async () => {
     for (const control of [
       { key_available: true, key_id: "0".repeat(64), fields: {} },
@@ -213,9 +268,60 @@ describe("PUT /api/credentials/[slug]", () => {
   });
 });
 
+describe("PUT /api/credentials/email (bound IMAP password)", () => {
+  const HOST = "imap.gmail.com";
+  const USER = "user@example.com";
+
+  it.each([
+    [{ imap_host: "imap.mail.me.com" }],
+    [{ imap_user: "other@example.com" }],
+    [{ imap_password: PASSWORD }],
+    [{ imap_host: HOST, imap_password: PASSWORD }],
+  ])("refuses a partial group %j", async (fields) => {
+    const response = await put("email", { fields });
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toContain("se guardan juntos");
+    expect(state.upserts).toHaveLength(0);
+  });
+
+  it("seals the password to the host and user saved with it", async () => {
+    const response = await put("email", {
+      fields: { imap_host: HOST, imap_user: USER, imap_password: PASSWORD },
+    });
+    expect(response.status).toBe(200);
+    const sealed = state.upserts[0].fields.find((f) => f.fieldKey === "imap_password")!.sealed;
+    const open = (binding?: string) =>
+      suite.open(
+        {
+          recipientKey: pair.privateKey,
+          enc: sealed.slice(0, 32),
+          info: sealingInfo("email", "imap_password", KEY.keyId, binding),
+        },
+        sealed.slice(32)
+      );
+    expect(new TextDecoder().decode(await open(await bindingDigest([HOST, USER])))).toBe(PASSWORD);
+    await expect(open(await bindingDigest(["imap.example.com", USER]))).rejects.toThrow();
+    await expect(open()).rejects.toThrow();
+  });
+
+  it("refuses an unknown IMAP host unless custom hosts are allowed", async () => {
+    const fields = { imap_host: "imap.example.com", imap_user: USER, imap_password: PASSWORD };
+    expect((await put("email", { fields })).status).toBe(400);
+    process.env.EMAIL_IMAP_ALLOW_CUSTOM_HOST = "1";
+    expect((await put("email", { fields })).status).toBe(200);
+  });
+
+  it("deletes the whole group when one of its fields is deleted", async () => {
+    await del("email", "imap_host");
+    expect(state.deletes).toEqual([
+      { slug: "email", field: "imap_password,imap_host,imap_user" },
+    ]);
+  });
+});
+
 describe("DELETE /api/credentials/[slug]", () => {
   it("deletes one field and tells the service", async () => {
-    state.reload = { applied: true, scrapers: [] };
+    state.reload = { applied: true, added: [], scrapers: [] };
     const response = await del("banchile", "password");
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ deleted: 1, applied: true });
@@ -277,6 +383,7 @@ describe("GET /api/credentials", () => {
   });
 
   it("still answers with the service down, fallback unknown", async () => {
+    state.control = null;
     const body = await (await GET()).json();
     expect(body.serviceReachable).toBe(false);
     expect(body.keyAvailable).toBeNull();

@@ -8,6 +8,7 @@
 // service opens it (apps/scrapers/scrapers/credentials.py); this side holds
 // no private key and can never read a stored value back.
 
+import "server-only";
 import {
   Aes256Gcm,
   CipherSuite,
@@ -36,17 +37,47 @@ const suite = new CipherSuite({
 
 export class CredentialSealError extends Error {}
 
-/** NUL-separated label, scheme, slug, field key and key id, as ASCII. */
-export function sealingInfo(slug: string, fieldKey: string, keyId: string): Uint8Array {
+/** NUL-separated label, scheme, slug, field key and key id, as ASCII, plus
+ *  `bind:<digest>` for a secret sealed to the fields it binds (`binds` in the
+ *  registry). Mirrors `sealing_info` in apps/scrapers/scrapers/credentials.py. */
+export function sealingInfo(
+  slug: string,
+  fieldKey: string,
+  keyId: string,
+  binding?: string
+): Uint8Array {
   if (!NAME_RE.test(slug) || !NAME_RE.test(fieldKey)) {
     throw new CredentialSealError("malformed credential slug or field key");
   }
   if (!KEY_ID_RE.test(keyId)) {
     throw new CredentialSealError("malformed credential key id");
   }
-  return new TextEncoder().encode(
-    [INFO_LABEL, CREDENTIAL_SCHEME, slug, fieldKey, keyId].join("\u0000")
-  );
+  const parts = [INFO_LABEL, CREDENTIAL_SCHEME, slug, fieldKey, keyId];
+  if (binding !== undefined) {
+    if (!KEY_ID_RE.test(binding)) throw new CredentialSealError("malformed credential binding");
+    parts.push(`bind:${binding}`);
+  }
+  return new TextEncoder().encode(parts.join("\u0000"));
+}
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", toArrayBuffer(bytes));
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** Hex SHA-256 of the bound values, each prefixed with its 4-byte big-endian
+ *  UTF-8 length. Mirrors `binding_digest` on the Python side. */
+export async function bindingDigest(values: readonly string[]): Promise<string> {
+  const chunks = values.map((value) => new TextEncoder().encode(value));
+  const total = chunks.reduce((n, c) => n + 4 + c.byteLength, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    new DataView(out.buffer).setUint32(offset, chunk.byteLength);
+    out.set(chunk, offset + 4);
+    offset += 4 + chunk.byteLength;
+  }
+  return sha256Hex(out);
 }
 
 function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
@@ -55,8 +86,7 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 
 /** Hex SHA-256 of the raw public key: the id rows record. */
 export async function keyIdFor(publicKey: Uint8Array): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", toArrayBuffer(publicKey));
-  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+  return sha256Hex(publicKey);
 }
 
 export interface SealingKey {
@@ -71,7 +101,8 @@ export async function sealCredential(
   key: SealingKey,
   slug: string,
   fieldKey: string,
-  value: string
+  value: string,
+  binding?: string
 ): Promise<Uint8Array> {
   if (key.algorithm !== CREDENTIAL_ALGORITHM) {
     throw new CredentialSealError("unsupported credential key algorithm");
@@ -82,7 +113,7 @@ export async function sealCredential(
   if ((await keyIdFor(key.publicKey)) !== key.keyId) {
     throw new CredentialSealError("credential key id does not match its public key");
   }
-  const info = sealingInfo(slug, fieldKey, key.keyId);
+  const info = sealingInfo(slug, fieldKey, key.keyId, binding);
   const recipientPublicKey = await suite.kem.deserializePublicKey(toArrayBuffer(key.publicKey));
   const { enc, ct } = await suite.seal(
     { recipientPublicKey, info: toArrayBuffer(info) },

@@ -4,6 +4,7 @@ import { failureBody, requireJsonContentType } from "@/lib/api/validation";
 import {
   fetchControlCredentialStatus,
   reloadControlCredentials,
+  triggerControlRefresh,
 } from "@/lib/credentials/control";
 import {
   deleteSealedFields,
@@ -14,11 +15,13 @@ import {
 import { noStoreJson } from "@/lib/credentials/overview";
 import {
   MAX_CREDENTIAL_BODY_BYTES,
+  bindingGroups,
+  bindingProblem,
   checkCredentialValue,
   credentialField,
   credentialSpec,
 } from "@/lib/credentials/registry";
-import { CREDENTIAL_SCHEME, sealCredential } from "@/lib/credentials/seal";
+import { CREDENTIAL_SCHEME, bindingDigest, sealCredential } from "@/lib/credentials/seal";
 
 export const dynamic = "force-dynamic";
 
@@ -38,29 +41,61 @@ function unknownInstitution() {
   return noStoreJson({ error: "Institución desconocida" }, 404);
 }
 
-/** The body as text, refusing an oversized one before and after reading. */
+const TOO_LARGE = { ok: false as const, status: 413, error: "Cuerpo demasiado grande" };
+
+/** The body as JSON, never buffering more than the cap: a declared length
+ *  over it is refused up front, and the stream is cut as soon as it passes. */
 async function readBoundedJson(
   request: NextRequest
 ): Promise<{ ok: true; body: unknown } | { ok: false; status: number; error: string }> {
   const declared = Number(request.headers.get("content-length") ?? "0");
-  if (declared > MAX_CREDENTIAL_BODY_BYTES) {
-    return { ok: false, status: 413, error: "Cuerpo demasiado grande" };
+  if (declared > MAX_CREDENTIAL_BODY_BYTES) return TOO_LARGE;
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  if (request.body) {
+    const reader = request.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_CREDENTIAL_BODY_BYTES) {
+        await reader.cancel();
+        return TOO_LARGE;
+      }
+      chunks.push(value);
+    }
   }
-  const text = await request.text();
-  if (new TextEncoder().encode(text).byteLength > MAX_CREDENTIAL_BODY_BYTES) {
-    return { ok: false, status: 413, error: "Cuerpo demasiado grande" };
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
   }
   try {
-    return { ok: true, body: JSON.parse(text) };
+    return { ok: true, body: JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) };
   } catch {
     return { ok: false, status: 400, error: "Invalid JSON body" };
   }
 }
 
-/** Tell the scraper service; true/false when it answered, null when not. */
-async function applyToService(): Promise<boolean | null> {
+function envFlag(name: string | null): boolean {
+  if (!name) return false;
+  const value = (process.env[name] ?? "").trim().toLowerCase();
+  return !["", "0", "false", "no", "off"].includes(value);
+}
+
+/** Tell the scraper service; `applied` is true/false when it answered and
+ *  null when not. A scraper this change enabled is run right away through the
+ *  refresh endpoint (its cooldown and in-flight guards apply); `triggered`
+ *  lists the ones the service accepted. */
+async function applyToService(): Promise<{ applied: boolean | null; triggered: string[] }> {
   const reload = await reloadControlCredentials();
-  return reload ? reload.applied : null;
+  if (!reload) return { applied: null, triggered: [] };
+  const triggered: string[] = [];
+  for (const slug of reload.added) {
+    if (await triggerControlRefresh(slug)) triggered.push(slug);
+  }
+  return { applied: reload.applied, triggered };
 }
 
 /**
@@ -110,19 +145,35 @@ export async function PUT(request: NextRequest, { params }: Context) {
         400
       );
     }
-    const checked = checkCredentialValue(field, raw);
+    const checked = checkCredentialValue(field, raw, envFlag(field.allowCustomEnv));
     if (!checked.ok) {
       return noStoreJson(failureBody({ error: checked.error, field: `fields.${key}` }), 400);
     }
     values.push({ fieldKey: key, value: checked.value });
   }
 
+  const grouping = bindingProblem(
+    spec,
+    values.map((v) => v.fieldKey)
+  );
+  if (grouping) return noStoreJson(failureBody({ error: grouping, field: "fields" }), 400);
+
   const key = await readSealingKey();
   if (!key) return noStoreJson({ error: NO_KEY_MESSAGE }, 503);
-  // When the service can be asked, make sure it can open what we seal: it
-  // must hold a usable key, and the very one published.
+  // Seal only to a key the running service confirms it holds: the published
+  // row alone could be stale or planted.
   const control = await fetchControlCredentialStatus();
-  if (control && (!control.key_available || control.key_id !== key.keyId)) {
+  if (!control) {
+    return noStoreJson(
+      {
+        error:
+          "El servicio de scrapers no responde, así que no se puede confirmar su clave. " +
+          "Inicia el stack completo con `make dev` y vuelve a intentarlo.",
+      },
+      503
+    );
+  }
+  if (!control.key_available || control.key_id !== key.keyId) {
     return noStoreJson(
       {
         error:
@@ -133,13 +184,17 @@ export async function PUT(request: NextRequest, { params }: Context) {
     );
   }
 
+  const byKey = new Map(values.map((v) => [v.fieldKey, v.value]));
   let sealed: SealedField[];
   try {
     sealed = await Promise.all(
-      values.map(async ({ fieldKey, value }) => ({
-        fieldKey,
-        sealed: await sealCredential(key, slug, fieldKey, value),
-      }))
+      values.map(async ({ fieldKey, value }) => {
+        const binds = credentialField(spec, fieldKey)?.binds ?? [];
+        // bindingProblem guaranteed every bound value is in this request.
+        const binding =
+          binds.length > 0 ? await bindingDigest(binds.map((k) => byKey.get(k) ?? "")) : undefined;
+        return { fieldKey, sealed: await sealCredential(key, slug, fieldKey, value, binding) };
+      })
     );
   } catch {
     return noStoreJson(
@@ -151,13 +206,14 @@ export async function PUT(request: NextRequest, { params }: Context) {
 
   return noStoreJson({
     saved: sealed.map((field) => field.fieldKey),
-    applied: await applyToService(),
+    ...(await applyToService()),
   });
 }
 
 /**
- * DELETE /api/credentials/[slug][?field=key]: forget one stored field, or
- * all of the institution's. The scraper service falls back to its local
+ * DELETE /api/credentials/[slug][?field=key]: forget one stored field (with
+ * the rest of its binding group, e.g. the three IMAP fields), or all of the
+ * institution's. The scraper service falls back to its local
  * secret store or env for them.
  */
 export async function DELETE(request: NextRequest, { params }: Context) {
@@ -171,6 +227,12 @@ export async function DELETE(request: NextRequest, { params }: Context) {
       400
     );
   }
-  const deleted = await deleteSealedFields(slug, fieldKey);
-  return noStoreJson({ deleted, applied: deleted > 0 ? await applyToService() : null });
+  // A field in a binding group goes with its whole group: a secret must never
+  // outlive, or be paired with, a destination it was not saved with.
+  const group = fieldKey
+    ? (bindingGroups(spec).find((keys) => keys.includes(fieldKey)) ?? [fieldKey])
+    : undefined;
+  const deleted = await deleteSealedFields(slug, group);
+  const applied = deleted > 0 ? (await applyToService()).applied : null;
+  return noStoreJson({ deleted, applied });
 }

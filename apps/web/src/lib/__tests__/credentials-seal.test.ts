@@ -13,6 +13,7 @@ import {
   CREDENTIAL_ALGORITHM,
   CREDENTIAL_SCHEME,
   CredentialSealError,
+  bindingDigest,
   keyIdFor,
   sealCredential,
   sealingInfo,
@@ -111,10 +112,15 @@ describe.runIf(process.env.WRITE_CREDENTIALS_FIXTURE === "1")("cross-language fi
     const jwk = publicKey.export({ format: "jwk" });
     const raw = new Uint8Array(Buffer.from(jwk.x as string, "base64url"));
     const key: SealingKey = { keyId: await keyIdFor(raw), algorithm: CREDENTIAL_ALGORITHM, publicKey: raw };
-    const entries = [
+    const entries: { slug: string; field: string; value: string; binding_values?: string[] }[] = [
       { slug: "banchile", field: "rut", value: "11.111.111-1" },
       { slug: "banchile", field: "password", value: "synthetic-password" },
-      { slug: "email", field: "imap_password", value: "synthetic äpp pässwörd ✓" },
+      {
+        slug: "email",
+        field: "imap_password",
+        value: "synthetic äpp pässwörd ✓",
+        binding_values: ["imap.gmail.com", "üser@example.com"],
+      },
     ];
     // Raw hex rather than PEM, so secret scanners do not flag a throwaway.
     const scalar = Buffer.from(privateKey.export({ format: "jwk" }).d as string, "base64url");
@@ -127,7 +133,13 @@ describe.runIf(process.env.WRITE_CREDENTIALS_FIXTURE === "1")("cross-language fi
         entries.map(async (entry) => ({
           ...entry,
           sealed: Buffer.from(
-            await sealCredential(key, entry.slug, entry.field, entry.value)
+            await sealCredential(
+              key,
+              entry.slug,
+              entry.field,
+              entry.value,
+              entry.binding_values ? await bindingDigest(entry.binding_values) : undefined
+            )
           ).toString("base64"),
         }))
       ),

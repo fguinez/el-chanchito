@@ -23,6 +23,7 @@ export type ControlCredentialStatus = z.infer<typeof statusSchema>;
 
 const reloadSchema = z.object({
   applied: z.boolean(),
+  added: z.array(z.string()).default([]),
   scrapers: z.array(z.string()),
 });
 
@@ -68,4 +69,21 @@ export async function fetchEnabledScrapers(): Promise<string[] | null> {
  *  scrapers. Null when it could not be asked. */
 export function reloadControlCredentials() {
   return call("/credentials/reload", "POST", reloadSchema);
+}
+
+/** Run a newly enabled scraper now through the regular refresh endpoint, so
+ *  its cooldown and in-flight guards apply. True when the service accepted. */
+export async function triggerControlRefresh(slug: string): Promise<boolean> {
+  const url = controlUrl(`/refresh/${encodeURIComponent(slug)}`);
+  if (!url) return false;
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+      cache: "no-store",
+    });
+    return res.status === 202;
+  } catch {
+    return false;
+  }
 }

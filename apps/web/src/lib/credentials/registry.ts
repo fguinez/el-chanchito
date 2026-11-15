@@ -27,16 +27,25 @@ export function credentialField(
   return spec.fields.find((field) => field.key === key) ?? null;
 }
 
-// Control characters never belong in a login and cannot all live in an env var.
-const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+// C0, DEL and C1 controls never belong in a login (the scraper service
+// refuses them too).
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/;
 
 export type ValueCheck = { ok: true; value: string } | { ok: false; error: string };
 
 /** The value to store, or why it is refused. Identifiers are trimmed;
- *  secrets are kept exactly as typed. Messages never repeat the value. */
-export function checkCredentialValue(field: CredentialFieldSpec, raw: string): ValueCheck {
+ *  secrets are kept exactly as typed. Messages never repeat the value.
+ *  `allowCustom` lifts `allowedValues` (the server reads `allowCustomEnv`). */
+export function checkCredentialValue(
+  field: CredentialFieldSpec,
+  raw: string,
+  allowCustom = false
+): ValueCheck {
   const value = field.kind === "identifier" ? raw.trim() : raw;
   if (value === "") return { ok: false, error: `${field.labelEs}: no puede quedar vacío.` };
+  if (!value.isWellFormed()) {
+    return { ok: false, error: `${field.labelEs}: tiene caracteres no válidos.` };
+  }
   if (value.length > field.maxLength) {
     return {
       ok: false,
@@ -52,7 +61,41 @@ export function checkCredentialValue(field: CredentialFieldSpec, raw: string): V
       error: `${field.labelEs}: ${field.patternHintEs ?? "formato no válido."}`,
     };
   }
+  if (
+    field.allowedValues.length > 0 &&
+    !allowCustom &&
+    !field.allowedValues.some((known) => known.toLowerCase() === value.toLowerCase())
+  ) {
+    return {
+      ok: false,
+      error:
+        `${field.labelEs}: no es un servidor conocido (${field.allowedValues.join(", ")}). ` +
+        `Para usar otro, define ${field.allowCustomEnv}=1 en el dashboard y en el servicio de scrapers.`,
+    };
+  }
   return { ok: true, value };
+}
+
+/** Field keys always saved together: each binding secret and what it binds. */
+export function bindingGroups(spec: InstitutionCredentialSpec): string[][] {
+  return spec.fields.filter((f) => f.binds.length > 0).map((f) => [f.key, ...f.binds]);
+}
+
+/** Why a set of submitted keys breaks a binding group, or null. A field that
+ *  decides where a secret goes can only change together with that secret. */
+export function bindingProblem(
+  spec: InstitutionCredentialSpec,
+  submitted: readonly string[]
+): string | null {
+  for (const group of bindingGroups(spec)) {
+    const touched = group.some((key) => submitted.includes(key));
+    const missing = group.filter((key) => !submitted.includes(key));
+    if (touched && missing.length > 0) {
+      const labels = group.map((key) => credentialField(spec, key)?.labelEs ?? key);
+      return `${labels.join(", ")} se guardan juntos: escribe los ${group.length} campos.`;
+    }
+  }
+  return null;
 }
 
 /** One field's state, never its value. `fallback` is null when the scraper
