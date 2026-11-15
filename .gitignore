@@ -37,6 +37,9 @@ coverage/
 local/
 .fintual_session.json*
 .banchile_session.json*
+# The scraper service's private key for the credentials sealed in the DB.
+.credentials_key
+.credentials_key.*
 # Per-institution browser profiles (live sessions), e.g. .bci_lider_chrome_profile/
 .*_chrome_profile*/
 # Left next to a profile when its session is lost, e.g. .mercadopago_chrome_profile.needs-sign-in

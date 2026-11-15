@@ -542,6 +542,14 @@ def get_session() -> ImapSession:
     return _SESSION
 
 
+def reset_session() -> None:
+    """Forget the session so the next use reads the EMAIL_IMAP_* values again
+    (they changed in Credenciales). A scan in flight keeps the old one, which
+    is left to close with it rather than logged out under it."""
+    global _SESSION
+    _SESSION = None
+
+
 def _collect_transactions(
     mail: imaplib.IMAP4_SSL, pattern: EmailPattern, lookback_days: int
 ) -> list[ScrapedTransaction]:
