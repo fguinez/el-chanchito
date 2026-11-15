@@ -17,8 +17,13 @@ PATTERN = EmailPattern(
     product_kind="wallet",
     sender_domains=["somosmach", "mach"],
     subject_contains=[
-        "compra", "pago", "transaccion", "transferencia", "recibiste",
-        "devolucion", "reembolso",
+        "compra",
+        "pago",
+        "transaccion",
+        "transferencia",
+        "recibiste",
+        "devolucion",
+        "reembolso",
     ],
     amount_rules=[
         anchored(r"compra(?:ste)?|pagaste|pago\s+de|transferiste|enviaste"),
@@ -37,8 +42,13 @@ PATTERN = EmailPattern(
         rf"\bcomercio:?\s+(.+?){MERCHANT_END}",
     ],
     income_keywords=[
-        "recibiste una transferencia", "recibiste dinero", "te transfirieron",
-        "devolucion", "reembolso", "anulad", "revers",
+        "recibiste una transferencia",
+        "recibiste dinero",
+        "te transfirieron",
+        "devolucion",
+        "reembolso",
+        "anulad",
+        "revers",
     ],
 )
 

@@ -111,7 +111,6 @@ import os
 import sys
 
 from product_model import SavingsMetrics, WalletMetrics
-
 from scrapers.backends.mercadopago_web import (
     DEFAULT_MOVEMENT_PAGES,
     MercadoPagoAccount,
@@ -303,9 +302,7 @@ class MercadoPagoScraper(BaseScraper):
                     closed_metrics=SavingsMetrics(balance=0),
                 )
             )
-        return ProductScrapeResult(
-            products, list(account.warnings), vanished_product_scopes=scopes
-        )
+        return ProductScrapeResult(products, list(account.warnings), vanished_product_scopes=scopes)
 
 
 def _login_cli() -> None:

@@ -36,13 +36,12 @@ is a failed surface ("tipo de cambio") and a run warning, never a crash.
 import logging
 import re
 from decimal import Decimal
-from typing import Optional
 
 from scrapers.backends.banchile_web import (
+    _PAGE_CALL_TIMEOUT_MS,
     _RENDER_TIMEOUTS_MS,
     _SURFACE_ATTEMPTS,
     _budget,
-    _PAGE_CALL_TIMEOUT_MS,
     _deadline_passed,
     _ensure_on_portal,
     _evaluate_bounded,
@@ -63,10 +62,7 @@ _PRODUCTS_PATH = (
     "/mibancochile/rest/persona/selectorproductos/selectorProductos/"
     "obtenerProductos?incluirTarjetas=true"
 )
-_RATE_PATH = (
-    "/mibancochile/rest/persona/tarjeta-credito-digital/pago/"
-    "calcular-pago-internacional"
-)
+_RATE_PATH = "/mibancochile/rest/persona/tarjeta-credito-digital/pago/calcular-pago-internacional"
 
 # Every `return` hands back an object literal with only these keys: `status`
 # (one of _STATUSES), an HTTP `code`, and on success the two rate fields. The
@@ -147,7 +143,7 @@ _RATE_RE = re.compile(r"^\d{1,12}(\.\d{1,8})?$")
 # --- Pure helpers (unit-tested; no browser) -----------------------------------
 
 
-def parse_rate(raw) -> Optional[Decimal]:
+def parse_rate(raw) -> Decimal | None:
     """The portal's `tipoCambio` as a positive Decimal; None when unusable.
 
     A JSON number or a dot-decimal string. Anything else (a bool, NaN, an
@@ -163,7 +159,7 @@ def parse_rate(raw) -> Optional[Decimal]:
     return rate if rate > 0 else None
 
 
-def exchange_rate_from_result(result) -> Optional[ScrapedExchangeRate]:
+def exchange_rate_from_result(result) -> ScrapedExchangeRate | None:
     """Build the USD card's rate from the in-page script's result, or None.
 
     Only `tipoCambio` and `fechaConsultaTipoCambio` are read; whatever else a
@@ -248,7 +244,7 @@ def _read_exchange_rate(page, attempt: int) -> list[ScrapedExchangeRate]:
 
 
 def read_exchange_rate_surface(
-    page, deadline: Optional[float] = None
+    page, deadline: float | None = None
 ) -> tuple[list[ScrapedExchangeRate], tuple[str, ...]]:
     """Read the USD card rate with retries: (rates, failed surfaces).
 
@@ -260,9 +256,7 @@ def read_exchange_rate_surface(
     if _deadline_passed(deadline):
         _skip_surfaces([SURFACE])
         return [], (SURFACE,)
-    rates = _read_surface_with_retries(
-        page, SURFACE, _read_exchange_rate, deadline=deadline
-    )
+    rates = _read_surface_with_retries(page, SURFACE, _read_exchange_rate, deadline=deadline)
     if rates:
         logger.info("BanChile: tipo de cambio read for the USD card")
         return rates, ()

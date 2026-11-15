@@ -154,7 +154,12 @@ class _Skipo:
     def _problem(status: int, code: str) -> httpx.Response:
         return httpx.Response(
             status,
-            json={"type": "about:blank", "title": "Synthetic problem", "status": status, "code": code},
+            json={
+                "type": "about:blank",
+                "title": "Synthetic problem",
+                "status": status,
+                "code": code,
+            },
             headers={"Content-Type": "application/problem+json"},
         )
 
@@ -180,7 +185,12 @@ class _Skipo:
                 200,
                 json={
                     "data": self.assets,
-                    "pagination": {"page": 1, "limit": 100, "totalItems": len(self.assets), "totalPages": 1},
+                    "pagination": {
+                        "page": 1,
+                        "limit": 100,
+                        "totalItems": len(self.assets),
+                        "totalPages": 1,
+                    },
                 },
             )
         if path == "/v2/ledger":
@@ -291,7 +301,9 @@ class TestParseBalances:
             [_balance(symbol, balance="0.12345678", frozen="0.5", pending="0")], _CLASSES
         )
 
-        assert [(p.kind, p.currency, p.external_ref) for p in products] == [("crypto", symbol, None)]
+        assert [(p.kind, p.currency, p.external_ref) for p in products] == [
+            ("crypto", symbol, None)
+        ]
         assert products[0].metrics.units == pytest.approx(0.12345678)
         assert products[0].metrics.frozen == pytest.approx(0.5)
         assert products[0].metrics.pending is None
@@ -331,7 +343,9 @@ class TestParseBalances:
         [
             pytest.param(_balance("USD", balance="1234.56"), "non-CLP fiat", id="other-fiat"),
             pytest.param(_balance("NVDAX", balance="0.12345678"), "tokenized stock", id="stock"),
-            pytest.param(_balance("ZZZ", balance="0.12345678"), "unknown asset class", id="unknown-class"),
+            pytest.param(
+                _balance("ZZZ", balance="0.12345678"), "unknown asset class", id="unknown-class"
+            ),
             pytest.param(_balance("BTC", balance="lots"), "unreadable", id="unreadable-balance"),
             pytest.param(_balance("CLP", balance="1e100"), "unreadable", id="clp-past-whole-pesos"),
             pytest.param(_balance("", balance="1"), "unreadable", id="no-symbol"),
@@ -362,7 +376,11 @@ class TestPriceRate:
         rate = _price_rate("BTC", _price("BTC-CLP", "65000000.123456789"))
 
         assert rate is not None
-        assert (rate.institution, rate.base_currency, rate.quote_currency) == ("skipo", "BTC", "CLP")
+        assert (rate.institution, rate.base_currency, rate.quote_currency) == (
+            "skipo",
+            "BTC",
+            "CLP",
+        )
         assert rate.rate == Decimal("65000000.12345679")
         assert rate.product is None
         assert rate.reported_as_of == date(2026, 1, 15)
@@ -462,7 +480,9 @@ class TestParseLedgerEntry:
     def test_description_does_not_change_the_id(self):
         """A rewritten detail or subtype keeps the same external_id."""
         first = _parse_ledger_entry(_entry(1))
-        rewritten = _parse_ledger_entry(_entry(1, detail="Otro texto", subType="EXTERNAL_FIAT_BANK"))
+        rewritten = _parse_ledger_entry(
+            _entry(1, detail="Otro texto", subType="EXTERNAL_FIAT_BANK")
+        )
 
         assert first is not None and rewritten is not None
         assert first.external_id == rewritten.external_id

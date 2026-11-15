@@ -71,7 +71,8 @@ A scraper is enabled only when its credentials are present (Mercado Pago, which 
 make test        # all tests: vitest (web) + pytest (scrapers, product-model)
 make test-db     # the Python tests plus the DB tests, on a throwaway Postgres
 make typecheck   # tsc --noEmit
-make lint        # eslint
+make lint        # eslint (web) + ruff check and format check (Python)
+make format-py   # apply ruff fixes and formatting to all Python code
 make product-model-generate  # regen TS/JSON artifacts after editing the registry
 make up          # full stack in Docker (postgres + web + scrapers)
 ```
@@ -109,7 +110,7 @@ For full detail, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 The DB writer tests (`apps/scrapers/tests/test_writer_db.py`) run the real writer SQL on a schema built from every migration, and are skipped unless `TEST_DATABASE_URL` is set. `make test-db` starts a throwaway `postgres-test` container (data in tmpfs, port 5436, or the `POSTGRES_TEST_PORT` shell variable; the Makefile does not read it from `.env`), runs `make test-py` against it, and leaves it up for the next run; `make test-db-down` removes it. Only ever point `TEST_DATABASE_URL` at a disposable server: the tests create and drop their own `chanchito_test_*` databases on it. When it is set but the server is unreachable, or unset in CI, the DB tests fail instead of skipping.
 
-CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on every pull request and push to `main`: typecheck, lint and vitest for the dashboard, and the full Python suite, DB tests included, against a Postgres service.
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on every pull request and push to `main`: typecheck, lint and vitest for the dashboard, Ruff lint and format checks for all Python code, and the full Python suite, DB tests included, against a Postgres service.
 
 ## Further reading
 

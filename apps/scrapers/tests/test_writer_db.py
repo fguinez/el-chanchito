@@ -14,7 +14,7 @@ synthetic.
 """
 
 import os
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
@@ -25,7 +25,6 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from db import writer
-from tests.conftest import MIGRATIONS_DIR, apply_migrations
 from db.writer import (
     UnresolvedPriceScope,
     UnresolvedRateScope,
@@ -69,6 +68,7 @@ from scrapers.base import (
     VanishedProductScope,
     VanishedWindow,
 )
+from tests.conftest import MIGRATIONS_DIR, apply_migrations
 
 # The single user V009 seeds; `_resolve_product` attaches everything to it.
 SEEDED_USER_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -82,7 +82,7 @@ class _Clock:
     """
 
     def __init__(self):
-        self._now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        self._now = datetime(2026, 1, 1, tzinfo=UTC)
 
     def now(self, tz=None):
         self._now += timedelta(seconds=1)
@@ -180,9 +180,7 @@ class TestResolveProduct:
         ],
         ids=["seeded-institution", "new-institution"],
     )
-    def test_a_first_write_builds_the_chain(
-        self, db_conn, slug, name, kind, product_slug
-    ):
+    def test_a_first_write_builds_the_chain(self, db_conn, slug, name, kind, product_slug):
         """A seeded institution is reused (an unknown one is created as
         'other'); the account goes to the seeded user and the product takes
         the slug of its default name."""
@@ -316,9 +314,7 @@ class TestUpsertTransactions:
 
     def test_a_new_row_stores_every_field(self, db_conn):
         """Each scraped field lands in its own column, on the resolved product."""
-        upsert_transactions(
-            [_txn("email_mach_0001", accounting_date=date(2026, 8, 21))]
-        )
+        upsert_transactions([_txn("email_mach_0001", accounting_date=date(2026, 8, 21))])
 
         row = db_conn.execute(
             """
@@ -375,13 +371,9 @@ class TestUpsertTransactions:
             "ALTER TABLE transactions ADD CONSTRAINT synthetic_failure "
             "CHECK (description <> 'FALLA SINTETICA')"
         )
-        failing = _txn("email_mach_0002").model_copy(
-            update={"description": "FALLA SINTETICA"}
-        )
+        failing = _txn("email_mach_0002").model_copy(update={"description": "FALLA SINTETICA"})
 
-        result = write_transactions(
-            [_txn("email_mach_0001"), failing, _txn("email_mach_0003")]
-        )
+        result = write_transactions([_txn("email_mach_0001"), failing, _txn("email_mach_0003")])
 
         assert (result.inserted, result.failed) == (2, 1)
         assert result.persisted_external_ids == {"email_mach_0001", "email_mach_0003"}
@@ -433,8 +425,7 @@ class TestUpsertTransactions:
         )
 
         rows = db_conn.execute(
-            "SELECT id, external_id, transaction_date, accounting_date "
-            "FROM transactions"
+            "SELECT id, external_id, transaction_date, accounting_date FROM transactions"
         ).fetchall()
         assert inserted == 0
         assert rows == [
@@ -448,15 +439,13 @@ class TestUpsertTransactions:
 
 
 _LOCATION_COLUMNS = (
-    "location_name, location_city, location_country, "
-    "location_latitude, location_longitude"
+    "location_name, location_city, location_country, location_latitude, location_longitude"
 )
 
 
 def _location_of(conn, external_id):
     return conn.execute(
-        f"SELECT {_LOCATION_COLUMNS}, location_is_manual FROM transactions "
-        "WHERE external_id = %s",
+        f"SELECT {_LOCATION_COLUMNS}, location_is_manual FROM transactions WHERE external_id = %s",
         (external_id,),
     ).fetchone()
 
@@ -521,8 +510,7 @@ class TestTransactionLocation:
     def test_a_location_the_user_edited_is_left_alone(self, db_conn):
         upsert_transactions([_txn("email_mach_0001")])
         db_conn.execute(
-            "UPDATE transactions SET location_is_manual = true, "
-            "location_name = 'Lugar Manual'"
+            "UPDATE transactions SET location_is_manual = true, location_name = 'Lugar Manual'"
         )
 
         upsert_transactions([_txn("email_mach_0001", location=self.FULL)])
@@ -601,9 +589,7 @@ class TestTransactionBillingStatus:
         upsert_transactions([_card_txn(billing_status="unbilled")])
         before = _billing_of(db_conn)
 
-        inserted = upsert_transactions(
-            [_card_txn(billing_status="billed", statement_date=_CLOSED)]
-        )
+        inserted = upsert_transactions([_card_txn(billing_status="billed", statement_date=_CLOSED)])
 
         after = _billing_of(db_conn)
         assert inserted == 0
@@ -630,9 +616,7 @@ class TestTransactionBillingStatus:
         """An installment purchase keeps the statement that first billed it."""
         upsert_transactions([_card_txn(billing_status="billed", statement_date=_CLOSED)])
 
-        upsert_transactions(
-            [_card_txn(billing_status="billed", statement_date=_CLOSED_LATER)]
-        )
+        upsert_transactions([_card_txn(billing_status="billed", statement_date=_CLOSED_LATER)])
 
         assert _billing_of(db_conn)["statement_date"] == _CLOSED
 
@@ -656,14 +640,10 @@ class TestTransactionBillingStatus:
     def test_banchile_adoption_carries_billed_and_its_statement(self, db_conn):
         """Issue #56: the unbilled leg's fingerprint row is re-keyed onto the
         billed reference, and takes the status and statement with the key."""
-        upsert_transactions(
-            [_card_txn("bch_fp_a1b2c3d4e5f60718", billing_status="unbilled")]
-        )
+        upsert_transactions([_card_txn("bch_fp_a1b2c3d4e5f60718", billing_status="unbilled")])
         stored_id = db_conn.execute("SELECT id FROM transactions").fetchone()["id"]
 
-        inserted = upsert_transactions(
-            [_card_txn(billing_status="billed", statement_date=_CLOSED)]
-        )
+        inserted = upsert_transactions([_card_txn(billing_status="billed", statement_date=_CLOSED)])
 
         rows = db_conn.execute(
             "SELECT id, external_id, billing_status, statement_date FROM transactions"
@@ -679,9 +659,7 @@ class TestTransactionBillingStatus:
         ]
 
     @pytest.mark.parametrize("billed_first", [False, True])
-    def test_one_batch_seeing_a_charge_in_both_views_stores_it_billed(
-        self, db_conn, billed_first
-    ):
+    def test_one_batch_seeing_a_charge_in_both_views_stores_it_billed(self, db_conn, billed_first):
         """A source whose key survives billing sends the charge once per view;
         whichever comes first, one row lands, billed on its statement."""
         views = [
@@ -1008,8 +986,7 @@ class TestTransferLinks:
         return {
             row["external_id"]: row
             for row in conn.execute(
-                "SELECT id, external_id, product_id, is_internal_transfer "
-                "FROM transactions"
+                "SELECT id, external_id, product_id, is_internal_transfer FROM transactions"
             ).fetchall()
         }
 
@@ -1046,8 +1023,7 @@ class TestTransferLinks:
         assert rows["email_mach_0001"]["id"] == credit_id
         assert all(row["is_internal_transfer"] for row in rows.values())
         link = db_conn.execute(
-            "SELECT from_transaction_id, to_transaction_id "
-            "FROM internal_transfers WHERE id = %s",
+            "SELECT from_transaction_id, to_transaction_id FROM internal_transfers WHERE id = %s",
             (transfer_id,),
         ).fetchone()
         assert link == {
@@ -1074,8 +1050,7 @@ class TestTransferLinks:
         db_conn.execute("DELETE FROM transactions WHERE id = %s", (debit_id,))
 
         link = db_conn.execute(
-            "SELECT from_transaction_id, to_transaction_id "
-            "FROM internal_transfers WHERE id = %s",
+            "SELECT from_transaction_id, to_transaction_id FROM internal_transfers WHERE id = %s",
             (transfer_id,),
         ).fetchone()
         assert link == {"from_transaction_id": None, "to_transaction_id": credit_id}
@@ -1131,9 +1106,7 @@ class TestBanChileUsdCardLocation:
             }
         ]
 
-    def test_a_usd_charge_stored_before_v024_gains_it_on_rescrape(
-        self, db_conn, monkeypatch
-    ):
+    def test_a_usd_charge_stored_before_v024_gains_it_on_rescrape(self, db_conn, monkeypatch):
         bare = self._scrape(monkeypatch, self._row(ciudadComercio="", pais=""))
         upsert_transactions([bare])
         assert self._stored(db_conn)[0]["location_city"] is None
@@ -1172,14 +1145,11 @@ class TestDecimalAmounts:
         )
 
         row = db_conn.execute(
-            "SELECT t.amount, p.currency FROM transactions t "
-            "JOIN products p ON t.product_id = p.id"
+            "SELECT t.amount, p.currency FROM transactions t JOIN products p ON t.product_id = p.id"
         ).fetchone()
         assert row == {"amount": Decimal("-1234.56"), "currency": "USD"}
 
-    def test_a_whole_amount_reads_back_equal_to_the_int_it_was_sent_as(
-        self, db_conn
-    ):
+    def test_a_whole_amount_reads_back_equal_to_the_int_it_was_sent_as(self, db_conn):
         upsert_transactions([_txn("email_mach_0001", amount=2500000)])
 
         amount = db_conn.execute("SELECT amount FROM transactions").fetchone()["amount"]
@@ -1198,13 +1168,9 @@ class TestDecimalAmounts:
 
         inserted = upsert_transactions([_txn("bch_ref_00000000001", **legacy)])
 
-        rows = db_conn.execute(
-            "SELECT external_id, amount FROM transactions"
-        ).fetchall()
+        rows = db_conn.execute("SELECT external_id, amount FROM transactions").fetchall()
         assert inserted == 0
-        assert rows == [
-            {"external_id": "bch_ref_00000000001", "amount": Decimal("-1234.56")}
-        ]
+        assert rows == [{"external_id": "bch_ref_00000000001", "amount": Decimal("-1234.56")}]
 
 
 class TestProductRefTransactions:
@@ -1298,9 +1264,7 @@ class TestProductRefTransactions:
         assert (result.inserted, result.failed, result.unresolved) == (1, 0, 1)
         assert result.persisted_external_ids == {"fintual_stock_buy_1001"}
         assert _count(db_conn, "products") == products_before
-        assert [row["external_id"] for row in self._rows(db_conn)] == [
-            "fintual_stock_buy_1001"
-        ]
+        assert [row["external_id"] for row in self._rows(db_conn)] == ["fintual_stock_buy_1001"]
 
     def test_a_ref_never_falls_back_to_the_ref_less_product(self, db_conn):
         """An existing stock/USD product without a ref is not a fallback:
@@ -1463,9 +1427,7 @@ class TestBilledStatements:
         self._store()
 
         # Act
-        mark_billed_statements(
-            [self._statement(_CLOSED_LATER), self._statement(_CLOSED)]
-        )
+        mark_billed_statements([self._statement(_CLOSED_LATER), self._statement(_CLOSED)])
 
         # Assert
         assert _billing_of(db_conn, self._KEY)["statement_date"] == _CLOSED
@@ -1503,9 +1465,7 @@ class TestBilledStatements:
         self._store(institution="banchile")
 
         # Act
-        changed = mark_billed_statements(
-            [self._statement(), self._statement(currency="USD")]
-        )
+        changed = mark_billed_statements([self._statement(), self._statement(currency="USD")])
 
         # Assert
         assert changed == 0
@@ -1704,9 +1664,7 @@ class TestVanishedTransactions:
     def _deleted_by(self, conn):
         return {
             row["external_id"]: (row["deleted_at"] is not None, row["deleted_by"])
-            for row in conn.execute(
-                "SELECT external_id, deleted_at, deleted_by FROM transactions"
-            )
+            for row in conn.execute("SELECT external_id, deleted_at, deleted_by FROM transactions")
         }
 
     def test_the_cleanup_marks_its_own_deletes(self, db_conn):
@@ -1862,9 +1820,7 @@ class TestSupersededTransactions:
 
     def _ship_fix(self, conn, when):
         conn.execute(
-            sql.SQL("UPDATE _migrations SET applied_at = {} WHERE name = %s").format(
-                sql.SQL(when)
-            ),
+            sql.SQL("UPDATE _migrations SET applied_at = {} WHERE name = %s").format(sql.SQL(when)),
             (self.MIGRATION,),
         )
 
@@ -1912,9 +1868,7 @@ class TestSupersededTransactions:
             ]
         )
 
-        deleted = self._delete(
-            [self._twin(-1235, "bch_fp_000000000000000a")]
-        )
+        deleted = self._delete([self._twin(-1235, "bch_fp_000000000000000a")])
 
         assert deleted == 1
         assert self._keys(db_conn) == ["bch_fp_000000000000000b"]
@@ -1922,9 +1876,7 @@ class TestSupersededTransactions:
     def test_an_exact_key_still_needs_the_date_and_amount(self, db_conn):
         upsert_transactions([self._card("bch_fp_000000000000000a", -1234)])
 
-        assert self._delete(
-            [self._twin(-1235, "bch_fp_000000000000000a")]
-        ) == 0
+        assert self._delete([self._twin(-1235, "bch_fp_000000000000000a")]) == 0
 
     def test_a_loose_match_is_one_to_one_and_oldest_first(self, db_conn):
         self._store(
@@ -1943,9 +1895,7 @@ class TestSupersededTransactions:
         """A loose match listed first must not take the row a key names."""
         self._store(db_conn, "bch_fp_000000000000000a", "bch_fp_000000000000000b")
 
-        deleted = self._delete(
-            [self._twin(-12), self._twin(-12, "bch_fp_000000000000000a")]
-        )
+        deleted = self._delete([self._twin(-12), self._twin(-12, "bch_fp_000000000000000a")])
 
         assert deleted == 2
         assert self._keys(db_conn) == []
@@ -1980,9 +1930,7 @@ class TestSupersededTransactions:
             ]
         )
 
-        deleted = self._delete(
-            [self._twin(-12)], {"bch_fp_000000000000000a"}
-        )
+        deleted = self._delete([self._twin(-12)], {"bch_fp_000000000000000a"})
 
         assert deleted == 1
         assert self._keys(db_conn) == ["bch_fp_000000000000000a"]
@@ -2002,9 +1950,7 @@ class TestSupersededTransactions:
         """The twin is consumed: no other row is deleted in its place."""
         self._store(db_conn, "bch_fp_000000000000000a", "bch_fp_000000000000000b")
         db_conn.execute(
-            sql.SQL("UPDATE transactions SET {} WHERE external_id = %s").format(
-                sql.SQL(edit)
-            ),
+            sql.SQL("UPDATE transactions SET {} WHERE external_id = %s").format(sql.SQL(edit)),
             ("bch_fp_000000000000000a",),
         )
 
@@ -2181,9 +2127,7 @@ class TestAmountMigration:
             ).fetchone()
             stored = [
                 row["amount"]
-                for row in conn.execute(
-                    "SELECT amount FROM transactions ORDER BY external_id"
-                )
+                for row in conn.execute("SELECT amount FROM transactions ORDER BY external_id")
             ]
         assert column == {
             "data_type": "numeric",
@@ -2242,9 +2186,7 @@ class TestBillingStatusMigration:
             ).fetchone()
         assert stored == {"billing_status": None, "statement_date": None}
         # The next scrape fills it: here the billed leg adopts the row.
-        inserted = upsert_transactions(
-            [_card_txn(billing_status="billed", statement_date=_CLOSED)]
-        )
+        inserted = upsert_transactions([_card_txn(billing_status="billed", statement_date=_CLOSED)])
         assert inserted == 0
         with psycopg.connect(unmigrated_db, row_factory=dict_row) as conn:
             rows = conn.execute(
@@ -2293,7 +2235,7 @@ class TestStockKindMigration:
     payloads and snapshot history included; the goals stay `investment`, and
     a stock ref can never be an `investment` again."""
 
-    _AS_OF = datetime(2026, 1, 2, 12, tzinfo=timezone.utc)
+    _AS_OF = datetime(2026, 1, 2, 12, tzinfo=UTC)
 
     def _stage(
         self,
@@ -2399,9 +2341,7 @@ class TestStockKindMigration:
 
         apply_migrations(unmigrated_db)
         # Re-running the statements finds nothing left to move.
-        migration = (MIGRATIONS_DIR / "V039__stock_product_kind.sql").read_text(
-            encoding="utf-8"
-        )
+        migration = (MIGRATIONS_DIR / "V039__stock_product_kind.sql").read_text(encoding="utf-8")
         with psycopg.connect(unmigrated_db) as conn:
             conn.execute(migration)
 
@@ -2435,10 +2375,7 @@ class TestStockKindMigration:
             )
         )
         with psycopg.connect(unmigrated_db, row_factory=dict_row) as conn:
-            refs = sorted(
-                (row["kind"], row["external_ref"])
-                for row in _products(conn, "fintual")
-            )
+            refs = sorted((row["kind"], row["external_ref"]) for row in _products(conn, "fintual"))
         assert refs == [
             ("investment", "1001"),
             ("stock", "stock:0001"),
@@ -2461,9 +2398,7 @@ class TestStockKindMigration:
             )
         )
 
-        with pytest.raises(
-            psycopg.errors.CheckViolation, match="products_stock_ref_kind_check"
-        ):
+        with pytest.raises(psycopg.errors.CheckViolation, match="products_stock_ref_kind_check"):
             upsert_product(
                 ScrapedProduct(
                     institution="fintual",
@@ -2475,9 +2410,9 @@ class TestStockKindMigration:
                 )
             )
 
-        assert [
-            (p["kind"], p["external_ref"]) for p in _products(db_conn, "fintual")
-        ] == [("stock", "stock:0001")]
+        assert [(p["kind"], p["external_ref"]) for p in _products(db_conn, "fintual")] == [
+            ("stock", "stock:0001")
+        ]
         # A goal (a bare numeric ref) is still an `investment`.
         upsert_product(
             ScrapedProduct(
@@ -2516,9 +2451,7 @@ class TestSnapshots:
     def test_a_kind_without_a_headline_gets_no_snapshot(self, db_conn):
         """debit_card's headline is None; only the latest metrics refresh."""
         upsert_product(
-            ScrapedProduct(
-                institution="banchile", kind="debit_card", metrics=DebitCardMetrics()
-            )
+            ScrapedProduct(institution="banchile", kind="debit_card", metrics=DebitCardMetrics())
         )
 
         product = _only_product(db_conn)
@@ -2642,8 +2575,7 @@ class TestRetireVanishedProducts:
         return [
             row["balance"]
             for row in conn.execute(
-                "SELECT balance FROM product_snapshots WHERE product_id = %s "
-                "ORDER BY as_of",
+                "SELECT balance FROM product_snapshots WHERE product_id = %s ORDER BY as_of",
                 (product_id,),
             ).fetchall()
         ]
@@ -2721,9 +2653,7 @@ class TestRetireVanishedProducts:
         assert pot["is_active"] is True
         assert "vanished_pending_since" not in pot["attributes"]
 
-    def test_a_flagged_pot_deactivated_by_hand_stays_frozen_and_loses_the_flag(
-        self, db_conn
-    ):
+    def test_a_flagged_pot_deactivated_by_hand_stays_frozen_and_loses_the_flag(self, db_conn):
         """Deactivated outside the PATCH: still frozen, but no stamp left to
         retire it on its first miss after a reactivation."""
         # Arrange
@@ -2846,9 +2776,7 @@ class TestRetireVanishedProducts:
         assert (pot["is_active"], pot["current_balance"]) == (False, Decimal("2500000"))
         assert len(_snapshots(db_conn)) == 1
 
-    def test_a_pot_re_enabled_by_hand_loses_the_marker_on_its_next_write(
-        self, db_conn
-    ):
+    def test_a_pot_re_enabled_by_hand_loses_the_marker_on_its_next_write(self, db_conn):
         """Once written again, a later hand deactivation is the user's and sticks."""
         upsert_product(_pot(_POT_1, 2500000))
         _miss_twice(_pot_scope())
@@ -2869,7 +2797,7 @@ class TestRetireVanishedProducts:
         upsert_product(_pot(_POT_1, 2500000))
         db_conn.execute(
             "UPDATE products SET attributes = attributes || "
-            "'{\"retired_by_scraper\": \"sintetico\"}'::jsonb"
+            '\'{"retired_by_scraper": "sintetico"}\'::jsonb'
         )
 
         upsert_product(_pot(_POT_1, 999999))
@@ -2879,12 +2807,16 @@ class TestRetireVanishedProducts:
     def test_another_account_of_the_institution_is_untouched(self, db_conn):
         """Only the account the scraper writes to is in scope."""
         upsert_product(_pot(_POT_1, 2500000))
-        (other_account,) = db_conn.execute(
-            "INSERT INTO accounts (user_id, institution_id, name, display_order) "
-            "SELECT %s, id, 'Sintetica', 1 FROM institutions WHERE slug = 'mercadopago' "
-            "RETURNING id",
-            (SEEDED_USER_ID,),
-        ).fetchone().values()
+        (other_account,) = (
+            db_conn.execute(
+                "INSERT INTO accounts (user_id, institution_id, name, display_order) "
+                "SELECT %s, id, 'Sintetica', 1 FROM institutions WHERE slug = 'mercadopago' "
+                "RETURNING id",
+                (SEEDED_USER_ID,),
+            )
+            .fetchone()
+            .values()
+        )
         db_conn.execute(
             "INSERT INTO products (account_id, name, slug, kind, currency, "
             "external_ref, current_balance) "
@@ -2902,9 +2834,7 @@ class TestRetireVanishedProducts:
 
 class TestScraperRuns:
     def _run(self, conn, run_id):
-        return conn.execute(
-            "SELECT * FROM scraper_runs WHERE id = %s", (run_id,)
-        ).fetchone()
+        return conn.execute("SELECT * FROM scraper_runs WHERE id = %s", (run_id,)).fetchone()
 
     def test_a_started_run_is_running(self, db_conn):
         run = self._run(db_conn, start_scraper_run("http_api", "buda"))
@@ -2924,9 +2854,7 @@ class TestScraperRuns:
     def test_finishing_records_the_outcome(self, db_conn, status, imported, message):
         run_id = start_scraper_run("http_api", "buda")
 
-        finish_scraper_run(
-            run_id, status, transactions_imported=imported, error_message=message
-        )
+        finish_scraper_run(run_id, status, transactions_imported=imported, error_message=message)
 
         run = self._run(db_conn, run_id)
         assert (run["status"], run["transactions_imported"], run["error_message"]) == (
@@ -3062,9 +2990,7 @@ class TestExchangeRates:
             upsert_exchange_rate(_usd_rate(product=False, institution="sintetico"))
 
         assert (
-            db_conn.execute(
-                "SELECT 1 FROM institutions WHERE slug = 'sintetico'"
-            ).fetchone()
+            db_conn.execute("SELECT 1 FROM institutions WHERE slug = 'sintetico'").fetchone()
             is None
         )
         assert self._rates(db_conn) == []
@@ -3115,9 +3041,7 @@ def _closes(*points, external_ref="stock:0001", institution="fintual"):
     """A synthetic daily series; each point is (YYYY-MM-DD, price)."""
     return ScrapedPriceHistory(
         institution=institution,
-        product=ProductRef(
-            kind="stock", currency="USD", external_ref=external_ref
-        ),
+        product=ProductRef(kind="stock", currency="USD", external_ref=external_ref),
         points=[DailyPrice(date=day, price=price) for day, price in points],
     )
 
@@ -3155,10 +3079,7 @@ class TestPriceHistory:
 
         rows = self._prices(db_conn)
         assert written == 2
-        assert [
-            (r["external_ref"], r["price_date"], r["price"], r["currency"])
-            for r in rows
-        ] == [
+        assert [(r["external_ref"], r["price_date"], r["price"], r["currency"]) for r in rows] == [
             ("stock:0002", date(2026, 1, 2), Decimal("100.0"), "USD"),
             ("stock:0002", date(2026, 1, 5), Decimal("250.5"), "USD"),
         ]
@@ -3180,9 +3101,7 @@ class TestPriceHistory:
         upsert_price_history(_closes(("2026-01-02", "100.0"), ("2026-01-05", "250.5")))
         before = {r["price_date"]: r for r in self._prices(db_conn)}
 
-        written = upsert_price_history(
-            _closes(("2026-01-05", "250.75"), ("2026-01-06", "250.5"))
-        )
+        written = upsert_price_history(_closes(("2026-01-05", "250.75"), ("2026-01-06", "250.5")))
 
         after = {r["price_date"]: r for r in self._prices(db_conn)}
         assert written == 2
@@ -3201,9 +3120,7 @@ class TestPriceHistory:
             UnresolvedPriceScope,
             match="no stock product in USD with that external_ref at 'fintual'",
         ):
-            upsert_price_history(
-                _closes(("2026-01-02", "100.0"), external_ref="stock:0003")
-            )
+            upsert_price_history(_closes(("2026-01-02", "100.0"), external_ref="stock:0003"))
 
         refs = [p["external_ref"] for p in _products(db_conn, "fintual")]
         assert refs == ["stock:0001"]
@@ -3211,14 +3128,10 @@ class TestPriceHistory:
 
     def test_an_unknown_institution_is_reported_and_not_created(self, db_conn):
         with pytest.raises(UnresolvedPriceScope, match="institution 'sintetico'"):
-            upsert_price_history(
-                _closes(("2026-01-02", "100.0"), institution="sintetico")
-            )
+            upsert_price_history(_closes(("2026-01-02", "100.0"), institution="sintetico"))
 
         assert (
-            db_conn.execute(
-                "SELECT 1 FROM institutions WHERE slug = 'sintetico'"
-            ).fetchone()
+            db_conn.execute("SELECT 1 FROM institutions WHERE slug = 'sintetico'").fetchone()
             is None
         )
         assert _count(db_conn, "product_prices") == 0
@@ -3226,9 +3139,7 @@ class TestPriceHistory:
     def test_deleting_the_product_drops_its_prices(self, db_conn):
         self._positions()
         upsert_price_history(_closes(("2026-01-02", "100.0")))
-        upsert_price_history(
-            _closes(("2026-01-02", "250.5"), external_ref="stock:0002")
-        )
+        upsert_price_history(_closes(("2026-01-02", "250.5"), external_ref="stock:0002"))
 
         db_conn.execute(
             "DELETE FROM product_snapshots WHERE product_id = "

@@ -166,9 +166,7 @@ class TestSaldosParsing:
 
     def test_clp_not_read_as_usd(self):
         """A bare '$' row must not be picked up by the USD (US$) pattern."""
-        saldos = web.card_saldos_from_text(
-            "Nacional $2.500.000 $1.000.000 $1.500.000"
-        )
+        saldos = web.card_saldos_from_text("Nacional $2.500.000 $1.000.000 $1.500.000")
         assert "CLP" in saldos and "USD" not in saldos
 
 
@@ -300,7 +298,12 @@ class TestMovementConversion:
         self.scraper = BciLiderScraper()
 
     def _mov(self, description="SYNTHETIC STORE", amount=-35000, day=15):
-        return {"date": date(2026, 7, day), "description": description, "cuotas": None, "amount": amount}
+        return {
+            "date": date(2026, 7, day),
+            "description": description,
+            "cuotas": None,
+            "amount": amount,
+        }
 
     def test_basic_conversion(self):
         txn = self.scraper._movement_to_transaction(self._mov())
@@ -323,9 +326,7 @@ class TestMovementConversion:
     def test_id_survives_a_description_rewrite(self):
         """Billing rewrites the store name, so the id must not depend on it."""
         por_facturar = self.scraper._movement_to_transaction(self._mov(description="STORE A"))
-        facturado = self.scraper._movement_to_transaction(
-            self._mov(description="STORE A,SANTIAGO")
-        )
+        facturado = self.scraper._movement_to_transaction(self._mov(description="STORE A,SANTIAGO"))
 
         assert por_facturar.external_id == facturado.external_id
 
@@ -367,7 +368,9 @@ class TestOneLoginCaching:
     def test_transactions_then_products_logs_in_once(self, monkeypatch):
         result = BciLiderCardResult(
             products=self.products,
-            movements=[{"date": date(2026, 7, 15), "description": "S", "cuotas": None, "amount": -1000}],
+            movements=[
+                {"date": date(2026, 7, 15), "description": "S", "cuotas": None, "amount": -1000}
+            ],
         )
         calls = self._install(monkeypatch, result=result)
 
@@ -401,8 +404,13 @@ class TestOneLoginCaching:
     @pytest.mark.parametrize("billed_first", [True, False], ids=["billed-first", "unbilled-first"])
     def test_a_charge_in_both_views_is_written_once_billed(self, monkeypatch, billed_first):
         """Its rewritten description kept both copies in the backend; one key wins."""
-        unbilled = {"date": date(2026, 7, 15), "description": "STORE A", "cuotas": None,
-                    "amount": -35000, "billed": False}
+        unbilled = {
+            "date": date(2026, 7, 15),
+            "description": "STORE A",
+            "cuotas": None,
+            "amount": -35000,
+            "billed": False,
+        }
         billed = dict(unbilled, description="STORE A,SANTIAGO", billed=True)
         other = dict(unbilled, date=date(2026, 7, 14), billed=False)
         movements = [billed, unbilled, other] if billed_first else [unbilled, billed, other]
@@ -441,9 +449,7 @@ class TestStatements:
 
     # Synthetic: an installment charge on both statements, a newer charge and
     # a payment on the newer one only.
-    OLDER = _lider_statement(
-        date(2026, 2, 11), date(2026, 2, 10), [(date(2026, 2, 3), -999999)]
-    )
+    OLDER = _lider_statement(date(2026, 2, 11), date(2026, 2, 10), [(date(2026, 2, 3), -999999)])
     NEWER = _lider_statement(
         date(2026, 3, 11),
         date(2026, 3, 10),
@@ -464,18 +470,31 @@ class TestStatements:
         """Even one read in "Por facturar"; an unlisted one keeps its view."""
         # Arrange
         movements = [
-            {"date": date(2026, 2, 3), "description": "CUOTAS", "cuotas": "02/03",
-             "amount": -999999, "billed": False},
-            {"date": date(2026, 3, 1), "description": "STORE", "cuotas": None,
-             "amount": -35000, "billed": None},
-            {"date": date(2026, 3, 12), "description": "NEW", "cuotas": None,
-             "amount": -35000, "billed": False},
+            {
+                "date": date(2026, 2, 3),
+                "description": "CUOTAS",
+                "cuotas": "02/03",
+                "amount": -999999,
+                "billed": False,
+            },
+            {
+                "date": date(2026, 3, 1),
+                "description": "STORE",
+                "cuotas": None,
+                "amount": -35000,
+                "billed": None,
+            },
+            {
+                "date": date(2026, 3, 12),
+                "description": "NEW",
+                "cuotas": None,
+                "amount": -35000,
+                "billed": False,
+            },
         ]
 
         # Act
-        installment, charge, new = self._scrape(
-            monkeypatch, movements, [self.NEWER, self.OLDER]
-        )
+        installment, charge, new = self._scrape(monkeypatch, movements, [self.NEWER, self.OLDER])
 
         # Assert
         assert (installment.billing_status, installment.statement_date) == (
@@ -503,8 +522,7 @@ class TestStatements:
             "CLP",
         )
         assert newer.external_ids == {
-            bci_lider_mod.movement_external_id(day, amount)
-            for day, amount in self.NEWER.movements
+            bci_lider_mod.movement_external_id(day, amount) for day, amount in self.NEWER.movements
         }
 
     def test_the_key_matches_the_movement_key(self):
@@ -649,7 +667,8 @@ class TestRealChromeWiring:
         assert "Lider profile" in str(info.value)
 
     def test_sign_in_chrome_that_exits_is_a_lider_web_error_with_the_profile_hint(
-        self, monkeypatch,
+        self,
+        monkeypatch,
     ):
         """The interactive sign-in watches the Chrome it launched and names the profile."""
         import contextlib
@@ -680,7 +699,8 @@ class TestRealChromeWiring:
         monkeypatch.setattr(web, "_launch_real_chrome", lambda port, url, offscreen: "proc")
         monkeypatch.setattr(web.real_chrome, "terminate_chrome", lambda proc: None)
         monkeypatch.setattr(
-            web, "_scrape_over_cdp",
+            web,
+            "_scrape_over_cdp",
             lambda cdp_url, rut, password, process=None: seen.append(process) or "result",
         )
 

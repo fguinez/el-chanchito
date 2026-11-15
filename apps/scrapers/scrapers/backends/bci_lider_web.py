@@ -54,10 +54,8 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 from product_model import CreditCardAttributes, CreditCardMetrics
-
 from scrapers.backends import real_chrome
 from scrapers.backends.bci_lider_billing import (
     LiderStatement,
@@ -154,7 +152,7 @@ _SUBMIT_SELECTORS = [
 # Length of the Cloudflare Turnstile token; > 0 means the check has passed.
 _TURNSTILE_TOKEN_JS = (
     "() => { const el = document.querySelector("
-    "'input[name=\"cf-turnstile-response\"],textarea[name=\"cf-turnstile-response\"]');"
+    '\'input[name="cf-turnstile-response"],textarea[name="cf-turnstile-response"]\');'
     " return el ? (el.value || '').length : 0; }"
 )
 _POPUP_CLOSE_SELECTORS = [
@@ -195,17 +193,17 @@ _LAST4_RE = re.compile(r"Tarjeta\s+N[°º][^\n]*?(\d{4})\s*(?:\n|$)", re.I)
 # so both placements are accepted. Anchored to a line so the greedy description
 # can't swallow rows.
 _MOVEMENT_RE = re.compile(
-    r"^\s*(\d{1,2}/\d{1,2}/\d{4})\s+"           # 1: date
-    r"(.+?)"                                     # 2: description (lazy)
-    r"(?:\s+(\d{1,2}/\d{1,2}))?"                # 3: cuotas (optional)
-    r"\s+(-?\s*\$\s?-?\s?[\d.]{1,15})\s*$",     # 4: monto (sign either side of "$")
+    r"^\s*(\d{1,2}/\d{1,2}/\d{4})\s+"  # 1: date
+    r"(.+?)"  # 2: description (lazy)
+    r"(?:\s+(\d{1,2}/\d{1,2}))?"  # 3: cuotas (optional)
+    r"\s+(-?\s*\$\s?-?\s?[\d.]{1,15})\s*$",  # 4: monto (sign either side of "$")
     re.M,
 )
 _MOVEMENTS_START_RE = re.compile(r"tienda\s*/\s*descripci[oó]n.*?monto", re.I | re.S)
 _MOVEMENTS_END_RE = re.compile(r"mostrando\s+p[aá]gina", re.I)
 
 
-def parse_amount(raw: Optional[str]) -> Optional[float]:
+def parse_amount(raw: str | None) -> float | None:
     """Parse a Chilean-formatted CLP/USD amount into a float (keeps decimals).
 
     Handles ``$1.234.567``, ``US$1.234,56``, ``$ 999.999`` and ``1.234,00``
@@ -227,13 +225,13 @@ def parse_amount(raw: Optional[str]) -> Optional[float]:
         return None
 
 
-def parse_clp(raw: Optional[str]) -> Optional[int]:
+def parse_clp(raw: str | None) -> int | None:
     """Parse a Chilean-formatted CLP amount into whole pesos (rounds decimals)."""
     value = parse_amount(raw)
-    return int(round(value)) if value is not None else None
+    return round(value) if value is not None else None
 
 
-def card_saldos_from_text(text: Optional[str]) -> dict[str, dict[str, float]]:
+def card_saldos_from_text(text: str | None) -> dict[str, dict[str, float]]:
     """Read the card cupos per currency off the "Saldos" page text.
 
     Returns e.g. (synthetic) ``{"CLP": {"available": 1500000.0, "limit":
@@ -261,7 +259,7 @@ def card_saldos_from_text(text: Optional[str]) -> dict[str, dict[str, float]]:
     return result
 
 
-def card_last4_from_text(text: Optional[str]) -> Optional[str]:
+def card_last4_from_text(text: str | None) -> str | None:
     """The card's last four digits from "Tarjeta N° XXXX XXXX XXXX 1234"."""
     if not text:
         return None
@@ -269,7 +267,7 @@ def card_last4_from_text(text: Optional[str]) -> Optional[str]:
     return match.group(1) if match else None
 
 
-def card_name_from_text(text: Optional[str]) -> Optional[str]:
+def card_name_from_text(text: str | None) -> str | None:
     """The card product name printed above "Tarjeta N°" (e.g. "Lider Bci Tradicional")."""
     if not text:
         return None
@@ -277,7 +275,7 @@ def card_name_from_text(text: Optional[str]) -> Optional[str]:
     return match.group(1).strip() if match else None
 
 
-def card_products_from_text(text: Optional[str]) -> list[ScrapedProduct]:
+def card_products_from_text(text: str | None) -> list[ScrapedProduct]:
     """Shape the "Saldos" page text into credit_card ScrapedProducts (CLP + USD).
 
     Disponible -> ``metrics.available``, Autorizado -> ``metrics.limit``,
@@ -320,15 +318,13 @@ def card_products_from_text(text: Optional[str]) -> list[ScrapedProduct]:
                 currency=currency,
                 name=brand,  # the card product name, e.g. "Lider Bci Tradicional"
                 attributes=attributes,
-                metrics=CreditCardMetrics(
-                    available=data["available"], limit=limit, owed=owed
-                ),
+                metrics=CreditCardMetrics(available=data["available"], limit=limit, owed=owed),
             )
         )
     return products
 
 
-def _parse_date_ddmmyyyy(raw: str) -> Optional[datetime.date]:
+def _parse_date_ddmmyyyy(raw: str) -> datetime.date | None:
     """Parse a "DD/MM/YYYY" date; None when it isn't a real date."""
     match = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", raw)
     if match is None:
@@ -340,7 +336,7 @@ def _parse_date_ddmmyyyy(raw: str) -> Optional[datetime.date]:
         return None
 
 
-def movements_from_text(text: Optional[str]) -> list[dict]:
+def movements_from_text(text: str | None) -> list[dict]:
     """Parse the Nacionales (CLP) movements table into raw movement dicts.
 
     Each dict is ``{"date": date, "description": str, "cuotas": str|None,
@@ -352,7 +348,7 @@ def movements_from_text(text: Optional[str]) -> list[dict]:
     if not text:
         return []
     start = _MOVEMENTS_START_RE.search(text)
-    region = text[start.end():] if start else text
+    region = text[start.end() :] if start else text
     end = _MOVEMENTS_END_RE.search(region)
     if end:
         region = region[: end.start()]
@@ -470,16 +466,18 @@ def _fill_by_keystrokes(page, selectors: list[str], value: str, timeout: int) ->
 
 def _submit_enabled(page) -> bool:
     try:
-        return bool(page.evaluate(
-            "() => { const b = [...document.querySelectorAll('button')]"
-            ".find(x => /ingresar/i.test(x.textContent || ''));"
-            " return b ? !b.disabled : false; }"
-        ))
+        return bool(
+            page.evaluate(
+                "() => { const b = [...document.querySelectorAll('button')]"
+                ".find(x => /ingresar/i.test(x.textContent || ''));"
+                " return b ? !b.disabled : false; }"
+            )
+        )
     except Exception:
         return False
 
 
-def _autofill_and_submit(page, rut: Optional[str], password: Optional[str], deadline: float) -> None:
+def _autofill_and_submit(page, rut: str | None, password: str | None, deadline: float) -> None:
     """Type the RUT + clave, then click Ingresar once the login is submittable.
 
     Submits only when the Cloudflare Turnstile token is present AND Ingresar is
@@ -493,8 +491,9 @@ def _autofill_and_submit(page, rut: Optional[str], password: Optional[str], dead
         if password:
             _fill_by_keystrokes(page, _PASSWORD_SELECTORS, password, timeout=8000)
     except Exception:
-        logger.info("BciLider: autofill hit an issue; finish the login in the window",
-                    exc_info=True)
+        logger.info(
+            "BciLider: autofill hit an issue; finish the login in the window", exc_info=True
+        )
 
     while time.monotonic() < deadline:
         try:
@@ -508,7 +507,9 @@ def _autofill_and_submit(page, rut: Optional[str], password: Optional[str], dead
 
 
 def save_login_session(
-    rut: Optional[str] = None, password: Optional[str] = None, timeout_s: int = 600,
+    rut: str | None = None,
+    password: str | None = None,
+    timeout_s: int = 600,
 ) -> str:
     """Launch a real Chrome, sign in via CDP-driven autofill, and leave it running.
 
@@ -561,8 +562,10 @@ def save_login_session(
             )
         # Do NOT close `browser`: dropping the CDP connection leaves Chrome running.
 
-    print(f"\nSigned in. Chrome left running on {cdp_url}. "
-          f"Point the scraper at it with LIDER_BCI_CDP_URL={cdp_url}.")
+    print(
+        f"\nSigned in. Chrome left running on {cdp_url}. "
+        f"Point the scraper at it with LIDER_BCI_CDP_URL={cdp_url}."
+    )
     return cdp_url
 
 
@@ -647,7 +650,7 @@ def _table_rerendered(page, read: set[tuple]) -> bool:
     return False
 
 
-def _view_checked(page, view: str) -> Optional[bool]:
+def _view_checked(page, view: str) -> bool | None:
     """Whether `view`'s period radio is checked; None when that can't be told."""
     try:
         checked = page.get_by_text(view, exact=False).first.evaluate(
@@ -685,7 +688,7 @@ def _read_movements(page) -> list[dict]:
     seen: dict[tuple, dict] = {}
     movements: list[dict] = []
 
-    def collect(billed: Optional[bool]) -> None:
+    def collect(billed: bool | None) -> None:
         for mov in movements_from_text(_inner_text(page)):
             key = _movement_key(mov)
             kept = seen.get(key)
@@ -696,7 +699,7 @@ def _read_movements(page) -> list[dict]:
             elif billed:
                 kept["billed"] = True
 
-    def read_all_pages(billed: Optional[bool]) -> None:
+    def read_all_pages(billed: bool | None) -> None:
         collect(billed)
         for page_num in range(2, MAX_MOVEMENT_PAGES + 1):
             before = len(movements)
@@ -768,7 +771,7 @@ def _read_billing_into(page, result: BciLiderCardResult) -> None:
             )
 
 
-def _login_via_autofill(page, rut: Optional[str], password: Optional[str], deadline: float) -> None:
+def _login_via_autofill(page, rut: str | None, password: str | None, deadline: float) -> None:
     """Drive the login form on `page` and wait for the private area.
 
     Autofill clears Cloudflare because this is a genuine Chrome. Raises
@@ -788,7 +791,7 @@ def _login_via_autofill(page, rut: Optional[str], password: Optional[str], deadl
     )
 
 
-def _ensure_logged_in(page, rut: Optional[str], password: Optional[str], deadline: float) -> None:
+def _ensure_logged_in(page, rut: str | None, password: str | None, deadline: float) -> None:
     """Make `page` an authenticated portal tab, logging in via autofill if needed.
 
     Probes by navigating to the balances route, then *polls* for the SPA route
@@ -816,7 +819,10 @@ def _ensure_logged_in(page, rut: Optional[str], password: Optional[str], deadlin
 
 
 def _connect_cdp(
-    playwright, cdp_url: str, deadline: float, process: Optional[subprocess.Popen] = None,
+    playwright,
+    cdp_url: str,
+    deadline: float,
+    process: subprocess.Popen | None = None,
 ):
     """Connect to a Chrome debug port, retrying until it's up or `deadline`.
 
@@ -826,9 +832,7 @@ def _connect_cdp(
     port opens fails at once instead of waiting out the deadline.
     """
     try:
-        return real_chrome.connect_over_cdp(
-            playwright, cdp_url, deadline=deadline, process=process
-        )
+        return real_chrome.connect_over_cdp(playwright, cdp_url, deadline=deadline, process=process)
     except real_chrome.ChromeExitedError as exc:
         raise BciLiderSessionError(f"{exc} {_CHROME_EXITED_HINT}") from exc
     except real_chrome.RealChromeError as exc:
@@ -840,8 +844,10 @@ def _connect_cdp(
 
 
 def _scrape_over_cdp(
-    cdp_url: str, rut: Optional[str], password: Optional[str],
-    process: Optional[subprocess.Popen] = None,
+    cdp_url: str,
+    rut: str | None,
+    password: str | None,
+    process: subprocess.Popen | None = None,
 ) -> BciLiderCardResult:
     """Read the card by driving a Chrome reachable at `cdp_url`; never closes it.
 
@@ -859,9 +865,8 @@ def _scrape_over_cdp(
         )
         # Prefer an already-authenticated tab (keeps its sessionStorage), else any
         # existing tab, else a new one; then ensure it's signed in before reading.
-        page = (
-            _find_page_matching(browser, "/private-home")
-            or _find_page_matching(browser, "liderbciserviciosfinancieros")
+        page = _find_page_matching(browser, "/private-home") or _find_page_matching(
+            browser, "liderbciserviciosfinancieros"
         )
         if page is None:
             context = browser.contexts[0] if browser.contexts else browser.new_context()
@@ -881,7 +886,7 @@ def _scrape_over_cdp(
     return result
 
 
-def _scrape_managed_sync(rut: Optional[str], password: Optional[str]) -> BciLiderCardResult:
+def _scrape_managed_sync(rut: str | None, password: str | None) -> BciLiderCardResult:
     """Launch a real Chrome, scrape (logging in via autofill), then close it.
 
     Fully unattended: no long-running Chrome to keep alive. Chrome must be a
@@ -909,14 +914,18 @@ def _scrape_managed_sync(rut: Optional[str], password: Optional[str]) -> BciLide
         return _scrape_managed_once(port, cdp_url, rut, password, offscreen=True)
     except Exception as exc:
         logger.warning(
-            "BciLider: off-screen Chrome scrape failed (%s); retrying with a "
-            "visible window", exc,
+            "BciLider: off-screen Chrome scrape failed (%s); retrying with a visible window",
+            exc,
         )
     return _scrape_managed_once(port, cdp_url, rut, password, offscreen=False)
 
 
 def _scrape_managed_once(
-    port: int, cdp_url: str, rut: Optional[str], password: Optional[str], offscreen: bool,
+    port: int,
+    cdp_url: str,
+    rut: str | None,
+    password: str | None,
+    offscreen: bool,
 ) -> BciLiderCardResult:
     """Launch Chrome, scrape, and terminate it (one managed attempt)."""
     proc = _launch_real_chrome(port, LOGIN_URL, offscreen=offscreen)
@@ -927,8 +936,9 @@ def _scrape_managed_once(
 
 
 async def scrape_card(
-    rut: Optional[str] = None, password: Optional[str] = None,
-    cdp_url: Optional[str] = None,
+    rut: str | None = None,
+    password: str | None = None,
+    cdp_url: str | None = None,
 ) -> BciLiderCardResult:
     """Read the card's balances + movements by driving a real Chrome over CDP.
 

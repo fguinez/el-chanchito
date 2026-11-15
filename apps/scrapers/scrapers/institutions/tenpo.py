@@ -15,8 +15,14 @@ PATTERN = EmailPattern(
     product_kind="wallet",
     sender_domains=["tenpo"],
     subject_contains=[
-        "compra", "pago", "transaccion", "transferencia", "recibiste",
-        "devolucion", "reembolso", "cashback",
+        "compra",
+        "pago",
+        "transaccion",
+        "transferencia",
+        "recibiste",
+        "devolucion",
+        "reembolso",
+        "cashback",
     ],
     amount_rules=[
         anchored(r"compra(?:ste)?|pagaste|pago\s+de|transferiste|enviaste"),
@@ -36,8 +42,13 @@ PATTERN = EmailPattern(
     ],
     # Not "cashback": a purchase email may mention the cashback it earned.
     income_keywords=[
-        "recibiste una transferencia", "recibiste dinero", "te transfirieron",
-        "devolucion", "reembolso", "anulad", "revers",
+        "recibiste una transferencia",
+        "recibiste dinero",
+        "te transfirieron",
+        "devolucion",
+        "reembolso",
+        "anulad",
+        "revers",
     ],
 )
 

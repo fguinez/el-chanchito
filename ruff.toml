@@ -1,0 +1,41 @@
+# Ruff config for every Python tree in the repo (apps/scrapers,
+# packages/product-model, scripts, .claude skills).
+target-version = "py312"
+line-length = 100
+extend-exclude = ["local"]
+
+# Standalone skill helpers run under any system python3 (3.9 too), so no
+# fix may introduce syntax newer than that.
+[per-file-target-version]
+".claude/skills/new-institution-scraper/scripts/json_shape.py" = "py39"
+".claude/skills/new-institution-scraper/scripts/scan_personal_data.py" = "py39"
+
+[lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific
+]
+ignore = [
+    "E501",   # the formatter owns line length; long strings and URLs stay as is
+    "RUF001", # Spanish text (º, ´, en dashes in scraped labels) is intentional
+    "RUF002",
+    "RUF003",
+    "SIM105", # try/except/pass reads fine; contextlib.suppress is not required
+    "UP031",  # %-formatting keeps JS snippets readable (no doubled braces)
+    "UP047",  # TypeVar generics stay until a dedicated PEP 695 pass
+    "RUF012", # class-level fakes in tests mutate shared defaults on purpose
+]
+
+[lint.per-file-ignores]
+# Entry points that set up sys.path or load env before importing project code.
+"apps/scrapers/main.py" = ["E402"]
+"packages/product-model/scripts/generate.py" = ["E402"]
+
+[lint.isort]
+known-first-party = ["scrapers", "db", "product_model", "main"]

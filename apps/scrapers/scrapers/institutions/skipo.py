@@ -54,7 +54,7 @@ import logging
 import os
 import re
 from collections.abc import AsyncIterator
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -62,7 +62,6 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from product_model import CryptoMetrics, WalletMetrics
-
 from scrapers.base import (
     BaseScraper,
     ProductScrapeResult,
@@ -164,7 +163,7 @@ def _local_date(raw: Any) -> date | None:
     except ValueError:
         return None
     if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
+        moment = moment.replace(tzinfo=UTC)
     return moment.astimezone(LOCAL_TZ).date()
 
 

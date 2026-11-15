@@ -24,7 +24,6 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 import httpx
 
 from product_model import CryptoMetrics
-
 from scrapers.base import (
     BaseScraper,
     ProductScrapeResult,
@@ -75,9 +74,7 @@ def _parse_movement(item: dict, tx_type: str) -> ScrapedTransaction | None:
         amount[1] if len(amount) > 1 else item.get("currency") or TRANSACTION_CURRENCY
     ).upper()
     if currency != TRANSACTION_CURRENCY:
-        logger.warning(
-            "Buda %s %s is in %s, not CLP; skipping", direction, item_id, currency
-        )
+        logger.warning("Buda %s %s is in %s, not CLP; skipping", direction, item_id, currency)
         return None
 
     try:
@@ -85,9 +82,7 @@ def _parse_movement(item: dict, tx_type: str) -> ScrapedTransaction | None:
     except InvalidOperation:
         value = None
     if value is None or not value.is_finite():
-        logger.warning(
-            "Buda %s %s has an unreadable amount, skipping", direction, item_id
-        )
+        logger.warning("Buda %s %s has an unreadable amount, skipping", direction, item_id)
         return None
     pesos = abs(int(value.to_integral_value(rounding=ROUND_HALF_UP)))
     if pesos == 0:
@@ -161,9 +156,7 @@ class BudaScraper(BaseScraper):
             label=f"Buda GET {path}",
         )
 
-    async def _pages(
-        self, client: httpx.AsyncClient, tx_type: str
-    ) -> AsyncIterator[list[dict]]:
+    async def _pages(self, client: httpx.AsyncClient, tx_type: str) -> AsyncIterator[list[dict]]:
         """Yield each page of CLP deposits or withdrawals, in Buda's order.
 
         Follows `meta.total_pages` when Buda reports it, else stops at the
@@ -171,14 +164,9 @@ class BudaScraper(BaseScraper):
         """
         currency = TRANSACTION_CURRENCY.lower()
         for page in range(1, MAX_PAGES + 1):
-            path = (
-                f"/api/v2/currencies/{currency}/{tx_type}.json"
-                f"?per={PAGE_SIZE}&page={page}"
-            )
+            path = f"/api/v2/currencies/{currency}/{tx_type}.json?per={PAGE_SIZE}&page={page}"
             resp = await send_with_retry(
-                lambda p=path: client.get(
-                    f"{BUDA_BASE}{p}", headers=self._sign("GET", p)
-                ),
+                lambda p=path: client.get(f"{BUDA_BASE}{p}", headers=self._sign("GET", p)),
                 label=f"Buda GET {path}",
             )
             resp.raise_for_status()

@@ -45,7 +45,12 @@ _FORMATS = [
     ("account-number", re.compile(r"^\d{2,4}-\d{3,4}-\d{4,8}-\d{1,2}$")),
     ("digit-groups", re.compile(r"^\d+(?:[-\s]\d+)+$")),
     ("masked", re.compile(r"^[*Xx•\s-]{4,}\d{2,4}$")),
-    ("uuid", re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")),
+    (
+        "uuid",
+        re.compile(
+            r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+        ),
+    ),
     ("hex", re.compile(r"^[0-9a-fA-F]{12,}$")),
     ("email", re.compile(r"^[^@\s]+@[^@\s]+$")),
     ("url", re.compile(r"^https?://")),
@@ -62,6 +67,7 @@ class ListShape:
     item: Any
 
 
+# Union, not `|`: evaluated at import, and the script runs under any python3 (3.9 too).
 Shape = Union[str, dict, ListShape]
 
 
@@ -227,7 +233,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("path", help="a .json response or a .har export")
     parser.add_argument("--filter", help="HAR only: keep URLs containing this text")
-    parser.add_argument("--items", type=int, default=5, help="list items sampled per list (default 5)")
+    parser.add_argument(
+        "--items", type=int, default=5, help="list items sampled per list (default 5)"
+    )
     args = parser.parse_args()
 
     data = _json_body(Path(args.path).read_text(encoding="utf-8"))

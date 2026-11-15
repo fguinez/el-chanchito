@@ -9,7 +9,6 @@ import sys
 from types import SimpleNamespace
 
 import pytest
-
 import secret_store as ss
 
 TRICKY = [
@@ -231,8 +230,12 @@ def test_export_of_named_keys_fails_when_one_has_no_value(capsys):
     assert code == 1
     assert "DASHBOARD_PASSWORD" in capsys.readouterr().err
     # A key already in the environment counts as present.
-    assert ss.cmd_export(backend, ["DASHBOARD_PASSWORD"], env={"DASHBOARD_PASSWORD": "x"},
-                         out=lines.append) == 0
+    assert (
+        ss.cmd_export(
+            backend, ["DASHBOARD_PASSWORD"], env={"DASHBOARD_PASSWORD": "x"}, out=lines.append
+        )
+        == 0
+    )
 
 
 def test_export_warns_when_the_store_is_empty(capsys):
@@ -360,7 +363,9 @@ def test_set_only_takes_a_secret_export_can_load(key):
 def test_set_overwrites():
     backend = MemoryBackend({"FINTUAL_PASSWORD": "synthetic-old"})
 
-    code = ss.cmd_set(backend, "FINTUAL_PASSWORD", prompt=lambda key: "synthetic-new", out=lambda _: None)
+    code = ss.cmd_set(
+        backend, "FINTUAL_PASSWORD", prompt=lambda key: "synthetic-new", out=lambda _: None
+    )
 
     assert code == 0
     assert backend.values["FINTUAL_PASSWORD"] == "synthetic-new"
@@ -497,8 +502,12 @@ def test_macos_without_the_security_cli_uses_keyring():
     [("file", ss.FileBackend), ("FILE", ss.FileBackend), ("keyring", ss.KeyringBackend)],
 )
 def test_forced_backend(forced, expected):
-    backend = _select(env={"CHANCHITO_SECRETS_BACKEND": forced}, platform="darwin",
-                      security=True, keyring=fake_keyring())
+    backend = _select(
+        env={"CHANCHITO_SECRETS_BACKEND": forced},
+        platform="darwin",
+        security=True,
+        keyring=fake_keyring(),
+    )
 
     assert isinstance(backend, expected)
 
@@ -574,16 +583,27 @@ def test_keychain_backend_matches_the_historical_security_calls():
     assert backend.get("BUDA_API_KEY") is None
     assert backend.has("BANCHILE_PASSWORD")
     assert fake.calls[0] == [
-        "security", "find-generic-password", "-a", "synthetic-user",
-        "-s", "chanchito.BANCHILE_PASSWORD", "-w",
+        "security",
+        "find-generic-password",
+        "-a",
+        "synthetic-user",
+        "-s",
+        "chanchito.BANCHILE_PASSWORD",
+        "-w",
     ]
     # Existence checks never read the password data (no access prompt).
     assert "-w" not in fake.calls[-1]
 
     backend.store_interactive("BUDA_API_KEY", prompt=lambda key: pytest.fail("no prompt"))
     assert fake.calls[-1] == [
-        "security", "add-generic-password", "-U", "-a", "synthetic-user",
-        "-s", "chanchito.BUDA_API_KEY", "-w",
+        "security",
+        "add-generic-password",
+        "-U",
+        "-a",
+        "synthetic-user",
+        "-s",
+        "chanchito.BUDA_API_KEY",
+        "-w",
     ]
 
 
@@ -641,7 +661,9 @@ def test_cli_file_backend_end_to_end(tmp_path):
     assert export.stdout == "export BUDA_API_KEY='synthetic $value'\n"
     named = subprocess.run(
         [sys.executable, ss.__file__, "export", "DASHBOARD_PASSWORD"],
-        env=env, capture_output=True, text=True,
+        env=env,
+        capture_output=True,
+        text=True,
     )
     assert named.returncode == 1
     assert named.stdout == ""
@@ -659,7 +681,9 @@ def test_cli_export_writes_utf8_with_lf(tmp_path):
 
     result = subprocess.run(
         [sys.executable, ss.__file__, "export", "BUDA_API_KEY"],
-        env=env, capture_output=True, check=True,
+        env=env,
+        capture_output=True,
+        check=True,
     )
 
-    assert result.stdout == "export BUDA_API_KEY='synthetic-ñandú'\n".encode("utf-8")
+    assert result.stdout == "export BUDA_API_KEY='synthetic-ñandú'\n".encode()

@@ -8,7 +8,7 @@ description, alias and figure is synthetic (see the repo's personal-data
 policy).
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
 
 import psycopg
@@ -124,18 +124,14 @@ class TestOrdering:
         assert _alias_for(db_conn, "COMPRA WEB") == "Alta"
 
     def test_tie_breaks_on_older_created_at(self, db_conn):
-        older = datetime(2026, 1, 1, tzinfo=timezone.utc)
-        newer = datetime(2026, 2, 1, tzinfo=timezone.utc)
-        _insert_alias(
-            db_conn, "compra", "Nueva", match_type="substring", created_at=newer
-        )
-        _insert_alias(
-            db_conn, "compra", "Antigua", match_type="substring", created_at=older
-        )
+        older = datetime(2026, 1, 1, tzinfo=UTC)
+        newer = datetime(2026, 2, 1, tzinfo=UTC)
+        _insert_alias(db_conn, "compra", "Nueva", match_type="substring", created_at=newer)
+        _insert_alias(db_conn, "compra", "Antigua", match_type="substring", created_at=older)
         assert _alias_for(db_conn, "COMPRA WEB") == "Antigua"
 
     def test_tie_breaks_on_lower_id_when_created_at_is_equal(self, db_conn):
-        same = datetime(2026, 3, 1, tzinfo=timezone.utc)
+        same = datetime(2026, 3, 1, tzinfo=UTC)
         low = UUID("00000000-0000-4000-8000-000000000001")
         high = UUID("00000000-0000-4000-8000-0000000000ff")
         _insert_alias(
@@ -185,17 +181,13 @@ class TestAmountCondition:
         assert _alias_for(db_conn, "COMPRA WEB", 2500001, "CLP") is None
 
     def test_min_only_is_an_open_upper_bound(self, db_conn):
-        _insert_alias(
-            db_conn, "COMPRA WEB", "Desde", amount_min=1000000, currency="CLP"
-        )
+        _insert_alias(db_conn, "COMPRA WEB", "Desde", amount_min=1000000, currency="CLP")
         assert _alias_for(db_conn, "COMPRA WEB", 999999, "CLP") is None
         assert _alias_for(db_conn, "COMPRA WEB", 1000000, "CLP") == "Desde"
         assert _alias_for(db_conn, "COMPRA WEB", 9999999, "CLP") == "Desde"
 
     def test_max_only_is_an_open_lower_bound(self, db_conn):
-        _insert_alias(
-            db_conn, "COMPRA WEB", "Hasta", amount_max=2500000, currency="CLP"
-        )
+        _insert_alias(db_conn, "COMPRA WEB", "Hasta", amount_max=2500000, currency="CLP")
         assert _alias_for(db_conn, "COMPRA WEB", 2500000, "CLP") == "Hasta"
         assert _alias_for(db_conn, "COMPRA WEB", 1000000, "CLP") == "Hasta"
         assert _alias_for(db_conn, "COMPRA WEB", 2500001, "CLP") is None
@@ -259,9 +251,7 @@ class TestConditionalFirstOrdering:
     def test_conditional_wins_over_higher_priority_unconditional(self, db_conn):
         # The unconditional alias has the HIGHER priority, yet the amount-bounded
         # one wins: conditional-first is the PRIMARY sort key, ahead of priority.
-        _insert_alias(
-            db_conn, "COMPRA WEB", "General", priority=100
-        )
+        _insert_alias(db_conn, "COMPRA WEB", "General", priority=100)
         _insert_alias(
             db_conn,
             "COMPRA WEB",
@@ -281,11 +271,9 @@ class TestConditionalFirstOrdering:
         assert _alias_for(db_conn, "COMPRA WEB", 1234, "USD") == "SoloUSD"
         assert _alias_for(db_conn, "COMPRA WEB", 1234, "CLP") == "General"
 
-    def test_between_conditionals_priority_then_created_at_then_id_break_ties(
-        self, db_conn
-    ):
-        older = datetime(2026, 1, 1, tzinfo=timezone.utc)
-        newer = datetime(2026, 2, 1, tzinfo=timezone.utc)
+    def test_between_conditionals_priority_then_created_at_then_id_break_ties(self, db_conn):
+        older = datetime(2026, 1, 1, tzinfo=UTC)
+        newer = datetime(2026, 2, 1, tzinfo=UTC)
         # Two conditional matches: higher priority wins.
         _insert_alias(
             db_conn,
@@ -326,18 +314,13 @@ class TestConditionalFirstOrdering:
             currency="CLP",
             created_at=older,
         )
-        assert (
-            _alias_for(db_conn, "COMPRA SINTETICA", 2000000, "CLP")
-            == "CondAntigua"
-        )
+        assert _alias_for(db_conn, "COMPRA SINTETICA", 2000000, "CLP") == "CondAntigua"
 
 
 class TestCheckConstraints:
     def test_a_bound_without_a_currency_is_rejected(self, db_conn):
         with pytest.raises(psycopg.errors.CheckViolation):
-            _insert_alias(
-                db_conn, "COMPRA WEB", "SinMoneda", amount_min=1000000
-            )
+            _insert_alias(db_conn, "COMPRA WEB", "SinMoneda", amount_min=1000000)
 
     def test_amount_min_greater_than_amount_max_is_rejected(self, db_conn):
         with pytest.raises(psycopg.errors.CheckViolation):
@@ -354,10 +337,7 @@ class TestCheckConstraints:
 class TestResolutionPriority:
     def test_custom_description_wins_over_everything(self, db_conn):
         _insert_alias(db_conn, "COMPRA WEB", "Alias", match_type="exact")
-        assert (
-            _resolve(db_conn, "Personalizada", "COMPRA WEB", 2500000, "CLP")
-            == "Personalizada"
-        )
+        assert _resolve(db_conn, "Personalizada", "COMPRA WEB", 2500000, "CLP") == "Personalizada"
 
     def test_alias_wins_when_no_custom_description(self, db_conn):
         _insert_alias(db_conn, "COMPRA WEB", "Alias", match_type="exact")
@@ -365,7 +345,4 @@ class TestResolutionPriority:
 
     def test_raw_description_when_neither_applies(self, db_conn):
         # No alias inserted, no custom override: the scraped text shows through.
-        assert (
-            _resolve(db_conn, None, "COMPRA SINTETICA", 999999, "CLP")
-            == "COMPRA SINTETICA"
-        )
+        assert _resolve(db_conn, None, "COMPRA SINTETICA", 999999, "CLP") == "COMPRA SINTETICA"

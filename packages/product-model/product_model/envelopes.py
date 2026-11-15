@@ -92,9 +92,7 @@ class TransactionLocation(BaseModel):
             "only reports an ISO 3166 code sends the code."
         ),
     )
-    latitude: float | None = Field(
-        None, ge=-90, le=90, description="WGS84 latitude in degrees."
-    )
+    latitude: float | None = Field(None, ge=-90, le=90, description="WGS84 latitude in degrees.")
     longitude: float | None = Field(
         None, ge=-180, le=180, description="WGS84 longitude in degrees."
     )
@@ -161,9 +159,7 @@ class ScrapedProduct(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    institution: str = Field(
-        description="Institution slug, e.g. 'banchile', 'fintual'."
-    )
+    institution: str = Field(description="Institution slug, e.g. 'banchile', 'fintual'.")
     kind: ProductKind = Field(
         description="Product kind; selects the attributes/metrics payload family."
     )
@@ -180,8 +176,7 @@ class ScrapedProduct(BaseModel):
     name: str | None = Field(
         None,
         description=(
-            "Display name used only when creating the product; "
-            "never overwrites user renames."
+            "Display name used only when creating the product; never overwrites user renames."
         ),
     )
     attributes: ProductAttributes | None = Field(
@@ -203,8 +198,7 @@ class ScrapedProduct(BaseModel):
             )
         if self.metrics is not None and self.metrics.kind != self.kind:
             raise ValueError(
-                f"metrics.kind '{self.metrics.kind}' does not match "
-                f"product kind '{self.kind}'"
+                f"metrics.kind '{self.metrics.kind}' does not match product kind '{self.kind}'"
             )
         return self
 
@@ -214,9 +208,7 @@ class ScrapedTransaction(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    institution: str = Field(
-        description="Institution slug, e.g. 'banchile', 'fintual'."
-    )
+    institution: str = Field(description="Institution slug, e.g. 'banchile', 'fintual'.")
     product_kind: str = Field(
         description="Kind of the product the transaction belongs to, e.g. 'checking'."
     )
@@ -240,9 +232,7 @@ class ScrapedTransaction(BaseModel):
             "CLP amounts are whole numbers and may be sent as integers."
         ),
     )
-    transaction_date: datetime.date = Field(
-        description="Date the transaction occurred."
-    )
+    transaction_date: datetime.date = Field(description="Date the transaction occurred.")
     accounting_date: datetime.date | None = Field(
         None,
         description=(
@@ -254,9 +244,7 @@ class ScrapedTransaction(BaseModel):
     )
     external_id: str = Field(description="Unique identifier for dedup.")
     currency: str = Field("CLP", description="ISO currency code (default 'CLP').")
-    category_hint: str | None = Field(
-        None, description="Scraper's best-guess category."
-    )
+    category_hint: str | None = Field(None, description="Scraper's best-guess category.")
     internal_transfer: bool = Field(
         False,
         description=(
@@ -269,10 +257,7 @@ class ScrapedTransaction(BaseModel):
     )
     scheduled_month: datetime.date | None = Field(
         None,
-        description=(
-            "First-of-month date the charge lands, for deferred/installment "
-            "purchases."
-        ),
+        description=("First-of-month date the charge lands, for deferred/installment purchases."),
     )
     location: TransactionLocation | None = Field(
         None,
@@ -336,8 +321,7 @@ class ScrapedTransaction(BaseModel):
     def _only_a_billed_movement_has_a_statement(self) -> Self:
         if self.statement_date is not None and self.billing_status != "billed":
             raise ValueError(
-                "statement_date needs billing_status 'billed', "
-                f"got {self.billing_status!r}"
+                f"statement_date needs billing_status 'billed', got {self.billing_status!r}"
             )
         return self
 
@@ -372,9 +356,7 @@ class ScrapedExchangeRate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    institution: str = Field(
-        description="Institution slug, e.g. 'banchile', 'fintual'."
-    )
+    institution: str = Field(description="Institution slug, e.g. 'banchile', 'fintual'.")
     base_currency: str = Field(
         description="Upper-case code of the currency being priced, e.g. 'USD'.",
         pattern=_CURRENCY_CODE_PATTERN,
@@ -425,9 +407,7 @@ class ScrapedExchangeRate(BaseModel):
     def _currencies_are_consistent(self) -> Self:
         """A rate prices one currency in another; a product rate prices its own."""
         if self.base_currency == self.quote_currency:
-            raise ValueError(
-                f"base_currency and quote_currency are both '{self.base_currency}'"
-            )
+            raise ValueError(f"base_currency and quote_currency are both '{self.base_currency}'")
         if self.product is not None and self.product.currency != self.base_currency:
             raise ValueError(
                 f"product currency '{self.product.currency}' does not match "
@@ -471,9 +451,7 @@ class ScrapedPriceHistory(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    institution: str = Field(
-        description="Institution slug, e.g. 'banchile', 'fintual'."
-    )
+    institution: str = Field(description="Institution slug, e.g. 'banchile', 'fintual'.")
     product: ProductRef = Field(
         description="The product of this institution whose unit the prices are for."
     )

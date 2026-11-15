@@ -203,7 +203,9 @@ class TestExtractContext:
             pytest.param('<script>var s="_n.ctx.r=";</script>', id="inside-a-string"),
             pytest.param("<script>// set by _n.ctx.r= below\n</script>", id="inside-a-comment"),
             pytest.param("<script>_n.ctx.r={};</script>", id="an-empty-object-first"),
-            pytest.param('<script>_n.ctx.r={"other": {"appProps": 1}};</script>', id="nested-elsewhere"),
+            pytest.param(
+                '<script>_n.ctx.r={"other": {"appProps": 1}};</script>', id="nested-elsewhere"
+            ),
             pytest.param("<script>if(_n.ctx.r==null){}</script>", id="a-comparison"),
         ],
     )
@@ -216,12 +218,16 @@ class TestExtractContext:
     @pytest.mark.parametrize(
         ("html", "message"),
         [
-            pytest.param("<html><body>Ingresa a tu cuenta</body></html>", "marker missing", id="no-marker"),
+            pytest.param(
+                "<html><body>Ingresa a tu cuenta</body></html>", "marker missing", id="no-marker"
+            ),
             pytest.param("<script>_n.ctx.r=undefined;</script>", "not JSON", id="not-json"),
             pytest.param("<script>_n.ctx.r=</script>", "not JSON", id="nothing-after-marker"),
             pytest.param("<script>_n.ctx.r=_n.ctx.r||{};</script>", "not JSON", id="only-a-guard"),
             pytest.param("<script>_n.ctx.r=[1, 2];</script>", "no appProps", id="not-an-object"),
-            pytest.param('<script>_n.ctx.r={"a": 1};</script>', "no appProps", id="object-without-app-props"),
+            pytest.param(
+                '<script>_n.ctx.r={"a": 1};</script>', "no appProps", id="object-without-app-props"
+            ),
             pytest.param(None, "not text", id="not-text"),
         ],
     )
@@ -414,9 +420,7 @@ class TestParseWalletYield:
                 "Generando ganancias al \u22120,5% anual", -0.5, id="negative-unicode-minus"
             ),
             pytest.param("GENERANDO GANANCIAS AL 1,0% ANUAL", 1.0, id="upper-case"),
-            pytest.param(
-                "100% disponible, al 1,0% anual", 1.0, id="first-percent-not-anual"
-            ),
+            pytest.param("100% disponible, al 1,0% anual", 1.0, id="first-percent-not-anual"),
         ],
     )
     def test_rate_is_the_number_before_percent_anual(self, subtitle, expected):
@@ -488,9 +492,7 @@ class TestParsePots:
         """Its uuid, name and CLP amount."""
         pots, skipped = web.parse_pots(_pots_props([_pot()]))
 
-        assert pots == [
-            Pot(id=POT_ID, name="Reserva sintética", amount=1_000_000, rate_pct=1.0)
-        ]
+        assert pots == [Pot(id=POT_ID, name="Reserva sintética", amount=1_000_000, rate_pct=1.0)]
         assert skipped == 0
 
     def test_every_pot_gets_the_hub_rate_and_no_gain(self):
@@ -706,7 +708,10 @@ class TestParseMovements:
         """The ledger groups rows by day; all of them are read, newest first."""
         props = _movements_props([_item()])
         props["listData"]["groups"].append(
-            {"title": "Ayer", "items": [_item(movement_id=MOVEMENT_ID_2), _item(movement_id=MOVEMENT_ID_3)]}
+            {
+                "title": "Ayer",
+                "items": [_item(movement_id=MOVEMENT_ID_2), _item(movement_id=MOVEMENT_ID_3)],
+            }
         )
 
         rows, _, _ = web.parse_movements(props)
@@ -765,10 +770,18 @@ class TestParseMovements:
         ("props", "message"),
         [
             pytest.param({}, "listData missing", id="no-list-data"),
-            pytest.param({"listData": "synthetic"}, "pages is not a count", id="list-data-not-an-object"),
+            pytest.param(
+                {"listData": "synthetic"}, "pages is not a count", id="list-data-not-an-object"
+            ),
             pytest.param({"listData": {"groups": []}}, "pages is not a count", id="no-pages"),
-            pytest.param({"listData": {"pages": True, "groups": []}}, "pages is not a count", id="pages-bool"),
-            pytest.param({"listData": {"pages": -1, "groups": []}}, "pages is not a count", id="pages-negative"),
+            pytest.param(
+                {"listData": {"pages": True, "groups": []}}, "pages is not a count", id="pages-bool"
+            ),
+            pytest.param(
+                {"listData": {"pages": -1, "groups": []}},
+                "pages is not a count",
+                id="pages-negative",
+            ),
             pytest.param({"listData": {"pages": 1}}, "groups is not a list", id="no-groups"),
         ],
     )
@@ -898,7 +911,10 @@ class TestFetchScript:
 class TestHtmlFromFetch:
     def test_ok_returns_the_page_text(self):
         """A 200 with text is the page."""
-        assert web.html_from_fetch({"status": "ok", "html": "<html></html>"}, "balance") == "<html></html>"
+        assert (
+            web.html_from_fetch({"status": "ok", "html": "<html></html>"}, "balance")
+            == "<html></html>"
+        )
 
     @pytest.mark.parametrize(
         "result",
@@ -925,7 +941,9 @@ class TestHtmlFromFetch:
             pytest.param({"status": "too_large"}, "pots: page too large", id="too-large"),
             pytest.param({"status": "not_allowed"}, "pots: page not allowed", id="not-allowed"),
             pytest.param({"status": "ok"}, "pots: no page text", id="ok-without-text"),
-            pytest.param({"status": "synthetic"}, "pots: unexpected fetch result", id="unknown-status"),
+            pytest.param(
+                {"status": "synthetic"}, "pots: unexpected fetch result", id="unknown-status"
+            ),
             pytest.param(None, "pots: unexpected fetch result", id="no-result"),
         ],
     )
@@ -1047,8 +1065,16 @@ class TestReadAccount:
         [
             pytest.param({"status": "http", "code": 500}, "pots: HTTP 500", id="http-500"),
             pytest.param({"status": "timeout"}, "pots: timed out", id="timeout"),
-            pytest.param({"status": "ok", "html": "<html></html>"}, "page data marker missing", id="no-marker"),
-            pytest.param(_ok(_pots_props([], status="error")), "pots: status is not success", id="widget-failed"),
+            pytest.param(
+                {"status": "ok", "html": "<html></html>"},
+                "page data marker missing",
+                id="no-marker",
+            ),
+            pytest.param(
+                _ok(_pots_props([], status="error")),
+                "pots: status is not success",
+                id="widget-failed",
+            ),
             pytest.param(_ok({"synthetic": 1}), "pots: hub missing", id="changed-page"),
         ],
     )
@@ -1252,9 +1278,7 @@ class TestLedgerPaging:
         account = web.read_account(tab, movement_pages=0)
 
         assert [row.movement_id for row in account.movements] == ["A00000000000000B1"]
-        assert account.warnings == [
-            "MercadoPago: movements page 2 not read (movements: HTTP 500)"
-        ]
+        assert account.warnings == ["MercadoPago: movements page 2 not read (movements: HTTP 500)"]
         assert self._ledger_calls(tab) == [1, 2]
 
     def test_the_first_page_failing_is_a_warning_not_a_quiet_empty_ledger(self, no_sleep):
@@ -1265,9 +1289,7 @@ class TestLedgerPaging:
         account = web.read_account(tab)
 
         assert account.movements == []
-        assert account.warnings == [
-            "MercadoPago: movements page 1 not read (movements: timed out)"
-        ]
+        assert account.warnings == ["MercadoPago: movements page 1 not read (movements: timed out)"]
 
     def test_a_row_seen_on_two_pages_is_kept_once(self, no_sleep):
         """A movement arriving between two fetches shifts the pages by one row."""
@@ -1601,7 +1623,9 @@ class TestTabDiscovery:
 
         message = str(info.value)
         assert not isinstance(info.value, MercadoPagoSessionError)
-        assert "Chrome has the Mercado Pago page open, but Playwright never attached to it" in message
+        assert (
+            "Chrome has the Mercado Pago page open, but Playwright never attached to it" in message
+        )
         assert f"{connections.attempts} connection(s)" in message
         assert "Chrome targets: page: 1, service_worker: 2" in message
         assert "make mercadopago-login" not in message
@@ -1772,9 +1796,7 @@ class TestTabDiscovery:
         assert max(connections.waits[1:]) <= web.RECONNECT_WAIT_S
         assert connections.started_at[-1] <= port_answered_at + web.MANAGED_TAB_WAIT_S
         assert attach_phase > port_answered_at + web.MANAGED_TAB_WAIT_S
-        assert attach_phase <= (
-            web.CONNECT_WAIT_S + web.MANAGED_TAB_WAIT_S + web.ATTACH_OVERRUN_S
-        )
+        assert attach_phase <= (web.CONNECT_WAIT_S + web.MANAGED_TAB_WAIT_S + web.ATTACH_OVERRUN_S)
         assert attach_phase + web.READ_BUDGET_S < web.MANAGED_HARD_LIMIT_S < web.DRIVE_TIMEOUT_S
 
 
@@ -1848,9 +1870,11 @@ class TestCdpConnection:
         log, state = driver_log
         self._refuse(state)
 
-        with pytest.raises(MercadoPagoConnectError) as info:
-            with web._cdp_connection(CDP_URL, 30):
-                raise AssertionError("the body must not run")
+        with (
+            pytest.raises(MercadoPagoConnectError) as info,
+            web._cdp_connection(CDP_URL, 30),
+        ):
+            raise AssertionError("the body must not run")
 
         assert log == ["start", ("connect", 30000), "stop"]
         assert "Chrome is up, but Playwright could not attach to it" in str(info.value)
@@ -1860,9 +1884,8 @@ class TestCdpConnection:
         """An error while reading still drops the connection."""
         log, _ = driver_log
 
-        with pytest.raises(MercadoPagoSessionError):
-            with web._cdp_connection(CDP_URL, 7):
-                raise MercadoPagoSessionError("synthetic")
+        with pytest.raises(MercadoPagoSessionError), web._cdp_connection(CDP_URL, 7):
+            raise MercadoPagoSessionError("synthetic")
 
         assert log[-1] == "stop"
 
@@ -1871,9 +1894,8 @@ class TestCdpConnection:
         _, state = driver_log
         self._refuse(state)
 
-        with pytest.raises(MercadoPagoConnectError) as info:
-            with web._cdp_connection(CDP_URL, 30):
-                pass
+        with pytest.raises(MercadoPagoConnectError) as info, web._cdp_connection(CDP_URL, 30):
+            pass
 
         assert "RuntimeError" in str(info.value)
         for link in _chain(info.value):
@@ -1886,9 +1908,11 @@ class TestCdpConnection:
         log, state = driver_log
         self._refuse(state)
 
-        with pytest.raises(MercadoPagoWebError, match="no longer running") as info:
-            with web._cdp_connection(CDP_URL, 30, _Exited()):
-                pass
+        with (
+            pytest.raises(MercadoPagoWebError, match="no longer running") as info,
+            web._cdp_connection(CDP_URL, 30, _Exited()),
+        ):
+            pass
 
         assert not isinstance(info.value, MercadoPagoConnectError)
         assert log[-1] == "stop"
@@ -1963,7 +1987,9 @@ class _Chrome:
         monkeypatch.setattr(web, "_require_playwright", lambda: None)
         self.reclaims: list[dict] = []
         monkeypatch.setattr(
-            web.real_chrome, "reclaim_orphaned_chrome", lambda **kwargs: self.reclaims.append(kwargs)
+            web.real_chrome,
+            "reclaim_orphaned_chrome",
+            lambda **kwargs: self.reclaims.append(kwargs),
         )
         monkeypatch.setattr(web.real_chrome, "port_in_use", lambda port: port_in_use)
         monkeypatch.setattr(web.real_chrome, "find_chrome", lambda env: "/synthetic/chrome")
@@ -2341,9 +2367,7 @@ class TestLaunchSafety:
         assert chrome.drives == []
         assert chrome.terminated == [chrome.proc]
 
-    def test_the_sign_in_window_is_closed_when_the_prompt_cannot_print(
-        self, monkeypatch, tmp_path
-    ):
+    def test_the_sign_in_window_is_closed_when_the_prompt_cannot_print(self, monkeypatch, tmp_path):
         """A closed stdout must not leave the visible Chrome behind."""
         chrome = _Chrome(monkeypatch, tmp_path)
 
@@ -2448,9 +2472,7 @@ class TestLaunchSafety:
         assert seen == [4242]
         assert not pidfile.exists()
 
-    def test_a_binary_that_cannot_start_names_the_setting_not_the_path(
-        self, monkeypatch, tmp_path
-    ):
+    def test_a_binary_that_cannot_start_names_the_setting_not_the_path(self, monkeypatch, tmp_path):
         """The override's path must not travel into the run's error message."""
         terminated = []
         monkeypatch.setenv("MERCADOPAGO_CHROME_PROFILE", str(tmp_path))
@@ -2831,7 +2853,9 @@ class TestManualSignIn:
     def test_probes_sparingly_while_the_tab_does_not_move(self, clock, monkeypatch):
         """An unreadable portal tab is probed, and attached to, on an interval."""
         probes = []
-        monkeypatch.setattr(web, "_balance_readable", lambda page: probes.append(clock.now) and False)
+        monkeypatch.setattr(
+            web, "_balance_readable", lambda page: probes.append(clock.now) and False
+        )
         _Looks(monkeypatch, PORTAL)
         connections = _Connections(monkeypatch, _Browser("https://www.mercadopago.cl/"))
 
@@ -2844,7 +2868,9 @@ class TestManualSignIn:
     def test_a_tab_that_moves_is_probed_at_once(self, clock, monkeypatch):
         """Landing on a new portal page after signing in does not wait the interval."""
         probes = []
-        monkeypatch.setattr(web, "_balance_readable", lambda page: probes.append(clock.now) and False)
+        monkeypatch.setattr(
+            web, "_balance_readable", lambda page: probes.append(clock.now) and False
+        )
         _Looks(
             monkeypatch,
             _summary(portal=1, key="synthetic-key-1"),
@@ -2861,9 +2887,7 @@ class TestManualSignIn:
         """A connection made while the portal tab loads never sees it."""
         monkeypatch.setattr(web, "_balance_readable", lambda page: True)
         _Looks(monkeypatch, ELSEWHERE, ELSEWHERE, PORTAL)
-        connections = _Connections(
-            monkeypatch, _Browser(STALE), NO_ATTACH, _Browser(web.START_URL)
-        )
+        connections = _Connections(monkeypatch, _Browser(STALE), NO_ATTACH, _Browser(web.START_URL))
 
         web._await_sign_in(CDP_URL, timeout_s=600)
 
@@ -3035,7 +3059,9 @@ class TestIdentity:
         [
             pytest.param("COMERCIO SINTETICO", "Pago", "COMERCIO SINTETICO (Pago)", id="both"),
             pytest.param("COMERCIO SINTETICO", "", "COMERCIO SINTETICO", id="no-description"),
-            pytest.param("Rentabilidad", "rentabilidad", "Rentabilidad", id="description-repeats-title"),
+            pytest.param(
+                "Rentabilidad", "rentabilidad", "Rentabilidad", id="description-repeats-title"
+            ),
             pytest.param(
                 "Persona Sintética",
                 "Transferencia recibida",

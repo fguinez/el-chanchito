@@ -10,7 +10,6 @@ point.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Optional
 
 from product_model import (
     BaseMetrics,
@@ -146,7 +145,7 @@ class SupersededTransaction:
     replacement_external_id: str
     created_before_migration: str
     external_id_prefix: str
-    external_id: Optional[str] = None
+    external_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -193,13 +192,11 @@ class BaseScraper(ABC):
 
     @property
     @abstractmethod
-    def method(self) -> str:
-        ...
+    def method(self) -> str: ...
 
     @property
     @abstractmethod
-    def institution(self) -> str:
-        ...
+    def institution(self) -> str: ...
 
     @property
     def name(self) -> str:

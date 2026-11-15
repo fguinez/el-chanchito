@@ -1702,10 +1702,13 @@ disposable one: unset, the DB tests skip; set but unreachable, they fail.
 `POSTGRES_TEST_PORT`).
 
 CI (`.github/workflows/ci.yml`, GitHub Actions) runs on every pull request and
-push to `main` in two jobs: `web` (`make typecheck`, `make lint`,
-`make test-ts`) and `python` (`make install-py`, then `make test-py` against a
-`postgres:16-alpine` service, so the DB tests run rather than skip). Neither
-downloads a Playwright browser; no test launches one.
+push to `main`. The lint and test jobs: `web` (`make typecheck`,
+`make lint-web`, `make test-ts`), `python-lint` (`ruff check` and
+`ruff format --check` over every Python tree, configured by the root
+`ruff.toml` and pinned in `apps/scrapers/requirements-dev.txt`) and `python`
+(`make install-py`, then `make test-py` against a `postgres:16-alpine` service,
+so the DB tests run rather than skip). None downloads a Playwright browser; no
+test launches one.
 
 ## Tech Stack
 

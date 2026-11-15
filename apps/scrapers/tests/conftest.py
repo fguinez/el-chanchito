@@ -41,9 +41,7 @@ from psycopg.rows import dict_row  # noqa: E402
 
 from db import connection  # noqa: E402
 
-MIGRATIONS_DIR = (
-    Path(__file__).resolve().parents[3] / "packages" / "db-schema" / "migrations"
-)
+MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "packages" / "db-schema" / "migrations"
 
 # Same DDL as packages/db-schema/migrate.mjs.
 _MIGRATIONS_TABLE = """
@@ -81,9 +79,7 @@ def _create_database(dsn: str, name: str, template: str | None = None) -> None:
 def _drop_database(dsn: str, name: str) -> None:
     with _admin(dsn) as conn:
         conn.execute(
-            sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
-                sql.Identifier(name)
-            )
+            sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name))
         )
 
 
@@ -99,18 +95,14 @@ def apply_migrations(dsn: str, before: str | None = None) -> None:
     with psycopg.connect(dsn) as conn:
         conn.execute(_MIGRATIONS_TABLE)
         conn.commit()
-        applied = {
-            row[0] for row in conn.execute("SELECT name FROM _migrations")
-        }
+        applied = {row[0] for row in conn.execute("SELECT name FROM _migrations")}
         conn.commit()
         for path in paths:
             if path.name in applied:
                 continue
             with conn.transaction():
                 conn.execute(path.read_text(encoding="utf-8"))
-                conn.execute(
-                    "INSERT INTO _migrations (name) VALUES (%s)", (path.name,)
-                )
+                conn.execute("INSERT INTO _migrations (name) VALUES (%s)", (path.name,))
 
 
 @pytest.fixture(scope="session")
@@ -160,9 +152,7 @@ def db_conn(_template_db, monkeypatch):
     try:
         connection.close_pool()
         monkeypatch.setenv("DATABASE_URL", test_dsn)
-        with psycopg.connect(
-            test_dsn, autocommit=True, row_factory=dict_row
-        ) as conn:
+        with psycopg.connect(test_dsn, autocommit=True, row_factory=dict_row) as conn:
             yield conn
     finally:
         connection.close_pool()

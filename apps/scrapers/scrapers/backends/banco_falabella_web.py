@@ -69,7 +69,7 @@ import unicodedata
 from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Any, Optional
+from typing import Any
 from urllib.parse import urlsplit
 
 from scrapers.backends.percent import parse_percent
@@ -105,12 +105,12 @@ class RawBalance:
     and due days come from the card detail instead (`RawStatement`).
     """
 
-    name: Optional[str] = None
-    last4: Optional[str] = None
-    brand: Optional[str] = None
-    limit: Optional[Decimal] = None
-    owed: Optional[Decimal] = None
-    available: Optional[Decimal] = None
+    name: str | None = None
+    last4: str | None = None
+    brand: str | None = None
+    limit: Decimal | None = None
+    owed: Decimal | None = None
+    available: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -124,11 +124,11 @@ class RawStatement:
     "Ultimos movimientos" tab: `next_statement_date` ("Próxima facturación").
     """
 
-    statement_date: Optional[date] = None
-    billed_amount: Optional[Decimal] = None
-    payment_due_date: Optional[date] = None
-    minimum_payment: Optional[Decimal] = None
-    next_statement_date: Optional[date] = None
+    statement_date: date | None = None
+    billed_amount: Decimal | None = None
+    payment_due_date: date | None = None
+    minimum_payment: Decimal | None = None
+    next_statement_date: date | None = None
 
 
 @dataclass(frozen=True)
@@ -154,10 +154,10 @@ class RawMovement:
     persona: str
     amount: Decimal
     currency: str
-    cuotas_current: Optional[int] = None
-    cuotas_total: Optional[int] = None
-    billed: Optional[bool] = None
-    statement_date: Optional[date] = None
+    cuotas_current: int | None = None
+    cuotas_total: int | None = None
+    billed: bool | None = None
+    statement_date: date | None = None
 
 
 @dataclass(frozen=True)
@@ -169,9 +169,9 @@ class RawCheckingBalance:
     name, kept for display only. Any field is None when it was not found.
     """
 
-    account_number: Optional[str] = None
-    available: Optional[Decimal] = None
-    accounting: Optional[Decimal] = None
+    account_number: str | None = None
+    available: Decimal | None = None
+    accounting: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -184,10 +184,10 @@ class RawLineBalance:
     when the detail was not read.
     """
 
-    limit: Optional[Decimal] = None
-    owed: Optional[Decimal] = None
-    available: Optional[Decimal] = None
-    daily_rate_pct: Optional[Decimal] = None
+    limit: Decimal | None = None
+    owed: Decimal | None = None
+    available: Decimal | None = None
+    daily_rate_pct: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -203,7 +203,7 @@ class RawCheckingMovement:
     description: str
     amount: Decimal
     currency: str
-    balance: Optional[Decimal] = None
+    balance: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -221,11 +221,11 @@ class FalabellaSession:
     `ProductScrapeResult.warnings`.
     """
 
-    balance: Optional[RawBalance] = None
+    balance: RawBalance | None = None
     movements: list[RawMovement] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
-    checking: Optional[RawCheckingBalance] = None
-    line: Optional[RawLineBalance] = None
+    checking: RawCheckingBalance | None = None
+    line: RawLineBalance | None = None
     checking_movements: list[RawCheckingMovement] = field(default_factory=list)
     statement: RawStatement = field(default_factory=RawStatement)
 
@@ -298,7 +298,7 @@ def _normalize(text: str) -> str:
     return _SPACES_RE.sub(" ", stripped).strip().lower()
 
 
-def parse_clp(raw: Any) -> Optional[Decimal]:
+def parse_clp(raw: Any) -> Decimal | None:
     """Parse a Chilean CLP amount into whole pesos, rounding half-up.
 
     Accepts both the portal's spaceless form ("$1.000.000") and the spaced one
@@ -323,7 +323,7 @@ def parse_clp(raw: Any) -> Optional[Decimal]:
     return -value if negative else value
 
 
-def parse_dmy(raw: Any) -> Optional[date]:
+def parse_dmy(raw: Any) -> date | None:
     """Parse a "DD/MM/YYYY" or "DD-MM-YYYY" date ("15/03/2025" -> 2025-03-15).
 
     The card tables print slashes and the checking table dashes; a mix of the
@@ -341,7 +341,7 @@ def parse_dmy(raw: Any) -> Optional[date]:
         return None
 
 
-def parse_cuotas(raw: Any) -> Optional[tuple[int, int]]:
+def parse_cuotas(raw: Any) -> tuple[int, int] | None:
     """Parse an installment counter ("01/01" -> (1, 1); "03/12" -> (3, 12))."""
     if not isinstance(raw, str):
         return None
@@ -351,7 +351,7 @@ def parse_cuotas(raw: Any) -> Optional[tuple[int, int]]:
     return int(match.group(1)), int(match.group(2))
 
 
-def last4_from_masked(raw: Any) -> Optional[str]:
+def last4_from_masked(raw: Any) -> str | None:
     """The last four digits of a masked card number ("* * * * 1234" / "**** 1234")."""
     if not isinstance(raw, str):
         return None
@@ -359,7 +359,7 @@ def last4_from_masked(raw: Any) -> Optional[str]:
     return digits[-4:] if len(digits) >= 4 else None
 
 
-def _brand_from_name(name: Optional[str]) -> Optional[str]:
+def _brand_from_name(name: str | None) -> str | None:
     """The card network word within a product name ("CMR Mastercard" -> "Mastercard")."""
     if not name:
         return None
@@ -375,11 +375,11 @@ def _is_payment(description: str) -> bool:
     return _PAYMENT_RE.search(_normalize(description)) is not None
 
 
-def _lines(text: Optional[str]) -> list[str]:
+def _lines(text: str | None) -> list[str]:
     return [line.strip() for line in (text or "").splitlines() if line.strip()]
 
 
-def _amount_before(lines: list[str], label: str) -> Optional[Decimal]:
+def _amount_before(lines: list[str], label: str) -> Decimal | None:
     """The CLP amount on the line before the first line equal to `label`."""
     for index, line in enumerate(lines):
         if index > 0 and _normalize(line) == label:
@@ -387,7 +387,7 @@ def _amount_before(lines: list[str], label: str) -> Optional[Decimal]:
     return None
 
 
-def balance_from_text(text: Optional[str]) -> RawBalance:
+def balance_from_text(text: str | None) -> RawBalance:
     """Shape the dashboard product-card innerText into a `RawBalance`.
 
     The card renders a line stack (card name, masked number, then amount/label
@@ -396,8 +396,8 @@ def balance_from_text(text: Optional[str]) -> RawBalance:
     is absent leaves its field None (a missing figure is tolerated).
     """
     lines = _lines(text)
-    name: Optional[str] = None
-    last4: Optional[str] = None
+    name: str | None = None
+    last4: str | None = None
     for index, line in enumerate(lines):
         candidate = last4_from_masked(line)
         if candidate is not None and re.search(r"[•*]", line):
@@ -416,7 +416,7 @@ def balance_from_text(text: Optional[str]) -> RawBalance:
 
 
 def movements_from_rows(
-    rows: list[list[str]], section: str = "", statement_date: Optional[date] = None
+    rows: list[list[str]], section: str = "", statement_date: date | None = None
 ) -> list[RawMovement]:
     """Turn rendered body rows into `RawMovement`s; skip and log a bad row.
 
@@ -442,15 +442,15 @@ def movements_from_rows(
     for row in rows:
         if len(row) < 4:
             skipped += 1
-            logger.warning("Banco Falabella: skipping a %s row with too few cells", section or "movement")
+            logger.warning(
+                "Banco Falabella: skipping a %s row with too few cells", section or "movement"
+            )
             continue
         transaction_date = parse_dmy(row[0])
         monto_total = parse_clp(row[3])
         if transaction_date is None or monto_total is None:
             skipped += 1
-            logger.warning(
-                "Banco Falabella: skipping an unparseable %s row", section or "movement"
-            )
+            logger.warning("Banco Falabella: skipping an unparseable %s row", section or "movement")
             continue
         description = _SPACES_RE.sub(" ", row[1].strip()) if len(row) > 1 else ""
         persona = row[2].strip() if len(row) > 2 else ""
@@ -473,11 +473,13 @@ def movements_from_rows(
             )
         )
     if skipped:
-        logger.warning("Banco Falabella: skipped %d unusable %s rows", skipped, section or "movement")
+        logger.warning(
+            "Banco Falabella: skipped %d unusable %s rows", skipped, section or "movement"
+        )
     return movements
 
 
-def _labelled_value(texts: list[str], index: int, label: str) -> Optional[str]:
+def _labelled_value(texts: list[str], index: int, label: str) -> str | None:
     """The value printed for `label` at `texts[index]`, else None.
 
     The rest of the same text when there is any ("Próxima facturación
@@ -486,7 +488,7 @@ def _labelled_value(texts: list[str], index: int, label: str) -> Optional[str]:
     normalized = _normalize(texts[index])
     if normalized != label and not normalized.startswith(label + " "):
         return None
-    rest = normalized[len(label):].strip()
+    rest = normalized[len(label) :].strip()
     if rest:
         return rest
     return texts[index + 1] if index + 1 < len(texts) else None
@@ -516,7 +518,7 @@ def statement_from_texts(texts: Any) -> RawStatement:
     return RawStatement(**found)
 
 
-def statement_date_from_selects(selects: Any) -> Optional[date]:
+def statement_date_from_selects(selects: Any) -> date | None:
     """The billed statement's closing date from the tab's visible selects.
 
     The "Movimientos facturados" tab picks its statement with a month select
@@ -537,7 +539,7 @@ def statement_date_from_selects(selects: Any) -> Optional[date]:
     return dates.pop() if len(dates) == 1 else None
 
 
-def checking_from_text(text: Optional[str]) -> RawCheckingBalance:
+def checking_from_text(text: str | None) -> RawCheckingBalance:
     """Shape the Cuenta Corriente dashboard card's innerText.
 
     The card renders the product name, the account number, then amount/label
@@ -546,7 +548,7 @@ def checking_from_text(text: Optional[str]) -> RawCheckingBalance:
     only when it carries digits and is not an amount.
     """
     lines = _lines(text)
-    account_number: Optional[str] = None
+    account_number: str | None = None
     for index, line in enumerate(lines[:-1]):
         if _normalize(line) == _CHECKING_NAME:
             candidate = lines[index + 1]
@@ -560,7 +562,7 @@ def checking_from_text(text: Optional[str]) -> RawCheckingBalance:
     )
 
 
-def line_from_text(text: Optional[str]) -> RawLineBalance:
+def line_from_text(text: str | None) -> RawLineBalance:
     """Shape the Línea de Crédito dashboard card's innerText.
 
     Same amount-then-label layout as the other cards: "Cupo autorizado" is the
@@ -575,7 +577,7 @@ def line_from_text(text: Optional[str]) -> RawLineBalance:
     )
 
 
-def daily_rate_from_text(text: Optional[str]) -> Optional[Decimal]:
+def daily_rate_from_text(text: str | None) -> Decimal | None:
     """The "Tasa diaria" percent in the línea detail's text, or None.
 
     Only a figure followed by "%" right after the label counts, so the
@@ -906,7 +908,9 @@ _RETRY_CONTROL_JS = (
 )
 _RETRY_SHOWN_JS = "() => {" + _RETRY_CONTROL_JS + "  return Boolean(retry);\n}"
 _CLICK_RETRY_JS = (
-    "() => {" + _RETRY_CONTROL_JS + "  if (!retry) return false;\n  retry.click();\n  return true;\n}"
+    "() => {"
+    + _RETRY_CONTROL_JS
+    + "  if (!retry) return false;\n  retry.click();\n  return true;\n}"
 )
 
 
@@ -981,7 +985,7 @@ _CHECKING_LINK_RE = r"cuenta\s+corriente"
 _LINE_LINK_RE = r"l[ií]nea\s+de\s+cr[eé]dito"
 
 
-def _find_marker(text: str, markers: tuple[str, ...]) -> Optional[str]:
+def _find_marker(text: str, markers: tuple[str, ...]) -> str | None:
     normalized = _normalize(text)
     return next((marker for marker in markers if marker in normalized), None)
 
@@ -1118,9 +1122,7 @@ def _login(page, rut: str, password: str) -> None:
     except Exception:
         marker = _find_marker(_body_text(page), _LOGIN_ERROR_MARKERS)
         if marker is not None:
-            raise BancoFalabellaLoginError(
-                "Banco Falabella rejected the RUT or clave"
-            ) from None
+            raise BancoFalabellaLoginError("Banco Falabella rejected the RUT or clave") from None
         raise BancoFalabellaLoginError(
             "Banco Falabella login did not reach the private site"
         ) from None
@@ -1176,7 +1178,9 @@ def _open_card_detail(page) -> bool:
         try:
             card.click(timeout=_CLICK_TIMEOUT_MS)
         except Exception:
-            logger.debug("Banco Falabella: the card click was blocked; dismissing overlays", exc_info=True)
+            logger.debug(
+                "Banco Falabella: the card click was blocked; dismissing overlays", exc_info=True
+            )
             _dismiss_overlays(page)
             continue
         deadline = time.monotonic() + _CARD_TIMEOUT_MS / 1000
@@ -1191,7 +1195,7 @@ def _open_card_detail(page) -> bool:
     return False
 
 
-def _read_table_rows(page) -> Optional[list[list[str]]]:
+def _read_table_rows(page) -> list[list[str]] | None:
     """Read the movements table once; None when it is not present yet."""
     try:
         result = page.evaluate(_MOVEMENTS_ROWS_JS)
@@ -1276,7 +1280,7 @@ class _MovementsFeed:
         """A point for `state`: only calls started after it count."""
         return self._started
 
-    def state(self, since: int) -> Optional[str]:
+    def state(self, since: int) -> str | None:
         if any(sequence >= since for sequence, _ in self._pending.values()):
             return None
         settled = [outcome for sequence, outcome in self._settled if sequence >= since]
@@ -1304,9 +1308,9 @@ def _read_surface(
     page,
     label: str,
     feed: _MovementsFeed,
-    previous: Optional[list[list[str]]] = None,
-    since: Optional[int] = None,
-) -> Optional[list[list[str]]]:
+    previous: list[list[str]] | None = None,
+    since: int | None = None,
+) -> list[list[str]] | None:
     """Open a movements tab and read its rows, retrying failed or hung loads.
 
     Returns the body rows, `[]` for a confirmed-empty tab, or None when the
@@ -1370,7 +1374,7 @@ def _read_surface(
             since = retry_since
 
 
-def _read_statement_date(page) -> Optional[date]:
+def _read_statement_date(page) -> date | None:
     """The showing statement's closing date off the tab's selects, else None."""
     for _ in range(_STATEMENT_POLLS):
         try:
@@ -1400,7 +1404,7 @@ def _read_statement_texts(page, label: str) -> RawStatement:
     return statement_from_texts(texts)
 
 
-def billed_statement(select_date: Optional[date], header: RawStatement) -> RawStatement:
+def billed_statement(select_date: date | None, header: RawStatement) -> RawStatement:
     """The billed tab's statement: its select's date and its printed figures.
 
     The select and the "Fecha de facturación" it prints were the same date
@@ -1428,7 +1432,7 @@ def _read_billed(
     page,
     feed: _MovementsFeed,
     warnings: list[str],
-    previous: Optional[list[list[str]]] = None,
+    previous: list[list[str]] | None = None,
 ) -> tuple[list[RawMovement], RawStatement]:
     """Read the current billed statement (the "Movimientos facturados" tab).
 
@@ -1527,7 +1531,7 @@ def _guarded(read, warnings: list[str], what: str, fallback):
 
 def _read_dashboard_products(
     page, home_url: str, warnings: list[str]
-) -> tuple[Optional[RawCheckingBalance], Optional[RawLineBalance]]:
+) -> tuple[RawCheckingBalance | None, RawLineBalance | None]:
     """Reload the dashboard and read the checking and línea cards off it."""
     if not _return_home(page, home_url):
         warnings.append("Banco Falabella: the dashboard did not come back for the other products")
@@ -1573,7 +1577,7 @@ def _read_card_movements(
     return movements, statement
 
 
-def _pick_grid(texts: Any, name: str) -> Optional[str]:
+def _pick_grid(texts: Any, name: str) -> str | None:
     """The first product-grid text whose product name is `name`, else None."""
     if not isinstance(texts, list):
         return None
@@ -1585,7 +1589,7 @@ def _pick_grid(texts: Any, name: str) -> Optional[str]:
 
 def _read_other_products(
     page, warnings: list[str]
-) -> tuple[Optional[RawCheckingBalance], Optional[RawLineBalance]]:
+) -> tuple[RawCheckingBalance | None, RawLineBalance | None]:
     """The Cuenta Corriente and Línea de Crédito dashboard cards, when listed.
 
     Polls until both cards have their available balance, or, when only one
@@ -1596,7 +1600,7 @@ def _read_other_products(
     never rendered a card, that is a warning, not a silent absence.
     """
     deadline = time.monotonic() + _OTHER_PRODUCTS_TIMEOUT_MS / 1000
-    settle_until: Optional[float] = None
+    settle_until: float | None = None
     while True:
         try:
             grids = page.evaluate(_PRODUCT_GRIDS_JS)
@@ -1652,9 +1656,7 @@ def _open_product(page, component: str, name: str) -> bool:
     _dismiss_overlays(page)
     try:
         link = (
-            page.locator(f"{component} a.div-product")
-            .filter(has_text=re.compile(name, re.I))
-            .first
+            page.locator(f"{component} a.div-product").filter(has_text=re.compile(name, re.I)).first
         )
         link.wait_for(state="visible", timeout=_CARD_TIMEOUT_MS)
     except Exception:
@@ -1665,12 +1667,16 @@ def _open_product(page, component: str, name: str) -> bool:
             link.click(timeout=_CLICK_TIMEOUT_MS)
             return True
         except Exception:
-            logger.debug("Banco Falabella: the %s click was blocked; dismissing overlays", component, exc_info=True)
+            logger.debug(
+                "Banco Falabella: the %s click was blocked; dismissing overlays",
+                component,
+                exc_info=True,
+            )
             _dismiss_overlays(page)
     return False
 
 
-def _read_checking_rows(page) -> Optional[list[list[str]]]:
+def _read_checking_rows(page) -> list[list[str]] | None:
     """Wait for the checking detail's movements table; None if it never loads.
 
     The legacy view arrives as one server-rendered response, so the table has
@@ -1689,7 +1695,11 @@ def _read_checking_rows(page) -> Optional[list[list[str]]]:
         if isinstance(result, dict):
             rows = result.get("rows")
             has_data = isinstance(rows, list) and any(len(row) >= 4 for row in rows)
-            if result.get("found") and isinstance(rows, list) and (has_data or not result.get("failed")):
+            if (
+                result.get("found")
+                and isinstance(rows, list)
+                and (has_data or not result.get("failed"))
+            ):
                 logger.info("Banco Falabella: checking surface read, %d rows", len(rows))
                 return rows
             if result.get("failed"):
@@ -1699,7 +1709,7 @@ def _read_checking_rows(page) -> Optional[list[list[str]]]:
     return None
 
 
-def _read_line_rate(page) -> Optional[Decimal]:
+def _read_line_rate(page) -> Decimal | None:
     """Wait for the línea detail's "Tasa diaria"; None if it never shows."""
     deadline = time.monotonic() + _LEGACY_VIEW_TIMEOUT_MS / 1000
     while time.monotonic() < deadline:
@@ -1798,9 +1808,7 @@ def _session_sync(rut: str, password: str, headless: bool) -> FalabellaSession:
                     logger.debug("Banco Falabella: closing the browser failed", exc_info=True)
 
 
-async def fetch_session(
-    rut: str, password: str, *, headless: bool = True
-) -> FalabellaSession:
+async def fetch_session(rut: str, password: str, *, headless: bool = True) -> FalabellaSession:
     """Log into Banco Falabella once and read the CMR card and its movements.
 
     Runs the synchronous Playwright flow in a worker thread so it does not block

@@ -6,7 +6,7 @@ with the shapes the recon recorded. Every id, ticker, date and figure is
 synthetic (asset ids 1001..1003, tickers ACME/GLBX/INITK).
 """
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -120,7 +120,7 @@ def _page(**lists):
 
 # Within a week of the fixtures' deposits and orders being declared: those
 # not executed yet are pending.
-_NOW = datetime(2026, 1, 7, 12, 0, tzinfo=timezone.utc)
+_NOW = datetime(2026, 1, 7, 12, 0, tzinfo=UTC)
 
 
 def _parse(data, now=_NOW):
@@ -434,11 +434,7 @@ class TestSkippedRows:
                 id="buy-not-filled",
             ),
             pytest.param(
-                {
-                    "stocksWalletAssetRedemptionInstructions": [
-                        {**_order(), "assetOrder": None}
-                    ]
-                },
+                {"stocksWalletAssetRedemptionInstructions": [{**_order(), "assetOrder": None}]},
                 id="sell-without-order",
             ),
         ],
@@ -461,7 +457,7 @@ class TestSkippedRows:
     def test_a_movement_never_executed_is_pending_for_a_week(self, age, pending, cancelled):
         """The query has no state field: past the window it was cancelled,
         and it no longer counts as pending."""
-        declared = datetime(2026, 1, 5, 14, 0, tzinfo=timezone.utc)  # _order's declaredAt
+        declared = datetime(2026, 1, 5, 14, 0, tzinfo=UTC)  # _order's declaredAt
         order = _order(fulfilled_at=None)
 
         page = _parse(_page(stocksWalletAssetSubscriptionInstructions=[order]), now=declared + age)
@@ -747,9 +743,7 @@ class TestShowsUnsoldStocks:
                 id="bought-and-merged-for-cash",
             ),
             pytest.param({"stocksWalletDividends": [_dividend()]}, False, id="dividend-only"),
-            pytest.param(
-                {"stocksDomesticBankDeposits": [_deposit()]}, False, id="wallet-only"
-            ),
+            pytest.param({"stocksDomesticBankDeposits": [_deposit()]}, False, id="wallet-only"),
         ],
     )
     def test_a_stock_bought_and_never_sold(self, lists, unsold):
