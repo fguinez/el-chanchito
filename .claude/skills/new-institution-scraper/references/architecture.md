@@ -251,9 +251,12 @@ Three levels:
 
 1. **Leg-fatal: raise.** Auth failed, the session expired with no way to
    refresh it unattended, or the top-level payload shape is unrecognizable.
-   Use a typed exception (`<Institution>SessionError(RuntimeError)`) whose
-   message says what the human should do ("Run `make <slug>-login`").
-   `run_scraper` records it.
+   Use a typed exception whose message says what the human should do ("Run
+   `make <slug>-login`"). When only a human sign-in fixes it, subclass
+   `SignInRequired` from `scrapers/base.py`
+   (`<Institution>SessionError(SignInRequired)`): `run_scraper` then records
+   the run as `needs_sign_in`, not `error`. Other leg-fatal failures subclass
+   `RuntimeError` and are recorded as errors.
 2. **Partial coverage: warn.** One surface failed after its retries, a page
    cap was hit, entries without ids were skipped. Add a short string to
    `ProductScrapeResult.warnings` (the run becomes `partial`) and log a
