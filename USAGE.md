@@ -789,7 +789,8 @@ instead of spinning forever.
     (`fallback`, `stored`, `needs_reentry`) plus the public key id; never a value
   - `POST /credentials/reload`: re-read the credentials stored from the
     dashboard and add, drop or rebuild scrapers to match (`added`, `removed`,
-    `updated`, `scrapers`)
+    `updated`, `scrapers`); both refuse browser requests the way the
+    `/login` routes below do
   - `GET /login`, `POST /login/{slug}`, `GET /login/{slug}`,
     `POST /login/{slug}/code`: the dashboard's sign-ins (see
     [Signing in from the dashboard](#signing-in-from-the-dashboard)); they

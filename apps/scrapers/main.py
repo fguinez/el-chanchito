@@ -557,7 +557,8 @@ def _make_control_handler(
     a POST must be labelled JSON, so a cross-origin one always needs a
     preflight this server never grants.
 
-    With `credentials`, GET /credentials/status reports per env var whether a
+    With `credentials` (refused to browsers like the /login routes),
+    GET /credentials/status reports per env var whether a
     fallback value exists and whether a stored one was opened or needs
     re-entry (booleans only, never a value), and POST /credentials/reload
     re-reads the stored credentials and adds, drops or rebuilds scrapers to
@@ -587,9 +588,9 @@ def _make_control_handler(
             self.end_headers()
             self.wfile.write(body)
 
-        def _login_refused(self) -> bool:
-            """Send the refusal for a /login request a browser made, or a POST
-            not labelled JSON; True when one was sent."""
+        def _browser_refused(self) -> bool:
+            """Send the refusal for a /login or /credentials request a browser
+            made, or a POST not labelled JSON; True when one was sent."""
             if self.headers.get("Origin") or self.headers.get("Sec-Fetch-Site"):
                 self._send(403, {"error": "browser requests are not accepted"})
                 return True
@@ -617,7 +618,7 @@ def _make_control_handler(
             if logins is None:
                 self._send(404, {"error": "not found"})
                 return
-            if self._login_refused():
+            if self._browser_refused():
                 return
             parts = self.path.strip("/").split("/")
             if self.command == "GET" and parts == ["login"]:
@@ -647,7 +648,7 @@ def _make_control_handler(
             elif self.path == "/credentials/status":
                 if credentials is None:
                     self._send(404, {"error": "not found"})
-                else:
+                elif not self._browser_refused():
                     self._send(200, credentials.status())
             elif self.path == "/scrapers":
                 # Which scrapers exist is decided by build_scrapers(), at
@@ -667,6 +668,8 @@ def _make_control_handler(
             elif self.path == "/credentials/reload":
                 if credentials is None:
                     self._send(404, {"error": "not found"})
+                    return
+                if self._browser_refused():
                     return
                 try:
                     self._send(200, credentials.reload())

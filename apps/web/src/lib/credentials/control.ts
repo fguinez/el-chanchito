@@ -46,6 +46,9 @@ async function call<S extends z.ZodType>(
   try {
     const res = await fetch(url, {
       method,
+      // The service refuses a /credentials POST not labelled JSON.
+      headers: method === "POST" ? { "content-type": "application/json" } : undefined,
+      body: method === "POST" ? "{}" : undefined,
       signal: AbortSignal.timeout(TIMEOUT_MS),
       cache: "no-store",
     });

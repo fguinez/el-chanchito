@@ -418,8 +418,10 @@ def control(tmp_path, store, monkeypatch):
     manager.overlay.apply(OpenedCredentials({}, frozenset()))
 
 
-def _call(url, method="GET"):
-    req = urllib.request.Request(url, method=method)
+def _call(url, method="GET", headers=None):
+    if headers is None:
+        headers = {"Content-Type": "application/json"} if method == "POST" else {}
+    req = urllib.request.Request(url, method=method, headers=headers)
     try:
         with urllib.request.urlopen(req) as resp:
             return resp.status, resp.read().decode()
@@ -470,6 +472,21 @@ def test_status_never_contains_fallback_values(rut_in_env, control):
     _, body = _call(f"{base}/credentials/status")
     assert "11.111.111-1" not in body
     assert json.loads(body)["fields"]["BANCHILE_RUT"]["fallback"] is True
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "headers", "code"),
+    [
+        ("GET", "/credentials/status", {"Origin": "http://evil.example"}, 403),
+        ("GET", "/credentials/status", {"Sec-Fetch-Site": "cross-site"}, 403),
+        ("POST", "/credentials/reload", {"Origin": "http://evil.example"}, 403),
+        ("POST", "/credentials/reload", {"Content-Type": "text/plain"}, 415),
+    ],
+)
+def test_credentials_endpoints_refuse_browser_requests(control, method, path, headers, code):
+    """Like /login, the credentials routes answer only the dashboard's server."""
+    _, base = control
+    assert _call(f"{base}{path}", method, headers)[0] == code
 
 
 def test_credentials_endpoints_404_without_a_manager():
