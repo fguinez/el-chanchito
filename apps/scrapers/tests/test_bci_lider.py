@@ -1090,7 +1090,9 @@ class TestAccountBinding:
         monkeypatch.setattr(web, "_find_page_matching", lambda browser, needle: "page")
         monkeypatch.setattr(web, "_ensure_logged_in", lambda *args: signed_in_now)
         monkeypatch.setattr(web, "_account_check", lambda page, rut: verdict)
-        monkeypatch.setattr(web, "_read_card", lambda page, result, browser: reads.append(page))
+        monkeypatch.setattr(
+            web, "_read_card", lambda page, result, browser, rut=None: reads.append(page)
+        )
         web._scrape_over_cdp("http://localhost:9222", self.RUT, None, profile=profile)
         return reads
 

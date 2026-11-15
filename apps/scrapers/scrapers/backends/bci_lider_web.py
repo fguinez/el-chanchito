@@ -892,12 +892,13 @@ def _read_movements(page) -> list[dict]:
     return movements
 
 
-def _read_card(page, result: BciLiderCardResult, browser=None) -> None:
+def _read_card(page, result: BciLiderCardResult, browser=None, rut: str | None = None) -> None:
     """Read balances + movements into `result` from an authenticated tab.
 
     The balances leg doubles as a final auth check: a session that bounced to
     /login raises BciLiderSessionError (the caller re-logs-in and retries). The
-    movements and billing legs are best-effort and degrade to warnings.
+    movements and billing legs are best-effort and degrade to warnings. A tab
+    the billing read falls back to must be `rut`'s too (`_live_portal_tab`).
     """
     result.products = _read_balances(page)
     if not result.products:
@@ -907,17 +908,19 @@ def _read_card(page, result: BciLiderCardResult, browser=None) -> None:
     except Exception as exc:
         logger.exception("BciLider: movements leg failed")
         result.warnings.append(f"BciLider: movements failed: {exc}")
-    reacquire = (lambda: _live_portal_tab(browser, page)) if browser is not None else None
+    reacquire = (lambda: _live_portal_tab(browser, page, rut)) if browser is not None else None
     _read_billing_into(page, result, reacquire)
 
 
-def _live_portal_tab(browser, failed=None):
+def _live_portal_tab(browser, failed=None, rut: str | None = None):
     """A still-open signed-in portal tab on a connected `browser`, or None.
 
     Only a tab already in the private area qualifies: the portal keeps its
     auth in tab-scoped sessionStorage, so a fresh tab would need a new login,
     and this never submits the clave again. `failed`, the tab whose call just
     lost its target, is skipped even while Playwright still reports it open.
+    With a `rut`, only a tab whose account check is "match" qualifies: a
+    reused Chrome may hold another account's tab too.
     """
     try:
         if not browser.is_connected():
@@ -935,6 +938,7 @@ def _live_portal_tab(browser, failed=None):
                 not page.is_closed()
                 and urlparse(url).hostname == PORTAL_HOST
                 and "/private-home" in url
+                and (not rut or _account_check(page, rut) == "match")
             ):
                 return page
         except Exception:
@@ -1098,7 +1102,7 @@ def _scrape_over_cdp(
         if managed and rut:
             session_account.write_account(profile, rut)
         try:
-            _read_card(page, result, browser)  # navigates the authenticated tab in place
+            _read_card(page, result, browser, rut)  # navigates the authenticated tab in place
         except BciLiderSessionError:
             # A late route-guard redirect bounced us to /login mid-read: sign in
             # and retry once (belt-and-braces with _ensure_logged_in's probe).
@@ -1106,7 +1110,7 @@ def _scrape_over_cdp(
             _login_via_autofill(page, rut, password, time.monotonic() + _LOGIN_WAIT_S)
             _verify_account(page, rut, signed_in_now=True, managed=managed)
             result = BciLiderCardResult()
-            _read_card(page, result, browser)
+            _read_card(page, result, browser, rut)
         # Do NOT close the browser here: in reuse mode it's the user's live Chrome;
         # in managed mode _scrape_managed_sync terminates the process it launched.
     return result
