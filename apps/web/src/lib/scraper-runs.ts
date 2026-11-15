@@ -3,14 +3,17 @@
 // means part of the run's data landed and part failed, or the scraper warned
 // about incomplete coverage; its error_message says which. `needs_sign_in`
 // means the scraper's session is gone and nothing else failed: a human must
-// sign in, and the message names the command.
+// sign in, and the message names the command. `skipped` means the scraper
+// chose not to read this time (e.g. BanChile's login cooldown refused a full
+// login): nothing is broken, the last run's data stands, and no banner shows.
 
 export type ScraperRunStatus =
   | "running"
   | "success"
   | "partial"
   | "error"
-  | "needs_sign_in";
+  | "needs_sign_in"
+  | "skipped";
 
 export interface RunStatusStyle {
   /** Badge text, in Spanish like the rest of the dashboard. */
@@ -26,6 +29,10 @@ const STATUS_STYLES: Record<ScraperRunStatus, RunStatusStyle> = {
   needs_sign_in: {
     label: "inicia sesión",
     badgeClass: "text-violet-600 border-violet-200",
+  },
+  skipped: {
+    label: "omitido",
+    badgeClass: "text-muted-foreground border-muted",
   },
   running: { label: "en curso", badgeClass: "text-blue-600 border-blue-200" },
 };

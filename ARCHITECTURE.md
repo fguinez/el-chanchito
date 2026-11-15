@@ -392,7 +392,7 @@ scraper_runs
   institution  (mach|mercadopago|tenpo|banchile|bci_lider|santander|...)
   started_at
   finished_at
-  status       (running|success|partial|error|needs_sign_in)
+  status       (running|success|partial|error|needs_sign_in|skipped)
   transactions_imported
   error_message
 
@@ -584,10 +584,12 @@ cache miss inside the window deletes the file and raises `LoginCooldownError`
 instead of calling `_login`, and a run that would certainly need that login (an
 attempt in the window and no session file, `login_cooldown_retry_after`) raises
 it before launching Chromium. A failed attempt counts too, since a quick retry
-is exactly what gets throttled. `BanChileScraper` logs the skip as a warning:
-the transactions leg re-raises it, so the run is still recorded as an error
-(`run_scraper` logs that generically, traceback included), and the products leg
-turns it into a run warning. The last attempt is claimed atomically but lives
+is exactly what gets throttled. `LoginCooldownError` is a `RunSkipped`: the
+cooldown working as intended, not a bug. `BanChileScraper` logs it as one
+warning and both legs raise it, so a run it stopped is recorded as `skipped`.
+When the transactions leg was refused, the products leg raises that same
+refusal again instead of a balance-only fallback the cooldown would refuse too,
+so the run stores one message. The last attempt is claimed atomically but lives
 in process memory, so a service restart resets the window, and a
 `SCRAPER_MODE=once` / `make scrapers-once` run alongside the service isn't
 gated against it.
@@ -1201,8 +1203,8 @@ class BaseScraper(ABC):
 ```
 
 Both `method` and `institution` are stored per `scraper_runs` row, and
-`run_scraper` finishes the row as `success`, `partial`, `error`, or
-`needs_sign_in`, with every failure and warning joined into `error_message`:
+`run_scraper` finishes the row as `success`, `partial`, `error`,
+`needs_sign_in` or `skipped`, with every failure and warning joined into `error_message`:
 
 - `partial`: something went wrong but part of the data landed (one leg raised
   while the other wrote, or some products or transactions failed to write
@@ -1222,14 +1224,22 @@ Both `method` and `institution` are stored per `scraper_runs` row, and
   `products: ` prefix, so the dashboard's 120-character summary keeps the
   command to run. Alongside another failure it counts as an error (`error`,
   or `partial` when something landed).
+- `skipped`: nothing landed and the only failures were legs that raised
+  `RunSkipped` (`scrapers/base.py`): the scraper chose not to read this time
+  and nothing is broken, e.g. BanChile's `LoginCooldownError`. Logged and
+  deduplicated like `SignInRequired`, after which its message follows; a
+  sign-in need wins over it, and alongside another failure it counts as an
+  error the same way.
 
 Writes are isolated per row: `run_scraper` writes each product separately, and
 `write_transactions` runs each transaction (and each product resolution) in
 its own `conn.transaction()` block, so a row that fails is rolled back alone
 instead of aborting the transaction for every row after it. The dashboard's
 `ScraperStatus` widget shows `partial` runs with an amber badge and banner,
-`needs_sign_in` runs with a violet badge and banner, and every finished row
-with a message expands to its `error_message`.
+`needs_sign_in` runs with a violet badge and banner (with an **Iniciar
+sesión** button where the control server supports that institution's sign-in,
+see "On-demand refresh"), `skipped` runs with a neutral badge and no banner,
+and every finished row with a message expands to its `error_message`.
 
 **Retries.** `scrapers/retry.py` retries idempotent work only, three attempts
 with 1 s / 2 s backoff: Buda's and Fintual's GETs, Fintual's read-only `/gql/`
@@ -1560,8 +1570,9 @@ Browser → web POST /api/institutions/refresh {institution?}
 - Triggering just moves a job's next run time to now, so it reuses each job's
   `coalesce=True` / `max_instances=1` guards: a manual trigger can't overlap a
   scheduled or manual run of the same institution. The startup run
-  (`run_all_once`) isn't a job, so a trigger during it isn't guarded (known gap;
-  for BanChile the login cooldown still stops a second login). The HTTP call
+  (`run_all_once`) isn't a job, so those guards don't cover it; `run_scraper`
+  itself returns without recording a run when the same scraper's run is still
+  in flight, which absorbs a trigger during the startup run. The HTTP call
   returns `202` immediately; the scrape runs asynchronously on the scheduler's
   event loop.
   Jobs also set `misfire_grace_time=None`: APScheduler's default of 1 s would
@@ -1584,6 +1595,26 @@ Browser → web POST /api/institutions/refresh {institution?}
   The Compose `scrapers` service polls it as its `healthcheck`, so a wedged
   scheduler shows as `unhealthy` in `docker compose ps`. Compose only marks
   the container; restarting it on that is up to whatever runs the stack.
+- `/login` routes start the `make *-login` flows from the dashboard
+  (`interactive_login.py`). `GET /login` lists `{institution, method}` for the
+  enabled scrapers that support one: `code` (Fintual: the service signs in with
+  its configured credentials, in a thread with its own event loop, and blocks
+  until the dashboard posts the e-mailed code to `POST /login/{slug}/code`, at
+  most 10 minutes), `browser` (Mercado Pago: `save_login_session` opens a
+  visible Chrome for the human), or `refresh` (Lider in managed mode: its run
+  already falls back to a visible window when sign-in needs a human, so
+  `POST /login/bci_lider` just triggers the job). `POST /login/{slug}` starts
+  one (`409` while one is under way, or while a run holds the institution) and
+  `GET /login/{slug}` reports `idle|running|awaiting_code|succeeded|failed`
+  with a showable `message`. A `code` or `browser` sign-in and a run of the
+  same institution never overlap: both claim it in `RunGuard` (`main._RUN_GUARD`),
+  and a run that finds it held is skipped without a run row. A successful
+  sign-in triggers that institution's job, which is what clears the dashboard's
+  violet banner. Because a sign-in opens windows and mails codes, these routes
+  refuse any request with a browser `Origin` or `Sec-Fetch-Site` header (a page
+  reaching the port directly, DNS rebinding included) and any POST not labelled
+  `application/json`; the web reaches them server-side through
+  `/api/scrapers/login[/{slug}[/code]]`, behind the proxy's Origin check.
 - The server runs on a daemon thread and binds `SCRAPER_CONTROL_HOST`, which
   defaults to `127.0.0.1` (host-dev); Compose sets `0.0.0.0` inside the
   container so `web` can reach it. It's an **unauthenticated** trigger: keep it

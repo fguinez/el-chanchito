@@ -23,6 +23,16 @@ describe("runStatusStyle", () => {
     }
   });
 
+  it("gives skipped runs a neutral label and color of their own", () => {
+    const skipped = runStatusStyle("skipped");
+
+    expect(skipped.label).toBe("omitido");
+    const others = ["success", "partial", "error", "needs_sign_in", "running"];
+    for (const other of others) {
+      expect(skipped.badgeClass).not.toBe(runStatusStyle(other).badgeClass);
+    }
+  });
+
   it("shows an unknown status as-is, unstyled", () => {
     expect(runStatusStyle("constructor")).toEqual({
       label: "constructor",
@@ -36,6 +46,7 @@ describe("hasRunDetails", () => {
     ["error", "products: login failed", true],
     ["needs_sign_in", "Stub needs sign-in: run `make stub-login`.", true],
     ["partial", "transactions: 1 of 2 not written", true],
+    ["skipped", "full login skipped (allowed again in 540s)", true],
     ["partial", null, false],
     ["success", null, false],
     ["success", "retired: 1 mercadopago savings CLP product(s) no longer listed", true],

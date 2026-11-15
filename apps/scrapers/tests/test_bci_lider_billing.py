@@ -7,8 +7,10 @@ rate, fabricated dates); no real portal capture or statement appears here.
 import base64
 from datetime import date
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
+from playwright.sync_api import Error as PlaywrightError
 
 from product_model import CreditCardMetrics
 from scrapers.backends import bci_lider_billing as billing
@@ -468,3 +470,165 @@ class TestReadBillingInto:
         # Assert
         assert result.products[0].metrics.statement_date is None
         assert result.warnings == ["BciLider: billing script failed: RuntimeError"]
+
+
+class TargetClosedError(PlaywrightError):
+    """Stands in for Playwright's non-public `TargetClosedError` (matched by name)."""
+
+
+class _ClosedPage:
+    """A tab that closed (with its Chrome, or alone) before the script ran."""
+
+    def __init__(self, error=None):
+        self.error = error or TargetClosedError("Target page, context or browser has been closed")
+
+    def evaluate(self, script, arg=None):
+        raise self.error
+
+
+class _Reacquire:
+    """Hands out `page` as the live portal tab and counts the requests."""
+
+    def __init__(self, page):
+        self.page = page
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        return self.page
+
+
+class TestReadBillingRetry:
+    def test_a_closed_tab_retries_once_on_a_live_portal_tab(self, text_pdfs):
+        """The script runs again on the tab `reacquire` returns and its read lands."""
+        reacquire = _Reacquire(_BillingPage(_result()))
+
+        read = billing.read_billing(_ClosedPage(), reacquire)
+
+        assert reacquire.calls == 1
+        assert read.warnings == []
+        assert len(read.statements) == 1
+
+    def test_no_live_portal_tab_names_the_closed_target(self):
+        """With Chrome gone there is nothing to retry on, and the warning says why."""
+        read = billing.read_billing(_ClosedPage(), _Reacquire(None))
+
+        assert read.warnings == [
+            "BciLider: billing script failed: TargetClosedError "
+            "(the tab or Chrome closed; no live portal tab left)"
+        ]
+
+    def test_a_retry_that_fails_too_is_a_warning(self):
+        """Only one retry: a second failure ends the billing leg."""
+        reacquire = _Reacquire(_ClosedPage())
+
+        read = billing.read_billing(_ClosedPage(), reacquire)
+
+        assert reacquire.calls == 1
+        assert read.warnings == [
+            "BciLider: billing script failed: TargetClosedError "
+            "(after one retry on a live portal tab)"
+        ]
+
+    def test_a_reacquire_that_raises_is_no_live_tab(self):
+        """A failing tab lookup is the same as no live tab: a warning, never a crash."""
+
+        def reacquire():
+            raise RuntimeError("lookup failed")
+
+        read = billing.read_billing(_ClosedPage(), reacquire)
+
+        assert read.warnings == [
+            "BciLider: billing script failed: TargetClosedError "
+            "(the tab or Chrome closed; no live portal tab left)"
+        ]
+
+    def test_a_live_tab_error_is_not_retried(self):
+        """A Playwright error that leaves the tab usable is reported as it is."""
+        reacquire = _Reacquire(_BillingPage(_result()))
+
+        read = billing.read_billing(_ClosedPage(PlaywrightError("Timeout")), reacquire)
+
+        assert reacquire.calls == 0
+        assert read.warnings == ["BciLider: billing script failed: Error"]
+
+
+class _Tab:
+    def __init__(self, url, closed=False):
+        self.url = url
+        self.closed = closed
+
+    def is_closed(self):
+        return self.closed
+
+
+class _Browser:
+    def __init__(self, tabs, connected=True):
+        self.contexts = [SimpleNamespace(pages=tabs)]
+        self.connected = connected
+
+    def is_connected(self):
+        return self.connected
+
+
+PRIVATE_URL = f"https://{billing.PORTAL_HOST}/private-home/saldos"
+
+
+class TestLivePortalTab:
+    @pytest.mark.parametrize(
+        "browser",
+        [
+            _Browser([_Tab(PRIVATE_URL)], connected=False),
+            _Browser([_Tab(PRIVATE_URL, closed=True)]),
+            _Browser([_Tab(f"https://{billing.PORTAL_HOST}/login")]),
+            _Browser([_Tab("https://example.test/private-home")]),
+            _Browser([]),
+        ],
+        ids=["chrome-gone", "tab-closed", "signed-out-tab", "other-host", "no-tabs"],
+    )
+    def test_no_usable_tab_is_none(self, browser):
+        """A gone Chrome, a closed tab or a signed-out tab is never retried on."""
+        assert web._live_portal_tab(browser) is None
+
+    def test_an_open_private_tab_is_returned(self):
+        """The first open tab in the private area is the one to retry on."""
+        live = _Tab(PRIVATE_URL)
+        browser = _Browser([_Tab(PRIVATE_URL, closed=True), live])
+
+        assert web._live_portal_tab(browser) is live
+
+    def test_the_failed_tab_is_skipped(self):
+        """The tab that just lost its target is never retried on, even if still listed open."""
+        failed = _Tab(PRIVATE_URL)
+        live = _Tab(PRIVATE_URL)
+
+        assert web._live_portal_tab(_Browser([failed, live]), failed) is live
+
+    def test_a_tab_that_raises_does_not_end_the_search(self):
+        """One unreadable tab is skipped; a signed-in tab after it still qualifies."""
+
+        class _BrokenTab(_Tab):
+            def is_closed(self):
+                raise RuntimeError("gone")
+
+        live = _Tab(PRIVATE_URL)
+
+        assert web._live_portal_tab(_Browser([_BrokenTab(PRIVATE_URL), live])) is live
+
+
+class TestReadCardRetryWiring:
+    @pytest.mark.parametrize("with_browser", [True, False], ids=["browser", "no-browser"])
+    def test_read_card_hands_billing_a_reacquire_only_with_a_browser(
+        self, monkeypatch, with_browser
+    ):
+        """`_read_card` wires the tab lookup into the billing read when it has a browser."""
+        seen = {}
+        monkeypatch.setattr(web, "_read_balances", lambda page: [])
+        monkeypatch.setattr(web, "_read_movements", lambda page: [])
+        monkeypatch.setattr(
+            web, "_read_billing_into", lambda page, result, reacquire=None: seen.update(r=reacquire)
+        )
+
+        web._read_card(object(), web.BciLiderCardResult(), _Browser([]) if with_browser else None)
+
+        assert (seen["r"] is not None) is with_browser

@@ -37,12 +37,14 @@ from db.writer import (
     upsert_product,
     write_transactions,
 )
+from interactive_login import InteractiveLogins, RunGuard, build_providers
 from product_model import CREDENTIAL_SPECS
 from scrapers.backends import banchile_web
 from scrapers.backends.email import get_session as get_email_session
 from scrapers.backends.email import reset_session as reset_email_session
 from scrapers.base import (
     BaseScraper,
+    RunSkipped,
     ScrapedExchangeRate,
     ScrapedPriceHistory,
     SignInRequired,
@@ -80,6 +82,7 @@ def run_outcome(
     landed: int,
     notes: list[str] | None = None,
     sign_in: list[str] | None = None,
+    skipped: list[str] | None = None,
 ) -> tuple[str, str | None]:
     """The final (status, error_message) of a run.
 
@@ -95,20 +98,43 @@ def run_outcome(
     human must act, and nothing is broken. Otherwise they count as errors.
     Both legs usually raise the same one, so each message is kept once, and
     first: the dashboard shows only a message's first 120 characters.
+
+    `skipped` holds the messages of legs that raised `RunSkipped` (the scraper
+    chose not to read, e.g. BanChile's login cooldown). When nothing landed
+    and nothing else failed or needs a sign-in, the run is `skipped`: nothing
+    is broken and the last run's data stands. Otherwise they count as errors.
+    They are deduplicated like `sign_in`, and follow it.
     """
     sign_in = list(dict.fromkeys(sign_in or []))
-    message = "; ".join(sign_in + errors + warnings + (notes or [])) or None
-    if sign_in and not errors and not landed:
-        return "needs_sign_in", message
-    if (errors or sign_in) and not landed:
+    skipped = list(dict.fromkeys(skipped or []))
+    message = "; ".join(sign_in + skipped + errors + warnings + (notes or [])) or None
+    if not errors and not landed:
+        if sign_in:
+            return "needs_sign_in", message
+        if skipped:
+            return "skipped", message
+    if (errors or sign_in or skipped) and not landed:
         return "error", message
-    if errors or sign_in or warnings:
+    if errors or sign_in or skipped or warnings:
         return "partial", message
     return "success", message
 
 
+# Institutions a run or a dashboard-started sign-in holds right now: the two
+# never overlap (a sign-in rewrites the session a run reads). It also keeps a
+# manual trigger from overlapping the startup run, which is no scheduler job, so
+# `max_instances=1` can't stop it.
+_RUN_GUARD = RunGuard()
+
+
 async def run_scraper(scraper: BaseScraper) -> None:
-    """Run a single scraper with logging and DB tracking.
+    """Run a single scraper with logging and DB tracking, unless a sign-in
+    to its institution is in progress (that sign-in refreshes it when done).
+
+    A call while the same scraper's run is still in flight records nothing and
+    returns: that run is already fetching what the call asked for, and two
+    sessions at once would fight over one login (BanChile's second run would
+    lose its restored session and hit the login cooldown).
 
     Transactions and products are scraped as independent legs: a failure in one
     must not stop the other. BanChile in particular reads both from one browser
@@ -121,8 +147,8 @@ async def run_scraper(scraper: BaseScraper) -> None:
     Writes are isolated per row too: a product or transaction that fails to
     write is logged and counted, and the rest are still written. Transactions
     that name a product not stored yet are a warning and land on a later run.
-    A leg that raises `SignInRequired` logs one line, no traceback: it is
-    expected on every run until someone signs in.
+    A leg that raises `SignInRequired` or `RunSkipped` logs one line, no
+    traceback: neither is a bug.
     The final status comes from `run_outcome`, and the products leg's
     non-fatal warnings (e.g. a BanChile surface that failed all its retries)
     join the message.
@@ -135,6 +161,22 @@ async def run_scraper(scraper: BaseScraper) -> None:
     products, each on its own: one that names an unknown product, or fails to
     write, is a warning. Neither counts as landed.
     """
+    if not _RUN_GUARD.claim(scraper.institution, "run"):
+        logger.info(
+            "Scraper %s skipped: %s is busy (%s)",
+            scraper.name,
+            scraper.institution,
+            _RUN_GUARD.holder(scraper.institution),
+        )
+        return
+    try:
+        await _run_scraper(scraper)
+    finally:
+        _RUN_GUARD.release(scraper.institution)
+
+
+async def _run_scraper(scraper: BaseScraper) -> None:
+    """`run_scraper`'s body, once it holds the scraper's institution."""
     run_id = start_scraper_run(scraper.method, scraper.institution)
     logger.info("Starting scraper: %s (run=%s)", scraper.name, run_id)
 
@@ -142,6 +184,7 @@ async def run_scraper(scraper: BaseScraper) -> None:
     warnings: list[str] = []
     notes: list[str] = []
     sign_in: list[str] = []
+    skipped: list[str] = []
     n_tx = 0
     inserted = 0
     n_prod = 0
@@ -165,6 +208,9 @@ async def run_scraper(scraper: BaseScraper) -> None:
     except SignInRequired as e:
         logger.warning("Scraper %s: transactions need sign-in: %s", scraper.name, e)
         sign_in.append(str(e))
+    except RunSkipped as e:
+        logger.info("Scraper %s: transactions skipped: %s", scraper.name, e)
+        skipped.append(str(e))
     except Exception as e:
         logger.exception("Scraper %s: transactions failed", scraper.name)
         errors.append(f"transactions: {e}")
@@ -209,6 +255,9 @@ async def run_scraper(scraper: BaseScraper) -> None:
     except SignInRequired as e:
         logger.warning("Scraper %s: products need sign-in: %s", scraper.name, e)
         sign_in.append(str(e))
+    except RunSkipped as e:
+        logger.info("Scraper %s: products skipped: %s", scraper.name, e)
+        skipped.append(str(e))
     except Exception as e:
         logger.exception("Scraper %s: products failed", scraper.name)
         errors.append(f"products: {e}")
@@ -276,7 +325,7 @@ async def run_scraper(scraper: BaseScraper) -> None:
         n_prod,
         sum(len(h.points) for h in histories),
     )
-    status, message = run_outcome(errors, warnings, landed, notes, sign_in)
+    status, message = run_outcome(errors, warnings, landed, notes, sign_in, skipped)
     finish_scraper_run(run_id, status, transactions_imported=inserted, error_message=message)
 
 
@@ -457,11 +506,26 @@ class Heartbeat:
         return self._clock() - self._last
 
 
+# The largest request body the control server reads (a sign-in code).
+_MAX_CONTROL_BODY = 1024
+
+
+def _trigger_job(scheduler: AsyncIOScheduler, slug: str) -> bool:
+    """Run `slug`'s scheduled job now; False when it has none."""
+    job = scheduler.get_job(slug)
+    if job is None:
+        return False
+    job.modify(next_run_time=datetime.now(UTC))
+    logger.info("Manual trigger for %s", slug)
+    return True
+
+
 def _make_control_handler(
     scheduler: AsyncIOScheduler,
     scraper_keys: "set[str] | Callable[[], frozenset[str]]",
     heartbeat: Heartbeat,
     cooldowns: dict[str, Callable[[], float | None]] | None = None,
+    logins: InteractiveLogins | None = None,
     credentials: "CredentialControl | None" = None,
 ):
     """Build the HTTP handler for the internal scraper control server.
@@ -476,12 +540,22 @@ def _make_control_handler(
     the seconds until it may be triggered again (None: now). Until then
     `POST /refresh/{slug}` answers 429 with `Retry-After`, and `POST /refresh`
     triggers the rest and lists it under `skipped`. The startup run isn't a
-    job, so a trigger during it isn't absorbed (BanChile's login gate still
-    stops a second login).
+    job, so a trigger during it isn't absorbed by `max_instances`;
+    `run_scraper`'s in-flight guard absorbs it instead.
 
     GET /health reports the scheduler, not just this thread: it answers 503
     when `heartbeat` has gone stale, which is what the compose healthcheck
     reads.
+
+    `/login` routes start the interactive sign-ins of `logins`
+    (`interactive_login`): `GET /login` lists them, `POST /login/{slug}`
+    starts one, `GET /login/{slug}` reports it, and `POST /login/{slug}/code`
+    hands a `code` sign-in its one-time code. A sign-in opens windows on this
+    machine and mails codes, so these routes answer only the dashboard's
+    server: a request carrying a browser's `Origin` or `Sec-Fetch-Site` is
+    refused (a page reaching this port directly, DNS rebinding included), and
+    a POST must be labelled JSON, so a cross-origin one always needs a
+    preflight this server never grants.
 
     With `credentials`, GET /credentials/status reports per env var whether a
     fallback value exists and whether a stored one was opened or needs
@@ -500,12 +574,7 @@ def _make_control_handler(
         return math.ceil(wait) if wait and wait > 0 else 0
 
     def trigger(slug: str) -> bool:
-        job = scheduler.get_job(slug)
-        if job is None:
-            return False
-        job.modify(next_run_time=datetime.now(UTC))
-        logger.info("Manual trigger for %s", slug)
-        return True
+        return _trigger_job(scheduler, slug)
 
     class ControlHandler(BaseHTTPRequestHandler):
         def _send(self, code: int, payload: dict, headers: dict[str, str] | None = None) -> None:
@@ -518,8 +587,58 @@ def _make_control_handler(
             self.end_headers()
             self.wfile.write(body)
 
+        def _login_refused(self) -> bool:
+            """Send the refusal for a /login request a browser made, or a POST
+            not labelled JSON; True when one was sent."""
+            if self.headers.get("Origin") or self.headers.get("Sec-Fetch-Site"):
+                self._send(403, {"error": "browser requests are not accepted"})
+                return True
+            if self.command == "POST":
+                content_type = (self.headers.get("Content-Type") or "").split(";")[0]
+                if content_type.strip().lower() != "application/json":
+                    self._send(415, {"error": "expected application/json"})
+                    return True
+            return False
+
+        def _read_json(self) -> dict | None:
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                return None
+            if not 0 <= length <= _MAX_CONTROL_BODY:
+                return None
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return None
+            return body if isinstance(body, dict) else None
+
+        def _handle_login(self) -> None:
+            if logins is None:
+                self._send(404, {"error": "not found"})
+                return
+            if self._login_refused():
+                return
+            parts = self.path.strip("/").split("/")
+            if self.command == "GET" and parts == ["login"]:
+                self._send(200, {"logins": logins.supported()})
+            elif self.command == "GET" and len(parts) == 2:
+                self._send(*logins.status(parts[1]))
+            elif self.command == "POST" and len(parts) == 2:
+                self._send(*logins.start(parts[1]))
+            elif self.command == "POST" and len(parts) == 3 and parts[2] == "code":
+                body = self._read_json()
+                if body is None:
+                    self._send(400, {"error": "invalid JSON body"})
+                else:
+                    self._send(*logins.submit_code(parts[1], body.get("code")))
+            else:
+                self._send(404, {"error": "not found"})
+
         def do_GET(self) -> None:
-            if self.path == "/health":
+            if self.path == "/login" or self.path.startswith("/login/"):
+                self._handle_login()
+            elif self.path == "/health":
                 age = round(heartbeat.age())
                 if age < _HEARTBEAT_STALE_SECONDS:
                     self._send(200, {"status": "ok", "heartbeat_age_seconds": age})
@@ -543,7 +662,9 @@ def _make_control_handler(
                 self._send(404, {"error": "not found"})
 
         def do_POST(self) -> None:
-            if self.path == "/credentials/reload":
+            if self.path.startswith("/login/"):
+                self._handle_login()
+            elif self.path == "/credentials/reload":
                 if credentials is None:
                     self._send(404, {"error": "not found"})
                     return
@@ -580,6 +701,9 @@ def _make_control_handler(
                         },
                         {"Retry-After": str(wait)},
                     )
+                elif _RUN_GUARD.holder(slug) == "login":
+                    # The run would be dropped; the sign-in refreshes it when it succeeds.
+                    self._send(409, {"error": f"a sign-in to {slug} is in progress"})
                 elif trigger(slug):
                     self._send(202, {"triggered": [slug]})
                 else:
@@ -612,15 +736,21 @@ def _start_control_server(
         return None
 
     host = os.environ.get("SCRAPER_CONTROL_HOST") or "127.0.0.1"
+    current_keys = scraper_keys if callable(scraper_keys) else lambda: frozenset(scraper_keys)
+    logins = InteractiveLogins(
+        build_providers(set(current_keys())),
+        lambda slug: _trigger_job(scheduler, slug),
+        _RUN_GUARD,
+    )
     handler = _make_control_handler(
-        scheduler, scraper_keys, heartbeat, _REFRESH_COOLDOWNS, credentials
+        scheduler, scraper_keys, heartbeat, _REFRESH_COOLDOWNS, logins, credentials
     )
     server = ThreadingHTTPServer((host, int(port)), handler)
     thread = threading.Thread(target=server.serve_forever, name="scraper-control", daemon=True)
     thread.start()
     logger.info(
-        "Control server listening on %s:%s (POST /refresh[/{slug}], GET /scrapers, "
-        "GET /health, GET /credentials/status, POST /credentials/reload)",
+        "Control server listening on %s:%s (POST /refresh[/{slug}], /login[/{slug}], "
+        "GET /scrapers, GET /health, GET /credentials/status, POST /credentials/reload)",
         host,
         port,
     )

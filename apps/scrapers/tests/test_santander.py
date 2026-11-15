@@ -319,7 +319,33 @@ class TestParseMovements:
         """An account with no movements in the window is not an error."""
         assert web.parse_movements(_movements_payload([])).movements == []
 
-    @pytest.mark.parametrize("payload", [None, {}, {"movements": None}, {"movements": {}}])
+    def test_window_without_movements_is_valid(self):
+        """The API drops `movements` and sends only `additionalInfo` for an empty window."""
+        payload = {
+            "additionalInfo": [
+                {"key": "code-ms", "value": "BGE0071"},
+                {"key": "message-ms", "value": "NO EXISTEN DATOS"},
+            ]
+        }
+
+        parsed = web.parse_movements(payload)
+
+        assert parsed.movements == []
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            None,
+            {},
+            {"movements": None},
+            {"movements": {}},
+            {"additionalInfo": [], "error": "x"},
+            {"additionalInfo": None},
+            {"additionalInfo": [{"key": "code-ms", "value": "0"}]},
+            {"additionalInfo": [{"key": "code-ms", "value": "XYZ9999"}]},
+            {"additionalInfo": [{"key": "code-ms", "value": "BGE0071"}], "error": "x"},
+        ],
+    )
     def test_unrecognisable_shape_raises(self, payload):
         """Without a movements list the payload cannot be trusted."""
         with pytest.raises(SantanderPayloadError):

@@ -410,6 +410,10 @@ is cached to disk (`apps/scrapers/.fintual_session.json`, gitignored):
 make fintual-login   # signs in, prompts for the 6-digit code Fintual e-mails you
 ```
 
+The dashboard's **Iniciar sesión** button on a Fintual `inicia sesión` banner
+does the same without a terminal and asks for the code in the page (see
+[Signing in from the dashboard](#signing-in-from-the-dashboard)).
+
 Scheduled scrapes refresh the cached session the way the website does, with no
 2FA, so you only need `make fintual-login` again when:
 
@@ -727,9 +731,33 @@ scraper (one row per method and institution):
 - How long ago it ran
 - A status badge: `success`, `partial` (it finished with warnings), `error`,
   `inicia sesión` (`needs_sign_in`: the session is gone and the message names
-  the `make <institution>-login` command to run), or `running`. Runs that need a
-  sign-in also get a violet banner of their own, apart from the red error one.
+  the `make <institution>-login` command to run), `omitido` (`skipped`: the
+  scraper chose not to read this time, e.g. BanChile's login cooldown refused a
+  full login; nothing is broken and the previous data stands), or `running`.
+  Runs that need a sign-in also get a violet banner of their own, apart from
+  the red error one; skipped runs get no banner.
+- An **Iniciar sesión** button in that violet banner, for institutions whose
+  sign-in the dashboard can start (see below), so you don't need a terminal
 - Error messages (click any finished row that has one to expand it)
+
+### Signing in from the dashboard
+
+The violet `needs_sign_in` banner offers **Iniciar sesión** where the scraper
+service can run the sign-in itself (the service must be the one `make dev`
+starts, on the machine you are sitting at, since it may open a Chrome window
+there):
+
+| Institution | What the button does |
+|---|---|
+| Fintual | Signs in with the configured e-mail and password, then shows a field for the 6-digit code Fintual e-mails you; needs `FINTUAL_PASSWORD` |
+| Mercado Pago | Opens a visible Chrome window on its dedicated profile; sign in there (nothing is typed for you); it closes by itself, like `make mercadopago-login` |
+| Tarjeta Lider Bci | Managed mode only: starts a run now, which opens a visible Chrome when the sign-in needs a human; tick the Cloudflare check if it shows one. A rejected clave still needs fixing in your secrets first |
+
+The banner follows the sign-in and shows its result. When it succeeds the
+service clears the failure marker (`.login-failed` for Fintual, the sign-in
+marker for Mercado Pago) and refreshes that institution; the banner clears once
+that run lands. Institutions without a button (Lider or Mercado Pago in reuse mode) still use
+their `make <institution>-login`.
 
 ### On-demand refresh (from the dashboard)
 
@@ -762,6 +790,11 @@ instead of spinning forever.
   - `POST /credentials/reload`: re-read the credentials stored from the
     dashboard and add, drop or rebuild scrapers to match (`added`, `removed`,
     `updated`, `scrapers`)
+  - `GET /login`, `POST /login/{slug}`, `GET /login/{slug}`,
+    `POST /login/{slug}/code`: the dashboard's sign-ins (see
+    [Signing in from the dashboard](#signing-in-from-the-dashboard)); they
+    refuse requests carrying a browser `Origin` or `Sec-Fetch-Site`, and POSTs
+    not labelled `application/json`
 - **Dashboard** — set `SCRAPER_CONTROL_URL` to reach that server; the web route
   `POST /api/institutions/refresh` (optional body `{"institution":"<slug>"}`) proxies
   to it and returns `503` when it's unavailable.

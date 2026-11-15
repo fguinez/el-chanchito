@@ -48,10 +48,12 @@ import datetime
 import io
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
+from scrapers.backends import real_chrome
 from scrapers.base import ProductRef, ScrapedExchangeRate
 
 logger = logging.getLogger(__name__)
@@ -522,24 +524,51 @@ def _statement_from_entry(entry: Any) -> LiderStatement | None:
     return statement_from_text(text)
 
 
-def read_billing(page) -> BillingRead:
-    """Run the in-page billing script on a signed-in portal tab and read it."""
+def _run_billing_script(page) -> Any:
+    return page.evaluate(
+        _BILLING_JS,
+        {
+            "host": PORTAL_HOST,
+            "api": API_BASE,
+            "maxStatements": MAX_STATEMENTS,
+            "timeoutMs": FETCH_TIMEOUT_MS,
+            "totalMs": TOTAL_TIMEOUT_MS,
+        },
+    )
+
+
+def _script_failed(exc: Exception, note: str = "") -> BillingRead:
+    logger.info("BciLider: billing script failed", exc_info=True)
+    read = BillingRead()
+    read.warnings.append(f"BciLider: billing script failed: {type(exc).__name__}{note}")
+    return read
+
+
+def read_billing(page, reacquire: Callable[[], Any] | None = None) -> BillingRead:
+    """Run the in-page billing script on a signed-in portal tab and read it.
+
+    When the call fails because the tab or Chrome went away (see
+    `real_chrome.connection_lost`), `reacquire` is asked for a live signed-in
+    portal tab and the script runs once more there; with none, the warning
+    says so instead of hiding the closed target.
+    """
     try:
-        result = page.evaluate(
-            _BILLING_JS,
-            {
-                "host": PORTAL_HOST,
-                "api": API_BASE,
-                "maxStatements": MAX_STATEMENTS,
-                "timeoutMs": FETCH_TIMEOUT_MS,
-                "totalMs": TOTAL_TIMEOUT_MS,
-            },
-        )
+        result = _run_billing_script(page)
     except Exception as exc:
-        logger.info("BciLider: billing script failed", exc_info=True)
-        read = BillingRead()
-        read.warnings.append(f"BciLider: billing script failed: {type(exc).__name__}")
-        return read
+        if reacquire is None or not real_chrome.connection_lost(exc):
+            return _script_failed(exc)
+        try:
+            retry_page = reacquire()
+        except Exception:
+            logger.info("BciLider: no portal tab to retry the billing read on", exc_info=True)
+            retry_page = None
+        if retry_page is None:
+            return _script_failed(exc, " (the tab or Chrome closed; no live portal tab left)")
+        logger.info("BciLider: the billing tab closed mid-read; retrying on a live portal tab")
+        try:
+            result = _run_billing_script(retry_page)
+        except Exception as retry_exc:
+            return _script_failed(retry_exc, " (after one retry on a live portal tab)")
     read = billing_from_result(result)
     logger.info(
         "BciLider: billing read (rate %s, current billing %s, %d statement(s))",

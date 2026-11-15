@@ -15,6 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from playwright.sync_api import Error as PlaywrightError
 
 from scrapers.backends import real_chrome
 
@@ -1571,3 +1572,18 @@ class TestCmdlineReading:
         assert line == "/synthetic/chrome --x"
         assert args == ["ps", "-ww", "-o", "command=", "-p", "4242"]
         assert kwargs["timeout"] == real_chrome._PS_TIMEOUT_S
+
+
+class TestConnectionLost:
+    @pytest.mark.parametrize(
+        "error, lost",
+        [
+            (type("TargetClosedError", (PlaywrightError,), {})("closed"), True),
+            (Exception("driver gone"), True),
+            (PlaywrightError("Timeout 1000ms exceeded"), False),
+        ],
+        ids=["target-closed", "dead-driver", "live-tab-error"],
+    )
+    def test_only_a_gone_tab_or_connection_counts(self, error, lost):
+        """A closed target or dead driver is lost; other Playwright errors are not."""
+        assert real_chrome.connection_lost(error) is lost
