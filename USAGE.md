@@ -536,6 +536,18 @@ check nobody ticked, or a wrong clave), the run shows `inicia sesión` and asks 
 run can't share the debug port with that Chrome.
 (Override the debug port with `LIDER_BCI_CDP_PORT`.)
 
+A run never reads a portal tab signed in to another account than
+`LIDER_BCI_RUT` (say, after you change the RUT in Credenciales). The managed
+profile (`apps/scrapers/.bci_lider_chrome_profile`) is tied to the RUT that
+last signed in with it, by a gitignored `.bci_lider_chrome_profile.account`
+marker holding a salted hash, never the RUT; a profile of another RUT, or one
+from before the marker existed, is deleted before Chrome starts and the run
+signs in afresh. A tab the run did not sign in itself must also show that
+RUT as the portal's signed-in customer (checked inside the page). In reuse
+mode the Chrome is yours and is never wiped: a tab of another account, or
+one that does not show its account, ends the run as `inicia sesión` asking
+you to sign out of the portal in that Chrome and run `make bci-lider-login`.
+
 Each card movement is marked billed or not by the period view it was read in
 ("Por facturar" or "Último periodo facturado"), and the statements the portal
 lists (about 8 months, read from their PDFs) mark the movements they billed

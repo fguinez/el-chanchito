@@ -26,6 +26,7 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -111,10 +112,15 @@ def belongs_to(session: Path, identifier: str) -> bool:
     return False
 
 
-def discard(session: Path) -> None:
-    """Delete a session and its marker; best effort."""
+def discard(session: Path, *, directory: bool = False) -> None:
+    """Delete a session and its marker; best effort. `directory` is for a
+    session that is a whole directory (a browser profile); otherwise a
+    directory found at the session path is left alone."""
     for path in (session, marker_path(session)):
         try:
-            path.unlink(missing_ok=True)
+            if directory and path is session and path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            else:
+                path.unlink(missing_ok=True)
         except OSError:
             logger.warning("Could not delete %s", path.name)

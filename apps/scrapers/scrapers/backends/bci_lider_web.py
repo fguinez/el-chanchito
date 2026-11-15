@@ -34,6 +34,15 @@ Either way it reuses an already-signed-in tab or re-logs-in via autofill, and
 raises `BciLiderSessionError` when Chrome is unreachable, or its subclass
 `BciLiderSignInRequired` (a `needs_sign_in` run) when sign-in can't complete.
 
+Account binding: nothing is read from a tab signed in to another account than
+LIDER_BCI_RUT. The managed profile carries a `session_account` marker and is
+deleted before launch when it isn't this RUT's (e.g. the RUT changed in the
+dashboard). A tab this run did not sign in itself must also show this RUT as
+the portal's signed-in `user` (compared inside the page, so the id never
+reaches Python): a mismatch resets the managed profile and signs in afresh,
+and in reuse mode (the user's own Chrome, never wiped) refuses the run asking
+for a sign-out and `make bci-lider-login`.
+
 Design note (why DOM scraping, not the XHR API): the balances are bootstrapped
 into the Angular app state at login and never re-fetched on a route change, and
 the movements endpoint (POST api-ssff.retailcard.cl/.../movfacturarpesos) needs
@@ -58,6 +67,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from product_model import CreditCardAttributes, CreditCardMetrics
+from scrapers import session_account
 from scrapers.backends import real_chrome
 from scrapers.backends.bci_lider_billing import (
     PORTAL_HOST,
@@ -413,6 +423,12 @@ class BciLiderSessionError(RuntimeError):
     """Raised when the debuggable Chrome is unreachable or sign-in didn't complete."""
 
 
+class BciLiderAccountMismatch(BciLiderSessionError):
+    """The managed profile's portal tab was signed in to another account (or
+    one that could not be confirmed): the profile is reset and signed in
+    afresh, never read."""
+
+
 class BciLiderSignInRequired(BciLiderSessionError, SignInRequired):
     """Chrome was reachable but the portal stayed signed out: a human must sign in.
 
@@ -466,6 +482,109 @@ def _find_authenticated_page(browser, deadline: float):
             return page
         time.sleep(2)
     return None
+
+
+# Whether the portal's signed-in customer (`user` in the tab's sessionStorage,
+# the id its API takes as `rut`) is the expected RUT, compared inside the page
+# so the id never reaches Python: "match", "mismatch", or "unknown" when the
+# tab holds no id. Separators and leading zeros are ignored, and an id without
+# its check digit matches too.
+_ACCOUNT_CHECK_JS = """
+({full, body}) => {
+  let user = null;
+  try { user = sessionStorage.getItem('user'); } catch (e) { return 'unknown'; }
+  const id = String(user || '').replace(/[^0-9kK]/g, '').toUpperCase().replace(/^0+/, '');
+  if (!id) return 'unknown';
+  return id === full || id === body ? 'match' : 'mismatch';
+}
+"""
+
+
+def _account_check(page, rut: str) -> str:
+    """`_ACCOUNT_CHECK_JS`'s verdict for `rut` on `page`; "unknown" on failure."""
+    full = session_account.normalize(rut).replace("-", "")
+    try:
+        verdict = page.evaluate(_ACCOUNT_CHECK_JS, {"full": full, "body": full[:-1]})
+    except Exception:
+        return "unknown"
+    return verdict if verdict in ("match", "mismatch") else "unknown"
+
+
+def _verify_account(page, rut: str | None, *, signed_in_now: bool, managed: bool) -> None:
+    """Refuse a tab signed in to another account than `rut`.
+
+    A tab this run signed in itself (autofill with `rut`) may show no id; one
+    it found signed in must show `rut`. Managed mode raises
+    `BciLiderAccountMismatch` (the caller resets the profile); reuse mode,
+    whose Chrome is the user's, asks for a sign-out instead. Without a RUT
+    there is no account to compare.
+    """
+    if not rut:
+        return
+    verdict = _account_check(page, rut)
+    if verdict == "match" or (verdict == "unknown" and signed_in_now):
+        return
+    what = (
+        "is signed in to another account than LIDER_BCI_RUT"
+        if verdict == "mismatch"
+        else "did not show which account it is signed in to"
+    )
+    if managed:
+        raise BciLiderAccountMismatch(f"BciLider: the Chrome profile {what}; nothing was read.")
+    raise BciLiderSignInRequired(
+        f"BciLider: the Chrome at {CDP_URL_ENV} {what}; nothing was read. Sign out of "
+        "the portal in that Chrome, then run `make bci-lider-login`."
+    )
+
+
+# How long a tab found signed in gets to show its account (or bounce to
+# /login) before an unknown one is refused.
+_ACCOUNT_SETTLE_S = 10
+
+
+def _confirm_account(
+    page,
+    rut: str | None,
+    password: str | None,
+    deadline: float,
+    *,
+    signed_in_now: bool,
+    managed: bool,
+) -> None:
+    """`_verify_account`, after giving a tab this run did not sign in a few
+    seconds to show its account: a slow route guard may still bounce it to
+    /login, which then signs in with `rut` like any expired session."""
+    if rut and not signed_in_now:
+        settle = min(deadline, time.monotonic() + _ACCOUNT_SETTLE_S)
+        while _account_check(page, rut) == "unknown" and time.monotonic() < settle:
+            if "/login" in (page.url or ""):
+                _login_via_autofill(page, rut, password, deadline)
+                signed_in_now = True
+                break
+            page.wait_for_timeout(500)
+    _verify_account(page, rut, signed_in_now=signed_in_now, managed=managed)
+
+
+def _reset_profile() -> None:
+    """Delete the managed Chrome profile and its account marker. Only call it
+    with no Chrome running on the profile."""
+    session_account.discard(_CHROME_PROFILE, directory=True)
+    if _CHROME_PROFILE.exists() or session_account.marker_path(_CHROME_PROFILE).exists():
+        raise BciLiderSessionError(
+            "BciLider: could not reset the Chrome profile of another account; delete "
+            f"{_CHROME_PROFILE.name} (in apps/scrapers) and run again."
+        )
+
+
+def _prepare_profile(rut: str | None) -> None:
+    """Reset the managed profile when it isn't tied to `rut` (the RUT changed,
+    or it predates account markers), so no session of another account loads."""
+    if not rut or not _CHROME_PROFILE.exists():
+        return
+    if session_account.belongs_to(_CHROME_PROFILE, rut):
+        return
+    logger.info("BciLider: the Chrome profile is not tied to this account; resetting it")
+    _reset_profile()
 
 
 def _fill_by_keystrokes(page, selectors: list[str], value: str, timeout: int) -> None:
@@ -550,6 +669,10 @@ def save_login_session(
     password = password or os.environ.get("LIDER_BCI_PASSWORD")
     port = _cdp_port()
     cdp_url = f"http://localhost:{port}"
+    # A Chrome already on the port may be using the profile: never delete it
+    # under a running browser (the account check below still applies).
+    if not real_chrome.port_in_use(port):
+        _prepare_profile(rut)
     proc = _launch_real_chrome(port, LOGIN_URL)
     print(
         "\nA Chrome window opened and the login is being autofilled. If Cloudflare "
@@ -575,13 +698,23 @@ def save_login_session(
             login_page = _find_page_matching(browser, "liderbciserviciosfinancieros")
             if login_page is None:
                 time.sleep(1)
+        submitted = False
         if login_page is not None and "/private-home" not in login_page.url:
-            _autofill_and_submit(login_page, rut, password, deadline)
+            submitted = _autofill_and_submit(login_page, rut, password, deadline)
 
-        if _find_authenticated_page(browser, deadline) is None:
+        authenticated = _find_authenticated_page(browser, deadline)
+        if authenticated is None:
             raise BciLiderSessionError(
                 "Sign-in not detected in time. Re-run `make bci-lider-login`."
             )
+        verdict = _account_check(authenticated, rut) if rut else "unknown"
+        if verdict == "mismatch":
+            raise BciLiderSessionError(
+                "This Chrome is signed in to another account than LIDER_BCI_RUT. Sign out "
+                "of the portal in it, then re-run `make bci-lider-login`."
+            )
+        if rut and (verdict == "match" or submitted):
+            session_account.write_account(_CHROME_PROFILE, rut)
         # Do NOT close `browser`: dropping the CDP connection leaves Chrome running.
 
     print(
@@ -871,8 +1004,9 @@ def _login_form_visible(page) -> bool:
     return False
 
 
-def _ensure_logged_in(page, rut: str | None, password: str | None, deadline: float) -> None:
+def _ensure_logged_in(page, rut: str | None, password: str | None, deadline: float) -> bool:
     """Make `page` an authenticated portal tab, logging in via autofill if needed.
+    True when it signed in (autofill with `rut`), False when the tab already was.
 
     Probes by navigating to the balances route, then *polls* for the SPA route
     guard's verdict: an expired session's redirect to /login fires after Angular
@@ -890,12 +1024,14 @@ def _ensure_logged_in(page, rut: str | None, password: str | None, deadline: flo
     while time.monotonic() < probe_deadline:
         if "/login" in page.url:
             _login_via_autofill(page, rut, password, deadline)
-            return
+            return True
         if card_saldos_from_text(_inner_text(page)):  # quiet: authenticated + rendering
-            return
+            return False
         page.wait_for_timeout(500)
     if "/login" in page.url:  # a bounce that landed just after the probe window
         _login_via_autofill(page, rut, password, deadline)
+        return True
+    return False
 
 
 def _connect_cdp(
@@ -928,12 +1064,15 @@ def _scrape_over_cdp(
     rut: str | None,
     password: str | None,
     process: subprocess.Popen | None = None,
+    profile: Path | None = None,
 ) -> BciLiderCardResult:
     """Read the card by driving a Chrome reachable at `cdp_url`; never closes it.
 
     Reuses an existing tab (an already-signed-in one keeps its tab-scoped
     sessionStorage auth) and ensures it's logged in, re-logging-in via autofill on a
     genuine-Chrome tab when the session has expired: that is what clears Cloudflare.
+    The tab must be `rut`'s (`_verify_account`) before anything is read. `profile`
+    is the managed profile (None in reuse mode), tied to `rut` once verified.
     """
     from playwright.sync_api import sync_playwright
 
@@ -951,7 +1090,13 @@ def _scrape_over_cdp(
         if page is None:
             context = browser.contexts[0] if browser.contexts else browser.new_context()
             page = context.pages[0] if context.pages else context.new_page()
-        _ensure_logged_in(page, rut, password, deadline)
+        managed = profile is not None
+        signed_in_now = _ensure_logged_in(page, rut, password, deadline)
+        _confirm_account(
+            page, rut, password, deadline, signed_in_now=signed_in_now, managed=managed
+        )
+        if managed and rut:
+            session_account.write_account(profile, rut)
         try:
             _read_card(page, result, browser)  # navigates the authenticated tab in place
         except BciLiderSessionError:
@@ -959,6 +1104,7 @@ def _scrape_over_cdp(
             # and retry once (belt-and-braces with _ensure_logged_in's probe).
             logger.info("BciLider: session bounced mid-read; re-logging in and retrying")
             _login_via_autofill(page, rut, password, time.monotonic() + _LOGIN_WAIT_S)
+            _verify_account(page, rut, signed_in_now=True, managed=managed)
             result = BciLiderCardResult()
             _read_card(page, result, browser)
         # Do NOT close the browser here: in reuse mode it's the user's live Chrome;
@@ -987,16 +1133,24 @@ def _scrape_managed_sync(rut: str | None, password: str | None) -> BciLiderCardR
             f"LIDER_BCI_CDP_URL=http://localhost:{port} to reuse that Chrome."
         )
     cdp_url = f"http://localhost:{port}"
+    # The port is free, so no Chrome of ours holds the profile: a profile of
+    # another account (or from before account markers) can be deleted now.
+    _prepare_profile(rut)
     # Prefer an off-screen window (no flash); if that misbehaves, fall back once to a
     # normal visible window, which is the most reliable. `terminate_chrome` waits
     # for exit, so the port is free again before the fallback launch. A clave the
     # portal already rejected is never resent: that would push toward a lockout.
+    # A tab of another account resets the profile (that Chrome has exited by
+    # then) and the fallback signs in on a fresh one.
     try:
         return _scrape_managed_once(port, cdp_url, rut, password, offscreen=True)
     except BciLiderSignInRequired as exc:
         if exc.submitted:
             raise
         first_error: Exception = exc
+    except BciLiderAccountMismatch as exc:
+        _reset_profile()
+        first_error = exc
     except Exception as exc:
         first_error = exc
     logger.warning(
@@ -1024,7 +1178,7 @@ def _scrape_managed_once(
     """Launch Chrome, scrape, and close it via CDP first so its cookies reach disk."""
     proc = _launch_real_chrome(port, LOGIN_URL, offscreen=offscreen)
     try:
-        return _scrape_over_cdp(cdp_url, rut, password, process=proc)
+        return _scrape_over_cdp(cdp_url, rut, password, process=proc, profile=_CHROME_PROFILE)
     finally:
         real_chrome.terminate_chrome(proc, cdp_url=cdp_url)
 

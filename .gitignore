@@ -44,6 +44,8 @@ local/
 .*_chrome_profile*/
 # Left next to a profile when its session is lost, e.g. .mercadopago_chrome_profile.needs-sign-in
 *.needs-sign-in
+# Ties a profile to its account (a salted hash), e.g. .bci_lider_chrome_profile.account
+.*_chrome_profile.account
 .agents/*local*
 **/.claude/*
 !/.claude/skills/

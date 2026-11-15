@@ -756,8 +756,17 @@ mode, driving a long-running Chrome from `make bci-lider-login` instead.
 Its managed Chrome has no pidfile yet, so one orphaned by a killed service
 still blocks later runs until it is closed by hand; that arrives when BCI
 Lider moves onto `backends/real_chrome.py`.
-Either way it reuses an already-signed-in tab or re-logs-in via autofill. A portal
-that stays signed out (the autofill times out with the login form still showing,
+Either way it reuses an already-signed-in tab or re-logs-in via autofill, and
+nothing is read from a tab of another account than `LIDER_BCI_RUT`: the
+managed profile carries a `session_account` marker and is deleted before
+launch when it is not this RUT's (a changed RUT, or a profile from before
+markers), and a tab the run did not sign in itself must show this RUT as the
+portal's sessionStorage `user` (compared inside the page, the id never reaches
+Python). A mismatch in managed mode (`BciLiderAccountMismatch`) resets the
+profile once Chrome exits and the visible retry signs in on a fresh one; in
+reuse mode, whose Chrome is the user's and never wiped, it raises
+`BciLiderSignInRequired` asking for a sign-out and `make bci-lider-login`. A
+portal that stays signed out (the autofill times out with the login form still showing,
 or a read bounces to /login after the retry) raises `BciLiderSignInRequired`, so
 the run is `needs_sign_in` and the message asks for `make bci-lider-login` plus
 `LIDER_BCI_CDP_URL` (a managed run would otherwise collide with that Chrome's

@@ -707,13 +707,15 @@ class TestRealChromeWiring:
         monkeypatch.setattr(
             web,
             "_scrape_over_cdp",
-            lambda cdp_url, rut, password, process=None: seen.append(process) or "result",
+            lambda cdp_url, rut, password, process=None, profile=None: (
+                seen.append((process, profile)) or "result"
+            ),
         )
 
         result = web._scrape_managed_once(9222, "http://localhost:9222", None, None, offscreen=True)
 
         assert result == "result"
-        assert seen == ["proc"]
+        assert seen == [("proc", web._CHROME_PROFILE)]
 
     def test_managed_attempt_terminates_its_chrome_even_on_failure(self, monkeypatch):
         """The Chrome a managed run launched is torn down by the shared helper, via CDP first."""
@@ -725,7 +727,7 @@ class TestRealChromeWiring:
             lambda proc, cdp_url=None: terminated.append((proc, cdp_url)),
         )
 
-        def broken_scrape(cdp_url, rut, password, process=None):
+        def broken_scrape(cdp_url, rut, password, process=None, profile=None):
             raise web.BciLiderSessionError("synthetic")
 
         monkeypatch.setattr(web, "_scrape_over_cdp", broken_scrape)
@@ -939,3 +941,203 @@ class TestManagedFallback:
 
         assert result == "result"
         assert calls == [True, False]
+
+
+class TestAccountBinding:
+    """Nothing is read from a portal tab of another account than LIDER_BCI_RUT.
+    Every RUT here is synthetic."""
+
+    RUT = "11.111.111-1"
+    OTHER = "22.222.222-2"
+
+    @pytest.fixture(autouse=True)
+    def profile(self, tmp_path, monkeypatch):
+        path = tmp_path / ".bci_lider_chrome_profile"
+        monkeypatch.setattr(web, "_CHROME_PROFILE", path)
+        return path
+
+    @staticmethod
+    def _make_profile(path, rut=None):
+        (path / "Default").mkdir(parents=True)
+        (path / "Default" / "Cookies").write_text("synthetic")
+        if rut is not None:
+            web.session_account.write_account(path, rut)
+
+    def test_the_check_runs_in_the_page_with_the_canonical_rut(self):
+        seen = []
+
+        class Page:
+            def evaluate(self, js, arg):
+                seen.append(arg)
+                return "match"
+
+        assert web._account_check(Page(), "11.111.111-k") == "match"
+        assert seen == [{"full": "11111111K", "body": "11111111"}]
+
+    @pytest.mark.parametrize("answer", [None, "yes", RuntimeError("closed")])
+    def test_an_unreadable_verdict_is_unknown(self, answer):
+        class Page:
+            def evaluate(self, js, arg):
+                if isinstance(answer, Exception):
+                    raise answer
+                return answer
+
+        assert web._account_check(Page(), self.RUT) == "unknown"
+
+    @pytest.mark.parametrize(
+        ("verdict", "signed_in_now"),
+        [("match", False), ("match", True), ("unknown", True)],
+    )
+    @pytest.mark.parametrize("managed", [True, False], ids=["managed", "reuse"])
+    def test_an_own_or_confirmed_tab_is_read(self, monkeypatch, verdict, signed_in_now, managed):
+        monkeypatch.setattr(web, "_account_check", lambda page, rut: verdict)
+        web._verify_account(object(), self.RUT, signed_in_now=signed_in_now, managed=managed)
+
+    @pytest.mark.parametrize(
+        ("verdict", "signed_in_now"),
+        [("mismatch", False), ("mismatch", True), ("unknown", False)],
+    )
+    def test_reuse_mode_refuses_and_asks_for_a_sign_out(self, monkeypatch, verdict, signed_in_now):
+        monkeypatch.setattr(web, "_account_check", lambda page, rut: verdict)
+        with pytest.raises(web.BciLiderSignInRequired) as info:
+            web._verify_account(object(), self.RUT, signed_in_now=signed_in_now, managed=False)
+        message = str(info.value)
+        assert "Sign out" in message and "make bci-lider-login" in message
+        assert "11" not in message
+
+    @pytest.mark.parametrize(
+        ("verdict", "signed_in_now"),
+        [("mismatch", False), ("mismatch", True), ("unknown", False)],
+    )
+    def test_managed_mode_raises_a_mismatch_to_reset(self, monkeypatch, verdict, signed_in_now):
+        monkeypatch.setattr(web, "_account_check", lambda page, rut: verdict)
+        with pytest.raises(web.BciLiderAccountMismatch) as info:
+            web._verify_account(object(), self.RUT, signed_in_now=signed_in_now, managed=True)
+        assert not isinstance(info.value, SignInRequired)
+
+    def test_without_a_rut_there_is_nothing_to_compare(self, monkeypatch):
+        def never(page, rut):
+            raise AssertionError("checked without a RUT")
+
+        monkeypatch.setattr(web, "_account_check", never)
+        web._verify_account(object(), None, signed_in_now=False, managed=False)
+
+    def test_a_profile_of_this_account_is_kept(self, profile):
+        self._make_profile(profile, "11111111-1")
+        web._prepare_profile(self.RUT)  # another spelling of the same RUT
+        assert (profile / "Default" / "Cookies").exists()
+
+    @pytest.mark.parametrize("owner", [OTHER, None], ids=["other-account", "unmarked"])
+    def test_a_profile_not_tied_to_this_account_is_deleted(self, profile, owner, caplog):
+        self._make_profile(profile, owner)
+        with caplog.at_level("INFO"):
+            web._prepare_profile(self.RUT)
+        assert not profile.exists()
+        assert not web.session_account.marker_path(profile).exists()
+        assert "11" not in caplog.text
+
+    def test_no_rut_leaves_the_profile_alone(self, profile):
+        self._make_profile(profile, self.OTHER)
+        web._prepare_profile(None)
+        assert profile.exists()
+
+    def test_a_profile_that_cannot_be_deleted_stops_the_run(self, profile, monkeypatch):
+        self._make_profile(profile, self.OTHER)
+        monkeypatch.setattr(web.session_account, "discard", lambda *args, **kwargs: None)
+        with pytest.raises(web.BciLiderSessionError, match="could not reset"):
+            web._prepare_profile(self.RUT)
+
+    def test_the_managed_run_resets_another_accounts_profile_before_launch(
+        self, profile, monkeypatch
+    ):
+        self._make_profile(profile, self.OTHER)
+        monkeypatch.setattr(web.real_chrome, "port_in_use", lambda port: False)
+        existed = []
+
+        def fake_once(port, cdp_url, rut, password, offscreen):
+            existed.append(profile.exists())
+            return "result"
+
+        monkeypatch.setattr(web, "_scrape_managed_once", fake_once)
+        assert web._scrape_managed_sync(self.RUT, "synthetic-clave") == "result"
+        assert existed == [False]
+
+    def test_a_mismatched_tab_resets_the_profile_and_signs_in_afresh(self, profile, monkeypatch):
+        monkeypatch.setattr(web.real_chrome, "port_in_use", lambda port: False)
+        self._make_profile(profile, self.RUT)
+        calls = []
+
+        def fake_once(port, cdp_url, rut, password, offscreen):
+            calls.append(profile.exists())
+            if len(calls) == 1:
+                raise web.BciLiderAccountMismatch("synthetic")
+            return "result"
+
+        monkeypatch.setattr(web, "_scrape_managed_once", fake_once)
+        assert web._scrape_managed_sync(self.RUT, "synthetic-clave") == "result"
+        assert calls == [True, False]
+
+    def _drive(self, monkeypatch, *, verdict, signed_in_now, profile):
+        import contextlib
+
+        import playwright.sync_api
+
+        reads = []
+        monkeypatch.setattr(
+            playwright.sync_api, "sync_playwright", lambda: contextlib.nullcontext(object())
+        )
+        monkeypatch.setattr(web, "_connect_cdp", lambda *args, **kwargs: object())
+        monkeypatch.setattr(web, "_find_page_matching", lambda browser, needle: "page")
+        monkeypatch.setattr(web, "_ensure_logged_in", lambda *args: signed_in_now)
+        monkeypatch.setattr(web, "_account_check", lambda page, rut: verdict)
+        monkeypatch.setattr(web, "_read_card", lambda page, result, browser: reads.append(page))
+        web._scrape_over_cdp("http://localhost:9222", self.RUT, None, profile=profile)
+        return reads
+
+    def test_a_slow_bounce_to_login_signs_in_instead_of_refusing(self, monkeypatch):
+        """A tab with no account yet that lands on /login signs in with the RUT."""
+        page = SimpleNamespace(url="https://example.invalid/private-home")
+        page.wait_for_timeout = lambda ms: setattr(page, "url", "https://example.invalid/login")
+        logins = []
+        monkeypatch.setattr(web, "_account_check", lambda page, rut: "unknown")
+        monkeypatch.setattr(web, "_login_via_autofill", lambda *args: logins.append(args[1]))
+
+        web._confirm_account(
+            page, self.RUT, None, time.monotonic() + 60, signed_in_now=False, managed=False
+        )
+
+        assert logins == [self.RUT]
+
+    def test_a_tab_that_never_shows_its_account_is_refused(self, monkeypatch):
+        monkeypatch.setattr(web, "_ACCOUNT_SETTLE_S", 0)
+        monkeypatch.setattr(web, "_account_check", lambda page, rut: "unknown")
+        page = SimpleNamespace(url="https://example.invalid/private-home")
+        with pytest.raises(web.BciLiderSignInRequired):
+            web._confirm_account(
+                page, self.RUT, None, time.monotonic() + 60, signed_in_now=False, managed=False
+            )
+
+    def test_a_verified_managed_tab_ties_the_profile(self, monkeypatch, profile):
+        profile.mkdir()
+        reads = self._drive(monkeypatch, verdict="match", signed_in_now=False, profile=profile)
+        assert reads == ["page"]
+        assert web.session_account.belongs_to(profile, "11111111-1")
+
+    def test_a_reuse_tab_never_writes_a_profile_marker(self, monkeypatch, profile):
+        reads = self._drive(monkeypatch, verdict="match", signed_in_now=False, profile=None)
+        assert reads == ["page"]
+        assert not web.session_account.marker_path(profile).exists()
+
+    @pytest.mark.parametrize("managed", [True, False], ids=["managed", "reuse"])
+    def test_a_tab_of_another_account_is_never_read(self, monkeypatch, profile, managed):
+        profile.mkdir()
+        reads = []
+        monkeypatch.setattr(web, "_read_card", lambda *args: reads.append(1))
+        with pytest.raises(web.BciLiderSessionError):
+            self._drive(
+                monkeypatch,
+                verdict="mismatch",
+                signed_in_now=False,
+                profile=profile if managed else None,
+            )
+        assert not web.session_account.marker_path(profile).exists()
