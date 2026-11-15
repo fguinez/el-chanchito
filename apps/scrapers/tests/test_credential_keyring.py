@@ -205,6 +205,16 @@ def test_reset_needs_the_typed_confirmation(tmp_path, store, monkeypatch):
     assert store.active.key_id == key_file.load().key_id
 
 
+def test_a_reset_with_nothing_retired_still_names_unreadable_rows(tmp_path, monkeypatch, capsys):
+    """A retried reset whose first commit landed retires nothing, yet the
+    rows sealed to the retired key still need entering again."""
+    key = _other_key()
+    monkeypatch.setattr(credentials_admin, "_poke_service", lambda: None)
+    monkeypatch.setattr(credentials_admin, "reset_key_file", lambda key_file, ring: (key, None, 2))
+    assert credentials_admin._reset(KeyFile(tmp_path / "k"), object(), assume_yes=True) == 0
+    assert "2 stored credential(s) must be entered again" in capsys.readouterr().out
+
+
 def test_reset_refuses_without_a_terminal(tmp_path, store, monkeypatch):
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
     assert credentials_admin._reset(KeyFile(tmp_path / "k"), store, assume_yes=False) == 2

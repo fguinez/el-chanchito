@@ -144,6 +144,11 @@ def _reset(key_file: KeyFile, ring: DatabaseKeyRing, assume_yes: bool) -> int:
         "scraper service (make dev or make up) still holds it, run that one instead (wrong\n"
         "stack? make dev is the default, STACK=up targets make up)."
     )
+    if key_file.next_path.exists():
+        print(
+            f"A pending key from an unfinished rotation ({key_file.next_path.name}) will be\n"
+            "moved aside, not deleted: it still holds a private key."
+        )
     if not assume_yes:
         if not sys.stdin.isatty():
             print("Refusing without a terminal to confirm on.", file=sys.stderr)
@@ -160,6 +165,9 @@ def _reset(key_file: KeyFile, ring: DatabaseKeyRing, assume_yes: bool) -> int:
         )
     else:
         print(f"Key {key.key_id[:12]} is the active key; no other key was retired.")
+        if orphaned:
+            # A retry after a commit whose reply was lost lands here too.
+            print(f"{orphaned} stored credential(s) must be entered again in Credenciales.")
     _poke_service()
     return 0
 

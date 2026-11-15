@@ -371,3 +371,19 @@ def test_reset_on_a_recreated_database_moves_the_pending_key_aside(db_conn, tmp_
         ]
         == key.key_id
     )
+
+
+def test_moving_a_pending_key_aside_never_overwrites_an_earlier_one(tmp_path):
+    """Two asides in the same second keep both private keys."""
+    key_file = KeyFile(tmp_path / "credentials_key")
+    first, second = generate_key(), generate_key()
+    key_file.write_pending(first)
+    first_aside = key_file.set_pending_aside()
+    key_file.write_pending(second)
+
+    second_aside = key_file.set_pending_aside()
+
+    assert first_aside != second_aside
+    assert load_key(first_aside).key_id == first.key_id
+    assert load_key(second_aside).key_id == second.key_id
+    assert not key_file.next_path.exists()

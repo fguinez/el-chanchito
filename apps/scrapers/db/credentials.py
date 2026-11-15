@@ -180,8 +180,10 @@ def rotate_key(
 ) -> tuple[int, int]:
     """In one transaction: re-seal every row sealed to `old` to `new`, retire
     `old` and make `new` the active key. Returns (re-sealed, left as they
-    were). Raises KeyRingConflict when `old` is not the active key. Not
-    retried: the caller decides an unknown outcome from the ring."""
+    were). Raises KeyRingConflict when `old` is not the active key. Must
+    stay un-retried: the caller decides an unknown outcome from the ring, and
+    discards `.next` on KeyRingConflict, which a retried commit would make
+    unsafe."""
     with get_pool().connection() as conn, conn.transaction():
         conn.execute(_RING_LOCK)
         active = _active(conn, lock=True)

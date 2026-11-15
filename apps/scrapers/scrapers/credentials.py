@@ -291,8 +291,11 @@ class KeyFile:
         """Rename `.next` to `.next.aside-<UTC time>` and return that path.
         It still holds a private key; the stale-temp sweep never touches it."""
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        aside = self.next_path.with_name(f"{self.next_path.name}.aside-{stamp}")
-        os.replace(self.next_path, aside)
+        aside = self.next_path.with_name(
+            f"{self.next_path.name}.aside-{stamp}-{secrets.token_hex(4)}"
+        )
+        os.link(self.next_path, aside)  # never clobbers an earlier aside file
+        self.next_path.unlink()
         _fsync_dir(self.path.parent)
         return aside
 
