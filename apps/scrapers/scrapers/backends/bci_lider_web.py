@@ -774,14 +774,13 @@ def save_login_session(
             raise BciLiderSessionError(
                 "Sign-in not detected in time. Re-run `make bci-lider-login`."
             )
-        verdict = _account_check(authenticated, rut) if rut else "unknown"
-        if verdict == "mismatch":
-            raise BciLiderSessionError(
-                "This Chrome is signed in to another account than LIDER_BCI_RUT. Sign out "
-                "of the portal in it, then re-run `make bci-lider-login`."
+        if rut:
+            _tie_login_profile(
+                authenticated,
+                rut,
+                own_autofill=submitted and authenticated is login_page,
+                deadline=deadline,
             )
-        if rut and (verdict == "match" or submitted):
-            session_account.write_account(_CHROME_PROFILE, rut)
         # Do NOT close `browser`: dropping the CDP connection leaves Chrome running.
 
     print(
@@ -789,6 +788,34 @@ def save_login_session(
         f"Point the scraper at it with LIDER_BCI_CDP_URL={cdp_url}."
     )
     return cdp_url
+
+
+def _tie_login_profile(page, rut: str, *, own_autofill: bool, deadline: float) -> None:
+    """Tie the profile to `rut` after `make bci-lider-login`, judged on the tab
+    that was found signed in (`page`).
+
+    The tab gets a few seconds to show its account. A match ties it, and so
+    does our own autofill of that same tab; a mismatch fails. A tab a human
+    signed in that never shows an id is left untied, so the next managed run
+    starts from a fresh profile rather than trust it.
+    """
+    settle = min(deadline, time.monotonic() + _ACCOUNT_SETTLE_S)
+    verdict = _account_check(page, rut)
+    while verdict == "unknown" and time.monotonic() < settle:
+        time.sleep(1)
+        verdict = _account_check(page, rut)
+    if verdict == "mismatch":
+        raise BciLiderSessionError(
+            "This Chrome is signed in to another account than LIDER_BCI_RUT. Sign out "
+            "of the portal in it, then re-run `make bci-lider-login`."
+        )
+    if verdict == "match" or own_autofill:
+        session_account.write_account(_CHROME_PROFILE, rut)
+        return
+    logger.warning(
+        "BciLider: could not confirm which account this Chrome signed in to; the "
+        "profile is not tied to LIDER_BCI_RUT, so a managed run starts from a fresh one"
+    )
 
 
 def _dismiss_popup(page) -> None:

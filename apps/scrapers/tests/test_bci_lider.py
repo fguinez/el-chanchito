@@ -1244,3 +1244,88 @@ class TestAccountCheckScript:
         assert _run_account_js("1.111.111-4", ours) == "unknown"
         assert _run_account_js("11111114", ours) == "unknown"
         assert _run_account_js("1.111.111-4", "1.111.111-4") == "match"
+
+
+class TestLoginProfileMarker:
+    """`make bci-lider-login` ties the profile only to an account it confirmed.
+    Every RUT is synthetic."""
+
+    RUT = "11.111.111-1"
+
+    @pytest.fixture
+    def login(self, tmp_path, monkeypatch):
+        import contextlib
+
+        import playwright.sync_api
+
+        profile = tmp_path / ".bci_lider_chrome_profile"
+        profile.mkdir()
+        monkeypatch.setattr(web, "_CHROME_PROFILE", profile)
+        monkeypatch.setattr(web, "_ACCOUNT_SETTLE_S", 0)
+        monkeypatch.setattr(web.time, "sleep", lambda s: None)
+        monkeypatch.setattr(web.real_chrome, "port_in_use", lambda port: True)
+        monkeypatch.setattr(web, "_launch_real_chrome", lambda port, url: "proc")
+        monkeypatch.setattr(web.real_chrome, "connect_over_cdp", lambda *a, **k: object())
+        monkeypatch.setattr(
+            playwright.sync_api, "sync_playwright", lambda: contextlib.nullcontext(object())
+        )
+        login_tab = SimpleNamespace(url="https://example.invalid/login")
+        state = {"login": login_tab, "authenticated": login_tab, "submitted": True}
+        monkeypatch.setattr(web, "_find_page_matching", lambda browser, needle: state["login"])
+        monkeypatch.setattr(
+            web, "_autofill_and_submit", lambda page, rut, password, deadline: state["submitted"]
+        )
+        monkeypatch.setattr(
+            web, "_find_authenticated_page", lambda browser, deadline: state["authenticated"]
+        )
+
+        def run(verdicts):
+            answers = list(verdicts)
+            monkeypatch.setattr(
+                web,
+                "_account_check",
+                lambda page, rut: answers.pop(0) if len(answers) > 1 else answers[0],
+            )
+            web.save_login_session(rut=self.RUT, password="synthetic-clave", timeout_s=60)
+            return web.session_account.marker_path(profile).exists()
+
+        return state, run
+
+    def test_a_match_ties_the_profile(self, login):
+        state, run = login
+        state["submitted"] = False
+        assert run(["match"])
+
+    def test_our_autofill_of_the_same_tab_ties_it_without_an_id(self, login):
+        _, run = login
+        assert run(["unknown"])
+
+    def test_an_autofill_of_another_tab_does_not_tie_an_unknown_one(self, login):
+        state, run = login
+        state["authenticated"] = SimpleNamespace(url="https://example.invalid/private-home")
+        assert not run(["unknown"])
+
+    def test_a_human_sign_in_without_an_id_is_not_tied(self, login):
+        state, run = login
+        state["submitted"] = False
+        assert not run(["unknown"])
+
+    def test_another_account_fails_and_ties_nothing(self, login, tmp_path):
+        _, run = login
+        with pytest.raises(web.BciLiderSessionError, match="another account"):
+            run(["mismatch"])
+        assert not web.session_account.marker_path(web._CHROME_PROFILE).exists()
+
+    def test_the_wait_for_an_id_polls_until_it_shows(self, monkeypatch, tmp_path):
+        profile = tmp_path / ".bci_lider_chrome_profile"
+        monkeypatch.setattr(web, "_CHROME_PROFILE", profile)
+        monkeypatch.setattr(web.time, "sleep", lambda s: None)
+        answers = ["unknown", "unknown", "match"]
+        monkeypatch.setattr(web, "_account_check", lambda page, rut: answers.pop(0))
+
+        web._tie_login_profile(
+            object(), self.RUT, own_autofill=False, deadline=time.monotonic() + 60
+        )
+
+        assert answers == []
+        assert web.session_account.marker_path(profile).exists()
