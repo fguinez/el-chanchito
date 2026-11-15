@@ -2446,6 +2446,38 @@ class TestSessionOnDisk:
 
         assert web._session_on_disk(tmp_path, LOGIN_START) is expected
 
+    def _store_with_update_time(self, profile, created, updated):
+        """A store in the newer schema, which has `last_update_utc`; one portal `ssid` row."""
+        db = profile / "Default" / "Network" / "Cookies"
+        db.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(db)
+        conn.execute(
+            "CREATE TABLE cookies (creation_utc INTEGER, host_key TEXT, name TEXT, "
+            "value TEXT, encrypted_value BLOB, expires_utc INTEGER, is_persistent INTEGER, "
+            "last_update_utc INTEGER)"
+        )
+        conn.execute(
+            "INSERT INTO cookies VALUES (?, '.mercadopago.cl', 'ssid', 'synthetic', x'00', ?, 1, ?)",
+            (created, LATER, updated),
+        )
+        conn.commit()
+        conn.close()
+
+    @pytest.mark.parametrize(
+        ("created", "updated", "expected"),
+        [
+            pytest.param(CREATED_BEFORE_LOGIN, FRESH, True, id="same-value-reset"),
+            pytest.param(FRESH, FRESH, True, id="new-cookie"),
+            pytest.param(CREATED_BEFORE_LOGIN, CREATED_BEFORE_LOGIN, False, id="untouched"),
+            pytest.param(FRESH, 0, True, id="no-update-time"),
+        ],
+    )
+    def test_a_cookie_updated_since_the_login_counts(self, tmp_path, created, updated, expected):
+        """Chrome keeps the old creation time when the same value is set again."""
+        self._store_with_update_time(tmp_path, created, updated)
+
+        assert web._session_on_disk(tmp_path, LOGIN_START) is expected
+
     @pytest.mark.parametrize("relative", ["Default/Network/Cookies", "Default/Cookies"])
     def test_both_cookie_store_locations_are_read(self, tmp_path, relative):
         """Newer Chrome keeps the store under `Network/`; older ones do not."""

@@ -802,8 +802,10 @@ signs in once, in a real Chrome on a dedicated persistent profile
 (`make mercadopago-login`: a visible window, nothing typed by the code, closed
 once the balance page reads, the persistent `ssid` login cookie is in Chrome's
 jar, and the profile's cookie store on disk holds a persistent `ssid` created
-since the login started and not expired (read from a copy that is discarded
-if the files change while copied; the disk wait gets at least 60 s); then
+or last updated since the login started and not expired (the update time
+counts because Chrome keeps the old creation time when a cookie is set again
+with the same value, as a re-run on a still signed-in profile may; read from
+a copy that is discarded if the files change while copied; the disk wait gets at least 60 s); then
 closed through CDP `Browser.close` and a copy of the disk store checked again,
 retried for about 10 s while Chrome's network service lets go of it. A
 balance read alone can pass while only session cookies hold the session, and

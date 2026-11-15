@@ -1503,16 +1503,23 @@ def chrome_time_to_unix(chrome_us: int) -> float:
 def _lasting_session_in_db(db: Path, since: float, now: float) -> bool:
     """Whether the cookie DB at `db` holds a fresh persistent portal `ssid`.
 
-    Fresh: created at or after `since` (Unix seconds, the login's start) and
-    expiring after `now`, so a cookie left from an earlier sign-in does not
-    count. Opened read-only, and only `host_key`, `name`, `is_persistent`,
-    `creation_utc` and `expires_utc` are selected: never a value column.
-    Raises on a sqlite error.
+    Fresh: written at or after `since` (Unix seconds, the login's start) and
+    expiring after `now`, so a cookie left untouched from an earlier sign-in
+    does not count. Written means `last_update_utc` where the store has it:
+    Chrome keeps the old `creation_utc` when a cookie is set again with the
+    same value (seen live), so a re-run of the login on a profile still
+    signed in could otherwise never pass. Opened read-only, and only
+    `host_key`, `name`, `is_persistent` and the time columns are selected:
+    never a value column. Raises on a sqlite error.
     """
     conn = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True)
     try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(cookies)")}
+        written = (
+            "MAX(creation_utc, last_update_utc)" if "last_update_utc" in columns else "creation_utc"
+        )
         rows = conn.execute(
-            "SELECT host_key, name, is_persistent, creation_utc, expires_utc FROM cookies "
+            f"SELECT host_key, name, is_persistent, {written}, expires_utc FROM cookies "
             "WHERE name = ? AND host_key IN (?, ?)",
             (LASTING_SESSION_COOKIE, *_PORTAL_COOKIE_HOSTS),
         ).fetchall()
@@ -1520,9 +1527,9 @@ def _lasting_session_in_db(db: Path, since: float, now: float) -> bool:
         conn.close()
     return any(
         is_persistent == 1
-        and chrome_time_to_unix(created) >= since
+        and chrome_time_to_unix(written_at) >= since
         and chrome_time_to_unix(expires) > now
-        for _host, _name, is_persistent, created, expires in rows
+        for _host, _name, is_persistent, written_at, expires in rows
     )
 
 
@@ -1647,9 +1654,9 @@ def _await_sign_in(
 
     `process` is the Chrome `save_login_session` launched: once it has ended
     (the window was closed) the wait ends with it. `since` is when the login
-    started (Unix seconds; default now): only a cookie created after it
+    started (Unix seconds; default now): only a cookie written after it
     counts on disk. The jar check has no such rule: Playwright reports no
-    creation time.
+    write time.
     """
     if since is None:
         since = time.time()
