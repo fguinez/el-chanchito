@@ -371,13 +371,40 @@ def parse_movement(row: Any, currency: str = "CLP") -> tuple[SantanderMovement |
     )
 
 
+# The transactions API's answer for a window with no movements: HTTP 200, no
+# `movements` key, and this code in `additionalInfo` ("NO EXISTEN DATOS").
+_NO_DATA_CODE = "BGE0071"
+
+
+def is_no_movements(payload: Any) -> bool:
+    """True for the API's "no data" payload: only `additionalInfo`, with `_NO_DATA_CODE`.
+
+    Any other code (an error the API reports with HTTP 200) is not taken for
+    an empty window.
+    """
+    if not isinstance(payload, dict) or set(payload) != {"additionalInfo"}:
+        return False
+    info = payload["additionalInfo"]
+    if not isinstance(info, list):
+        return False
+    return any(
+        isinstance(entry, dict)
+        and entry.get("key") == "code-ms"
+        and entry.get("value") == _NO_DATA_CODE
+        for entry in info
+    )
+
+
 def parse_movements(payload: Any, currency: str = "CLP") -> ParsedMovements:
     """Every usable movement of a transactions payload.
 
     Raises `SantanderPayloadError` when `movements` is not a list; an empty
-    list is a valid, quiet account. Skipped rows are counted, not logged one
-    by one (see `parse_movement` for the rules).
+    list is a valid, quiet account, and so is the API's "no data" answer for
+    an empty window (see `is_no_movements`). Skipped rows are counted, not
+    logged one by one (see `parse_movement` for the rules).
     """
+    if is_no_movements(payload):
+        return ParsedMovements()
     rows = payload.get("movements") if isinstance(payload, dict) else None
     if not isinstance(rows, list):
         raise SantanderPayloadError("Santander movements had an unexpected shape")
@@ -500,7 +527,9 @@ _LOGOUT_TIMEOUT_MS = 5_000
 _POLL_MS = 250
 # The masked Angular inputs drop characters typed faster than this.
 _TYPE_DELAY_MS = 120
-# The window the SPA itself was seen requesting, reused by the replay fallback.
+# How far back the replay fallback reads, ending today. The SPA itself asks for
+# the same 70-day span shifted forward (40 days back, 30 ahead), so a quiet
+# account's movements leave its window after 40 days.
 _REPLAY_WINDOW_DAYS = 69
 
 # Headers the replay fallback needs from a request the SPA made itself in this
