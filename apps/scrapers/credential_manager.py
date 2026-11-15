@@ -111,8 +111,25 @@ class RotationPending(RotationError):
 
 class PendingUnresolved(RotationPending):
     """A leftover `.next` the database neither confirms nor rules out (for
-    example DATABASE_URL points at another database). It is kept, never
-    deleted, until a database that can decide is reachable."""
+    example DATABASE_URL points at another database, or it was recreated).
+    It is kept, never deleted: a database that can decide resolves it, or
+    `make credentials-reset-key` moves it aside."""
+
+    def __init__(self, next_path: Path, pending_key_id: str) -> None:
+        super().__init__("an interrupted rotation could not be resolved against this database")
+        self.next_path = next_path
+        self.pending_key_id = pending_key_id
+
+    def detail(self) -> str:
+        return (
+            f"{self.next_path} holds the key of an interrupted rotation "
+            f"({self.pending_key_id[:12]}) that this database neither confirms nor rules out. "
+            "If DATABASE_URL points at the wrong database, fix it and the service resolves it. "
+            "If this database was recreated, or the rotation is known to have failed, run "
+            "`make credentials-reset-key`: it moves the file aside to "
+            f"{self.next_path.name}.aside-<time>, which still holds a private key; delete it "
+            "once you are sure nothing was sealed to it"
+        )
 
 
 NO_LOCK_REASON = (
@@ -160,14 +177,7 @@ def recover_pending(key_file: KeyFile, ring) -> str | None:
         key_file.discard_pending()
         logger.warning("Rolled back an interrupted credentials key rotation; the key is unchanged")
         return "discarded"
-    logger.error(
-        "%s holds the key of an interrupted rotation (%s) that this database neither "
-        "confirms nor rules out; it is kept. Check that DATABASE_URL is the database the "
-        "rotation ran against; the service resolves it once it is",
-        key_file.next_path,
-        pending.key_id[:12],
-    )
-    raise PendingUnresolved("an interrupted rotation could not be resolved against this database")
+    raise PendingUnresolved(key_file.next_path, pending.key_id)
 
 
 def rotate_key_file(
@@ -208,8 +218,13 @@ def rotate_key_file(
             resealed, skipped = ring.rotate(
                 old, new, lambda rows: reseal_rows(old, new, rows, fallback)
             )
+        except KeyRingConflict as exc:
+            # Raised inside the transaction, which rolled back: nothing used
+            # the new key.
+            key_file.discard_pending()
+            raise RotationError(f"the database refused the rotation ({exc})") from None
         except Exception as exc:
-            reason = str(exc) if isinstance(exc, KeyRingConflict) else type(exc).__name__
+            reason = type(exc).__name__
             try:
                 outcome = recover_pending(key_file, ring)
             except Exception:
@@ -233,19 +248,28 @@ def rotate_key_file(
 
 def reset_key_file(key_file: KeyFile, ring) -> tuple[CredentialKey, str | None, int]:
     """Make the local key file's key the database's active one, retiring
-    whatever was active. Rows sealed to that one can no longer be opened."""
+    whatever was active. Rows sealed to that one can no longer be opened.
+    A pending key the database cannot judge is moved aside, never deleted."""
     if not key_file.locking_available:
         raise RotationError(NO_LOCK_REASON)
     with key_file.lock():
         try:
             recover_pending(key_file, ring)
+        except PendingUnresolved as exc:
+            aside = key_file.set_pending_aside()
+            logger.warning(
+                "Moved the unresolved pending key %s aside to %s; it still holds a private "
+                "key: delete it once you are sure nothing was sealed to it",
+                exc.pending_key_id[:12],
+                aside,
+            )
         except (CredentialKeyError, RotationPending):
             raise
         except Exception as exc:
             raise RotationPending(
                 f"could not check an interrupted rotation ({type(exc).__name__})"
             ) from None
-        key = key_file.load_or_create()
+        key = key_file.load_or_create_locked()
         retired, orphaned = ring.reset(key)
     return key, retired, orphaned
 
@@ -267,7 +291,9 @@ def max_age_days_from_env(environ=os.environ) -> int:
 
 
 def _transient(exc: BaseException) -> bool:
-    return is_transient_db_error(exc) or isinstance(exc, OSError)
+    """A database connection error, worth waiting for; a file error on the
+    key or its lock (EACCES, EROFS, ENOLCK) is not."""
+    return is_transient_db_error(exc)
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -303,6 +329,8 @@ class CredentialManager:
         self._next_rotation_attempt = 0.0
         self._rows_read = False
         self._warned_no_lock = False
+        self._pending_unresolved = False
+        self._key_file_error = False
         # Set once the stored credentials are applied or known to be unusable
         # (no key, key mismatch, schema missing): the first scrape waits on it,
         # so it never logs in with credentials the dashboard has replaced.
@@ -426,13 +454,32 @@ class CredentialManager:
             with self.key_file.lock():
                 key_changed = self._adopt_key_file()
                 sync = self.ring.sync_key(self.key, allow_takeover=not self._ever_published)
-        except CredentialKeyError as exc:
-            logger.error("Stored credentials are disabled (%s)", exc)
+        except PendingUnresolved as exc:
+            if not self._pending_unresolved:
+                logger.error("pending_unresolved: %s", exc.detail())
+            with self._lock:
+                self._pending_unresolved = True
+            self.settled.set()
+            return False
+        except (CredentialKeyError, OSError) as exc:
+            # The key file or its lock (EACCES, EROFS, ENOLCK): waiting will
+            # not fix it, so run on the env fallback and say so.
+            if not self._key_file_error:
+                logger.error(
+                    "Stored credentials are disabled: the credentials key file cannot be used "
+                    "(%s); only the secret store and env are used",
+                    exc,
+                )
+            with self._lock:
+                self._key_file_error = True
             self.settled.set()
             return False
         except Exception as exc:
             self._db_failed("sync the credentials key with the database", exc)
             return False
+        with self._lock:
+            self._pending_unresolved = False
+            self._key_file_error = False
 
         if sync.outcome == "mismatch":
             newly = self._mismatch != sync.active.key_id
@@ -450,9 +497,8 @@ class CredentialManager:
                     self.key.key_id[:12],
                     RESET_HINT,
                 )
-            changed = (
-                self._apply(OpenedCredentials({}, frozenset())) if self._opened.values else False
-            )
+            stale = self._opened.values or self._opened.suppressed
+            changed = self._apply(OpenedCredentials({}, frozenset())) if stale else False
             self.settled.set()
             return changed
 
@@ -576,8 +622,11 @@ class CredentialManager:
         """Booleans, key ids and dates only; never a value. Never waits on
         the database."""
         with self._lock:
-            if self.key is None:
+            usable = self.key is not None and not self._key_file_error
+            if not usable:
                 state = "key_unavailable"
+            elif self._pending_unresolved:
+                state = "pending_unresolved"
             elif self._mismatch:
                 state = "key_mismatch"
             elif self._published and self._loaded:
@@ -587,7 +636,7 @@ class CredentialManager:
             failure = self._rotation_failure
             return {
                 "state": state,
-                "key_available": self.key is not None,
+                "key_available": usable,
                 "key_id": self.key.key_id if self.key else None,
                 "published": self._published,
                 "loaded": self._loaded,

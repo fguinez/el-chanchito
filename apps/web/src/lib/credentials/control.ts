@@ -16,6 +16,8 @@ const fieldStatus = z.object({
 const statusSchema = z.object({
   key_available: z.boolean(),
   key_id: z.string().nullable(),
+  // ok, starting, key_mismatch, key_unavailable or pending_unresolved.
+  state: z.string().optional(),
   // The database seals to another service's key that owns stored rows.
   key_mismatch: z.boolean().optional(),
   max_age_days: z.number().int().nonnegative().optional(),

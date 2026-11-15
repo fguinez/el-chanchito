@@ -23,6 +23,7 @@ describe("saveBlocker", () => {
     ["key_mismatch", KEY, control({ key_id: "b".repeat(64), key_mismatch: true })],
     ["no_key", null, control()],
     ["key_pending", KEY, control({ key_id: "b".repeat(64) })],
+    ["pending_unresolved", KEY, control({ state: "pending_unresolved" })],
   ] as const)("is %s", (reason, key, status) => {
     expect(saveBlocker(key, status)).toBe(reason);
     expect(SAVE_BLOCKED_MESSAGES[reason]).toBeTruthy();

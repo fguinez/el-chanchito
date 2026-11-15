@@ -12,6 +12,7 @@ export type SaveBlocker =
   | "service_unreachable"
   | "key_unavailable"
   | "key_mismatch"
+  | "pending_unresolved"
   | "no_key"
   | "key_pending";
 
@@ -21,6 +22,7 @@ export function saveBlocker(
 ): SaveBlocker | null {
   if (!control) return "service_unreachable";
   if (!control.key_available) return "key_unavailable";
+  if (control.state === "pending_unresolved") return "pending_unresolved";
   if (control.key_mismatch) return "key_mismatch";
   if (!key) return "no_key";
   if (control.key_id !== key.keyId) return "key_pending";
@@ -41,6 +43,13 @@ export const SAVE_BLOCKED_MESSAGES: Record<SaveBlocker, string> = {
     "guardó) y detén el otro; no copies su archivo de clave, porque tras una rotación la copia " +
     "conserva la clave antigua. Si esa clave se perdió, ejecuta `make credentials-reset-key` " +
     "para partir de cero (habrá que volver a ingresarlas).",
+  pending_unresolved:
+    "Una rotación de la clave quedó a medias y esta base de datos no permite saber si se " +
+    "completó (¿`DATABASE_URL` apunta a otra base, o la base se recreó?). El servicio guardó " +
+    "las dos claves y no abre credenciales hasta resolverlo; el detalle está en su log. Si " +
+    "`DATABASE_URL` es la correcta, ejecuta `make credentials-reset-key`: deja aparte el archivo " +
+    "`.next` (sigue conteniendo una clave privada; bórralo cuando estés seguro) y habrá que " +
+    "volver a ingresar las credenciales.",
   no_key:
     "El servicio de scrapers aún no ha publicado su clave de cifrado; suele tardar mientras " +
     "espera la base de datos. Vuelve a intentarlo en un minuto.",

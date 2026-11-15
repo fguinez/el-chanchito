@@ -29,10 +29,10 @@ import os
 import re
 import secrets
 import stat
-import time
 from collections.abc import Iterable, Iterator, Mapping, MutableMapping
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from cryptography.hazmat.primitives import hpke, serialization
@@ -277,7 +277,24 @@ class KeyFile:
         return load_key(self.path)
 
     def load_or_create(self) -> CredentialKey:
+        """Under the lock, so the sweep never meets a first-start temp file
+        still being written."""
+        with self.lock():
+            return self.load_or_create_locked()
+
+    def load_or_create_locked(self) -> CredentialKey:
+        """`load_or_create` for a caller that already holds the lock (flock
+        is per open file, so taking it twice in one process deadlocks)."""
         return load_or_create_key(self.path)
+
+    def set_pending_aside(self) -> Path:
+        """Rename `.next` to `.next.aside-<UTC time>` and return that path.
+        It still holds a private key; the stale-temp sweep never touches it."""
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        aside = self.next_path.with_name(f"{self.next_path.name}.aside-{stamp}")
+        os.replace(self.next_path, aside)
+        _fsync_dir(self.path.parent)
+        return aside
 
     def load_pending(self) -> CredentialKey | None:
         """The key a rotation left in `.next`; None when there is none. An
@@ -310,18 +327,15 @@ class KeyFile:
         self.write_pending(key)
         self.promote_pending()
 
-    def sweep_stale_tmp(self, min_age_seconds: float = 60.0) -> int:
+    def sweep_stale_tmp(self) -> int:
         """Delete key temp files a killed writer left behind (each holds a
         private key, or is a second link to one that rotation would then
-        never delete). `.next` temps are written under the lock, so any is
-        stale; a first-start temp is only once it is older than a minute."""
+        never delete). Call it with the lock held: every key write happens
+        under it, so any temp file found is stale. `.aside-*` files are not
+        temps and are left alone."""
         removed = 0
-        now = time.time()
         for tmp in self.path.parent.glob(f"{self.path.name}.*.tmp"):
-            under_lock = tmp.name.startswith(f"{self.next_path.name}.")
             try:
-                if not under_lock and now - tmp.lstat().st_mtime < min_age_seconds:
-                    continue
                 tmp.unlink()
                 removed += 1
             except FileNotFoundError:

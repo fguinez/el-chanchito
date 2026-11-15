@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 
 from credential_manager import (
     DatabaseKeyRing,
+    PendingUnresolved,
     RotationError,
     max_age_days_from_env,
     reset_key_file,
@@ -180,6 +181,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "rotate":
             return _rotate(key_file, ring)
         return _reset(key_file, ring, args.yes)
+    except PendingUnresolved as exc:
+        print(f"Failed: {exc}. {exc.detail()}.", file=sys.stderr)
+        return 1
     except (RotationError, CredentialKeyError) as exc:
         print(f"Failed: {exc} (key file: {key_file.path})", file=sys.stderr)
         return 1

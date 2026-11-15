@@ -59,7 +59,7 @@ export default function CredentialsPage() {
         <p
           role="alert"
           className={
-            blocked === "key_mismatch" || blocked === "key_unavailable"
+            blocked === "key_mismatch" || blocked === "key_unavailable" || blocked === "pending_unresolved"
               ? "rounded-md border border-destructive/40 p-3 text-sm text-destructive"
               : "rounded-md border p-3 text-sm"
           }

@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime
 
+import psycopg
+
 from db.credentials import ActiveKey, KeyRingConflict, KeySync
 
 
@@ -22,7 +24,7 @@ class FakeRing:
 
     def _check(self) -> None:
         if self.fail:
-            raise ConnectionError("db down")
+            raise psycopg.OperationalError("db down")
 
     def activate(self, key) -> ActiveKey:
         if self.active is not None:
@@ -62,7 +64,7 @@ class FakeRing:
     def fetch_rows(self):
         self._check()
         if self.fail_fetch:
-            raise ConnectionError("db down")
+            raise psycopg.OperationalError("db down")
         self.fetches += 1
         return list(self.rows)
 

@@ -7,9 +7,11 @@ Every value is synthetic and every key is generated per test.
 """
 
 import json
+import os
 from datetime import timedelta
 
 import credentials_admin
+import psycopg
 import pytest
 from credential_manager import (
     CredentialManager,
@@ -87,6 +89,7 @@ def test_a_displaced_service_drops_the_values_it_opened(tmp_path, store):
     assert "SKIPO_API_KEY" not in environ
 
 
+@pytest.mark.skipif(os.name == "nt", reason="key rotation needs flock; native Windows refuses it")
 def test_rotation_reseals_and_swaps_the_key_file(tmp_path, store):
     manager = _manager(tmp_path, store, {})
     old = manager.key
@@ -113,6 +116,7 @@ def test_rotation_with_the_database_down_leaves_everything_as_it_was(tmp_path, s
     assert not manager.key_file.next_path.exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="key rotation needs flock; native Windows refuses it")
 def test_an_unconfirmed_commit_stays_pending_until_the_database_answers(tmp_path, store):
     manager = _manager(tmp_path, store, {})
     old = manager.key
@@ -123,7 +127,7 @@ def test_an_unconfirmed_commit_stays_pending_until_the_database_answers(tmp_path
     def rotate_then_drop(*args):
         real_rotate(*args)
         store.fail = True
-        raise ConnectionError("connection lost during commit")
+        raise psycopg.OperationalError("connection lost during commit")
 
     store.rotate = rotate_then_drop
     with pytest.raises(RotationPending):
@@ -138,6 +142,7 @@ def test_an_unconfirmed_commit_stays_pending_until_the_database_answers(tmp_path
     assert manager.overlay.status()["SKIPO_API_KEY"]["stored"] is True
 
 
+@pytest.mark.skipif(os.name == "nt", reason="key rotation needs flock; native Windows refuses it")
 def test_rotation_is_due_by_age_and_retried_after_a_failure(tmp_path, store):
     now = [store.now]
     manager = _manager(tmp_path, store, {}, max_age_days=90, now=lambda: now[0])
@@ -148,7 +153,7 @@ def test_rotation_is_due_by_age_and_retried_after_a_failure(tmp_path, store):
     assert manager.key.key_id == old_id
 
     def db_down(*args):
-        raise ConnectionError("db down")
+        raise psycopg.OperationalError("db down")
 
     now[0] = store.now + timedelta(days=91)
     store.rotate = db_down
@@ -185,6 +190,7 @@ def test_max_age_from_env(raw, days):
     assert max_age_days_from_env(environ) == days
 
 
+@pytest.mark.skipif(os.name == "nt", reason="key rotation needs flock; native Windows refuses it")
 def test_reset_needs_the_typed_confirmation(tmp_path, store, monkeypatch):
     other = _other_key()
     store.activate(other)

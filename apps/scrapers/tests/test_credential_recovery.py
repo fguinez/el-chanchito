@@ -20,10 +20,11 @@ from credential_manager import (
     PendingUnresolved,
     RotationError,
     recover_pending,
+    reset_key_file,
     rotate_key_file,
 )
 
-from db.credentials import sync_key
+from db.credentials import KeyRingConflict, sync_key
 from main import CredentialControl, ScraperSet
 from scrapers.credentials import ALGORITHM, KeyFile, OpenedCredentials, generate_key, load_key
 from tests.fakes_credentials import FakeRing
@@ -87,17 +88,126 @@ def test_stale_key_temp_files_are_swept(tmp_path, store):
     key_file = KeyFile(tmp_path / "credentials_key")
     store.activate(key_file.load_or_create())
     next_tmp = tmp_path / "credentials_key.next.0123456789abcdef.tmp"
-    old_tmp = tmp_path / "credentials_key.fedcba9876543210.tmp"
-    fresh_tmp = tmp_path / "credentials_key.aaaaaaaaaaaaaaaa.tmp"
-    for path in (next_tmp, old_tmp, fresh_tmp):
+    first_start_tmp = tmp_path / "credentials_key.fedcba9876543210.tmp"
+    aside = tmp_path / "credentials_key.next.aside-20260101T000000Z"
+    for path in (next_tmp, first_start_tmp, aside):
         path.write_text("synthetic")
-    long_ago = time.time() - 3600
-    os.utime(old_tmp, (long_ago, long_ago))
     recover_pending(key_file, store)
+    # Every key write happens under the lock the sweep holds: any temp is stale.
     assert not next_tmp.exists()
-    assert not old_tmp.exists()
-    # A first start may be writing this one right now.
-    assert fresh_tmp.exists()
+    assert not first_start_tmp.exists()
+    # A key moved aside is not a temp file.
+    assert aside.exists()
+
+
+def test_a_first_start_writes_its_key_under_the_lock(tmp_path, monkeypatch):
+    held = []
+    real_lock = KeyFile.lock
+
+    def recording_lock(self):
+        held.append(self.path)
+        return real_lock(self)
+
+    monkeypatch.setattr(KeyFile, "lock", recording_lock)
+    key_file = KeyFile(tmp_path / "credentials_key")
+    key_file.load_or_create()
+    assert held == [key_file.path]
+    assert key_file.path.exists()
+
+
+# --- A pending key always has a way out ------------------------------------------
+
+
+def test_a_refused_rotation_discards_its_pending_key(tmp_path, store):
+    """KeyRingConflict is raised inside the transaction, which rolled back:
+    the new key was never used, so it must not wedge later syncs."""
+    manager = _manager(tmp_path, store)
+    manager.reload()
+
+    def conflict(*args):
+        raise KeyRingConflict("the key being rotated is not the active key")
+
+    store.rotate = conflict
+    with pytest.raises(RotationError):
+        rotate_key_file(manager.key_file, store)
+    assert not manager.key_file.next_path.exists()
+    del store.rotate
+    assert manager.tick() is False
+    assert manager.status()["state"] == "ok"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="key rotation needs flock; native Windows refuses it")
+@pytest.mark.parametrize("case", ["recreated database", "key file gone"])
+def test_reset_moves_an_unresolved_pending_key_aside(tmp_path, store, case):
+    key_file = KeyFile(tmp_path / "credentials_key")
+    key_file.load_or_create()
+    pending = generate_key()
+    key_file.write_pending(pending)
+    if case == "key file gone":
+        store.activate(generate_key())
+        key_file.path.unlink()
+    with pytest.raises(PendingUnresolved):
+        recover_pending(key_file, store)
+
+    key, _retired, _orphaned = reset_key_file(key_file, store)
+    assert store.active.key_id == key.key_id
+    assert not key_file.next_path.exists()
+    (aside,) = tmp_path.glob("credentials_key.next.aside-*")
+    # Moved, never deleted: it still holds the pending private key.
+    assert load_key(aside).key_id == pending.key_id
+    recover_pending(key_file, store)
+    assert aside.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="key rotation needs flock; native Windows refuses it")
+def test_an_unresolved_pending_key_gets_its_own_state_and_one_log_line(tmp_path, store, caplog):
+    key_file = KeyFile(tmp_path / "credentials_key")
+    key_file.load_or_create()
+    key_file.write_pending(generate_key())
+    manager = _manager(tmp_path, store)  # empty ring: a recreated database
+    for _ in range(3):
+        manager.tick()
+        manager.status()
+    assert manager.status()["state"] == "pending_unresolved"
+    assert manager.settled.is_set()
+    lines = [r for r in caplog.records if "pending_unresolved" in r.getMessage()]
+    assert len(lines) == 1
+    assert "credentials-reset-key" in lines[0].getMessage()
+
+    reset_key_file(key_file, store)
+    manager.tick()
+    assert manager.status()["state"] == "ok"
+
+
+# --- Key file errors settle instead of waiting -----------------------------------
+
+
+def test_a_lasting_key_file_error_settles_on_the_env_fallback(tmp_path, store, monkeypatch):
+    """EACCES / EROFS / ENOLCK on the key or its lock is not worth waiting
+    for: the first scrape goes ahead on the env, and status says why."""
+    manager = _manager(tmp_path, store)
+
+    def no_lock(self):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(KeyFile, "lock", no_lock)
+    assert manager.reload() is False
+    assert manager.settled.is_set()
+    status = manager.status()
+    assert status["state"] == "key_unavailable"
+    assert status["key_available"] is False
+
+    monkeypatch.undo()
+    manager.reload()
+    assert manager.status()["state"] == "ok"
+
+
+def test_a_database_outage_is_still_waited_for(tmp_path, store):
+    store.fail = True
+    manager = _manager(tmp_path, store)
+    assert manager.reload() is False
+    assert not manager.settled.is_set()
+    assert manager.status()["state"] == "starting"
 
 
 # --- File locking ---------------------------------------------------------------
@@ -239,3 +349,25 @@ def test_recovery_against_another_database_keeps_the_pending_key(db_conn, tmp_pa
     with pytest.raises(PendingUnresolved):
         recover_pending(key_file, DatabaseKeyRing())
     assert key_file.next_path.exists()
+
+
+def test_reset_on_a_recreated_database_moves_the_pending_key_aside(db_conn, tmp_path):
+    key_file = KeyFile(tmp_path / "credentials_key")
+    key_file.load_or_create()
+    key_file.write_pending(generate_key())
+    manager = CredentialManager(key_path=key_file.path, environ={})
+    manager.start()
+    assert manager.reload() is False
+    assert manager.status()["state"] == "pending_unresolved"
+
+    key, retired, _ = reset_key_file(key_file, DatabaseKeyRing())
+    assert retired is None
+    assert list(tmp_path.glob("credentials_key.next.aside-*"))
+    manager.tick()
+    assert manager.status()["state"] == "ok"
+    assert (
+        db_conn.execute("SELECT key_id FROM credential_keys WHERE status = 'active'").fetchone()[
+            "key_id"
+        ]
+        == key.key_id
+    )
