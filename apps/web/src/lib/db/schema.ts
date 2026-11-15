@@ -11,6 +11,9 @@ import {
   uniqueIndex,
   unique,
   index,
+  primaryKey,
+  smallint,
+  customType,
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import { relations, sql } from "drizzle-orm";
@@ -689,6 +692,55 @@ export const monitorAdjustments = pgTable(
     ),
     index("idx_monitor_adjustments_transaction").on(table.transactionId),
   ]
+);
+
+// ---------------------------------------------------------------------------
+// Scraper credentials (V048)
+// ---------------------------------------------------------------------------
+
+const bytea = customType<{ data: Uint8Array; driverData: Buffer }>({
+  dataType() {
+    return "bytea";
+  },
+  toDriver(value) {
+    return Buffer.from(value);
+  },
+  fromDriver(value) {
+    return new Uint8Array(value);
+  },
+});
+
+// The scraper service's public key, the one row the dashboard seals to
+// (see lib/credentials). The private half never leaves the scraper service.
+export const credentialKeys = pgTable("credential_keys", {
+  id: smallint("id").primaryKey().default(1),
+  keyId: text("key_id").notNull(),
+  algorithm: text("algorithm").notNull(),
+  publicKey: bytea("public_key").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+// One sealed field per row: HPKE enc || ciphertext, bound to its scheme,
+// institution, field and key. Never selected by the dashboard's read paths:
+// they read the metadata columns only.
+export const institutionCredentials = pgTable(
+  "institution_credentials",
+  {
+    institutionSlug: text("institution_slug").notNull(),
+    fieldKey: text("field_key").notNull(),
+    scheme: text("scheme").notNull(),
+    keyId: text("key_id").notNull(),
+    sealed: bytea("sealed").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.institutionSlug, table.fieldKey] })]
 );
 
 // ---------------------------------------------------------------------------
