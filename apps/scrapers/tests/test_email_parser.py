@@ -14,6 +14,7 @@ import email.message
 import hashlib
 import logging
 import os
+import ssl
 import subprocess
 import sys
 import threading
@@ -691,3 +692,45 @@ class TestDecodeHeader:
 
     def test_empty(self):
         assert _decode_header_value("") == ""
+
+
+class TestImapTls:
+    """The IMAP login verifies the server before the password goes out."""
+
+    def _session(self, monkeypatch, connect):
+        calls = []
+
+        def fake_imap4_ssl(host, *args, **kwargs):
+            calls.append((host, kwargs))
+            return connect()
+
+        monkeypatch.setattr(email_mod.imaplib, "IMAP4_SSL", fake_imap4_ssl)
+        session = ImapSession("imap.example.com", "usuario@example.com", "not-a-secret")
+        return session, calls
+
+    def test_the_context_verifies_certificates_and_hostnames(self, monkeypatch):
+        logins = []
+
+        class Mail:
+            def login(self, user, password):
+                logins.append(user)
+
+        session, calls = self._session(monkeypatch, Mail)
+        session._reconnect()
+
+        [(host, kwargs)] = calls
+        context = kwargs["ssl_context"]
+        assert host == "imap.example.com"
+        assert context.verify_mode == ssl.CERT_REQUIRED
+        assert context.check_hostname is True
+        assert logins == ["usuario@example.com"]
+
+    def test_a_failed_verification_surfaces_and_skips_the_login(self, monkeypatch):
+        def refuse():
+            raise ssl.SSLCertVerificationError(1, "certificate verify failed")
+
+        session, _ = self._session(monkeypatch, refuse)
+
+        with pytest.raises(ConnectionError, match=r"imap\.example\.com .*certificate verification"):
+            session._reconnect()
+        assert session._mail is None
