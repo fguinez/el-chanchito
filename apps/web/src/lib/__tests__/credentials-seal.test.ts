@@ -16,7 +16,6 @@ import {
   CREDENTIAL_SCHEME_V2,
   CredentialSealError,
   bindingDigest,
-  credentialScheme,
   keyIdFor,
   schemeForAlgorithm,
   sealCredential,
@@ -68,10 +67,10 @@ describe.each(SCHEMES)("sealCredential to a $name key", (kind) => {
 
   it("opens only with the recipient key and the same context", async () => {
     const { pair, key } = await recipient(kind);
-    const sealed = await sealCredential(key, "banchile", "password", VALUE);
+    const { sealed, scheme: sealedWith } = await sealCredential(key, "banchile", "password", VALUE);
+    expect(sealedWith).toBe(scheme);
     expect(Buffer.from(sealed).includes(Buffer.from(VALUE))).toBe(false);
     expect(sealed.byteLength).toBe(suite.kem.encSize + VALUE.length + 16);
-    expect(credentialScheme(key)).toBe(scheme);
 
     const { enc, ct } = split(suite, sealed);
     const open = (info: Uint8Array) =>
@@ -86,8 +85,8 @@ describe.each(SCHEMES)("sealCredential to a $name key", (kind) => {
 
   it("seals the same value differently every time", async () => {
     const { key } = await recipient(kind);
-    const a = await sealCredential(key, "buda", "api_key", VALUE);
-    const b = await sealCredential(key, "buda", "api_key", VALUE);
+    const { sealed: a } = await sealCredential(key, "buda", "api_key", VALUE);
+    const { sealed: b } = await sealCredential(key, "buda", "api_key", VALUE);
     expect(Buffer.from(a).equals(Buffer.from(b))).toBe(false);
   });
 
@@ -102,7 +101,6 @@ describe.each(SCHEMES)("sealCredential to a $name key", (kind) => {
     await expect(
       sealCredential({ ...key, publicKey: key.publicKey.slice(1) }, "buda", "api_key", VALUE)
     ).rejects.toBeInstanceOf(CredentialSealError);
-    expect(() => credentialScheme({ ...key, algorithm: "RSA" })).toThrow(CredentialSealError);
   });
 });
 
@@ -157,13 +155,15 @@ async function sealEntries(key: SealingKey) {
     FIXTURE_ENTRIES.map(async (entry) => ({
       ...entry,
       sealed: Buffer.from(
-        await sealCredential(
-          key,
-          entry.slug,
-          entry.field,
-          entry.value,
-          entry.binding_values ? await bindingDigest(entry.binding_values) : undefined
-        )
+        (
+          await sealCredential(
+            key,
+            entry.slug,
+            entry.field,
+            entry.value,
+            entry.binding_values ? await bindingDigest(entry.binding_values) : undefined
+          )
+        ).sealed
       ).toString("base64"),
     }))
   );

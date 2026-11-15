@@ -155,9 +155,6 @@ export class XWingKem implements KemInterface {
   }
 
   async encap(params: SenderContextParams): Promise<{ sharedSecret: ArrayBuffer; enc: ArrayBuffer }> {
-    if (typeof encapsulate !== "function") {
-      throw new NotSupportedError("X-Wing needs crypto.encapsulate (Node 24.7 or later)");
-    }
     if (params.senderKey !== undefined) throw new NotSupportedError("X-Wing has no auth mode");
     try {
       const pk = params.recipientPublicKey as unknown as XWingPublicKey;

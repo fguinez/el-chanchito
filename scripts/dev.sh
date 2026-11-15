@@ -10,11 +10,15 @@ set -eu
 
 cd "$(dirname "$0")/.."
 
-# Next.js needs Node >= 24 (see package.json engines / .nvmrc). If the active
-# node is older, try to switch via nvm before anything runs pnpm.
+# The web needs Node >= 24.7 (see package.json engines / .nvmrc): the
+# credentials page imports crypto.encapsulate, which 24.7 added. If the
+# active node is older, try to switch via nvm before anything runs pnpm.
+node_ok() {
+  # Succeeds when `node -v` reports 24.7 or later.
+  node -v 2>/dev/null | awk -F. '{ sub(/^v/, "", $1); ok = $1 > 24 || ($1 == 24 && $2 >= 7) } END { exit !ok }'
+}
 ensure_node() {
-  node_major="$(node -v 2>/dev/null | sed -n 's/^v\([0-9]*\).*/\1/p')"
-  if [ -n "$node_major" ] && [ "$node_major" -ge 24 ]; then
+  if node_ok; then
     return
   fi
   NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
@@ -22,9 +26,8 @@ ensure_node() {
     . "$NVM_DIR/nvm.sh" >/dev/null 2>&1 || true
     nvm use >/dev/null 2>&1 || nvm use 24 >/dev/null 2>&1 || true
   fi
-  node_major="$(node -v 2>/dev/null | sed -n 's/^v\([0-9]*\).*/\1/p')"
-  if [ -z "$node_major" ] || [ "$node_major" -lt 24 ]; then
-    echo "!!  Node >= 24 required (found: $(node -v 2>/dev/null || echo none))." >&2
+  if ! node_ok; then
+    echo "!!  Node >= 24.7 required (found: $(node -v 2>/dev/null || echo none))." >&2
     echo "!!  Install it (e.g. 'nvm install 24') and retry." >&2
     exit 1
   fi

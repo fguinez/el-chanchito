@@ -2,8 +2,8 @@
 
 ## Prerequisites
 
-- **Node.js** >= 24 (24.7 or later: the credentials page seals with Node's
-  native ML-KEM, `crypto.encapsulate`) + **pnpm** 9 (`corepack enable` provides the version pinned
+- **Node.js** >= 24.7 (the credentials page seals with Node's native
+  ML-KEM, `crypto.encapsulate`, which 24.7 added) + **pnpm** 9 (`corepack enable` provides the version pinned
   in `package.json`)
 - **Python** >= 3.12 as `python3` (the shared `packages/product-model` requires
   it; `make install` builds `.venv` from whatever `python3` is on your PATH)

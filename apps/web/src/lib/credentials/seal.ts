@@ -134,22 +134,17 @@ function schemeOf(key: SealingKey): Scheme {
   return scheme;
 }
 
-/** The scheme to store with rows sealed to `key`; throws for an algorithm
- *  this side cannot seal to. */
-export function credentialScheme(key: SealingKey): string {
-  return schemeOf(key).scheme;
-}
-
 /** `enc || ciphertext` for one field, sealed with the scheme of the key's
- *  algorithm. Refuses a key whose id, algorithm or size does not match what
- *  the scraper service published with it. */
+ *  algorithm, plus that scheme (the one rows must store). Refuses a key whose
+ *  id, algorithm or size does not match what the scraper service published
+ *  with it. */
 export async function sealCredential(
   key: SealingKey,
   slug: string,
   fieldKey: string,
   value: string,
   binding?: string
-): Promise<Uint8Array> {
+): Promise<{ sealed: Uint8Array; scheme: string }> {
   const { scheme, publicKeyBytes, suite } = schemeOf(key);
   if (key.publicKey.byteLength !== publicKeyBytes) {
     throw new CredentialSealError("malformed credential public key");
@@ -166,5 +161,5 @@ export async function sealCredential(
   const sealed = new Uint8Array(enc.byteLength + ct.byteLength);
   sealed.set(new Uint8Array(enc), 0);
   sealed.set(new Uint8Array(ct), enc.byteLength);
-  return sealed;
+  return { sealed, scheme };
 }

@@ -1698,10 +1698,9 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
   `@hpke/core` runs the HPKE layers on the web, with X-Wing as a
   `KemInterface` over `node:crypto` (`xwing.ts`: native ML-KEM-768 through
   `crypto.encapsulate`/`decapsulate`, X25519 through `diffieHellman`), which
-  is why the web needs Node 24.7 or later (`engines` says `>=24`; `.nvmrc`
-  and the Docker image use Node 24); the scraper uses `cryptography`'s
-  `hazmat.primitives.hpke` (`MLKEM768X25519PrivateKey` for v2,
-  `cryptography>=50.0.2`). The HPKE `info` is `el-chanchito/credential \0
+  is why the web needs Node 24.7 or later; the scraper uses `cryptography`'s
+  `hazmat.primitives.hpke` (`MLKEM768X25519PrivateKey` for v2). The HPKE
+  `info` is `el-chanchito/credential \0
   scheme \0 slug \0 field \0 key_id` (the scheme of the key sealed to), so
   a ciphertext opens only for its own scheme, institution, field and key;
   `sealed` is `enc || ciphertext`.
