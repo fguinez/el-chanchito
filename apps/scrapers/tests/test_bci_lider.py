@@ -8,6 +8,7 @@ import asyncio
 import os
 import time
 from datetime import date
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -776,6 +777,44 @@ class TestSignInRequired:
         assert "make bci-lider-login" in str(info.value)[:120]
         assert "LIDER_BCI_CDP_URL" in str(info.value)
 
+    @pytest.mark.parametrize(
+        ("submitted", "hint"),
+        [(True, "clave may be wrong"), (False, "Cloudflare")],
+        ids=["rejected", "never-submitted"],
+    )
+    def test_the_error_says_whether_the_clave_was_sent(self, monkeypatch, submitted, hint):
+        """A submitted login that never lands blames the clave; an unsent one, Cloudflare."""
+        monkeypatch.setattr(web, "_autofill_and_submit", lambda *args: submitted)
+
+        with pytest.raises(web.BciLiderSignInRequired) as info:
+            web._login_via_autofill(_SignedOutPage(), None, None, time.monotonic() - 1)
+
+        assert info.value.submitted is submitted
+        assert hint in str(info.value)
+        assert "make bci-lider-login" in str(info.value)[:120]
+
+    @pytest.mark.parametrize("clicked", [True, False], ids=["clicked", "click-failed"])
+    def test_submitted_means_ingresar_was_clicked(self, monkeypatch, clicked):
+        """The autofill only reports a submit when the Ingresar click went through."""
+        monkeypatch.setattr(web, "_submit_enabled", lambda page: True)
+        monkeypatch.setattr(web, "_click_first", lambda *args, **kwargs: clicked)
+        page = SimpleNamespace(evaluate=lambda js: True, wait_for_timeout=lambda ms: None)
+
+        submitted = web._autofill_and_submit(page, None, None, time.monotonic() + 60)
+
+        assert submitted is clicked
+
+    def test_a_rejected_clave_without_its_form_still_blames_the_clave(self, monkeypatch):
+        """Once the clave went out, a page hiding the form is still a rejection."""
+        monkeypatch.setattr(web, "_autofill_and_submit", lambda *args: True)
+
+        with pytest.raises(web.BciLiderSignInRequired) as info:
+            web._login_via_autofill(
+                _SignedOutPage(login_form=False), None, None, time.monotonic() - 1
+            )
+
+        assert info.value.submitted is True
+
     def test_a_login_page_without_its_form_is_an_error(self, monkeypatch):
         """A maintenance or error page at /login is not a sign-in a human can fix."""
         monkeypatch.setattr(web, "_autofill_and_submit", lambda *args: None)
@@ -836,3 +875,67 @@ class TestSignInRequired:
         (_, recorded), _ = finish.call_args
         assert recorded == status
         assert calls == [1]
+
+
+class TestManagedFallback:
+    """The visible-window retry never resends a rejected clave nor hides a sign-in."""
+
+    @pytest.fixture
+    def attempts(self, monkeypatch):
+        monkeypatch.setattr(web.real_chrome, "port_in_use", lambda port: False)
+        calls = []
+        outcomes = []
+
+        def fake_once(port, cdp_url, rut, password, offscreen):
+            calls.append(offscreen)
+            outcome = outcomes.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        monkeypatch.setattr(web, "_scrape_managed_once", fake_once)
+        return calls, outcomes
+
+    def test_a_rejected_clave_is_not_retried(self, attempts):
+        """A submitted sign-in the portal rejected propagates without a second attempt."""
+        calls, outcomes = attempts
+        rejected = web.BciLiderSignInRequired("synthetic", submitted=True)
+        outcomes.append(rejected)
+
+        with pytest.raises(web.BciLiderSignInRequired) as info:
+            web._scrape_managed_sync(None, None)
+
+        assert info.value is rejected
+        assert calls == [True]
+
+    def test_an_unsent_sign_in_retries_visibly(self, attempts):
+        """A sign-in Cloudflare never let through is retried in a visible window."""
+        calls, outcomes = attempts
+        outcomes.extend([web.BciLiderSignInRequired("synthetic"), "result"])
+
+        result = web._scrape_managed_sync(None, None)
+
+        assert result == "result"
+        assert calls == [True, False]
+
+    def test_a_retry_failing_otherwise_keeps_the_sign_in_error(self, attempts):
+        """A visible retry that dies for another reason still reports the sign-in."""
+        calls, outcomes = attempts
+        unsent = web.BciLiderSignInRequired("synthetic")
+        outcomes.extend([unsent, web.BciLiderSessionError("Chrome exited")])
+
+        with pytest.raises(web.BciLiderSignInRequired) as info:
+            web._scrape_managed_sync(None, None)
+
+        assert info.value is unsent
+        assert calls == [True, False]
+
+    def test_a_plain_failure_falls_back_to_a_visible_window(self, attempts):
+        """Any other off-screen failure is retried once, and the retry's result wins."""
+        calls, outcomes = attempts
+        outcomes.extend([web.BciLiderSessionError("synthetic"), "result"])
+
+        result = web._scrape_managed_sync(None, None)
+
+        assert result == "result"
+        assert calls == [True, False]

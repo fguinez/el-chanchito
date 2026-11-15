@@ -412,7 +412,15 @@ class BciLiderSessionError(RuntimeError):
 
 
 class BciLiderSignInRequired(BciLiderSessionError, SignInRequired):
-    """Chrome was reachable but the portal stayed signed out: a human must sign in."""
+    """Chrome was reachable but the portal stayed signed out: a human must sign in.
+
+    `submitted` is True when the clave was sent and the portal rejected it, so
+    sending it again in the same run would only push toward the bank's lockout.
+    """
+
+    def __init__(self, message: str, *, submitted: bool = False) -> None:
+        super().__init__(message)
+        self.submitted = submitted
 
 
 def _first_visible(page, selectors: list[str], timeout: int = 5000):
@@ -487,13 +495,13 @@ def _submit_enabled(page) -> bool:
         return False
 
 
-def _autofill_and_submit(page, rut: str | None, password: str | None, deadline: float) -> None:
-    """Type the RUT + clave, then click Ingresar once the login is submittable.
+def _autofill_and_submit(page, rut: str | None, password: str | None, deadline: float) -> bool:
+    """Type the RUT + clave, click Ingresar once submittable; return whether it did.
 
     Submits only when the Cloudflare Turnstile token is present AND Ingresar is
     enabled. The token appears invisibly for a genuine browser or after the human
     ticks the "Verifique que es un ser humano" check; we never tick it ourselves.
-    If it never clears, we never submit (the caller then times out).
+    If it never clears, we never submit (the caller then times out) and return False.
     """
     try:
         if rut:
@@ -508,12 +516,14 @@ def _autofill_and_submit(page, rut: str | None, password: str | None, deadline: 
     while time.monotonic() < deadline:
         try:
             if page.evaluate(_TURNSTILE_TOKEN_JS) and _submit_enabled(page):
-                _click_first(page, _SUBMIT_SELECTORS, timeout=5000)
+                if not _click_first(page, _SUBMIT_SELECTORS, timeout=5000):
+                    return False
                 logger.info("BciLider: submitted the login (Turnstile token present)")
-                return
+                return True
         except Exception:
             pass
         page.wait_for_timeout(1000)
+    return False
 
 
 def save_login_session(
@@ -786,15 +796,23 @@ def _login_via_autofill(page, rut: str | None, password: str | None, deadline: f
 
     Autofill clears Cloudflare because this is a genuine Chrome. Raises
     BciLiderSignInRequired if sign-in can't complete (e.g. Cloudflare shows the human
-    check with nobody to tick it, or the credentials are wrong).
+    check with nobody to tick it, or the portal rejects the submitted clave).
     """
     if "/login" not in (page.url or ""):
         page.goto(LOGIN_URL, timeout=LOGIN_TIMEOUT, wait_until="domcontentloaded")
-    _autofill_and_submit(page, rut, password, deadline)
+    submitted = _autofill_and_submit(page, rut, password, deadline)
     while time.monotonic() < deadline:
         if "/private-home" in page.url:
             return
         page.wait_for_timeout(1000)
+    if submitted:
+        # Whatever the portal shows now (the form, an error modal, a lock page), the
+        # clave already went out: never let a retry send it again.
+        raise BciLiderSignInRequired(
+            "BciLider sign-in rejected: run `make bci-lider-login` (the clave may be "
+            f"wrong); {_REUSE_HINT}",
+            submitted=True,
+        )
     if not _login_form_visible(page):
         # No login form to sign in on (a maintenance or error page, or a portal too
         # slow to render it): a human sign-in would not help.
@@ -804,7 +822,7 @@ def _login_via_autofill(page, rut: str | None, password: str | None, deadline: f
         )
     raise BciLiderSignInRequired(
         "BciLider sign-in didn't complete: run `make bci-lider-login` (Cloudflare may "
-        f"need a human to tick the check, or the clave is wrong); {_REUSE_HINT}"
+        f"need a human to tick the check); {_REUSE_HINT}"
     )
 
 
@@ -937,15 +955,29 @@ def _scrape_managed_sync(rut: str | None, password: str | None) -> BciLiderCardR
     cdp_url = f"http://localhost:{port}"
     # Prefer an off-screen window (no flash); if that misbehaves, fall back once to a
     # normal visible window, which is the most reliable. `terminate_chrome` waits
-    # for exit, so the port is free again before the fallback launch.
+    # for exit, so the port is free again before the fallback launch. A clave the
+    # portal already rejected is never resent: that would push toward a lockout.
     try:
         return _scrape_managed_once(port, cdp_url, rut, password, offscreen=True)
+    except BciLiderSignInRequired as exc:
+        if exc.submitted:
+            raise
+        first_error: Exception = exc
     except Exception as exc:
-        logger.warning(
-            "BciLider: off-screen Chrome scrape failed (%s); retrying with a visible window",
-            exc,
-        )
-    return _scrape_managed_once(port, cdp_url, rut, password, offscreen=False)
+        first_error = exc
+    logger.warning(
+        "BciLider: off-screen Chrome scrape failed (%s); retrying with a visible window",
+        first_error,
+    )
+    try:
+        return _scrape_managed_once(port, cdp_url, rut, password, offscreen=False)
+    except Exception as exc:
+        # The retry dying for another reason (Chrome exited, connect timeout) must not
+        # hide that the portal needs a sign-in: keep the run `needs_sign_in`.
+        if isinstance(first_error, BciLiderSignInRequired) and not isinstance(exc, SignInRequired):
+            logger.warning("BciLider: visible-window retry failed too (%s)", exc)
+            raise first_error from exc
+        raise
 
 
 def _scrape_managed_once(

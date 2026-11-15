@@ -758,7 +758,9 @@ that stays signed out (the autofill times out with the login form still showing,
 or a read bounces to /login after the retry) raises `BciLiderSignInRequired`, so
 the run is `needs_sign_in` and the message asks for `make bci-lider-login` plus
 `LIDER_BCI_CDP_URL` (a managed run would otherwise collide with that Chrome's
-port). Everything else stays a plain `BciLiderSessionError`, an `error` run: an
+port). A clave the portal rejected off-screen is never resent by the visible
+retry, and a retry that dies otherwise keeps the run `needs_sign_in`.
+Everything else stays a plain `BciLiderSessionError`, an `error` run: an
 unreachable or exited Chrome, a busy debug port, and a `/login` page that never
 showed its form (portal down or slow). Both legs share one
 drive per cycle: `scrape_transactions` opens it and caches the result for
