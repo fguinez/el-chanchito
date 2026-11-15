@@ -746,7 +746,9 @@ check, which we never do).
 By default `scrape_card` runs *managed*: it launches a headed Chrome off-screen (with
 a visible-window fallback so it doesn't flash on the desktop), signs in, scrapes,
 and closes it, so scheduled runs are fully unattended (needs a machine with a
-display: Cloudflare blocks headless). Setting `LIDER_BCI_CDP_URL` switches to *reuse*
+display: Cloudflare blocks headless). The close goes through CDP `Browser.close`
+first (the shared `terminate_chrome`), so the profile's cookies reach disk
+before any SIGTERM fallback. Setting `LIDER_BCI_CDP_URL` switches to *reuse*
 mode, driving a long-running Chrome from `make bci-lider-login` instead.
 Its managed Chrome has no pidfile yet, so one orphaned by a killed service
 still blocks later runs until it is closed by hand; that arrives when BCI

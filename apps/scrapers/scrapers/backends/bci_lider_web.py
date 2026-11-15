@@ -927,12 +927,12 @@ def _scrape_managed_once(
     password: str | None,
     offscreen: bool,
 ) -> BciLiderCardResult:
-    """Launch Chrome, scrape, and terminate it (one managed attempt)."""
+    """Launch Chrome, scrape, and close it via CDP first so its cookies reach disk."""
     proc = _launch_real_chrome(port, LOGIN_URL, offscreen=offscreen)
     try:
         return _scrape_over_cdp(cdp_url, rut, password, process=proc)
     finally:
-        real_chrome.terminate_chrome(proc)
+        real_chrome.terminate_chrome(proc, cdp_url=cdp_url)
 
 
 async def scrape_card(
