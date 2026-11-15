@@ -2,7 +2,8 @@
 
 ## Prerequisites
 
-- **Node.js** >= 20 + **pnpm** 9 (`corepack enable` provides the version pinned
+- **Node.js** >= 24 (24.7 or later: the credentials page seals with Node's
+  native ML-KEM, `crypto.encapsulate`) + **pnpm** 9 (`corepack enable` provides the version pinned
   in `package.json`)
 - **Python** >= 3.12 as `python3` (the shared `packages/product-model` requires
   it; `make install` builds `.venv` from whatever `python3` is on your PATH)
@@ -243,15 +244,22 @@ scraper service). Deleting any of the three deletes all three.
 
 How it is protected:
 
-- The scraper service owns an X25519 key pair. The private key lives in an
+- The scraper service owns a key pair. The private key lives in an
   owner-only (`0600`) file, `apps/scrapers/.credentials_key` (gitignored; in
   Compose `/data/credentials_key` on the `scraper_state` volume; move it with
   `CREDENTIALS_KEY_FILE`). It is created on first start, and the service
   refuses a key file that other users can read. Only the public key goes to
   the database.
 - The dashboard's server seals each field to that public key with HPKE
-  (RFC 9180: DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, AES-256-GCM) and stores
-  only the ciphertext. Each ciphertext is bound to its institution, field and
+  (RFC 9180 base mode, HKDF-SHA256, AES-256-GCM) and stores only the
+  ciphertext. New keys use X-Wing (ML-KEM-768 + X25519, scheme
+  `hpke-mlkem768x25519-sha256-aes256gcm-v2`), a hybrid post-quantum KEM: a
+  database copy that leaks without the key file stays closed even to a
+  future quantum computer ("harvest now, decrypt later"). Keys created before
+  it (X25519 only, `hpke-x25519-sha256-aes256gcm-v1`) keep working; the next
+  rotation (automatic, or `make credentials-rotate`) replaces such a key with
+  an X-Wing one and re-seals every stored credential to it, with nothing to
+  type again. Each ciphertext is bound to its institution, field and
   key, so it cannot be moved to another field. The dashboard can write a
   credential but never read one back.
 - **Threat model.** The database alone (a dump, a backup, a leaked
@@ -301,7 +309,8 @@ the database currently seals to; they never create, publish or rotate a key.
 
 ### Rotating the credentials key
 
-Rotating makes a new key pair, re-seals every stored credential to it in one
+Rotating makes a new key pair (always X-Wing, so it also upgrades an older
+X25519 key), re-seals every stored credential to it in one
 database transaction, and then deletes the old private key file. Old
 database backups (which hold the old ciphertext) then no longer open with
 anything the app keeps: that is the point. Nothing has to be typed again.

@@ -510,6 +510,7 @@ suggested category, cascading with the category.
 | `V046__category_subcategories.sql` | subcategories one level deep on the existing `categories.parent_id`: index on `parent_id` and a `BEFORE INSERT OR UPDATE OF parent_id` trigger (`trg_categories_one_level`) rejecting a self parent, a parent that is itself a subcategory, and re-parenting a category that has subcategories; no backfill |
 | `V048__institution_credentials.sql` | `credential_keys` (the scraper service's single X25519 public key, `key_id` = hex SHA-256 of it) and `institution_credentials` (one HPKE-sealed field per `(institution_slug, field_key)`, with its `scheme` and `key_id`); see "Sealed credentials" |
 | `V049__credential_key_ring.sql` | `credential_keys` becomes a key ring: `key_id` primary key, `status` `active`/`retired` (at most one active, partial unique index `credential_keys_one_active`), `created_at`, `retired_at`, `rotation_failed_at`, `rotation_error`; the V048 singleton becomes the active key (`created_at` from its `updated_at`); a trigger lets `institution_credentials` be written only under the active key, locking it FOR SHARE; idempotent |
+| `V050__credential_keys_xwing.sql` | `credential_keys` may hold X-Wing keys: V048's `octet_length(public_key) = 32` CHECK becomes `credential_keys_algorithm_public_key_check`, which allows only the two published algorithms and ties each to its length (32 bytes for v1 X25519, 1216 for v2 X-Wing); `institution_credentials.sealed` keeps its 48 to 4096-byte CHECK; idempotent; see "Sealed credentials" |
 
 ## Scraper Architecture
 
@@ -1645,7 +1646,7 @@ Browser → web POST /api/institutions/refresh {institution?}
 | `BANCHILE_LOGIN_COOLDOWN_MINUTES` | scrapers | Minimum minutes between full BanChile logins, which also gates manual refreshes (default `10`; `0` disables) |
 | `BANCHILE_BILLED_STATEMENTS` | scrapers | Card statements per currency each BanChile run reads, newest first (default `2`, at most `12`); raise it for a one-off backfill of older billed history |
 
-### Sealed credentials (V048, V049)
+### Sealed credentials (V048 to V050)
 
 Scraper credentials can be entered in the dashboard (Credenciales) instead of
 the host secret store. The design goal is that the dashboard can **write** a
@@ -1659,31 +1660,70 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
         → open rows with the private key file → overlay os.environ → rebuild jobs
 ```
 
-- **Keys.** The scraper service owns an X25519 key pair. The private key is a
+- **Keys.** The scraper service owns an HPKE key pair. The private key is a
   PKCS#8 PEM file (`CREDENTIALS_KEY_FILE`, default
   `apps/scrapers/.credentials_key`, Compose `/data/credentials_key`), created on
   first start with `O_EXCL` + mode `0600` and linked into place atomically (a
   concurrent creator's key wins). It is opened with `O_NOFOLLOW` and refused
   when group/others can read it or another user owns it; the service then
-  runs on the env fallback only. The public key and its id (hex SHA-256 of the
-  32 raw bytes) go into the `credential_keys` ring (V049), where at most one
-  key is `active`. Every read or write of the private key goes through
+  runs on the env fallback only. The public key, its algorithm and its id
+  (hex SHA-256 of the raw public key) go into the `credential_keys` ring
+  (V049), where at most one key is `active`. A v2 key file is a PKCS#8
+  `PRIVATE KEY` with the X-Wing OID (`1.3.6.1.4.1.62253.25722`, no
+  parameters) holding the 32-byte X-Wing seed, encoded and parsed strictly
+  by hand; `load_key` also accepts a v1 X25519 PKCS#8 and refuses anything
+  else. Every read or write of the private key goes through
   `KeyFile` (scrapers/credentials.py), the seam a secret manager can replace.
-- **Scheme.** HPKE (RFC 9180) base mode, DHKEM(X25519, HKDF-SHA256),
-  HKDF-SHA256, AES-256-GCM: `@hpke/core` on the web (WebCrypto), Python
-  `cryptography`'s `hazmat.primitives.hpke` in the scraper. The HPKE `info`
-  is `el-chanchito/credential \0 scheme \0 slug \0 field \0 key_id`, so a
-  ciphertext opens only for its own institution, field and key; `sealed` is
-  `enc || ciphertext`. A checked-in fixture sealed by the TypeScript code
-  (with a throwaway key) is opened by the Python tests to keep both sides in
-  step.
+- **Schemes.** HPKE (RFC 9180) base mode with HKDF-SHA256 and AES-256-GCM;
+  the KEM follows the key, and every row stores the scheme it was sealed
+  with:
+
+  | Scheme | KEM | Public key | `enc` |
+  |---|---|---|---|
+  | `hpke-x25519-sha256-aes256gcm-v1` | DHKEM(X25519, HKDF-SHA256) | 32 B | 32 B |
+  | `hpke-mlkem768x25519-sha256-aes256gcm-v2` | MLKEM768-X25519, i.e. X-Wing (draft-ietf-hpke-pq, KEM id `0x647a`; draft-connolly-cfrg-xwing-kem) | 1216 B (ML-KEM-768 1184 then X25519 32) | 1120 B (ML-KEM ciphertext 1088 then X25519 32) |
+
+  v2 is a hybrid post-quantum KEM, against "harvest now, decrypt later": a
+  database copy that leaks without the private key stays closed even to a
+  future quantum computer, and it is never weaker than X25519 alone. The X-Wing private key is a 32-byte seed;
+  SHAKE256(seed, 96) gives the ML-KEM-768 seed (64 bytes) and the X25519 key
+  (32), and the shared secret is SHA3-256(ss_ML-KEM, ss_X25519, ct_X25519,
+  pk_X25519, label). `generate_key` makes v2 keys, so new installs start on
+  v2; a v1 key keeps sealing and opening v1 rows until it is rotated, and
+  rotation re-seals every row to the new v2 key with the v2 scheme. The web
+  picks the suite from the active key's published algorithm (`seal.ts`, which
+  rejects a public key of the wrong length) and the route stores that
+  scheme; the scraper opens only rows whose scheme matches the key's, and
+  the Credenciales page asks to re-enter any other.
+  `@hpke/core` runs the HPKE layers on the web, with X-Wing as a
+  `KemInterface` over `node:crypto` (`xwing.ts`: native ML-KEM-768 through
+  `crypto.encapsulate`/`decapsulate`, X25519 through `diffieHellman`), which
+  is why the web needs Node 24.7 or later (`engines` says `>=24`; `.nvmrc`
+  and the Docker image use Node 24); the scraper uses `cryptography`'s
+  `hazmat.primitives.hpke` (`MLKEM768X25519PrivateKey` for v2,
+  `cryptography>=50.0.2`). The HPKE `info` is `el-chanchito/credential \0
+  scheme \0 slug \0 field \0 key_id` (the scheme of the key sealed to), so
+  a ciphertext opens only for its own scheme, institution, field and key;
+  `sealed` is `enc || ciphertext`.
+- **Compatibility tests.** Both sides check X-Wing against the published
+  vectors, trimmed into fixtures that name their source commits
+  (`apps/web/src/lib/__tests__/fixtures/xwing-vectors.json`,
+  `apps/scrapers/tests/fixtures/credentials/xwing_vectors.json`): the two
+  KEM `0x647a` vectors of draft-ietf-hpke-pq (public key from the seed, then
+  decap on the web and a full HPKE open in Python) and the three X-Wing
+  vectors (public key from the seed; the web also decaps). Two checked-in fixtures sealed by the TypeScript code with
+  throwaway keys, `ts_sealed.json` (v1) and `ts_sealed_v2.json` (v2, a
+  binding entry with non-ASCII values included), are opened by the Python
+  tests to keep both sides in step.
 - **Registry.** `packages/product-model/product_model/credentials.py` lists
   each institution's fields (label, env var, identifier or secret, input
   hints, pattern) and is generated into the TS index, so the form, the API
   validation and the scraper overlay share one list. Identifiers (RUT,
   e-mail) are sealed too. `required` is exactly what `build_scrapers()` gates
-  on (a test checks every spec). `max_length` is capped so 4 bytes per
-  character plus the HPKE overhead fit V048's 4096-byte CHECK.
+  on (a test checks every spec). `max_length` is capped (`MAX_FIELD_LENGTH`, 740
+  characters) so 4 bytes per character plus the largest scheme's overhead
+  (v2: 1120-byte `enc` and 16-byte tag) fit V048's 4096-byte CHECK, whichever
+  key seals the field.
 - **Bound secrets.** A secret with `binds` (the IMAP password binds the IMAP
   host and user) is always saved together with the fields it binds (the API
   refuses a partial group, and deleting one member deletes the group), and is
@@ -1759,7 +1799,8 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
   active key row FOR UPDATE, open every row sealed to it and seal it to the
   new key (the `info` binds the key id, so this is a full re-encrypt; binding
   secrets keep their binding), retire the old key and insert the new active
-  one; then `rename(.next, key file)`, which unlinks the old private key, so
+  one (the new key is always v2, so a v1 key's rows move to the v2 scheme);
+  then `rename(.next, key file)`, which unlinks the old private key, so
   older database backups open with nothing the app keeps (snapshots, volume
   backups or copies of the key file still hold it: the rename does not erase
   the disk). Rows that cannot be opened stay as they were and need re-entry.
