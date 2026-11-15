@@ -849,15 +849,20 @@ class ScraperSet:
     def _fingerprint(slug: str) -> str:
         return env_fingerprint(_credential_env_vars(slug))
 
-    def _add(self, slug: str, scraper: BaseScraper) -> bool:
+    def _add(self, slug: str, scraper: BaseScraper, fingerprint: str | None = None) -> bool:
         if not _schedule_scraper(self.scheduler, slug, scraper):
             return False
         self._keys = self._keys | {slug}
-        self._fingerprints[slug] = self._fingerprint(slug)
+        self._fingerprints[slug] = fingerprint or self._fingerprint(slug)
         return True
 
     def rebuild(self) -> dict[str, list[str]]:
         with self._lock:
+            # Fingerprint before building: if a concurrent apply changes the
+            # env mid-build, the stored fingerprint is the older one, so the
+            # next rebuild sees the change instead of skipping it.
+            slugs = self._keys | {s for spec in CREDENTIAL_SPECS for s in spec.scraper_slugs}
+            fingerprints = {slug: self._fingerprint(slug) for slug in slugs}
             wanted = self._build()
             added: list[str] = []
             removed: list[str] = []
@@ -872,9 +877,9 @@ class ScraperSet:
                     reset_email_session()
                 logger.info("Scraper %s disabled: its credentials are gone", slug)
             for slug in sorted(wanted):
-                fingerprint = self._fingerprint(slug)
+                fingerprint = fingerprints.get(slug) or self._fingerprint(slug)
                 if slug not in self._keys:
-                    if self._add(slug, wanted[slug]):
+                    if self._add(slug, wanted[slug], fingerprint):
                         _reset_scraper_state(slug, wanted[slug])
                         added.append(slug)
                 elif fingerprint != self._fingerprints.get(slug):
