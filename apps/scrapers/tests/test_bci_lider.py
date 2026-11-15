@@ -1043,6 +1043,44 @@ class TestAccountBinding:
         assert not web.session_account.marker_path(profile).exists()
         assert "11" not in caplog.text
 
+    @staticmethod
+    def _lock(profile, target):
+        (profile / "SingletonLock").symlink_to(target)
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX SingletonLock symlink")
+    @pytest.mark.parametrize(
+        "owner",
+        [lambda: f"{__import__('socket').gethostname()}-{os.getpid()}", lambda: "other-host-1"],
+        ids=["live-pid", "other-host"],
+    )
+    def test_a_profile_held_by_a_chrome_is_never_deleted(self, profile, owner):
+        self._make_profile(profile, self.OTHER)
+        self._lock(profile, owner())
+        with pytest.raises(web.BciLiderSessionError, match="still using the Lider profile"):
+            web._prepare_profile(self.RUT)
+        assert (profile / "Default" / "Cookies").exists()
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX SingletonLock symlink")
+    def test_a_stale_lock_does_not_keep_the_profile(self, profile):
+        import socket
+        import subprocess
+        import sys
+
+        done = subprocess.Popen([sys.executable, "-c", ""])
+        done.wait()
+        self._make_profile(profile, self.OTHER)
+        self._lock(profile, f"{socket.gethostname()}-{done.pid}")
+        web._prepare_profile(self.RUT)
+        assert not profile.exists()
+
+    def test_the_lock_check_on_windows_is_the_lockfile(self, profile, monkeypatch):
+        monkeypatch.setattr(web.real_chrome, "is_windows", lambda: True)
+        profile.mkdir()
+        assert web._profile_in_use(profile) is False
+        (profile / "lockfile").write_text("")
+        assert web._profile_in_use(profile) is False  # deletable: no Chrome holds it
+        assert not (profile / "lockfile").exists()
+
     def test_no_rut_leaves_the_profile_alone(self, profile):
         self._make_profile(profile, self.OTHER)
         web._prepare_profile(None)

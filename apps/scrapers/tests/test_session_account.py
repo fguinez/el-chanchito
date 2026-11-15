@@ -204,3 +204,30 @@ def test_fintual_unmarked_session_without_imap_asks_for_a_sign_in(tmp_path, monk
     with pytest.raises(SignInRequired, match="make fintual-login"):
         asyncio.run(scraper._ensure_session(_NoCookies()))
     assert not path.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+def test_discarding_a_directory_session_that_is_a_symlink_keeps_its_target(tmp_path):
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    (target / "keep.txt").write_text("synthetic")
+    link = tmp_path / ".profile"
+    link.symlink_to(target, target_is_directory=True)
+    session_account.write_account(link, A)
+
+    session_account.discard(link, directory=True)
+
+    assert not link.exists() and not link.is_symlink()
+    assert (target / "keep.txt").exists()
+    assert not session_account.marker_path(link).exists()
+
+
+def test_discarding_a_directory_session_removes_it(tmp_path):
+    profile = tmp_path / ".profile"
+    (profile / "Default").mkdir(parents=True)
+    session_account.write_account(profile, A)
+
+    session_account.discard(profile, directory=True)
+
+    assert not profile.exists()
+    assert not session_account.marker_path(profile).exists()

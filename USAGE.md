@@ -542,7 +542,8 @@ profile (`apps/scrapers/.bci_lider_chrome_profile`) is tied to the RUT that
 last signed in with it, by a gitignored `.bci_lider_chrome_profile.account`
 marker holding a salted hash, never the RUT; a profile of another RUT, or one
 from before the marker existed, is deleted before Chrome starts and the run
-signs in afresh. A tab the run did not sign in itself must also show that
+signs in afresh. While any Chrome still holds that profile (on any port) it is
+never deleted: the run fails asking you to close that Chrome. A tab the run did not sign in itself must also show that
 RUT as the portal's signed-in customer (checked inside the page). In reuse
 mode the Chrome is yours and is never wiped: a tab of another account, or
 one that does not show its account, ends the run as `inicia sesión` asking

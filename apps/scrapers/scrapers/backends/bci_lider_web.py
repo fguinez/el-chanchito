@@ -60,6 +60,7 @@ import importlib.util
 import logging
 import os
 import re
+import socket
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -586,9 +587,54 @@ def _confirm_account(
     _verify_account(page, rut, signed_in_now=signed_in_now, managed=managed)
 
 
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # it exists, owned by someone else
+    return True
+
+
+def _profile_in_use(profile: Path) -> bool:
+    """Whether a live Chrome holds `profile`, whatever its debug port.
+
+    POSIX Chrome keeps a `SingletonLock` symlink to `<hostname>-<pid>` in the
+    profile while it runs; a lock naming a dead pid on this host is stale.
+    Anything unreadable, or another host's lock, counts as held. On Windows
+    Chrome keeps `lockfile` open, so it cannot be deleted while it runs.
+    """
+    if real_chrome.is_windows():
+        lockfile = profile / "lockfile"
+        try:
+            lockfile.unlink()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+        return False
+    lock = profile / "SingletonLock"
+    try:
+        target = os.readlink(lock)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    host, _, pid = target.rpartition("-")
+    if host != socket.gethostname() or not pid.isdigit():
+        return True
+    return _pid_alive(int(pid))
+
+
 def _reset_profile() -> None:
-    """Delete the managed Chrome profile and its account marker. Only call it
-    with no Chrome running on the profile."""
+    """Delete the managed Chrome profile and its account marker; refuses
+    while a Chrome still holds the profile (its lock), whatever its port."""
+    if _CHROME_PROFILE.exists() and _profile_in_use(_CHROME_PROFILE):
+        raise BciLiderSessionError(
+            "BciLider: a Chrome is still using the Lider profile, which must be reset "
+            "for another account; close that Chrome and run again."
+        )
     session_account.discard(_CHROME_PROFILE, directory=True)
     if _CHROME_PROFILE.exists() or session_account.marker_path(_CHROME_PROFILE).exists():
         raise BciLiderSessionError(
@@ -1158,8 +1204,8 @@ def _scrape_managed_sync(rut: str | None, password: str | None) -> BciLiderCardR
             f"LIDER_BCI_CDP_URL=http://localhost:{port} to reuse that Chrome."
         )
     cdp_url = f"http://localhost:{port}"
-    # The port is free, so no Chrome of ours holds the profile: a profile of
-    # another account (or from before account markers) can be deleted now.
+    # A profile of another account (or from before account markers) is
+    # deleted now, unless a Chrome on another port still holds it (its lock).
     _prepare_profile(rut)
     # Prefer an off-screen window (no flash); if that misbehaves, fall back once to a
     # normal visible window, which is the most reliable. `terminate_chrome` waits
