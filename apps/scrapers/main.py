@@ -866,18 +866,20 @@ class ScraperSet:
 
     def rebuild(self) -> dict[str, list[str]]:
         with self._lock:
-            if not self._initialized:
-                self._initialized = True
-                added = [
-                    slug for slug, scraper in self._build().items() if self._add(slug, scraper)
-                ]
-                return {"added": sorted(added), "removed": [], "updated": []}
             # Fingerprint before building: if a concurrent apply changes the
             # env mid-build, the stored fingerprint is the older one, so the
             # next rebuild sees the change instead of skipping it.
             slugs = self._keys | {s for spec in CREDENTIAL_SPECS for s in spec.scraper_slugs}
             fingerprints = {slug: self._fingerprint(slug) for slug in slugs}
             wanted = self._build()
+            if not self._initialized:
+                self._initialized = True
+                added = [
+                    slug
+                    for slug, scraper in wanted.items()
+                    if self._add(slug, scraper, fingerprints.get(slug))
+                ]
+                return {"added": sorted(added), "removed": [], "updated": []}
             added: list[str] = []
             removed: list[str] = []
             updated: list[str] = []
@@ -915,21 +917,30 @@ class CredentialControl:
         self.manager = manager
         self.scrapers = scrapers
 
+    def rebuild(self) -> dict[str, list[str]]:
+        """Rebuild the scrapers, but only once the stored credentials are
+        applied or known unusable: before that the env may still hold
+        credentials the dashboard replaced, and a scraper built on them
+        could log in with them (POST /refresh)."""
+        if not self.manager.settled.is_set():
+            return {"added": [], "removed": [], "updated": []}
+        return self.scrapers.rebuild()
+
     def status(self) -> dict:
         # Not published or not loaded yet (database down, V048 missing): try
         # again now, off this request's thread.
-        self.manager.retry_in_background(on_loaded=self.scrapers.rebuild)
+        self.manager.retry_in_background(on_loaded=self.rebuild)
         return self.manager.status()
 
     def reload(self) -> dict:
         applied = self.manager.reload()
-        changes = self.scrapers.rebuild()
+        changes = self.rebuild()
         enabled = sorted(s for s in self.scrapers.snapshot() if self.scrapers.scheduler.get_job(s))
         return {"applied": applied, **changes, "scrapers": enabled}
 
     def tick(self) -> None:
         if self.manager.tick():
-            self.scrapers.rebuild()
+            self.rebuild()
 
 
 # How often the service retries publishing its key and reading the stored
@@ -1052,7 +1063,7 @@ def main_scheduled() -> None:
     control_server = _start_control_server(
         scheduler, scraper_set.snapshot, heartbeat, credential_control
     )
-    credential_manager.retry_in_background(on_loaded=scraper_set.rebuild)
+    credential_manager.retry_in_background(on_loaded=credential_control.rebuild)
 
     loop.run_until_complete(
         _first_scrape(credential_manager, scraper_set, os.environ.get("SCRAPER_CONTROL_PORT"))

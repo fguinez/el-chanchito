@@ -366,7 +366,8 @@ def test_scraper_set_adds_drops_and_rebuilds(monkeypatch):
     assert scrapers.keys == {"buda"} and set(scheduler.jobs) == {"buda"}
 
 
-def test_a_change_applied_mid_build_is_picked_up_by_the_next_rebuild(monkeypatch):
+@pytest.mark.parametrize("first", [False, True], ids=["later rebuild", "first rebuild"])
+def test_a_change_applied_mid_build_is_picked_up_by_the_next_rebuild(monkeypatch, first):
     """A concurrent apply that lands while a rebuild builds must not be
     recorded as already seen, or its own rebuild skips the update."""
     for name in main._credential_env_vars("skipo"):
@@ -382,7 +383,7 @@ def test_a_change_applied_mid_build_is_picked_up_by_the_next_rebuild(monkeypatch
         return {"skipo": instance}
 
     scheduler = FakeScheduler()
-    scrapers = ScraperSet(scheduler, build(), build=build)
+    scrapers = ScraperSet(scheduler, None if first else build(), build=build)
     racing["on"] = True
     scrapers.rebuild()
     stale = scheduler.jobs["skipo"].args[0]

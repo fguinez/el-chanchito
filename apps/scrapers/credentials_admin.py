@@ -29,6 +29,7 @@ from credential_manager import (
     rotate_key_file,
 )
 from dotenv import load_dotenv
+from psycopg.conninfo import conninfo_to_dict
 
 from db.connection import close_pool
 from scrapers.credentials import CredentialKeyError, KeyFile, key_file_path
@@ -85,7 +86,8 @@ def _status(key_file: KeyFile, ring: DatabaseKeyRing) -> int:
     if local != active.key_id:
         print(
             "key_mismatch: this key file is not the database's active key; this service "
-            "cannot open the stored credentials. Use the other service's key file, or run "
+            "cannot open the stored credentials. Run only the scraper service that saved them "
+            "against this database (never a copy of its key file), or run "
             "`make credentials-reset-key` to start over."
         )
         return 1
@@ -102,20 +104,44 @@ def _rotate(key_file: KeyFile, ring: DatabaseKeyRing) -> int:
     )
     print(
         f"Rotated the credentials key {result.old_key_id[:12]} -> {result.new_key.key_id[:12]}: "
-        f"{counts}. The old private key is deleted, so older database backups no longer open."
+        f"{counts}. The old private key file is deleted, so older database backups no longer "
+        "open with this key file (filesystem snapshots, volume backups or copies of the key "
+        "file still hold the old key)."
     )
     _poke_service()
     return 0
 
 
+def _target() -> str:
+    """Where this runs and which database it changes (never the password)."""
+    try:
+        info = conninfo_to_dict(os.environ.get("DATABASE_URL", ""))
+        database = f"{info.get('host', '?')}:{info.get('port', '5432')}/{info.get('dbname', '?')}"
+    except Exception:
+        database = "(unparsable DATABASE_URL)"
+    where = "the scrapers container (make up)" if os.path.exists("/.dockerenv") else "this host"
+    return f"{where}, database {database}"
+
+
 def _reset(key_file: KeyFile, ring: DatabaseKeyRing, assume_yes: bool) -> int:
+    try:
+        local = key_file.load().key_id[:12]
+    except FileNotFoundError:
+        local = "none yet; it will be created"
+    try:
+        active = ring.active_key()
+        active_id = active.key_id[:12] if active else "none"
+    except Exception as exc:
+        active_id = f"unknown ({type(exc).__name__})"
     print(
-        "This makes the key file\n"
-        f"  {key_file.path}\n"
-        "the database's active credentials key and retires the current one. Every credential\n"
-        "stored in Credenciales becomes unreadable and must be entered again. Use it only when\n"
-        "the key file that sealed them is lost; if another scraper service (make dev or make up)\n"
-        "still holds it, use that key file instead."
+        f"Running on {_target()}.\n"
+        f"  Database's active key: {active_id}\n"
+        f"  Local key file:        {local} ({key_file.path})\n"
+        "This makes the local key the database's active credentials key and retires the\n"
+        "current one. Every credential stored in Credenciales becomes unreadable and must be\n"
+        "entered again. Use it only when the key file that sealed them is lost; if another\n"
+        "scraper service (make dev or make up) still holds it, run that one instead (wrong\n"
+        "stack? make dev is the default, STACK=up targets make up)."
     )
     if not assume_yes:
         if not sys.stdin.isatty():
@@ -155,7 +181,7 @@ def main(argv: list[str] | None = None) -> int:
             return _rotate(key_file, ring)
         return _reset(key_file, ring, args.yes)
     except (RotationError, CredentialKeyError) as exc:
-        print(f"Failed: {exc}", file=sys.stderr)
+        print(f"Failed: {exc} (key file: {key_file.path})", file=sys.stderr)
         return 1
     except Exception as exc:
         print(f"Failed: {type(exc).__name__} (is the database up?)", file=sys.stderr)
