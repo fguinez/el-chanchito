@@ -50,6 +50,9 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-finance}:${POSTGRES_PASSWORD:-finance}@postgres:5432/${POSTGRES_DB:-finance}
       # Internal-only control endpoint on the scraper service (see below).
       SCRAPER_CONTROL_URL: ${SCRAPER_CONTROL_URL:-http://scrapers:8080}
+      # 1 lets Credenciales store an IMAP host outside the known list (set it
+      # on the scrapers service too).
+      EMAIL_IMAP_ALLOW_CUSTOM_HOST: ${EMAIL_IMAP_ALLOW_CUSTOM_HOST:-}
       # Dashboard login. Without DASHBOARD_PASSWORD the app fails closed in
       # production and serves nothing (see USAGE.md > Deployment).
       DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:-}
@@ -87,8 +90,12 @@ services:
       EMAIL_IMAP_MAILBOX: ${EMAIL_IMAP_MAILBOX:-INBOX}
       # Private key that opens the credentials saved from the dashboard's
       # Credenciales page; created owner-only on first start, on the volume so
-      # it survives rebuilds. Without it they must be entered again.
-      CREDENTIALS_KEY_FILE: ${CREDENTIALS_KEY_FILE:-/data/credentials_key}
+      # it survives rebuilds. Without it they must be entered again. Fixed on
+      # purpose: a host CREDENTIALS_KEY_FILE (make dev's) must not leak in.
+      CREDENTIALS_KEY_FILE: /data/credentials_key
+      # 1 lets a stored IMAP host be a server outside the known list (set it
+      # on the web service too).
+      EMAIL_IMAP_ALLOW_CUSTOM_HOST: ${EMAIL_IMAP_ALLOW_CUSTOM_HOST:-}
       # Cached Fintual web session (see `make fintual-login`); persisted in the
       # scraper_state volume so 2FA isn't re-triggered on every container start.
       FINTUAL_SESSION_FILE: ${FINTUAL_SESSION_FILE:-/data/fintual_session.json}

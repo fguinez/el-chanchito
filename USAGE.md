@@ -222,7 +222,24 @@ No API ever returns a stored value, not even masked: to fix one, type it
 again. You can save a single field (e.g. only the clave) and delete one field
 or all of a card's; a deleted field falls back to the secret store. Saving or
 deleting applies at once (the scraper service rebuilds its scrapers without a
-restart; a scrape already running finishes with the old values).
+restart; a scrape already running finishes with the old values). A save that
+enables a scraper which was off also starts its first scrape right away,
+through the same refresh endpoint as the **Actualizar** buttons (so its
+cooldown and in-flight guards apply). Changing an institution's credentials
+clears its "sign-in failed" marker, and changing the account itself (the RUT
+or e-mail) also discards its cached session; Fintual then mails a sign-in code,
+read automatically when the e-mail card uses the same mailbox, or else enter it
+with `make fintual-login`. Fields marked optional (the Tarjeta Lider Bci clave)
+never decide whether a scraper runs.
+
+The e-mail card's three fields (IMAP server, user, app password) are always
+saved together: the password is sealed to that server and user, and the
+scraper service never sends a password to a server or user it was not saved
+with, not even the secret store's password. A stored IMAP server must also be
+a known provider (Gmail, Outlook, Yahoo, iCloud, Fastmail, Zoho, Proton) unless
+`EMAIL_IMAP_ALLOW_CUSTOM_HOST=1` is set for both the dashboard and the scraper
+service (export it in your shell for `make dev`; `.env` alone reaches only the
+scraper service). Deleting any of the three deletes all three.
 
 How it is protected:
 
@@ -243,14 +260,27 @@ How it is protected:
   out of shared backups, but do back it up somewhere private: without it every
   stored credential has to be entered again.
 - A key file that changes (deleted, or a different one, such as `make dev` and
-  `make up` each with their own) makes the rows sealed to the old one show
-  **Requiere reingreso**; the service log says how many. Restore the old key
-  file or enter them again. Key rotation is not automated yet.
+  `make up` each with their own against the same database) makes the rows
+  sealed to the old one show **Requiere reingreso**; the service log says how
+  many. Restore the old key file or enter them again. The service checks every
+  minute that the database still seals to its key and publishes it again if
+  not, logging a warning: two services with different key files on one
+  database keep replacing each other, so give them one. Compose always uses
+  `/data/credentials_key` on its volume, never your host's
+  `CREDENTIALS_KEY_FILE`. Key rotation is not automated yet.
+- The HPKE base mode used here does not authenticate who sealed a row, so
+  someone able to write the database could plant a value; they still cannot
+  read one. The e-mail binding above is what keeps a planted IMAP server from
+  receiving your password.
 
-Saving needs the scraper service to have started once (it publishes its key);
-otherwise the API answers `503` asking you to run `make dev`.
-`make fintual-login` and `make bci-lider-login` also use the credentials
-stored here.
+Saving needs the long-running scraper service (`make dev`, `make
+scrapers-start`, `make up`) to be up and to have published its key; otherwise
+the API answers `503` asking you to start it. If the database or its V048
+tables were not there when it started, it keeps retrying every minute (and
+whenever the page asks), so saving starts working once they are. One-off runs
+(`make scrapers-once`) and the login CLIs (`make fintual-login`,
+`make bci-lider-login`) use the stored credentials too, but only with the key
+the database currently seals to; they never create or publish a key.
 
 ### Secret store backends
 

@@ -1633,7 +1633,22 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
   each institution's fields (label, env var, identifier or secret, input
   hints, pattern) and is generated into the TS index, so the form, the API
   validation and the scraper overlay share one list. Identifiers (RUT,
-  e-mail) are sealed too.
+  e-mail) are sealed too. `required` is exactly what `build_scrapers()` gates
+  on (a test checks every spec). `max_length` is capped so 4 bytes per
+  character plus the HPKE overhead fit V048's 4096-byte CHECK.
+- **Bound secrets.** A secret with `binds` (the IMAP password binds the IMAP
+  host and user) is always saved together with the fields it binds (the API
+  refuses a partial group, and deleting one member deletes the group), and is
+  sealed with `bind:<sha256 of the bound values>` appended to its `info`. On
+  open, the scraper computes that digest from the effective host and user; if
+  the password does not open, or there is no stored password while the host or
+  user came from the store, `EMAIL_IMAP_PASSWORD` is left unset, the secret
+  store's value included. HPKE base mode does not authenticate the sender, so
+  a database writer can plant rows; this binding keeps a planted host from
+  receiving the real password. A stored host must also be in the registry's
+  `allowed_values` unless `EMAIL_IMAP_ALLOW_CUSTOM_HOST` is set (checked by
+  both the API and the scraper). Values with C0/C1 controls or unpaired
+  surrogates are refused on both sides.
 - **Overlay.** At startup (both modes) and on `POST /credentials/reload`, the
   service opens every row and writes the values over `os.environ` under the
   registry's env var names, the ones the scrapers already read. Stored values
@@ -1646,9 +1661,23 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
   lost its credentials loses its job, a new one gets one, and one whose
   credential env changed (compared by an in-memory keyed digest, never the
   values) gets a fresh instance through `job.modify(args=...)`. A run in
-  flight keeps its instance; `max_instances=1` still prevents overlap. A Tenpo
-  change resets the IMAP session. With the control port set, the scheduled
-  service stays up with no scrapers, waiting for credentials.
+  flight keeps its instance; `max_instances=1` still prevents overlap. A
+  change clears Fintual's `.login-failed` marker, an account change (RUT or
+  e-mail digest) also deletes the Fintual or BanChile cached session, and a
+  Tenpo change resets the IMAP session. The control server reads an immutable
+  snapshot of the scraper set, swapped on each rebuild. The dashboard runs a
+  scraper the save just enabled through `POST /refresh/{slug}`. With the
+  control port set, the scheduled service stays up with no scrapers, waiting
+  for credentials.
+- **Retries and key ownership.** A `credentials` scheduler job (every 60 s, on
+  a worker thread) publishes the key until it sticks, reads the rows until
+  they load (then rebuilds the scrapers), and republishes the key with a
+  warning if another process replaced it; `GET /credentials/status` also
+  kicks a background attempt while either is pending. Only the long-running
+  service creates or publishes a key: `main_once` and the login CLIs load an
+  existing key read-only and use the rows only when the published key id is
+  theirs. The dashboard seals only after the running service confirms it holds
+  the published key (503 otherwise, including when it is unreachable).
 - **Never a value out.** `GET /api/credentials` selects metadata columns only
   and merges the control server's `GET /credentials/status` (booleans per env
   var and the key id). No route, log line, error message or exception text
@@ -1662,7 +1691,8 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
 
 | Var | Service | Meaning |
 |---|---|---|
-| `CREDENTIALS_KEY_FILE` | scrapers | Private key file for the sealed credentials (default `apps/scrapers/.credentials_key`; Compose `/data/credentials_key`) |
+| `CREDENTIALS_KEY_FILE` | scrapers | Private key file for the sealed credentials on host runs (default `apps/scrapers/.credentials_key`); Compose hardcodes `/data/credentials_key` |
+| `EMAIL_IMAP_ALLOW_CUSTOM_HOST` | web, scrapers | `1` allows a stored IMAP host outside the known-provider list |
 
 ## Dashboard authentication
 
