@@ -18,7 +18,11 @@ Hard contract (each line is a way the session was or could be lost):
     gateway);
   * a redirect is never followed: it means the session is gone, the run
     stops with `MercadoPagoSessionError` and nothing is retried. A human
-    signs in again.
+    signs in again. In managed mode, a session lost before or at the
+    balance page also leaves a marker next to the profile
+    (`<profile>.needs-sign-in`), and later runs fail at once without opening
+    Chrome until a successful `make mercadopago-login` clears it (or the
+    file is deleted).
 
 Two modes (`scrape_account`):
 
@@ -133,6 +137,7 @@ from typing import Any
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
+from scrapers import sign_in_marker
 from scrapers.backends import real_chrome
 from scrapers.backends.percent import parse_percent
 
@@ -338,7 +343,18 @@ class MercadoPagoSessionError(RuntimeError):
 
     Never retried: a second attempt against a lost session is what gets an
     account flagged. Every message names `make mercadopago-login`.
+
+    `after_balance` is set when the balance page had already read, so the
+    loss came from the pots or ledger page. That one leaves no needs-sign-in
+    marker: the login checks the balance page only, so it could never clear
+    a marker those pages keep writing.
     """
+
+    after_balance: bool = False
+
+
+class MercadoPagoSignInPending(MercadoPagoSessionError):
+    """A managed run skipped because an earlier run found the session lost."""
 
 
 def _session_lost(reason: str) -> MercadoPagoSessionError:
@@ -980,17 +996,21 @@ def read_account(
     account = MercadoPagoAccount(balance=balance, wallet_yield=parse_wallet_yield(balance_props))
 
     try:
-        account.pots, skipped = parse_pots(_fetch_props(page, "pots", kill_switch=kill_switch))
-    except (MercadoPagoPageError, MercadoPagoFetchError) as exc:
-        logger.warning("MercadoPago: savings pots not read: %s", exc)
-        account.warnings.append(f"MercadoPago: savings pots not read ({exc})")
-    else:
-        if skipped:
-            account.warnings.append(f"MercadoPago: {skipped} savings pot(s) not read")
+        try:
+            account.pots, skipped = parse_pots(_fetch_props(page, "pots", kill_switch=kill_switch))
+        except (MercadoPagoPageError, MercadoPagoFetchError) as exc:
+            logger.warning("MercadoPago: savings pots not read: %s", exc)
+            account.warnings.append(f"MercadoPago: savings pots not read ({exc})")
         else:
-            account.pots_complete = True
+            if skipped:
+                account.warnings.append(f"MercadoPago: {skipped} savings pot(s) not read")
+            else:
+                account.pots_complete = True
 
-    _read_movements(page, account, movement_pages, deadline, kill_switch)
+        _read_movements(page, account, movement_pages, deadline, kill_switch)
+    except MercadoPagoSessionError as exc:
+        exc.after_balance = True
+        raise
     logger.info(
         "MercadoPago: balance read, %d pot(s), %d movement(s), %d warning(s)",
         len(account.pots),
@@ -1017,6 +1037,12 @@ def profile_dir() -> Path:
     """The dedicated Chrome profile that holds the signed-in session."""
     override = os.environ.get(CHROME_PROFILE_ENV)
     return Path(override).expanduser() if override else DEFAULT_PROFILE_DIR
+
+
+def sign_in_marker_path() -> Path:
+    """The marker a lost managed session leaves, next to the profile."""
+    profile = profile_dir()
+    return profile.with_name(profile.name + ".needs-sign-in")
 
 
 def on_portal(url: str) -> bool:
@@ -1311,6 +1337,18 @@ def _drive_managed(movement_pages: int) -> MercadoPagoAccount:
             "No signed-in Chrome profile for Mercado Pago yet. "
             "Run `make mercadopago-login` and sign in."
         )
+    marker = sign_in_marker_path()
+    since = sign_in_marker.marked_since(marker)
+    if since is not None:
+        # The session was lost earlier: opening Chrome again only re-learns
+        # that (and a lost session must never be retried).
+        # The hint leads: the dashboard shows only a run message's first 120
+        # characters, and the time is cut to the minute.
+        when = since[:16].replace("T", " ") + " UTC" if since else "an earlier run"
+        raise MercadoPagoSignInPending(
+            "Mercado Pago needs sign-in: run `make mercadopago-login` "
+            f"(skipped without opening Chrome; lost since {when})."
+        )
     port = cdp_port()
     proc = _launch(port, offscreen=True)
     # Nothing may raise between the launch and this `try`: the `finally` is
@@ -1329,6 +1367,10 @@ def _drive_managed(movement_pages: int) -> MercadoPagoAccount:
             no_tab=_MANAGED_NO_TAB,
             process=proc,
         )
+    except MercadoPagoSessionError as exc:
+        if not exc.after_balance:
+            sign_in_marker.mark(marker)
+        raise
     except MercadoPagoConnectionLostError:
         # The watchdog terminating Chrome is what cut the connection.
         if watchdog is None or not watchdog.finished.is_set():
@@ -1743,3 +1785,4 @@ def save_login_session(timeout_s: float = LOGIN_TIMEOUT_S) -> None:
             "Signed in, but after Chrome closed the session was not in the profile on "
             "disk, so later runs would be signed out. Re-run `make mercadopago-login`."
         )
+    sign_in_marker.clear(sign_in_marker_path())

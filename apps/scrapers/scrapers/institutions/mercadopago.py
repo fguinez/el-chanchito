@@ -115,6 +115,7 @@ from scrapers.backends.mercadopago_web import (
     DEFAULT_MOVEMENT_PAGES,
     MercadoPagoAccount,
     MercadoPagoSessionError,
+    MercadoPagoSignInPending,
     MercadoPagoWebError,
     Movement,
     save_login_session,
@@ -217,6 +218,11 @@ class MercadoPagoScraper(BaseScraper):
         except ImportError as exc:
             # A missing runtime dep is a broken deployment, not a clean run.
             logger.exception("Playwright not installed. Run: pip install -r requirements.txt")
+            self._error = exc
+            raise
+        except MercadoPagoSignInPending as exc:
+            # Expected on every run until someone signs in: no traceback.
+            logger.warning("%s", exc)
             self._error = exc
             raise
         except Exception as exc:
