@@ -5,7 +5,9 @@ account. When the identifier (RUT, e-mail) changes, from the dashboard or in
 the env across restarts, the old session must not be reused, and a run still
 holding the old one may write it back after it was deleted. So every save
 writes `<session>.account` next to it (0600) with a salted SHA-256 of the
-identifier, never the identifier itself, and every load checks it.
+identifier, never the identifier itself, and every load checks it. The
+identifier is normalized first (`normalize`), so a RUT typed with or without
+dots, or an e-mail in another case, is still the same account.
 
 A session with no marker yet (cached before markers existed) is adopted for
 the current account rather than discarded, so upgrading does not force a new
@@ -18,6 +20,7 @@ import hashlib
 import hmac
 import logging
 import os
+import re
 import secrets
 import tempfile
 from pathlib import Path
@@ -31,9 +34,38 @@ def marker_path(session: Path) -> Path:
     return session.with_name(session.name + ".account")
 
 
-def _digest(salt: bytes, identifier: str) -> str:
-    encoded = identifier.strip().encode("utf-8")
+# A RUT as people type it: digits with optional dots or spaces, an optional
+# hyphen, then the check digit (0-9 or K).
+_RUT_RE = re.compile(r"^[\d.\s]+-?\s*[\dkK]$")
+
+
+def normalize(identifier: str) -> str:
+    """The canonical form of an account identifier: an e-mail stripped and
+    lowercased, a RUT as `<digits>-<check digit>` with an uppercase K (no dots
+    or spaces, leading zeros dropped), anything else stripped."""
+    value = identifier.strip()
+    if "@" in value:
+        return value.lower()
+    if _RUT_RE.match(value):
+        compact = re.sub(r"[.\s-]", "", value).upper()
+        body, check = compact[:-1].lstrip("0"), compact[-1]
+        if body:
+            return f"{body}-{check}"
+    return value
+
+
+def _hash(salt: bytes, value: str) -> str:
+    encoded = value.encode("utf-8")
     return hashlib.sha256(_LABEL + salt + len(encoded).to_bytes(4, "big") + encoded).hexdigest()
+
+
+def _digest(salt: bytes, identifier: str) -> str:
+    return _hash(salt, normalize(identifier))
+
+
+def _legacy_digest(salt: bytes, identifier: str) -> str:
+    """The digest markers had before identifiers were normalized."""
+    return _hash(salt, identifier.strip())
 
 
 def write_account(session: Path, identifier: str) -> None:
@@ -65,7 +97,13 @@ def belongs_to(session: Path, identifier: str) -> bool:
         return True
     except (OSError, ValueError):
         return False
-    return hmac.compare_digest(digest, _digest(salt, identifier))
+    if hmac.compare_digest(digest, _digest(salt, identifier)):
+        return True
+    if hmac.compare_digest(digest, _legacy_digest(salt, identifier)):
+        # Written before normalization: same account, so move it to the new form.
+        write_account(session, identifier)
+        return True
+    return False
 
 
 def discard(session: Path) -> None:

@@ -1696,7 +1696,9 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
   change clears Fintual's `.login-failed` marker and a Tenpo change resets the
   IMAP session. Cached sessions (Fintual cookies, BanChile storage state) carry
   a `<session>.account` marker (0600, a salted SHA-256 of the RUT or e-mail,
-  never the identifier), written on every save and checked on every load: a
+  never the identifier; normalized first, so `11.111.111-1` and `11111111-1`
+  are one account, and a marker from before normalization still matches and
+  is rewritten), written on every save and checked on every load: a
   session of another account is discarded, whether the change came from the
   dashboard or the env, and even when a run on the old credentials writes its
   session back afterwards. A session with no marker yet is adopted. `POST

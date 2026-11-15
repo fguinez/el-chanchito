@@ -45,6 +45,63 @@ def test_a_session_without_a_marker_is_adopted(tmp_path):
     assert not session_account.belongs_to(path, B)
 
 
+@pytest.mark.parametrize(
+    ("raw", "canonical"),
+    [
+        ("11.111.111-1", "11111111-1"),
+        ("11111111-1", "11111111-1"),
+        (" 11 111 111 - 1 ", "11111111-1"),
+        ("111111111", "11111111-1"),
+        ("11.111.111-k", "11111111-K"),
+        ("011.111.111-1", "11111111-1"),
+        (" User@Example.COM ", "user@example.com"),
+        ("not-a-rut", "not-a-rut"),
+    ],
+)
+def test_normalize(raw, canonical):
+    assert session_account.normalize(raw) == canonical
+
+
+def test_a_rut_with_or_without_dots_is_one_account(tmp_path):
+    path = _session(tmp_path)
+    session_account.write_account(path, "11.111.111-k")
+    assert session_account.belongs_to(path, "11111111-K")
+    assert session_account.belongs_to(path, "11111111k")
+    assert not session_account.belongs_to(path, "22.222.222-2")
+
+
+def test_an_email_in_another_case_is_one_account(tmp_path):
+    path = _session(tmp_path)
+    session_account.write_account(path, A)
+    assert session_account.belongs_to(path, " USER@example.com")
+
+
+def _legacy_marker(path, identifier):
+    salt = bytes(16)
+    digest = session_account._legacy_digest(salt, identifier)
+    session_account.marker_path(path).write_text(f"{salt.hex()}:{digest}\n")
+
+
+def test_a_legacy_marker_still_matches_and_is_rewritten(tmp_path):
+    path = _session(tmp_path)
+    _legacy_marker(path, "11.111.111-1")
+    marker = session_account.marker_path(path)
+    before = marker.read_text()
+    assert session_account.belongs_to(path, "11.111.111-1")
+    assert marker.read_text() != before
+    # Rewritten in the normalized form: any spelling of the RUT matches now.
+    assert session_account.belongs_to(path, "11111111-1")
+
+
+def test_a_legacy_marker_of_another_account_does_not_match(tmp_path):
+    path = _session(tmp_path)
+    _legacy_marker(path, "11.111.111-1")
+    marker = session_account.marker_path(path)
+    before = marker.read_text()
+    assert not session_account.belongs_to(path, "22.222.222-2")
+    assert marker.read_text() == before
+
+
 def test_a_corrupt_marker_does_not_match(tmp_path):
     path = _session(tmp_path)
     session_account.marker_path(path).write_text("garbage")
