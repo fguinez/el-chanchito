@@ -438,7 +438,11 @@ LIDER_BCI_CDP_URL=http://localhost:9222   # add to .env; scrapes then drive this
 ```
 
 In reuse mode scrapes drive that Chrome (reusing the signed-in tab or re-logging-in
-via autofill) and report `Could not reach the Chrome debug port…` when it isn't up.
+via autofill) and report `Could not reach the Chrome debug port…` (an `error` run)
+when it isn't up. When Chrome is up but the sign-in can't complete (a Cloudflare
+check nobody ticked, or a wrong clave), the run shows `inicia sesión` and asks for
+`make bci-lider-login` and `LIDER_BCI_CDP_URL`, in managed mode too: a managed
+run can't share the debug port with that Chrome.
 (Override the debug port with `LIDER_BCI_CDP_PORT`.)
 
 Each card movement is marked billed or not by the period view it was read in
