@@ -34,7 +34,6 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from product_model import CheckingMetrics
-
 from scrapers.base import (
     BaseScraper,
     ProductScrapeResult,

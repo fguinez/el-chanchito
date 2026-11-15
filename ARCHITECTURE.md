@@ -880,7 +880,25 @@ from the balance page's "... al X% anual" subtitle) and its gain of the last
 12 months (`profit_12m`), each pot the savings hub's shared rate while the hub
 flags the pots as invested. Per-pot gain is not read: the pot page computes it
 in the browser, and its server-side `investment.profit` stays 0. A missing or unreadable rate or gain
-is left empty and never fails the run. The transactions leg
+is left empty and never fails the run. When the pots page
+was read in full (success status, no pot skipped), it also declares the pots
+as a complete listing (`VanishedProductScope`): once every product of the leg
+is written, `run_scraper` calls `db/writer.py::retire_vanished_products`.
+An active stored pot the listing lacks is first only stamped
+`vanished_pending_since` (one missed listing may be a glitch); the next
+complete listing that still lacks it deactivates it, writes a zero-balance
+snapshot (history kept, net worth stops counting it) and swaps the pending
+stamp for `retired_by_scraper` / `retired_by_scraper_at`. The counts join
+the run's `scraper_runs.error_message` as `retired:` / `pending:` notes,
+which never change its status (a clean run stays `success`; the dashboard
+expands any finished run with a message). `upsert_product` locks the row,
+clears the stamps whenever it sees the pot (frozen ones included) and
+reactivates only a pot carrying `retired_by_scraper`; one the user
+deactivated (no stamp) stays frozen. The product PATCH in
+`apps/web/src/lib/management.ts` drops all three keys whenever it changes
+`isActive`, so a hand deactivation is never undone by a scrape and a hand
+reactivation starts clean. A failed or partial pots read declares nothing,
+so it neither advances nor clears a pending stamp. The transactions leg
 emits the ledger rows on the wallet (the newest
 `MERCADOPAGO_MOVEMENT_PAGES` pages of 100, default 1; 0 reads every page,
 capped at 50), with the ledger's sign (negative is money out) and its UTC
@@ -895,13 +913,17 @@ emitted).
 
 Every Playwright call that takes a timeout gets one (the connection and each
 in-page fetch) and the reads share a time budget. Copying a fetch's result
-out of the page takes none, so a watchdog terminates the managed Chrome if a
-drive overruns, and in either mode the run gives up on a drive that does not
-finish in time. A managed Chrome orphaned by a killed service is reclaimed
-on the next run through its pidfile (see above). The e-mail leg this
-replaced read transactions only, heuristically, and also captured purchases
-where Mercado Pago was just the gateway; the rows it stored are not removed
-(see "Deduplication").
+out of the page takes none, so a watchdog ends an overrunning drive (managed
+mode terminates its Chrome; reuse mode kills the Playwright driver and leaves
+the user's Chrome running), and in either mode the run gives up on a drive
+that does not finish in time. A call that fails because the tab or its
+connection is gone (a crashed driver, a closed tab or Chrome) stops the read
+there rather than carrying on to the next page; Playwright is held at 1.64 or
+later because older sync calls spin forever on a dead driver. A managed Chrome
+orphaned by a killed service is reclaimed on the next run through its pidfile
+(see above). The e-mail leg this replaced read transactions only,
+heuristically, and also captured purchases where Mercado Pago was just the
+gateway; the rows it stored are not removed (see "Deduplication").
 
 Verified live, in managed mode with an off-screen Chrome on a real signed-in
 profile: a whole run end to end (launch, reattaching until the tab shows,
@@ -1696,10 +1718,13 @@ disposable one: unset, the DB tests skip; set but unreachable, they fail.
 `POSTGRES_TEST_PORT`).
 
 CI (`.github/workflows/ci.yml`, GitHub Actions) runs on every pull request and
-push to `main` in two jobs: `web` (`make typecheck`, `make lint`,
-`make test-ts`) and `python` (`make install-py`, then `make test-py` against a
-`postgres:16-alpine` service, so the DB tests run rather than skip). Neither
-downloads a Playwright browser; no test launches one.
+push to `main`. The lint and test jobs: `web` (`make typecheck`,
+`make lint-web`, `make test-ts`), `python-lint` (`ruff check` and
+`ruff format --check` over every Python tree, configured by the root
+`ruff.toml` and pinned in `apps/scrapers/requirements-dev.txt`) and `python`
+(`make install-py`, then `make test-py` against a `postgres:16-alpine` service,
+so the DB tests run rather than skip). None downloads a Playwright browser; no
+test launches one.
 
 ## Tech Stack
 

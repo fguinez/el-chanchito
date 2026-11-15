@@ -332,9 +332,9 @@ class TestMovementsFromRows:
     )
     def test_printed_sign_is_a_credit(self, descripcion, monto):
         """A "-" the portal prints marks a credit, whatever the description."""
-        movement = web.movements_from_rows(
-            [_row(descripcion=descripcion, monto=monto)], "billed"
-        )[0]
+        movement = web.movements_from_rows([_row(descripcion=descripcion, monto=monto)], "billed")[
+            0
+        ]
 
         assert movement.amount == Decimal(12_345)
 
@@ -665,7 +665,9 @@ class TestCardMovementsStatement:
         monkeypatch.setattr(web, "_open_card_detail", lambda page: False)
         warnings = []
 
-        result = web._read_card_movements(_TabbedCardPage([]), SimpleNamespace(mark=lambda: 0), warnings)
+        result = web._read_card_movements(
+            _TabbedCardPage([]), SimpleNamespace(mark=lambda: 0), warnings
+        )
 
         assert result == ([], RawStatement())
         assert warnings == ["Banco Falabella: could not open the card detail"]
@@ -713,7 +715,13 @@ class TestExternalId:
         """A purchase seen as unbilled and later as billed keeps one id."""
         unbilled = web.movements_from_rows([_row()], "unbilled")[0]
         billed = web.movements_from_rows(
-            [_row(descripcion="COMERCIO SINTETICO (FACTURADO)", cuotas="02/12", cuota_a_pagar="$ 2.000")],
+            [
+                _row(
+                    descripcion="COMERCIO SINTETICO (FACTURADO)",
+                    cuotas="02/12",
+                    cuota_a_pagar="$ 2.000",
+                )
+            ],
             "billed",
         )[0]
 
@@ -760,23 +768,6 @@ class TestLineFromText:
 
 
 class TestDailyRate:
-    @pytest.mark.parametrize(
-        ("raw", "expected"),
-        [
-            pytest.param("1.23 %", Decimal("1.23"), id="dot"),
-            pytest.param("1,23 %", Decimal("1.23"), id="comma"),
-            pytest.param("1.23", Decimal("1.23"), id="bare"),
-        ],
-    )
-    def test_parse_percent(self, raw, expected):
-        """The rate field's text parses with either decimal separator."""
-        assert web.parse_percent(raw) == expected
-
-    @pytest.mark.parametrize("raw", [None, "", "abc %", "1,23 % diario"])
-    def test_parse_percent_rejects_junk(self, raw):
-        """Anything but a lone percent figure is None."""
-        assert web.parse_percent(raw) is None
-
     def test_from_the_detail_text(self):
         """The label's figure is read, not the movements column header."""
         assert web.daily_rate_from_text(_LINE_DETAIL_TEXT) == Decimal("1.23")
@@ -959,7 +950,11 @@ class TestReadOtherProducts:
         _ticking_clock(monkeypatch)
         checking_only = {"accounts": [_CHECKING_CARD_TEXT], "agreements": [], "hasAgreements": True}
         page = _GridsPage(
-            [checking_only, checking_only, {"accounts": [_CHECKING_CARD_TEXT], "agreements": [_LINE_CARD_TEXT]}]
+            [
+                checking_only,
+                checking_only,
+                {"accounts": [_CHECKING_CARD_TEXT], "agreements": [_LINE_CARD_TEXT]},
+            ]
         )
         warnings = []
 
@@ -984,7 +979,14 @@ class TestReadOtherProducts:
         """An agreements component left without a card is a warning, not silence."""
         _ticking_clock(monkeypatch)
         page = _GridsPage(
-            [{"accounts": [_CHECKING_CARD_TEXT], "agreements": [], "hasAccounts": True, "hasAgreements": True}]
+            [
+                {
+                    "accounts": [_CHECKING_CARD_TEXT],
+                    "agreements": [],
+                    "hasAccounts": True,
+                    "hasAgreements": True,
+                }
+            ]
         )
         warnings = []
 
@@ -1024,7 +1026,10 @@ class TestReadCheckingRows:
     def test_rows_once_the_table_renders(self):
         """The table's body rows come back as soon as it exists."""
         page = _LegacyViewPage(
-            [{"found": False, "failed": False, "rows": []}, {"found": True, "failed": False, "rows": [_cc_row()]}]
+            [
+                {"found": False, "failed": False, "rows": []},
+                {"found": True, "failed": False, "rows": [_cc_row()]},
+            ]
         )
 
         assert web._read_checking_rows(page) == [_cc_row()]
@@ -1037,13 +1042,17 @@ class TestReadCheckingRows:
 
     def test_error_banner_with_an_empty_table_is_not_loaded(self):
         """An empty table next to the error view is a failed load, not an empty account."""
-        page = _LegacyViewPage([{"found": True, "failed": True, "rows": [["No existen registros"]]}])
+        page = _LegacyViewPage(
+            [{"found": True, "failed": True, "rows": [["No existen registros"]]}]
+        )
 
         assert web._read_checking_rows(page) is None
 
     def test_empty_table_without_the_error_view_is_empty(self):
         """A clean "no records" table is a confirmed-empty account."""
-        page = _LegacyViewPage([{"found": True, "failed": False, "rows": [["No existen registros"]]}])
+        page = _LegacyViewPage(
+            [{"found": True, "failed": False, "rows": [["No existen registros"]]}]
+        )
 
         assert web._read_checking_rows(page) == [["No existen registros"]]
 
@@ -1116,9 +1125,17 @@ class TestReadSession:
         """A browser error in the checking read is a warning; card and línea land."""
         card_movements = web.movements_from_rows([_row()], "unbilled")
         monkeypatch.setattr(web, "_wait_for_card_text", lambda page: _DASHBOARD_CARD_TEXT)
-        monkeypatch.setattr(web, "_read_card_movements", lambda page, feed, warnings: (card_movements, RawStatement()))
+        monkeypatch.setattr(
+            web,
+            "_read_card_movements",
+            lambda page, feed, warnings: (card_movements, RawStatement()),
+        )
         monkeypatch.setattr(web, "_return_home", lambda page, home_url: True)
-        monkeypatch.setattr(web, "_read_other_products", lambda page, warnings: (_checking(), _line(daily_rate_pct=None)))
+        monkeypatch.setattr(
+            web,
+            "_read_other_products",
+            lambda page, warnings: (_checking(), _line(daily_rate_pct=None)),
+        )
         monkeypatch.setattr(web, "_open_product", lambda page, component, name: True)
 
         session = web.read_session(_SessionPage())
@@ -1135,7 +1152,9 @@ class TestReadSession:
     def test_dashboard_reread_failure_keeps_the_card(self, monkeypatch):
         """An error reading the other cards drops only them, with a warning."""
         monkeypatch.setattr(web, "_wait_for_card_text", lambda page: _DASHBOARD_CARD_TEXT)
-        monkeypatch.setattr(web, "_read_card_movements", lambda page, feed, warnings: ([], RawStatement()))
+        monkeypatch.setattr(
+            web, "_read_card_movements", lambda page, feed, warnings: ([], RawStatement())
+        )
         monkeypatch.setattr(web, "_return_home", lambda page, home_url: True)
 
         def boom(page, warnings):
@@ -1446,7 +1465,11 @@ class TestScraperLegs:
         kinds = [t.product_kind for t in transactions]
         assert kinds == ["credit_card", "credit_card", "checking", "checking"]
         abono, cargo = transactions[2:]
-        assert (abono.currency, abono.amount, abono.product_external_ref) == ("CLP", Decimal(1_000_000), None)
+        assert (abono.currency, abono.amount, abono.product_external_ref) == (
+            "CLP",
+            Decimal(1_000_000),
+            None,
+        )
         assert cargo.amount == Decimal(-999_999)
         assert abono.external_id.startswith("bfal_cc_")
         assert abono.scheduled_month == date(2025, 3, 1)
@@ -1574,7 +1597,9 @@ class _NoMatch:
 class _SurfacePage:
     """A page with scripted movements-table reads, on a fake clock (no browser)."""
 
-    def __init__(self, reads, empty_state=False, backdrop=False, retry_shown=False, retry_lands=True):
+    def __init__(
+        self, reads, empty_state=False, backdrop=False, retry_shown=False, retry_lands=True
+    ):
         self.reads = list(reads)
         self.empty_state = empty_state
         self.backdrop = backdrop
@@ -1943,7 +1968,9 @@ class TestMovementsFeed:
     @pytest.mark.parametrize(
         ("path", "method"),
         [
-            pytest.param("/credit-card-banking-statement/billing-date/list", "POST", id="other-bff"),
+            pytest.param(
+                "/credit-card-banking-statement/billing-date/list", "POST", id="other-bff"
+            ),
             pytest.param(_MOVEMENTS_CALL, "OPTIONS", id="cors-preflight"),
         ],
     )

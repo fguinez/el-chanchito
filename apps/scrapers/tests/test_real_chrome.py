@@ -1,8 +1,9 @@
 """Tests for the generic real-Chrome helpers (`backends/real_chrome.py`).
 
-No Chrome and no Playwright is ever started: `subprocess.Popen`, the signals
-and the CDP connection are replaced by fakes. Every path, port and URL is
-synthetic.
+No Chrome is ever started: `subprocess.Popen`, the signals and the CDP
+connection are replaced by fakes. One test starts the bare Playwright driver
+(no browser) to check where the kill switch finds it. Every path, port and
+URL is synthetic.
 """
 
 import json
@@ -11,6 +12,7 @@ import signal
 import subprocess
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -163,7 +165,9 @@ class TestChromeDiscovery:
             ("linux", False, "apt install chromium"),
         ],
     )
-    def test_not_found_names_the_override_and_an_os_hint(self, monkeypatch, platform, windows, hint):
+    def test_not_found_names_the_override_and_an_os_hint(
+        self, monkeypatch, platform, windows, hint
+    ):
         """The error says how to install Chrome and which env var overrides it."""
         self._isolate(monkeypatch, platform, windows=windows)
 
@@ -200,7 +204,7 @@ class TestLaunch:
 
         proc = self._launch()
 
-        (args, kwargs), = calls
+        ((args, _),) = calls
         assert proc == "proc"
         assert args[0] == "/synthetic/chrome"
         assert "--remote-debugging-port=9333" in args
@@ -215,7 +219,7 @@ class TestLaunch:
 
         self._launch()
 
-        (_, kwargs), = calls
+        ((_, kwargs),) = calls
         assert kwargs["start_new_session"] is True
         assert "creationflags" not in kwargs
 
@@ -226,7 +230,7 @@ class TestLaunch:
 
         self._launch(offscreen=True)
 
-        (args, kwargs), = calls
+        ((args, kwargs),) = calls
         assert kwargs["creationflags"] == getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200)
         assert "start_new_session" not in kwargs
         assert "--window-position=-32000,-32000" in args
@@ -236,8 +240,13 @@ class TestLaunchFailure:
     @pytest.mark.parametrize(
         "error",
         [
-            pytest.param(FileNotFoundError(2, "No such file", "/synthetic/secret/chrome"), id="missing"),
-            pytest.param(PermissionError(13, "Permission denied", "/synthetic/secret/chrome"), id="not-executable"),
+            pytest.param(
+                FileNotFoundError(2, "No such file", "/synthetic/secret/chrome"), id="missing"
+            ),
+            pytest.param(
+                PermissionError(13, "Permission denied", "/synthetic/secret/chrome"),
+                id="not-executable",
+            ),
         ],
     )
     def test_a_binary_that_cannot_start_raises_without_its_path(self, monkeypatch, error):
@@ -408,6 +417,117 @@ class TestFindPage:
 
         assert real_chrome.find_page(browser, lambda url: url.startswith("https://")) is None
 
+
+class _DriverProc:
+    def __init__(self, error=None):
+        self.kills = 0
+        self.error = error
+
+    def kill(self):
+        self.kills += 1
+        if self.error is not None:
+            raise self.error
+
+
+def _manager(proc):
+    """A started `sync_playwright()` manager, as far as the switch looks into it."""
+    transport = SimpleNamespace(_proc=proc)
+    return SimpleNamespace(_connection=SimpleNamespace(_transport=transport))
+
+
+class TestDriverKillSwitch:
+    def test_a_kill_with_nothing_attached_only_fires(self):
+        switch = real_chrome.DriverKillSwitch()
+
+        switch.kill()
+
+        assert switch.fired is True
+
+    def test_a_kill_after_attach_kills_the_driver_process(self):
+        switch = real_chrome.DriverKillSwitch()
+        proc = _DriverProc()
+        switch.attach(_manager(proc))
+
+        switch.kill()
+
+        assert proc.kills == 1
+
+    def test_a_detached_driver_is_not_killed(self):
+        """Once its connection has ended the process may be reaped and its pid reused."""
+        switch = real_chrome.DriverKillSwitch()
+        proc = _DriverProc()
+        switch.attach(_manager(proc))
+        switch.detach()
+
+        switch.kill()
+
+        assert (proc.kills, switch.fired) == (0, True)
+
+    def test_an_attach_after_the_kill_is_refused(self):
+        switch = real_chrome.DriverKillSwitch()
+        switch.kill()
+        proc = _DriverProc()
+
+        with pytest.raises(real_chrome.DriverKilledError):
+            switch.attach(_manager(proc))
+
+        switch.kill()
+        assert proc.kills == 0
+
+    def test_a_kill_that_fails_never_raises(self):
+        """A driver that already exited is not an error for the watchdog thread."""
+        switch = real_chrome.DriverKillSwitch()
+        switch.attach(_manager(_DriverProc(ProcessLookupError())))
+
+        switch.kill()
+
+        assert switch.fired is True
+
+    def test_a_manager_without_the_expected_attributes_disarms_the_switch(self):
+        """A Playwright upgrade that moves the process must not fail the drive."""
+        switch = real_chrome.DriverKillSwitch()
+        switch.attach(SimpleNamespace())
+
+        switch.kill()
+
+        assert switch.fired is True
+
+    def test_the_installed_playwright_exposes_its_driver_process(self):
+        """The switch reads private attributes; an upgrade that moves them would
+        silently disarm the reuse watchdog, so check them on the real driver."""
+        from playwright.sync_api import sync_playwright
+
+        manager = sync_playwright()
+        manager.start()
+        try:
+            proc = real_chrome._driver_process(manager)
+            assert proc is not None
+            assert callable(getattr(proc, "kill", None))
+        finally:
+            manager.__exit__(None, None, None)
+
+    def test_the_installed_playwright_stops_cleanly_after_a_kill(self):
+        """Leaving `with sync_playwright()` once the switch killed its driver
+        must return, or the reuse drive's worker thread would never end."""
+        from playwright.sync_api import sync_playwright
+
+        switch = real_chrome.DriverKillSwitch()
+        stopped = threading.Event()
+
+        def drive():
+            manager = sync_playwright()
+            with manager:
+                switch.attach(manager)
+                switch.kill()
+            stopped.set()
+
+        worker = threading.Thread(target=drive, daemon=True)
+        worker.start()
+        worker.join(timeout=30)
+
+        assert stopped.is_set()
+
+
 class TestTargetSummary:
     """Chrome's own `/json/list`, faked: no request is ever made."""
 
@@ -427,13 +547,19 @@ class TestTargetSummary:
         ("cdp_url", "endpoint"),
         [
             pytest.param("http://127.0.0.1:9333", "http://127.0.0.1:9333/json/list", id="http"),
-            pytest.param("http://localhost:9333/", "http://localhost:9333/json/list", id="trailing-slash"),
+            pytest.param(
+                "http://localhost:9333/", "http://localhost:9333/json/list", id="trailing-slash"
+            ),
             pytest.param(
                 "ws://127.0.0.1:9333/devtools/browser/synthetic-id",
                 "http://127.0.0.1:9333/json/list",
                 id="websocket",
             ),
-            pytest.param("wss://chrome.example.invalid/x", "https://chrome.example.invalid/json/list", id="wss"),
+            pytest.param(
+                "wss://chrome.example.invalid/x",
+                "https://chrome.example.invalid/json/list",
+                id="wss",
+            ),
         ],
     )
     def test_asks_the_debug_port_the_cdp_url_names(self, monkeypatch, cdp_url, endpoint):
@@ -513,7 +639,11 @@ class TestTargetSummary:
         self._serve(
             monkeypatch,
             [
-                {"type": "page", "url": "https://portal.example.invalid/?id=synthetic", "title": "Persona"},
+                {
+                    "type": "page",
+                    "url": "https://portal.example.invalid/?id=synthetic",
+                    "title": "Persona",
+                },
                 {"type": "Persona Sintética <b>", "url": "https://portal.example.invalid/"},
                 "synthetic",
                 {"url": "https://portal.example.invalid/"},
@@ -680,9 +810,7 @@ class TestTerminate:
         monkeypatch.delattr(real_chrome.os, "getpgid", raising=False)
         monkeypatch.delattr(real_chrome.signal, "SIGKILL", raising=False)
         runs = []
-        monkeypatch.setattr(
-            real_chrome.subprocess, "run", lambda args, **kwargs: runs.append(args)
-        )
+        monkeypatch.setattr(real_chrome.subprocess, "run", lambda args, **kwargs: runs.append(args))
         proc = _FakeChrome(exits_after=1)
 
         real_chrome.terminate_chrome(proc)
@@ -694,9 +822,7 @@ class TestTerminate:
         """taskkill /F follows when the polite one did not end Chrome."""
         monkeypatch.setattr(real_chrome, "is_windows", lambda: True)
         runs = []
-        monkeypatch.setattr(
-            real_chrome.subprocess, "run", lambda args, **kwargs: runs.append(args)
-        )
+        monkeypatch.setattr(real_chrome.subprocess, "run", lambda args, **kwargs: runs.append(args))
         proc = _FakeChrome(exits_after=2)
 
         real_chrome.terminate_chrome(proc)
@@ -1031,7 +1157,9 @@ class TestOrphanReclaim:
     @pytest.mark.parametrize(
         "cmdline",
         [
-            pytest.param(lambda profile: ["/usr/bin/synthetic-editor", "notes.txt"], id="another-program"),
+            pytest.param(
+                lambda profile: ["/usr/bin/synthetic-editor", "notes.txt"], id="another-program"
+            ),
             pytest.param(lambda profile: _argv(port=9333, profile=profile), id="other-port"),
             pytest.param(lambda profile: _argv(profile=f"{profile}-2"), id="other-profile"),
             pytest.param(lambda profile: _argv(profile=profile)[:2], id="no-profile-arg"),
@@ -1349,11 +1477,27 @@ class TestCmdlineReading:
     @pytest.mark.parametrize(
         ("line", "expected"),
         [
-            pytest.param("/synthetic/chrome --user-data-dir=/synthetic/My Profile --x", True, id="space-in-path"),
-            pytest.param("/synthetic/chrome --user-data-dir=/synthetic/My Profile", True, id="last-arg"),
-            pytest.param("/synthetic/chrome --user-data-dir=/synthetic/My Profile-2", False, id="prefix"),
-            pytest.param("/synthetic/chrome --user-data-dir=/synthetic/My Profile 2 --x", False, id="longer-path-with-space"),
-            pytest.param("/synthetic/chrome --user-data-dir=/synthetic/My Profile-2 --user-data-dir=/synthetic/My Profile", True, id="second-occurrence"),
+            pytest.param(
+                "/synthetic/chrome --user-data-dir=/synthetic/My Profile --x",
+                True,
+                id="space-in-path",
+            ),
+            pytest.param(
+                "/synthetic/chrome --user-data-dir=/synthetic/My Profile", True, id="last-arg"
+            ),
+            pytest.param(
+                "/synthetic/chrome --user-data-dir=/synthetic/My Profile-2", False, id="prefix"
+            ),
+            pytest.param(
+                "/synthetic/chrome --user-data-dir=/synthetic/My Profile 2 --x",
+                False,
+                id="longer-path-with-space",
+            ),
+            pytest.param(
+                "/synthetic/chrome --user-data-dir=/synthetic/My Profile-2 --user-data-dir=/synthetic/My Profile",
+                True,
+                id="second-occurrence",
+            ),
         ],
     )
     def test_a_ps_line_matches_arguments_between_spaces(self, line, expected):
@@ -1364,7 +1508,9 @@ class TestCmdlineReading:
         ("stat", "expected"),
         [
             pytest.param("4242 (chrome) S 1 4242 4242 0", (1, "S"), id="sleeping"),
-            pytest.param("4242 (Chrome Helper) Z 5151 4242 4242 0", (5151, "Z"), id="zombie-spaces"),
+            pytest.param(
+                "4242 (Chrome Helper) Z 5151 4242 4242 0", (5151, "Z"), id="zombie-spaces"
+            ),
             pytest.param("4242 (a) b) R 77 4242 4242 0", (77, "R"), id="paren-in-name"),
         ],
     )
@@ -1413,13 +1559,15 @@ class TestCmdlineReading:
 
         def fake_run(args, **kwargs):
             calls.append((args, kwargs))
-            return subprocess.CompletedProcess(args, 0, stdout=" /synthetic/chrome --x\n", stderr="")
+            return subprocess.CompletedProcess(
+                args, 0, stdout=" /synthetic/chrome --x\n", stderr=""
+            )
 
         monkeypatch.setattr(real_chrome.subprocess, "run", fake_run)
 
         line = real_chrome.read_ps_command(4242)
 
-        (args, kwargs), = calls
+        ((args, kwargs),) = calls
         assert line == "/synthetic/chrome --x"
         assert args == ["ps", "-ww", "-o", "command=", "-p", "4242"]
         assert kwargs["timeout"] == real_chrome._PS_TIMEOUT_S

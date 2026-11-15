@@ -1,5 +1,5 @@
 .PHONY: help install install-deps install-py dev dev-web build db-up db-down db-migrate db-reset db-shell \
-       scrapers-once scrapers-start scrapers-test fintual-login bci-lider-login mercadopago-login up down logs clean typecheck lint \
+       scrapers-once scrapers-start scrapers-test fintual-login bci-lider-login mercadopago-login up down logs clean typecheck lint lint-web lint-py format-py \
        test test-ts test-py test-db test-db-up test-db-down product-model-generate
 
 # ─── Help ────────────────────────────────────────────────────────────────────
@@ -94,8 +94,20 @@ build: ## Build the dashboard for production
 typecheck: ## Run TypeScript type checking
 	pnpm --filter @chanchito/web exec tsc --noEmit
 
-lint: ## Run ESLint
+lint: lint-web lint-py ## Run every linter (ESLint + Ruff)
+
+lint-web: ## Run ESLint on the dashboard
 	pnpm --filter @chanchito/web lint
+
+RUFF = $(if $(wildcard .venv/bin/ruff),.venv/bin/ruff,ruff)
+
+lint-py: ## Run Ruff (lint + format check) on all Python code
+	$(RUFF) check .
+	$(RUFF) format --check .
+
+format-py: ## Apply Ruff fixes and format all Python code
+	$(RUFF) check --fix .
+	$(RUFF) format .
 
 test: test-ts test-py ## Run all tests (TypeScript + Python)
 

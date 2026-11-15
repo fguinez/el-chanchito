@@ -53,9 +53,17 @@ consumes it, re-raising a cached error without driving again):
   pot's `profit` stays empty. A rate or gain the
   page does not carry readably is left empty; it never fails the run. Pots
   have no movements on the web, so no `savings` transaction is ever emitted
-  (one without a ref would create a roll-up product). A pot that disappears
-  from the page keeps its last balance: an absent pot cannot be told from a
-  failed read.
+  (one without a ref would create a roll-up product). When the pots page was
+  read in full (success status, no pot skipped; see
+  `MercadoPagoAccount.pots_complete`), the leg also declares the pots as a
+  complete listing. A stored pot the first such listing lacks is only flagged
+  (`vanished_pending_since`); the second complete listing in a row that still
+  lacks it retires it (closed at the source): inactive, with a zero-balance
+  snapshot, its history kept, and a `retired:` note in the run's message. A
+  failed or partial pots read neither flags, retires nor clears anything; a
+  flagged or retired pot that shows up again is cleared and reactivated.
+  Toggling a pot's active flag under Instituciones drops both markers, so a
+  hand deactivation sticks.
 
 If the pots page or a ledger page fails after the balance was read, or a pot
 or a ledger row cannot be read, the run ends `partial` with a warning instead
@@ -90,7 +98,11 @@ Not verified live:
 - how long a sign-in lasts;
 - which ledger rows are movements between the user's own products (none is
   flagged `internal_transfer`);
-- reuse mode (`MERCADOPAGO_CDP_URL`) against a live Chrome.
+- reuse mode (`MERCADOPAGO_CDP_URL`) against a live Chrome;
+- that a closed pot drops out of the `/savings/hub` list (rather than staying
+  listed at zero), which is what retires its product;
+- that the `/savings/hub` pots list is neither paginated nor capped: it is
+  taken as every pot the account has, so a pot past a cut would be retired.
 """
 
 import datetime
@@ -99,7 +111,6 @@ import os
 import sys
 
 from product_model import SavingsMetrics, WalletMetrics
-
 from scrapers.backends.mercadopago_web import (
     DEFAULT_MOVEMENT_PAGES,
     MercadoPagoAccount,
@@ -114,6 +125,7 @@ from scrapers.base import (
     ProductScrapeResult,
     ScrapedProduct,
     ScrapedTransaction,
+    VanishedProductScope,
 )
 
 logger = logging.getLogger(__name__)
@@ -123,11 +135,12 @@ MOVEMENT_PAGES_ENV = "MERCADOPAGO_MOVEMENT_PAGES"
 WALLET_KIND = "wallet"
 POT_KIND = "savings"
 CURRENCY = "CLP"
+POT_REF_PREFIX = "mp_pot_"
 
 
 def pot_ref(pot_id: str) -> str:
     """The `external_ref` of the savings product of the pot `pot_id` (a uuid)."""
-    return f"mp_pot_{pot_id}"
+    return f"{POT_REF_PREFIX}{pot_id}"
 
 
 def movement_external_id(movement_id: str) -> str:
@@ -277,7 +290,19 @@ class MercadoPagoScraper(BaseScraper):
                     ),
                 )
             )
-        return ProductScrapeResult(products, list(account.warnings))
+        scopes: list[VanishedProductScope] = []
+        if account.pots_complete:
+            scopes.append(
+                VanishedProductScope(
+                    institution=self.institution,
+                    product_kind=POT_KIND,
+                    currency=CURRENCY,
+                    external_ref_prefix=POT_REF_PREFIX,
+                    present_refs=frozenset(pot_ref(pot.id) for pot in account.pots),
+                    closed_metrics=SavingsMetrics(balance=0),
+                )
+            )
+        return ProductScrapeResult(products, list(account.warnings), vanished_product_scopes=scopes)
 
 
 def _login_cli() -> None:

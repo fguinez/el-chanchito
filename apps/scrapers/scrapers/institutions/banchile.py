@@ -414,9 +414,7 @@ class BanChileScraper(BaseScraper):
         for currency, surface in _BILLED_SURFACES.items():
             if surface in failed_surfaces:
                 continue
-            billed = [
-                m for m in movements if m.source == "card_billed" and m.currency == currency
-            ]
+            billed = [m for m in movements if m.source == "card_billed" and m.currency == currency]
             if any(m.billing_unknown for m in billed):
                 continue
             statement = next((s for s in statements if s.currency == currency), None)
@@ -429,11 +427,7 @@ class BanChileScraper(BaseScraper):
                 continue
             newest = statement.statement_date
             read_dates = sorted(
-                {
-                    statement_date
-                    for m in billed
-                    if (statement_date := billing_of(m)[1]) is not None
-                }
+                {statement_date for m in billed if (statement_date := billing_of(m)[1]) is not None}
             )
             windows.append(self._vanished_window(currency, newest, include_unreported=True))
             older = [d for d in read_dates if d < newest]

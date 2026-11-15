@@ -99,9 +99,13 @@ evening movement stays on its own day.
 Bounds: every Playwright call that takes a timeout gets one (the connection
 and each in-page fetch), and the reads share one time budget. Copying a
 fetch's result out of the page (`json_value`) takes none, so two outer bounds
-cover it: in managed mode a watchdog terminates the Chrome it launched if the
-drive overruns, which ends any call still waiting on it, and in both modes
-the run gives up on a drive that does not finish in time.
+cover it: a watchdog ends any call still waiting if the drive overruns (in
+managed mode it terminates the Chrome it launched; in reuse mode it kills the
+Playwright driver, leaving the user's Chrome running), and in both modes the
+run gives up on a drive that does not finish in time. A call that fails
+because the tab or its connection is gone (the driver crashed, Chrome or the
+tab closed, the watchdog fired) stops the read there instead of moving on to
+the next page.
 
 Nothing in an exception message comes from a page: they name fields, counts
 and HTTP codes only, because they end up in `scraper_runs.error_message`.
@@ -125,11 +129,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Optional, TypeVar
+from typing import Any, TypeVar
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from scrapers.backends import real_chrome
+from scrapers.backends.percent import parse_percent
 
 logger = logging.getLogger(__name__)
 
@@ -210,15 +215,18 @@ READ_BUDGET_S = 5 * 60
 # Managed mode: the launched Chrome is terminated this long after its launch
 # whatever the drive is doing, which ends any Playwright call still waiting.
 # It covers the worst case of each phase plus two minutes of margin.
-MANAGED_HARD_LIMIT_S = (
-    CONNECT_WAIT_S + MANAGED_TAB_WAIT_S + ATTACH_OVERRUN_S + READ_BUDGET_S + 120
+MANAGED_HARD_LIMIT_S = CONNECT_WAIT_S + MANAGED_TAB_WAIT_S + ATTACH_OVERRUN_S + READ_BUDGET_S + 120
+# Reuse mode: the same bound on its own waits; the watchdog kills the
+# Playwright driver (never the user's Chrome), which ends any call still waiting.
+REUSE_HARD_LIMIT_S = (
+    REUSE_CONNECT_WAIT_S + REUSE_TAB_WAIT_S + ATTACH_OVERRUN_S + READ_BUDGET_S + 120
 )
 # Either mode: the run gives up on a drive after this long, so a call stuck on
-# a frozen browser (reuse mode has no Chrome of its own to terminate) cannot
-# hold the scraper service. Later than the watchdog, which ends it cleanly.
-# The 60 s past the watchdog must cover a whole teardown
-# (`real_chrome.TERMINATE_WORST_CASE_S`); a test pins that.
+# a frozen browser cannot hold the scraper service. Later than both watchdogs,
+# which end it cleanly. The 60 s past the managed watchdog must cover a whole
+# teardown (`real_chrome.TERMINATE_WORST_CASE_S`); a test pins that.
 DRIVE_TIMEOUT_S = MANAGED_HARD_LIMIT_S + 60
+_TIMED_OUT = "Mercado Pago read did not finish in time."
 # Pause between ledger pages.
 _PAGE_PAUSE_S = 0.5
 # A page far larger than any real one is not parsed.
@@ -267,8 +275,7 @@ _CHROME_START_HINT = (
     "Chrome may be using the Mercado Pago profile)."
 )
 _REUSE_START_HINT = (
-    f"No Chrome answers there. Start it again, or unset {CDP_URL_ENV} to use "
-    "the managed one."
+    f"No Chrome answers there. Start it again, or unset {CDP_URL_ENV} to use the managed one."
 )
 # The port answered and then stopped answering.
 _CHROME_GONE_HINT = "Chrome answered before and stopped (was it closed?)."
@@ -289,9 +296,7 @@ _REUSE_NO_TAB = (
 # The inline script assigns the page data right after this marker.
 CONTEXT_MARKER = "_n.ctx.r="
 
-_UUID_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I
-)
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 # Observed as 17 uppercase alphanumerics. Kept looser than that: the id is
 # only a dedup key, so any plain token is usable, while a blank or structured
 # value is not.
@@ -299,9 +304,7 @@ _MOVEMENT_ID_RE = re.compile(r"^[A-Za-z0-9]{8,64}$")
 # "12.345" or "-12.345": dotted thousands (or plain digits), an optional
 # leading minus that is an ASCII hyphen or U+2212 (MINUS SIGN).
 _MINUS_SIGNS = "-" + chr(0x2212)
-_FRACTION_RE = re.compile(
-    r"^([" + re.escape(_MINUS_SIGNS) + r"]?)\s*(\d{1,3}(?:\.\d{3})+|\d+)$"
-)
+_FRACTION_RE = re.compile(r"^([" + re.escape(_MINUS_SIGNS) + r"]?)\s*(\d{1,3}(?:\.\d{3})+|\d+)$")
 _CENTS_RE = re.compile(r"^\d{2}$")
 # The rate in "Generando ganancias al 1,0% anual". The whole number must sit
 # between "al" and the percent sign, so "1.234,5%" never yields a partial match.
@@ -309,9 +312,6 @@ _RATE_IN_TEXT_RE = re.compile(
     r"\bal\s+([" + re.escape(_MINUS_SIGNS) + r"]?\d+(?:[.,]\d+)?)\s*%\s*anual\b",
     re.IGNORECASE,
 )
-# A bare rate string as the savings hub prints it ("1.0" or "1,0"), signed
-# like the wallet's so a negative fund rate reads the same on both pages.
-_RATE_RE = re.compile(r"^[" + re.escape(_MINUS_SIGNS) + r"]?\d+(?:[.,]\d+)?$")
 
 
 class MercadoPagoWebError(RuntimeError):
@@ -328,6 +328,10 @@ class MercadoPagoFetchError(MercadoPagoWebError):
 
 class MercadoPagoConnectError(MercadoPagoWebError):
     """The Chrome debug port did not accept a connection in time."""
+
+
+class MercadoPagoConnectionLostError(MercadoPagoWebError):
+    """The connection to the tab ended mid-read; nothing more can be fetched."""
 
 
 class MercadoPagoSessionError(RuntimeError):
@@ -354,7 +358,7 @@ class Pot:
     id: str
     name: str
     amount: int
-    rate_pct: Optional[float] = None
+    rate_pct: float | None = None
 
 
 @dataclass(frozen=True)
@@ -366,8 +370,8 @@ class WalletYield:
     when the page did not carry it in a readable form.
     """
 
-    rate_pct: Optional[float] = None
-    profit_12m: Optional[int] = None
+    rate_pct: float | None = None
+    profit_12m: int | None = None
 
 
 @dataclass(frozen=True)
@@ -391,13 +395,16 @@ class MercadoPagoAccount:
 
     `warnings` flag partial coverage (the pots page or a ledger page failed
     after the balance was read), so the run records `partial`. A failed pots
-    page leaves `pots` empty, like an account without pots; only the warning
-    tells them apart.
+    page leaves `pots` empty, like an account without pots; `pots_complete`
+    tells them apart. It is True only when the pots page answered with a
+    success status and no pot was skipped, so `pots` lists every pot the
+    account has (an empty list included).
     """
 
     balance: int
     wallet_yield: WalletYield = field(default_factory=WalletYield)
     pots: list[Pot] = field(default_factory=list)
+    pots_complete: bool = False
     movements: list[Movement] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -465,7 +472,7 @@ def _require_success(node: Any, what: str) -> None:
         raise MercadoPagoPageError(f"{what}: status is not success")
 
 
-def _whole_pesos(raw: Any) -> Optional[int]:
+def _whole_pesos(raw: Any) -> int | None:
     """A JSON number as whole CLP, rounded half up; None when it is not one."""
     if isinstance(raw, bool) or not isinstance(raw, (int, float)):
         return None
@@ -478,7 +485,7 @@ def _whole_pesos(raw: Any) -> Optional[int]:
         return None
 
 
-def parse_clp_amount(amount: Any) -> Optional[int]:
+def parse_clp_amount(amount: Any) -> int | None:
     """A ledger `amount` (`fraction` plus `cents`) as signed whole CLP.
 
     `fraction` is the peso part with dotted thousands and the sign ("12.345",
@@ -507,7 +514,7 @@ def parse_clp_amount(amount: Any) -> Optional[int]:
     return int(value.quantize(Decimal(1), rounding=ROUND_HALF_UP))
 
 
-def santiago_date(raw: Any) -> Optional[datetime.date]:
+def santiago_date(raw: Any) -> datetime.date | None:
     """The America/Santiago date of an ISO timestamp that carries its offset.
 
     The ledger stamps movements in UTC ("...Z"); a timestamp without an
@@ -538,13 +545,10 @@ def parse_balance(props: dict) -> int:
     return pesos
 
 
-def _rate_number(text: str) -> Optional[float]:
-    """A rate written with a comma or dot decimal ("1,0", "4.50") as a float."""
-    try:
-        value = Decimal(text.replace(",", ".").replace(chr(0x2212), "-"))
-    except InvalidOperation:
-        return None
-    return float(value) if value.is_finite() else None
+def _rate_number(raw: Any) -> float | None:
+    """A signed rate ("1,0", "4.50", "-0,5") as a float, or None."""
+    value = parse_percent(raw, signed=True)
+    return None if value is None else float(value)
 
 
 def parse_wallet_yield(props: Any) -> WalletYield:
@@ -578,7 +582,7 @@ def parse_wallet_yield(props: Any) -> WalletYield:
     return WalletYield(rate_pct=rate, profit_12m=_whole_pesos(middle))
 
 
-def parse_pots_rate(props: Any) -> Optional[float]:
+def parse_pots_rate(props: Any) -> float | None:
     """The savings hub's yearly rate for every pot, or None.
 
     The hub prints one rate for all pots (`investmentData.data.rate`, a
@@ -595,12 +599,10 @@ def parse_pots_rate(props: Any) -> Optional[float]:
         return None
     if isinstance(raw, (int, float)):
         raw = str(raw)
-    if not isinstance(raw, str) or not _RATE_RE.match(raw.strip()):
-        return None
-    return _rate_number(raw.strip())
+    return _rate_number(raw)
 
 
-def _parse_pot(entry: Any, rate_pct: Optional[float] = None) -> Optional[Pot]:
+def _parse_pot(entry: Any, rate_pct: float | None = None) -> Pot | None:
     if not isinstance(entry, dict):
         return None
     pot_id = entry.get("id")
@@ -820,28 +822,62 @@ def html_from_fetch(result: Any, surface: str) -> str:
     raise MercadoPagoFetchError(f"{surface}: {reason or 'unexpected fetch result'}")
 
 
-def _evaluate_bounded(page, script: str, arg: dict, timeout_ms: int) -> Any:
+def _check_killed(kill_switch) -> None:
+    """Raise `DriverKilledError` once the drive's watchdog has killed the driver.
+
+    After that the first pending Playwright call fails, and before 1.64 any
+    later one spun forever, so none may follow.
+    """
+    if kill_switch is not None:
+        kill_switch.raise_if_fired()
+
+
+def _evaluate_bounded(page, script: str, arg: dict, timeout_ms: int, kill_switch=None) -> Any:
     """Run an async in-page `script` and return its JSON result, bounded; raises.
 
     `page.evaluate` takes no timeout. `wait_for_function` runs its predicate
     once right away, and when that returns a promise (always truthy) it waits
     for the promise inside its timeout, so the script is bounded. `json_value`
     (copying the settled result out) and `dispose` have no timeout of their
-    own; the managed-mode watchdog and the drive timeout cover that window.
+    own; the drive's watchdog and the drive timeout cover that window. A
+    failed `json_value` is not followed by `dispose`: the connection may be
+    dead, and the handle goes with it.
     """
+    _check_killed(kill_switch)
     handle = page.wait_for_function(script, arg=arg, timeout=timeout_ms)
-    try:
-        return handle.json_value()
-    finally:
+    value = handle.json_value()
+    if kill_switch is None or not kill_switch.fired:
         try:
             handle.dispose()
         except Exception:
             pass
+    return value
 
 
-def _fetch_props(page, surface: str, page_number: int = 1) -> dict:
-    """Fetch one allowed page from inside the tab and return its `pageProps`."""
-    failure: Optional[str] = None
+def _connection_lost(exc: Exception) -> bool:
+    """Whether a failed Playwright call means the tab or its connection is gone.
+
+    A dead driver raises a bare `Exception` (1.64) or `TargetClosedError`
+    (1.65, also for a closed tab or Chrome); `TargetClosedError` is not public,
+    so it is matched by name. Any other Playwright `Error` (a timeout, a
+    navigation that destroyed the script's context) leaves the tab usable.
+    """
+    from playwright.sync_api import Error as PlaywrightError
+
+    return not isinstance(exc, PlaywrightError) or type(exc).__name__ == "TargetClosedError"
+
+
+def _fetch_props(page, surface: str, page_number: int = 1, kill_switch=None) -> dict:
+    """Fetch one allowed page from inside the tab and return its `pageProps`.
+
+    The in-page script turns every fetch failure into a status, so a call that
+    raises is either a page failure to carry on from (`MercadoPagoFetchError`:
+    the script outlived its timeout, the tab navigated) or a lost tab or
+    connection (`MercadoPagoConnectionLostError`, see `_connection_lost`),
+    which ends the read: further calls would only fail the same way.
+    """
+    failure: str | None = None
+    lost = False
     result = None
     try:
         result = _evaluate_bounded(
@@ -849,18 +885,26 @@ def _fetch_props(page, surface: str, page_number: int = 1) -> dict:
             _FETCH_JS,
             {"surface": surface, "pageNumber": page_number, "timeoutMs": FETCH_TIMEOUT_MS},
             EVALUATE_TIMEOUT_MS,
+            kill_switch,
         )
     except Exception as exc:
         failure = type(exc).__name__
+        lost = _connection_lost(exc)
     if failure is not None:
+        # A killed driver is not a page failure to carry on from.
+        _check_killed(kill_switch)
         # Raised outside the handler: the Playwright error (its text carries a
         # call log) is neither the cause nor the context of this one.
+        if lost:
+            raise MercadoPagoConnectionLostError(
+                f"Mercado Pago read lost its connection to the tab ({surface}: {failure})."
+            )
         raise MercadoPagoFetchError(f"{surface}: in-page fetch failed ({failure})")
     return page_props_from_html(html_from_fetch(result, surface))
 
 
 def _read_movements(
-    page, account: MercadoPagoAccount, max_pages: int, deadline: float
+    page, account: MercadoPagoAccount, max_pages: int, deadline: float, kill_switch=None
 ) -> None:
     """Read the ledger into `account`, newest page first.
 
@@ -883,8 +927,10 @@ def _read_movements(
             )
             break
         try:
-            rows, pages, unread = parse_movements(_fetch_props(page, "movements", number))
-        except MercadoPagoWebError as exc:
+            rows, pages, unread = parse_movements(
+                _fetch_props(page, "movements", number, kill_switch)
+            )
+        except (MercadoPagoPageError, MercadoPagoFetchError) as exc:
             logger.warning("MercadoPago: movements page %d not read: %s", number, exc)
             account.warnings.append(f"MercadoPago: movements page {number} not read ({exc})")
             break
@@ -907,7 +953,9 @@ def _read_movements(
         account.warnings.append(f"MercadoPago: {skipped} movement row(s) not read")
 
 
-def read_account(page, movement_pages: int = DEFAULT_MOVEMENT_PAGES) -> MercadoPagoAccount:
+def read_account(
+    page, movement_pages: int = DEFAULT_MOVEMENT_PAGES, kill_switch=None
+) -> MercadoPagoAccount:
     """Read balance, pots and ledger from a tab on the portal. Never navigates.
 
     The balance page goes first and doubles as the session probe. Whatever
@@ -916,10 +964,12 @@ def read_account(page, movement_pages: int = DEFAULT_MOVEMENT_PAGES) -> MercadoP
     by the fetch); a page that answers 200 without a readable balance (a
     changed page, a balance widget that did not load) or that cannot be
     fetched is a plain `MercadoPagoWebError`, which asks nobody to sign in.
+    A lost connection (`MercadoPagoConnectionLostError`) ends the read at any
+    page; once `kill_switch` has fired, `DriverKilledError` does instead.
     """
     deadline = time.monotonic() + READ_BUDGET_S
     try:
-        balance_props = _fetch_props(page, "balance")
+        balance_props = _fetch_props(page, "balance", kill_switch=kill_switch)
         balance = parse_balance(balance_props)
     except MercadoPagoPageError as exc:
         raise MercadoPagoWebError(
@@ -928,20 +978,20 @@ def read_account(page, movement_pages: int = DEFAULT_MOVEMENT_PAGES) -> MercadoP
         ) from exc
     except MercadoPagoFetchError as exc:
         raise MercadoPagoWebError(f"Mercado Pago balance page not fetched ({exc}).") from exc
-    account = MercadoPagoAccount(
-        balance=balance, wallet_yield=parse_wallet_yield(balance_props)
-    )
+    account = MercadoPagoAccount(balance=balance, wallet_yield=parse_wallet_yield(balance_props))
 
     try:
-        account.pots, skipped = parse_pots(_fetch_props(page, "pots"))
-    except MercadoPagoWebError as exc:
+        account.pots, skipped = parse_pots(_fetch_props(page, "pots", kill_switch=kill_switch))
+    except (MercadoPagoPageError, MercadoPagoFetchError) as exc:
         logger.warning("MercadoPago: savings pots not read: %s", exc)
         account.warnings.append(f"MercadoPago: savings pots not read ({exc})")
     else:
         if skipped:
             account.warnings.append(f"MercadoPago: {skipped} savings pot(s) not read")
+        else:
+            account.pots_complete = True
 
-    _read_movements(page, account, movement_pages, deadline)
+    _read_movements(page, account, movement_pages, deadline, kill_switch)
     logger.info(
         "MercadoPago: balance read, %d pot(s), %d movement(s), %d warning(s)",
         len(account.pots),
@@ -1022,21 +1072,32 @@ def _connect(playwright, cdp_url: str, wait_s: float, process=None):
 
 
 @contextlib.contextmanager
-def _cdp_connection(cdp_url: str, wait_s: float, process=None):
+def _cdp_connection(cdp_url: str, wait_s: float, process=None, kill_switch=None):
     """A fresh Playwright driver attached to the Chrome at `cdp_url`.
 
     Leaving the block stops the driver, which drops the connection, also when
     the connection fails or the block raises. Nothing is closed in the
     browser: Chrome and its tabs keep running, so the next connection finds
-    them as they are.
+    them as they are. The driver is published on `kill_switch` while it runs.
     """
     from playwright.sync_api import sync_playwright  # lazy: keeps tests browser-free
 
-    with sync_playwright() as playwright:
-        yield _connect(playwright, cdp_url, wait_s, process)
+    manager = sync_playwright()
+    if kill_switch is None:
+        with manager as playwright:
+            yield _connect(playwright, cdp_url, wait_s, process)
+        return
+    kill_switch.raise_if_fired()
+    try:
+        with manager as playwright:
+            kill_switch.attach(manager)
+            yield _connect(playwright, cdp_url, wait_s, process)
+    finally:
+        # After the driver stopped, so the watchdog can still end a stuck stop.
+        kill_switch.detach()
 
 
-def _look(cdp_url: str) -> Optional[real_chrome.TargetSummary]:
+def _look(cdp_url: str) -> real_chrome.TargetSummary | None:
     """What Chrome itself lists as open (one bounded local HTTP request)."""
     return real_chrome.summarize_targets(cdp_url, on_portal)
 
@@ -1068,7 +1129,9 @@ def _unanswered(unanswered: int, process) -> None:
     if real_chrome.has_exited(process):
         raise _chrome_exited()
     if unanswered >= _MAX_UNANSWERED_LOOKS:
-        raise MercadoPagoConnectError(f"Chrome's target list stopped answering. {_CHROME_GONE_HINT}")
+        raise MercadoPagoConnectError(
+            f"Chrome's target list stopped answering. {_CHROME_GONE_HINT}"
+        )
 
 
 def _targets_text(summary: real_chrome.TargetSummary) -> str:
@@ -1086,6 +1149,7 @@ def _with_portal_tab(
     start_hint: str,
     no_tab: str,
     process=None,
+    kill_switch=None,
 ) -> T:
     """Find the portal tab and run `action` on it; never navigates.
 
@@ -1106,7 +1170,7 @@ def _with_portal_tab(
     look decides the error: the page was there but never attached to, or
     there was no tab (`no_tab` says what to do about it). A target list that
     stops answering, or a launched Chrome (`process`) that ends, ends the
-    wait at once.
+    wait at once. Each connection's driver is published on `kill_switch`.
     """
     summary = _await_chrome(cdp_url, connect_wait_s, start_hint, process)
     deadline = time.monotonic() + tab_wait_s
@@ -1125,7 +1189,7 @@ def _with_portal_tab(
             remaining = deadline - time.monotonic()
             wait = min(attach_wait, max(_MIN_ATTACH_S, remaining))
             try:
-                with _cdp_connection(cdp_url, wait, process) as browser:
+                with _cdp_connection(cdp_url, wait, process, kill_switch) as browser:
                     watch = min(ATTACH_POLL_S, max(0.0, deadline - time.monotonic()))
                     page = _watch_for_portal_tab(browser, watch)
                     if page is not None:
@@ -1137,6 +1201,7 @@ def _with_portal_tab(
                         return action(page)
             except MercadoPagoConnectError as exc:
                 logger.info("MercadoPago: attach %d failed: %s", connections + 1, exc)
+                _check_killed(kill_switch)
             pause = _REATTACH_PAUSES_S[min(connections, len(_REATTACH_PAUSES_S) - 1)]
             connections += 1
             attach_wait = RECONNECT_WAIT_S
@@ -1155,7 +1220,9 @@ def _with_portal_tab(
         summary = _look(cdp_url)
 
     if summary is None:
-        raise MercadoPagoConnectError(f"Chrome's target list stopped answering. {_CHROME_GONE_HINT}")
+        raise MercadoPagoConnectError(
+            f"Chrome's target list stopped answering. {_CHROME_GONE_HINT}"
+        )
     if summary.matching_pages:
         raise MercadoPagoWebError(
             "Chrome has the Mercado Pago page open, but Playwright never attached to it "
@@ -1175,6 +1242,7 @@ def _drive_over_cdp(
     start_hint: str,
     no_tab: str,
     process=None,
+    kill_switch=None,
 ) -> MercadoPagoAccount:
     """Find the portal tab of the Chrome at `cdp_url` and read it.
 
@@ -1184,12 +1252,13 @@ def _drive_over_cdp(
     """
     return _with_portal_tab(
         cdp_url,
-        lambda page: read_account(page, movement_pages),
+        lambda page: read_account(page, movement_pages, kill_switch),
         connect_wait_s=connect_wait_s,
         tab_wait_s=tab_wait_s,
         start_hint=start_hint,
         no_tab=no_tab,
         process=process,
+        kill_switch=kill_switch,
     )
 
 
@@ -1247,11 +1316,9 @@ def _drive_managed(movement_pages: int) -> MercadoPagoAccount:
     proc = _launch(port, offscreen=True)
     # Nothing may raise between the launch and this `try`: the `finally` is
     # the only thing that closes the Chrome just started.
-    watchdog: Optional[threading.Timer] = None
+    watchdog: threading.Timer | None = None
     try:
-        watchdog = threading.Timer(
-            MANAGED_HARD_LIMIT_S, real_chrome.terminate_chrome, args=(proc,)
-        )
+        watchdog = threading.Timer(MANAGED_HARD_LIMIT_S, real_chrome.terminate_chrome, args=(proc,))
         watchdog.daemon = True
         watchdog.start()
         return _drive_over_cdp(
@@ -1263,6 +1330,10 @@ def _drive_managed(movement_pages: int) -> MercadoPagoAccount:
             no_tab=_MANAGED_NO_TAB,
             process=proc,
         )
+    except MercadoPagoConnectionLostError:
+        # The watchdog terminating Chrome is what cut the connection.
+        if watchdog is None or not watchdog.finished.is_set():
+            raise
     finally:
         if watchdog is not None:
             watchdog.cancel()
@@ -1271,23 +1342,46 @@ def _drive_managed(movement_pages: int) -> MercadoPagoAccount:
         real_chrome.terminate_chrome(proc, cdp_url=f"http://127.0.0.1:{port}")
         if real_chrome.has_exited(proc):
             real_chrome.forget_managed_launch(profile_dir(), proc.pid)
+    # Raised outside the handler: the lost connection is the timeout itself.
+    raise MercadoPagoWebError(_TIMED_OUT)
 
 
 def _drive_reuse(cdp_url: str, movement_pages: int) -> MercadoPagoAccount:
-    """Attach to a Chrome that is already running; leave it running."""
+    """Attach to a Chrome that is already running; leave it running.
+
+    The watchdog kills the Playwright driver if the drive overruns, so a call
+    stuck on a frozen browser fails and this thread ends; no Playwright call
+    follows, and no partial account is returned. The driver error that ends
+    the drive is reported as the timeout it is; a scraper error is not.
+    """
     _require_playwright()
-    return _drive_over_cdp(
-        cdp_url,
-        movement_pages,
-        connect_wait_s=REUSE_CONNECT_WAIT_S,
-        tab_wait_s=REUSE_TAB_WAIT_S,
-        start_hint=_REUSE_START_HINT,
-        no_tab=_REUSE_NO_TAB,
-    )
+    switch = real_chrome.DriverKillSwitch()
+    watchdog = threading.Timer(REUSE_HARD_LIMIT_S, switch.kill)
+    watchdog.daemon = True
+    watchdog.start()
+    try:
+        return _drive_over_cdp(
+            cdp_url,
+            movement_pages,
+            connect_wait_s=REUSE_CONNECT_WAIT_S,
+            tab_wait_s=REUSE_TAB_WAIT_S,
+            start_hint=_REUSE_START_HINT,
+            no_tab=_REUSE_NO_TAB,
+            kill_switch=switch,
+        )
+    except real_chrome.DriverKilledError:
+        pass
+    except Exception as exc:
+        if not switch.fired or isinstance(exc, (MercadoPagoWebError, MercadoPagoSessionError)):
+            raise
+    finally:
+        watchdog.cancel()
+    # Raised outside the handler: the driver error is neither cause nor context.
+    raise MercadoPagoWebError(_TIMED_OUT)
 
 
 async def scrape_account(
-    cdp_url: Optional[str] = None, movement_pages: int = DEFAULT_MOVEMENT_PAGES
+    cdp_url: str | None = None, movement_pages: int = DEFAULT_MOVEMENT_PAGES
 ) -> MercadoPagoAccount:
     """Read the wallet balance, the savings pots and the wallet ledger.
 
@@ -1297,7 +1391,7 @@ async def scrape_account(
     `MercadoPagoWebError` when Chrome or the balance page could not be
     reached, and `ImportError` when Playwright is not installed. A pots or
     ledger page that fails after the balance was read is a warning on the
-    result instead.
+    result instead, unless the tab or its connection was lost.
     """
     cdp = cdp_url if cdp_url is not None else os.environ.get(CDP_URL_ENV)
     drive = (
@@ -1305,13 +1399,13 @@ async def scrape_account(
         if cdp
         else asyncio.to_thread(_drive_managed, movement_pages)
     )
-    failure: Optional[str] = None
+    failure: str | None = None
     try:
         return await asyncio.wait_for(drive, timeout=DRIVE_TIMEOUT_S)
-    except asyncio.TimeoutError:
-        # The worker thread cannot be stopped; in managed mode its watchdog has
-        # already terminated the Chrome it was waiting on.
-        raise MercadoPagoWebError("Mercado Pago read did not finish in time.") from None
+    except TimeoutError:
+        # Only if the drive's watchdog did not end it first (both modes have
+        # one, firing earlier); the worker thread itself cannot be stopped.
+        raise MercadoPagoWebError(_TIMED_OUT) from None
     except (MercadoPagoWebError, MercadoPagoSessionError, ImportError):
         raise
     except Exception as exc:
@@ -1384,8 +1478,7 @@ def _await_lasting_session(page, deadline: float, process=None) -> None:
             return
         if not told:
             print(
-                "Signed in; waiting for Mercado Pago to save the session before "
-                "closing Chrome...",
+                "Signed in; waiting for Mercado Pago to save the session before closing Chrome...",
                 flush=True,
             )
             told = True
@@ -1397,7 +1490,7 @@ def _await_lasting_session(page, deadline: float, process=None) -> None:
                 "Signed in, but Mercado Pago did not save a lasting session in time, so "
                 "it would not survive Chrome closing. Re-run `make mercadopago-login` "
                 "and stay on the balance page until the login closes Chrome itself (if "
-                "the sign-in page offers a \"keep me signed in\" option, tick it)."
+                'the sign-in page offers a "keep me signed in" option, tick it).'
             )
         time.sleep(_LOGIN_POLL_S)
 
@@ -1433,7 +1526,7 @@ def _lasting_session_in_db(db: Path, since: float, now: float) -> bool:
     )
 
 
-def _file_stamp(path: Path) -> Optional[tuple[int, int]]:
+def _file_stamp(path: Path) -> tuple[int, int] | None:
     """Size and mtime (ns) of `path`, or None when it is not there."""
     try:
         st = path.stat()
@@ -1520,7 +1613,7 @@ def _log_portal_cookie_names(page) -> None:
 
 
 def _await_sign_in(
-    cdp_url: str, timeout_s: float, process=None, since: Optional[float] = None
+    cdp_url: str, timeout_s: float, process=None, since: float | None = None
 ) -> None:
     """Wait until a portal tab reads the balance page and the session lasts.
 
@@ -1562,7 +1655,7 @@ def _await_sign_in(
         since = time.time()
     summary = _await_chrome(cdp_url, CONNECT_WAIT_S, _CHROME_START_HINT, process)
     deadline = time.monotonic() + timeout_s
-    probed_key: Optional[str] = None
+    probed_key: str | None = None
     probed_at = float("-inf")
     unanswered = 0
     while True:

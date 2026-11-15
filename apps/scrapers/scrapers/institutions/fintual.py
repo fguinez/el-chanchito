@@ -69,12 +69,12 @@ import logging
 import os
 import tempfile
 from collections import Counter
-from collections.abc import AsyncIterator, Awaitable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import httpx
 
@@ -84,7 +84,6 @@ from product_model import (
     StockMetrics,
     WalletMetrics,
 )
-
 from scrapers.backends.email import fetch_latest_code
 from scrapers.backends.fintual_stocks import (
     MAX_PAGES,
@@ -316,8 +315,8 @@ def _bar_time(time: Any) -> datetime:
         raise ValueError("a bar's time must be an ISO datetime string")
     stamp = datetime.fromisoformat(time)
     if stamp.tzinfo is None:
-        stamp = stamp.replace(tzinfo=timezone.utc)
-    return stamp.astimezone(timezone.utc)
+        stamp = stamp.replace(tzinfo=UTC)
+    return stamp.astimezone(UTC)
 
 
 def trading_date(time: str) -> date:
@@ -381,9 +380,7 @@ def details_query(count: int) -> str:
     return f"query StocksDetails({variables}) {{\n{fields}\n}}"
 
 
-def stock_metrics(
-    shares: Decimal, price: StockPrice | None, performance: dict
-) -> StockMetrics:
+def stock_metrics(shares: Decimal, price: StockPrice | None, performance: dict) -> StockMetrics:
     """A position's figures, by the web app's own formulas (verified to the cent):
 
         value          = shares * price
@@ -452,9 +449,7 @@ def stock_attributes(symbol: str, asset: Any) -> StockAttributes:
                 continue
             emoji = text(tag.get("emoji"))
             tags.append(f"{emoji} {label}" if emoji else label)
-    return StockAttributes(
-        ticker=symbol, description=text(asset.get("overview")), tags=tags
-    )
+    return StockAttributes(ticker=symbol, description=text(asset.get("overview")), tags=tags)
 
 
 def wallet_balance(wallet: Any) -> Decimal | None:
@@ -484,7 +479,7 @@ def stock_wallet_product(wallet: Any) -> ScrapedProduct | None:
 
 
 def _utc_today() -> date:
-    return datetime.now(timezone.utc).date()
+    return datetime.now(UTC).date()
 
 
 def _pricing_service_failed(exc: Exception) -> bool:
@@ -538,9 +533,7 @@ class FintualScraper(BaseScraper):
         self.email = os.environ["FINTUAL_EMAIL"]
         # FINTUAL_TOKEN is the legacy name for the same value: the account password.
         self.password = os.environ.get("FINTUAL_PASSWORD") or os.environ["FINTUAL_TOKEN"]
-        self.session_file = Path(
-            os.environ.get("FINTUAL_SESSION_FILE", str(_DEFAULT_SESSION_FILE))
-        )
+        self.session_file = Path(os.environ.get("FINTUAL_SESSION_FILE", str(_DEFAULT_SESSION_FILE)))
         # The refresh token is single-use, so two runs at once (the startup
         # scrape isn't a scheduler job, so a manual refresh can overlap it)
         # would both spend it. A run waits, then reads the rotated cache.
@@ -616,9 +609,7 @@ class FintualScraper(BaseScraper):
                 logger.info("Fintual: read 2FA code from e-mail.")
                 return code
             await asyncio.sleep(_CODE_POLL_INTERVAL_SECONDS)
-        raise FintualSessionError(
-            "Fintual's 2FA code e-mail did not reach the IMAP inbox."
-        )
+        raise FintualSessionError("Fintual's 2FA code e-mail did not reach the IMAP inbox.")
 
     async def login(self, code_provider: Callable[[], str | Awaitable[str]]) -> None:
         """Sign in and cache the session.
@@ -674,12 +665,10 @@ class FintualScraper(BaseScraper):
         every run would e-mail a new code each time, which looks like an attack.
         """
         if self._login_failed_file.exists():
-            raise FintualSessionError(
-                f"Fintual automatic sign-in failed earlier. {_RELOGIN_HINT}"
-            )
+            raise FintualSessionError(f"Fintual automatic sign-in failed earlier. {_RELOGIN_HINT}")
         # Taken before initiate_login: only a code e-mailed after this point is
         # valid, and the inbox may still hold the previous login's spent one.
-        received_after = datetime.now(timezone.utc) - _CODE_CLOCK_SKEW
+        received_after = datetime.now(UTC) - _CODE_CLOCK_SKEW
         try:
             await self.login(lambda: self._email_code_provider(received_after))
         except Exception as exc:
@@ -694,7 +683,7 @@ class FintualScraper(BaseScraper):
 
     def _mark_login_failed(self) -> None:
         try:
-            self._login_failed_file.write_text(datetime.now(timezone.utc).isoformat())
+            self._login_failed_file.write_text(datetime.now(UTC).isoformat())
             os.chmod(self._login_failed_file, 0o600)
         except OSError:
             logger.warning("Fintual: could not write %s", self._login_failed_file)
@@ -711,9 +700,7 @@ class FintualScraper(BaseScraper):
             await self._auto_login()
             self._load_session(client)
             return True
-        raise FintualSessionError(
-            "No cached Fintual session. Run `make fintual-login` to sign in."
-        )
+        raise FintualSessionError("No cached Fintual session. Run `make fintual-login` to sign in.")
 
     # -- scraping -----------------------------------------------------------
 
@@ -853,9 +840,7 @@ class FintualScraper(BaseScraper):
                 f"the stocks pricing service answered HTTP {resp.status_code}"
             )
         if not resp.is_success:
-            raise FintualStocksError(
-                f"the stocks pricing service answered HTTP {resp.status_code}"
-            )
+            raise FintualStocksError(f"the stocks pricing service answered HTTP {resp.status_code}")
         return resp
 
     async def _stock_prices(
@@ -915,9 +900,7 @@ class FintualScraper(BaseScraper):
 
     async def _scrape_stocks(self, client: httpx.AsyncClient) -> _Stocks:
         """The brokerage: the USD cash wallet plus one product per position."""
-        portfolio, errors = await self._graphql(
-            client, "StocksPortfolio", _PORTFOLIO_QUERY, {}
-        )
+        portfolio, errors = await self._graphql(client, "StocksPortfolio", _PORTFOLIO_QUERY, {})
         portfolio = portfolio if isinstance(portfolio, dict) else {}
         wallet = portfolio.get("stocksWallet")
         positions, unreadable = parse_positions(portfolio)
@@ -938,9 +921,7 @@ class FintualScraper(BaseScraper):
         if wallet is not None:
             wallet_product = stock_wallet_product(wallet)
             if wallet_product is None:
-                warnings.append(
-                    "Fintual: skipped the stocks wallet (no readable USD balance)"
-                )
+                warnings.append("Fintual: skipped the stocks wallet (no readable USD balance)")
             else:
                 products.append(wallet_product)
         if unreadable:
@@ -962,35 +943,25 @@ class FintualScraper(BaseScraper):
         if positions:
             # Whatever fails on the positions' own requests, the wallet lands.
             try:
-                position_products, unpriced, without_totals = (
-                    await self._position_products(client, positions)
+                position_products, unpriced, without_totals = await self._position_products(
+                    client, positions
                 )
             except Exception as exc:
                 logger.exception("Fintual: stock positions failed; keeping the wallet")
-                warnings.append(
-                    f"Fintual stock positions skipped: {_stocks_failure_reason(exc)}"
-                )
+                warnings.append(f"Fintual stock positions skipped: {_stocks_failure_reason(exc)}")
             else:
                 products.extend(position_products)
                 emitted = {p.external_ref for p in position_products}
-                held = [
-                    p
-                    for p in positions
-                    if p.shares > 0 and stock_ref(p.asset_id) in emitted
-                ]
+                held = [p for p in positions if p.shares > 0 and stock_ref(p.asset_id) in emitted]
 
         if unpriced:
-            logger.warning(
-                "Fintual: %d stock position(s) without a current price", unpriced
-            )
+            logger.warning("Fintual: %d stock position(s) without a current price", unpriced)
             warnings.append(
                 f"Fintual: skipped {unpriced} stock position(s) without a current price"
             )
         if without_totals:
             logger.warning("Fintual: %d stock position(s) without totals", without_totals)
-            warnings.append(
-                f"Fintual: skipped {without_totals} stock position(s) without totals"
-            )
+            warnings.append(f"Fintual: skipped {without_totals} stock position(s) without totals")
         logger.info(
             "Fintual: %d stock positions%s",
             sum(p.kind == "stock" for p in products),
@@ -1064,9 +1035,7 @@ class FintualScraper(BaseScraper):
         for i, position in enumerate(targets):
             try:
                 async with asyncio.timeout_at(deadline):
-                    points, skipped = await self._price_history(
-                        client, position.symbol, start
-                    )
+                    points, skipped = await self._price_history(client, position.symbol, start)
                 history = ScrapedPriceHistory(
                     institution="fintual",
                     product=ProductRef(
@@ -1079,8 +1048,7 @@ class FintualScraper(BaseScraper):
             except TimeoutError:
                 not_read = len(targets) - i
                 logger.warning(
-                    "Fintual: stock price history ran over its %.0f s budget; "
-                    "%d stock(s) not read",
+                    "Fintual: stock price history ran over its %.0f s budget; %d stock(s) not read",
                     PRICE_HISTORY_BUDGET_SECONDS,
                     not_read,
                 )
@@ -1151,9 +1119,7 @@ class FintualScraper(BaseScraper):
             if errors:
                 # A list that failed to resolve answers null, which reads as
                 # empty: the page can't be trusted.
-                raise FintualStocksError(
-                    f"WalletMovements answered {errors} GraphQL error(s)"
-                )
+                raise FintualStocksError(f"WalletMovements answered {errors} GraphQL error(s)")
             page = parse_wallet_page(data, now)
             yield page
             if not page.length:
@@ -1182,7 +1148,7 @@ class FintualScraper(BaseScraper):
         # Reached the empty page that ends the ledger (never after a failure).
         complete = failed = False
         try:
-            async for page in self._wallet_pages(client, datetime.now(timezone.utc)):
+            async for page in self._wallet_pages(client, datetime.now(UTC)):
                 complete = not page.length
                 for entry in page.entries:
                     # A list that ignored the offset would repeat its rows.
@@ -1195,9 +1161,7 @@ class FintualScraper(BaseScraper):
         except Exception as exc:
             failed = True
             logger.exception("Fintual: stock movements failed; keeping the pages read")
-            warnings.append(
-                f"Fintual: stock movements failed ({_stocks_failure_reason(exc)})"
-            )
+            warnings.append(f"Fintual: stock movements failed ({_stocks_failure_reason(exc)})")
         if not complete and not failed:
             warn(
                 f"Fintual: stopped after {MAX_PAGES} pages of stock movements; "
@@ -1307,7 +1271,7 @@ class FintualScraper(BaseScraper):
 
             attrs = goal.get("attributes", {})
             # A brand-new goal can report `"nav": null`; value it at 0.
-            nav = int(round(float(attrs.get("nav") or 0)))
+            nav = round(float(attrs.get("nav") or 0))
             total_nav += nav
 
             # deposited/profit ride along when the payload reports them.
@@ -1323,9 +1287,7 @@ class FintualScraper(BaseScraper):
                     name=attrs.get("name", "Unknown"),
                     metrics=InvestmentMetrics(
                         nav=nav,
-                        deposited=(
-                            float(deposited) if deposited is not None else None
-                        ),
+                        deposited=(float(deposited) if deposited is not None else None),
                         profit=float(profit) if profit is not None else None,
                     ),
                 )
@@ -1345,9 +1307,12 @@ class FintualScraper(BaseScraper):
     async def _run_cycle(self) -> _Cycle:
         """One session drive: the goals, then the stocks (portfolio,
         movements, price history), then save the jar."""
-        async with self._session_lock, httpx.AsyncClient(
-            timeout=30.0, follow_redirects=True, headers=self._base_headers()
-        ) as client:
+        async with (
+            self._session_lock,
+            httpx.AsyncClient(
+                timeout=30.0, follow_redirects=True, headers=self._base_headers()
+            ) as client,
+        ):
             self._refreshed_this_run = False
             products, warnings = await self._goal_products(client)
 
@@ -1368,8 +1333,8 @@ class FintualScraper(BaseScraper):
             transactions: list[ScrapedTransaction] = []
             if stocks is None or stocks.has_account:
                 try:
-                    transactions, sold_out, movement_warnings = (
-                        await self._scrape_movements(client, stocks)
+                    transactions, sold_out, movement_warnings = await self._scrape_movements(
+                        client, stocks
                     )
                 except Exception as exc:
                     logger.exception("Fintual: stock movements failed; keeping the rest")
@@ -1391,12 +1356,9 @@ class FintualScraper(BaseScraper):
                         client, list(stocks.held_positions)
                     )
                 except Exception as exc:
-                    logger.exception(
-                        "Fintual: stock price history failed; keeping the rest"
-                    )
+                    logger.exception("Fintual: stock price history failed; keeping the rest")
                     warnings.append(
-                        "Fintual: stock price history failed "
-                        f"({_stocks_failure_reason(exc)})"
+                        f"Fintual: stock price history failed ({_stocks_failure_reason(exc)})"
                     )
                 else:
                     warnings.extend(history_warnings)

@@ -6,7 +6,7 @@ import re
 import unicodedata
 from collections.abc import Collection
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -22,6 +22,7 @@ from scrapers.base import (
     ScrapedTransaction,
     SupersededTransaction,
     TransactionLocation,
+    VanishedProductScope,
     VanishedWindow,
 )
 
@@ -35,14 +36,12 @@ def start_scraper_run(method: str, institution: str) -> str:
     'open_banking'); `institution` is the platform being scraped.
     """
     run_id = str(uuid4())
-    _insert_scraper_run(run_id, method, institution, datetime.now(timezone.utc))
+    _insert_scraper_run(run_id, method, institution, datetime.now(UTC))
     return run_id
 
 
 @with_db_retry
-def _insert_scraper_run(
-    run_id: str, method: str, institution: str, started_at: datetime
-) -> None:
+def _insert_scraper_run(run_id: str, method: str, institution: str, started_at: datetime) -> None:
     """The id is minted by the caller, so a retry after a commit whose
     acknowledgement was lost finds its own row instead of adding a second one
     that would stay `running` forever."""
@@ -76,7 +75,7 @@ def finish_scraper_run(
             WHERE id = %s
             """,
             (
-                datetime.now(timezone.utc),
+                datetime.now(UTC),
                 status,
                 transactions_imported,
                 error_message,
@@ -121,9 +120,7 @@ def _canonical_metrics(metrics: dict | None) -> str:
     """
     if metrics is None:
         return _NO_METRICS
-    return json.dumps(
-        _normalize_numbers(metrics), sort_keys=True, separators=(",", ":")
-    )
+    return json.dumps(_normalize_numbers(metrics), sort_keys=True, separators=(",", ":"))
 
 
 def _headline_decimal(headline: float | int | None) -> Decimal | None:
@@ -172,33 +169,20 @@ def _resolve_product(
             (institution_id, institution_slug, institution_slug),
         )
 
-    user_row = conn.execute(
-        "SELECT id FROM users ORDER BY created_at LIMIT 1"
-    ).fetchone()
+    user_row = conn.execute("SELECT id FROM users ORDER BY created_at LIMIT 1").fetchone()
     if not user_row:
         raise RuntimeError("No users found — run the V009 migration first")
     user_id = user_row[0]
 
-    account_row = conn.execute(
-        """
-        SELECT id FROM accounts
-        WHERE user_id = %s AND institution_id = %s
-        ORDER BY display_order LIMIT 1
-        """,
-        (user_id, institution_id),
-    ).fetchone()
-    if account_row:
-        account_id = account_row[0]
-    else:
+    account_id = _scraper_account(conn, user_id, institution_id)
+    if account_id is None:
         account_id = str(uuid4())
         conn.execute(
             "INSERT INTO accounts (id, user_id, institution_id) VALUES (%s, %s, %s)",
             (account_id, user_id, institution_id),
         )
 
-    default_name = f"{institution_name} - {kind}" + (
-        f" ({currency})" if currency != "CLP" else ""
-    )
+    default_name = f"{institution_name} - {kind}" + (f" ({currency})" if currency != "CLP" else "")
     product_name = name or default_name
     # Slugs are unique per institution (inactive products keep theirs reserved),
     # so the taken set spans every account of the institution.
@@ -245,12 +229,40 @@ def _resolve_product(
     return product_row[0]
 
 
+# The attributes keys `retire_vanished_products` stamps on a product it retires,
+# so a later scrape can tell it from one the user deactivated by hand.
+RETIRED_MARKER_KEY = "retired_by_scraper"
+RETIRED_AT_KEY = "retired_by_scraper_at"
+# Stamped (with an ISO timestamp) on an active product the first complete
+# listing lacks; only the next complete listing that still lacks it retires it.
+VANISHED_PENDING_KEY = "vanished_pending_since"
+
+
+def _scraper_account(conn, user_id, institution_id):
+    """The account scrapers write an institution's products to (its first by
+    display order), or None when the user has none there yet."""
+    row = conn.execute(
+        """
+        SELECT id FROM accounts
+        WHERE user_id = %s AND institution_id = %s
+        ORDER BY display_order LIMIT 1
+        """,
+        (user_id, institution_id),
+    ).fetchone()
+    return row[0] if row else None
+
+
 def _resolve_product_row(conn, product_id: str):
-    """The (account_id, kind, currency, external_ref, is_active) of a product."""
+    """The (account_id, kind, currency, external_ref, is_active,
+    retired_by_scraper, vanished_pending) of a product, row locked until the
+    caller's transaction ends, so a concurrent hand toggle of `is_active` (the
+    web PATCH locks the row too) can't land between this read and the write
+    decided from it."""
     return conn.execute(
-        "SELECT account_id, kind, currency, external_ref, is_active "
-        "FROM products WHERE id = %s",
-        (product_id,),
+        "SELECT account_id, kind, currency, external_ref, is_active, "
+        "attributes @> %s, attributes ? %s "
+        "FROM products WHERE id = %s FOR NO KEY UPDATE",
+        (Jsonb({RETIRED_MARKER_KEY: True}), VANISHED_PENDING_KEY, product_id),
     ).fetchone()
 
 
@@ -285,9 +297,7 @@ def _retire_rollup_sibling(conn, account_id, kind: str, currency: str) -> str | 
     if not row:
         return None
     sibling_id = row[0]
-    conn.execute(
-        "DELETE FROM product_snapshots WHERE product_id = %s", (sibling_id,)
-    )
+    conn.execute("DELETE FROM product_snapshots WHERE product_id = %s", (sibling_id,))
     conn.execute(
         "UPDATE products SET is_active = false, current_balance = NULL, "
         "metrics = NULL, balance_as_of = NULL, updated_at = now() WHERE id = %s",
@@ -297,19 +307,26 @@ def _retire_rollup_sibling(conn, account_id, kind: str, currency: str) -> str | 
 
 
 def _write_decision(
-    is_active: bool, external_ref: str | None, has_active_ref_sibling: bool
+    is_active: bool,
+    external_ref: str | None,
+    has_active_ref_sibling: bool,
+    retired_by_scraper: bool = False,
 ) -> str:
     """What `upsert_product` should do with a resolved product row.
 
-    - ``"skip_inactive"``: the row is retired (a roll-up superseded by
-      per-holding products, or the retired Fintual aggregate). Leave it frozen
-      so a fallback scrape can't resurrect a double-counting aggregate.
+    - ``"reactivate"``: the row is inactive because `retire_vanished_products`
+      retired it (the source had stopped listing it), and the source lists it
+      again: reactivate it, then write it normally.
+    - ``"skip_inactive"``: the row is retired otherwise (a roll-up superseded
+      by per-holding products, the retired Fintual aggregate, or a product the
+      user deactivated). Leave it frozen so a fallback scrape can't resurrect
+      a double-counting aggregate.
     - ``"skip_superseded"``: a NULL-ref roll-up whose per-holding siblings are
       active. Writing it would double-count, so the per-holding rows win.
     - ``"write"``: proceed normally.
     """
     if not is_active:
-        return "skip_inactive"
+        return "reactivate" if retired_by_scraper else "skip_inactive"
     if external_ref is None and has_active_ref_sibling:
         return "skip_superseded"
     return "write"
@@ -357,7 +374,7 @@ def _untagged_ref_key(external_id: str) -> str | None:
     """
     if not external_id.startswith("bch_ref_"):
         return None
-    reference, sep, _tag = external_id[len("bch_ref_"):].partition("_")
+    reference, sep, _tag = external_id[len("bch_ref_") :].partition("_")
     if not sep or not reference:
         return None
     return f"bch_ref_{reference}"
@@ -511,9 +528,7 @@ def _similar_descriptions(left: str | None, right: str | None) -> bool:
     left_tokens, left_joined = _description_tokens(left)
     right_tokens, right_joined = _description_tokens(right)
     return any(
-        len(token) >= _MIN_SHARED_TOKEN
-        and token not in _GENERIC_TOKENS
-        and token in other
+        len(token) >= _MIN_SHARED_TOKEN and token not in _GENERIC_TOKENS and token in other
         for tokens, other in ((left_tokens, right_joined), (right_tokens, left_joined))
         for token in tokens
     )
@@ -588,9 +603,7 @@ def _nearby_card_sibling(
     return _closest_unique(candidates, txn.transaction_date)
 
 
-def _same_day_siblings(
-    conn, product_id: str, txn: ScrapedTransaction, source: str
-) -> list[tuple]:
+def _same_day_siblings(conn, product_id: str, txn: ScrapedTransaction, source: str) -> list[tuple]:
     """Stored rows on `txn`'s own dates that could be it under an older key.
 
     Scoped as tightly as the identity allows: same product, same amount, same
@@ -734,8 +747,7 @@ def _fill_billing(conn, row_id, txn: ScrapedTransaction) -> None:
     if txn.billing_status is None:
         return
     stored = conn.execute(
-        "SELECT billing_status, statement_date FROM transactions "
-        "WHERE id = %s FOR UPDATE",
+        "SELECT billing_status, statement_date FROM transactions WHERE id = %s FOR UPDATE",
         (row_id,),
     ).fetchone()
     if stored is None:
@@ -753,8 +765,7 @@ def _fill_billing(conn, row_id, txn: ScrapedTransaction) -> None:
 def _stored_row_id(conn, product_id: str, external_id: str):
     """The id of the row already stored under this key, or None."""
     row = conn.execute(
-        "SELECT id FROM transactions "
-        "WHERE product_id = %s AND external_id = %s",
+        "SELECT id FROM transactions WHERE product_id = %s AND external_id = %s",
         (product_id, external_id),
     ).fetchone()
     return row[0] if row else None
@@ -1041,9 +1052,7 @@ def write_transactions(transactions: list[ScrapedTransaction]) -> TransactionWri
             except Exception:
                 if conn.broken:
                     raise
-                logger.exception(
-                    "Failed to resolve the product for: %s", txn.external_id
-                )
+                logger.exception("Failed to resolve the product for: %s", txn.external_id)
                 continue
             if products[key] is not None:
                 incoming.setdefault(products[key], set()).add(txn.external_id)
@@ -1140,8 +1149,7 @@ def delete_superseded_transactions(
     ]
     if len(replaced) < len(superseded):
         logger.warning(
-            "%d superseded transaction(s) left in place: their replacement was "
-            "not stored this run",
+            "%d superseded transaction(s) left in place: their replacement was not stored this run",
             len(superseded) - len(replaced),
         )
     superseded = replaced
@@ -1226,8 +1234,7 @@ def delete_superseded_transactions(
                 (
                     candidate
                     for candidate in rows
-                    if candidate[0] not in claimed
-                    and candidate[1] not in protected_external_ids
+                    if candidate[0] not in claimed and candidate[1] not in protected_external_ids
                 ),
                 None,
             )
@@ -1386,8 +1393,7 @@ def soft_delete_vanished_transactions(
                     )
                     deleted += len(doomed)
                     logger.info(
-                        "Soft-deleted %d %s %s %s row(s) after %s the source no "
-                        "longer lists",
+                        "Soft-deleted %d %s %s %s row(s) after %s the source no longer lists",
                         len(doomed),
                         window.institution,
                         window.product_kind,
@@ -1471,7 +1477,9 @@ def upsert_product(sp: ScrapedProduct) -> None:
     same transaction so the denormalized columns can't drift.
 
     Two guards keep a roll-up total and its per-holding rows from both counting
-    (see `_write_decision`): a retired product is left frozen, and a NULL-ref
+    (see `_write_decision`): a retired product is left frozen (unless
+    `retire_vanished_products` retired it, which reactivates it; a write also
+    clears a pending vanished marker), and a NULL-ref
     roll-up is dropped when active per-holding siblings exist. Conversely, a
     per-holding write retires any active NULL-ref sibling for its account/kind.
     """
@@ -1486,13 +1494,53 @@ def upsert_product(sp: ScrapedProduct) -> None:
             name=sp.name,
         )
 
-        account_id, kind, currency, external_ref, is_active = _resolve_product_row(
-            conn, product_id
-        )
+        (
+            account_id,
+            kind,
+            currency,
+            external_ref,
+            is_active,
+            retired_by_scraper,
+            vanished_pending,
+        ) = _resolve_product_row(conn, product_id)
         has_sibling = external_ref is None and _has_active_ref_sibling(
             conn, account_id, kind, currency
         )
-        decision = _write_decision(is_active, external_ref, has_sibling)
+        decision = _write_decision(is_active, external_ref, has_sibling, retired_by_scraper)
+        if decision == "reactivate":
+            # Listed again after the scraper retired it: back to active, and
+            # the markers go. The guard keeps a row that lost its marker (a
+            # hand toggle) from being reactivated.
+            conn.execute(
+                "UPDATE products SET is_active = true, "
+                "attributes = attributes - %s - %s - %s, updated_at = now() "
+                "WHERE id = %s AND attributes @> %s",
+                (
+                    RETIRED_MARKER_KEY,
+                    RETIRED_AT_KEY,
+                    VANISHED_PENDING_KEY,
+                    product_id,
+                    Jsonb({RETIRED_MARKER_KEY: True}),
+                ),
+            )
+        elif retired_by_scraper or vanished_pending:
+            # Written (listed again) or left frozen: the markers go either way,
+            # so a product the user re-enabled by hand stays frozen on a later
+            # hand deactivation, and a stray pending stamp can't make the next
+            # miss after a reactivation retire at once. `is_active` is the
+            # user's and is never touched here.
+            conn.execute(
+                "UPDATE products SET attributes = attributes - %s - %s - %s WHERE id = %s",
+                (RETIRED_MARKER_KEY, RETIRED_AT_KEY, VANISHED_PENDING_KEY, product_id),
+            )
+        if decision == "reactivate":
+            logger.info(
+                "Reactivated %s/%s %s (external_ref=%s): listed again",
+                sp.institution,
+                sp.kind,
+                sp.currency,
+                external_ref,
+            )
         if decision == "skip_inactive":
             logger.warning(
                 "Skipping retired product %s/%s %s (external_ref=%s); left frozen",
@@ -1544,15 +1592,11 @@ def upsert_product(sp: ScrapedProduct) -> None:
         metrics_dict = sp.metrics.model_dump(mode="json", exclude_none=True)
         headline = _headline_decimal(sp.metrics.headline())
 
-        row = conn.execute(
-            "SELECT metrics FROM products WHERE id = %s", (product_id,)
-        ).fetchone()
+        row = conn.execute("SELECT metrics FROM products WHERE id = %s", (product_id,)).fetchone()
         current_metrics = row[0] if row else None
 
-        now = datetime.now(timezone.utc)
-        changed = _canonical_metrics(metrics_dict) != _canonical_metrics(
-            current_metrics
-        )
+        now = datetime.now(UTC)
+        changed = _canonical_metrics(metrics_dict) != _canonical_metrics(current_metrics)
         # `balance` is NOT NULL: a kind whose headline is None (e.g. debit_card)
         # gets no history row, only the latest-metrics refresh below.
         if changed and headline is not None:
@@ -1586,6 +1630,123 @@ def upsert_product(sp: ScrapedProduct) -> None:
             sp.currency,
             metrics_dict,
         )
+
+
+@dataclass(frozen=True)
+class VanishedProductsResult:
+    """What one `retire_vanished_products` call did.
+
+    `retired` counts the products deactivated (missing from two complete
+    listings in a row); `pending` counts those newly flagged on their first
+    miss, still active.
+    """
+
+    retired: int = 0
+    pending: int = 0
+
+
+@with_db_retry
+def retire_vanished_products(scope: VanishedProductScope) -> VanishedProductsResult:
+    """Retire the stored products two complete listings in a row no longer carry.
+
+    Candidates are the active products of the scope's kind and currency, on
+    the account `_resolve_product` writes to, whose `external_ref` has the
+    scope's prefix and is not in `present_refs` (never a ref-less one). A
+    candidate without `VANISHED_PENDING_KEY` is only stamped with it (one
+    missed listing may be the source's glitch). One already stamped is
+    retired: deactivated, stamped with `RETIRED_MARKER_KEY` / `RETIRED_AT_KEY`
+    (the pending key goes) so `upsert_product` can reactivate it, and given a
+    `closed_metrics` snapshot, so its history stays and net worth stops
+    counting it. `upsert_product` clears the pending key when the product is
+    listed again.
+    """
+    metrics_dict = scope.closed_metrics.model_dump(mode="json", exclude_none=True)
+    headline = _headline_decimal(scope.closed_metrics.headline())
+    present = list(scope.present_refs)
+    pool = get_pool()
+    with pool.connection() as conn, conn.transaction():
+        owner = conn.execute(
+            """
+            SELECT u.id, i.id FROM institutions i,
+                (SELECT id FROM users ORDER BY created_at LIMIT 1) u
+            WHERE i.slug = %s
+            """,
+            (scope.institution,),
+        ).fetchone()
+        account_id = owner and _scraper_account(conn, owner[0], owner[1])
+        if account_id is None:
+            return VanishedProductsResult()
+        rows = conn.execute(
+            """
+            SELECT p.id, p.metrics, p.attributes ? %s FROM products p
+            WHERE p.account_id = %s
+              AND p.kind = %s AND p.currency = %s
+              AND p.external_ref LIKE %s
+              AND NOT (p.external_ref = ANY(%s::text[]))
+              AND p.is_active
+            FOR UPDATE OF p
+            """,
+            (
+                VANISHED_PENDING_KEY,
+                account_id,
+                scope.product_kind,
+                scope.currency,
+                _like_prefix(scope.external_ref_prefix),
+                present,
+            ),
+        ).fetchall()
+        now = datetime.now(UTC)
+        retired = 0
+        pending = 0
+        for product_id, current_metrics, already_pending in rows:
+            if not already_pending:
+                conn.execute(
+                    "UPDATE products SET attributes = attributes || %s WHERE id = %s",
+                    (Jsonb({VANISHED_PENDING_KEY: now.isoformat()}), product_id),
+                )
+                pending += 1
+                continue
+            changed = _canonical_metrics(metrics_dict) != _canonical_metrics(current_metrics)
+            if changed and headline is not None:
+                conn.execute(
+                    """
+                    INSERT INTO product_snapshots
+                        (id, product_id, balance, metrics, as_of, source)
+                    VALUES (%s, %s, %s, %s, %s, 'scraper')
+                    ON CONFLICT (product_id, as_of) DO NOTHING
+                    """,
+                    (str(uuid4()), product_id, headline, Jsonb(metrics_dict), now),
+                )
+            conn.execute(
+                """
+                UPDATE products
+                SET is_active = false, current_balance = %s, metrics = %s,
+                    balance_as_of = %s, attributes = (attributes - %s) || %s,
+                    updated_at = %s
+                WHERE id = %s
+                """,
+                (
+                    headline,
+                    Jsonb(metrics_dict),
+                    now,
+                    VANISHED_PENDING_KEY,
+                    Jsonb({RETIRED_MARKER_KEY: True, RETIRED_AT_KEY: now.isoformat()}),
+                    now,
+                    product_id,
+                ),
+            )
+            retired += 1
+    if retired or pending:
+        logger.info(
+            "%s %s %s: retired %d product(s) missing from two complete listings, "
+            "flagged %d missing from this one",
+            scope.institution,
+            scope.product_kind,
+            scope.currency,
+            retired,
+            pending,
+        )
+    return VanishedProductsResult(retired=retired, pending=pending)
 
 
 # --- Exchange rates (V024) -----------------------------------------------------
@@ -1661,7 +1822,7 @@ def upsert_exchange_rate(rate: ScrapedExchangeRate) -> None:
                     + f" at '{rate.institution}'"
                 )
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         conn.execute(
             """
             INSERT INTO exchange_rates
@@ -1731,12 +1892,8 @@ def upsert_price_history(history: ScrapedPriceHistory) -> int:
             "SELECT id FROM institutions WHERE slug = %s", (history.institution,)
         ).fetchone()
         if not row:
-            raise UnresolvedPriceScope(
-                f"institution '{history.institution}' not found"
-            )
-        product_id = _lookup_product(
-            conn, row[0], ref.kind, ref.currency, ref.external_ref
-        )
+            raise UnresolvedPriceScope(f"institution '{history.institution}' not found")
+        product_id = _lookup_product(conn, row[0], ref.kind, ref.currency, ref.external_ref)
         if product_id is None:
             raise UnresolvedPriceScope(
                 f"no {ref.kind} product in {ref.currency}"

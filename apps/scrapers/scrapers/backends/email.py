@@ -23,10 +23,9 @@ import os
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from email.header import decode_header
-from typing import Optional
 from zoneinfo import ZoneInfo
 
 from scrapers.base import ScrapedTransaction
@@ -85,13 +84,13 @@ class EmailPattern:
 
     institution: str
     product_kind: str
-    sender_domains: list[str]         # From domain must contain one of these as whole labels
-    subject_contains: list[str]       # match any of these in Subject (optional filter)
-    amount_rules: list[AmountRule]    # the rule anchored earliest in the body wins
-    merchant_patterns: list[str]      # regex patterns to extract merchant name
+    sender_domains: list[str]  # From domain must contain one of these as whole labels
+    subject_contains: list[str]  # match any of these in Subject (optional filter)
+    amount_rules: list[AmountRule]  # the rule anchored earliest in the body wins
+    merchant_patterns: list[str]  # regex patterns to extract merchant name
     income_keywords: list[str] = field(default_factory=list)  # in Subject: money came in
-    mailbox: Optional[str] = None     # None: EMAIL_IMAP_MAILBOX, else INBOX
-    max_messages: Optional[int] = None  # None: EMAIL_MAX_MESSAGES, else 100
+    mailbox: str | None = None  # None: EMAIL_IMAP_MAILBOX, else INBOX
+    max_messages: int | None = None  # None: EMAIL_MAX_MESSAGES, else 100
 
 
 def _decode_header_value(raw: str) -> str:
@@ -165,7 +164,7 @@ def _get_body(msg: email.message.Message) -> str:
     return ""
 
 
-def _to_clp(raw: str) -> Optional[int]:
+def _to_clp(raw: str) -> int | None:
     """Parse a Chilean-formatted figure into whole CLP.
 
     Dots group thousands and a comma marks decimals, which round half up:
@@ -179,9 +178,7 @@ def _to_clp(raw: str) -> Optional[int]:
     return int(value.quantize(Decimal(1), rounding=ROUND_HALF_UP))
 
 
-def _parse_amount(
-    text: str, rules: list[AmountRule]
-) -> Optional[tuple[int, bool]]:
+def _parse_amount(text: str, rules: list[AmountRule]) -> tuple[int, bool] | None:
     """Return (amount, the rule's `income`) for the earliest anchor in `text`.
 
     An email opens with what happened and only then restates figures, so the
@@ -189,7 +186,7 @@ def _parse_amount(
     devolvimos $ N de tu compra por $ M" is a refund of N. Ties go to the
     earlier rule. None when no anchored figure is present.
     """
-    best: Optional[tuple[int, int, int, bool]] = None
+    best: tuple[int, int, int, bool] | None = None
     for index, rule in enumerate(rules):
         match = re.search(rule.pattern, text, re.IGNORECASE)
         if not match:
@@ -203,7 +200,7 @@ def _parse_amount(
     return None if best is None else (best[2], best[3])
 
 
-def _parse_merchant(text: str, patterns: list[str]) -> Optional[str]:
+def _parse_merchant(text: str, patterns: list[str]) -> str | None:
     """Return the first plausible merchant name captured by `patterns`.
 
     A capture longer than a merchant name can be is a runaway match (a whole
@@ -243,10 +240,7 @@ def _domain_matches(domain: str, wanted: str) -> bool:
     """
     labels = domain.split(".")
     want = wanted.lower().split(".")
-    return any(
-        labels[i : i + len(want)] == want
-        for i in range(len(labels) - len(want) + 1)
-    )
+    return any(labels[i : i + len(want)] == want for i in range(len(labels) - len(want) + 1))
 
 
 def _match_pattern(from_addr: str, subject: str, pattern: EmailPattern) -> bool:
@@ -255,11 +249,7 @@ def _match_pattern(from_addr: str, subject: str, pattern: EmailPattern) -> bool:
     if not any(_domain_matches(domain, d) for d in pattern.sender_domains):
         return False
 
-    if pattern.subject_contains:
-        if not _contains_any(subject, pattern.subject_contains):
-            return False
-
-    return True
+    return not pattern.subject_contains or _contains_any(subject, pattern.subject_contains)
 
 
 def _today() -> date:
@@ -269,14 +259,14 @@ def _today() -> date:
 def _local_date(moment: datetime) -> date:
     """Calendar date of `moment` in Chile; a naive time is taken as UTC."""
     if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
+        moment = moment.replace(tzinfo=UTC)
     return moment.astimezone(LOCAL_TZ).date()
 
 
 def _transaction_date(
     msg: email.message.Message,
     institution: str,
-    internal_date: Optional[datetime],
+    internal_date: datetime | None,
 ) -> date:
     """Date the email was sent: its Date header, else the IMAP INTERNALDATE.
 
@@ -302,9 +292,7 @@ def _transaction_date(
     return _today()
 
 
-def _external_id(
-    institution: str, msg: email.message.Message, fallback_parts: list[str]
-) -> str:
+def _external_id(institution: str, msg: email.message.Message, fallback_parts: list[str]) -> str:
     """Deterministic dedup key for one email.
 
     Keyed on the Message-ID, so the same email found again (a later run, or
@@ -322,8 +310,8 @@ def _external_id(
 def parse_transaction(
     msg: email.message.Message,
     pattern: EmailPattern,
-    internal_date: Optional[datetime] = None,
-) -> Optional[ScrapedTransaction]:
+    internal_date: datetime | None = None,
+) -> ScrapedTransaction | None:
     """Turn one email into a transaction, or None when it isn't one.
 
     The sign follows the money: an email is income when its subject carries
@@ -394,9 +382,7 @@ def _resolve_max_messages(pattern: EmailPattern) -> int:
         try:
             cap = int(raw)
         except ValueError:
-            raise ValueError(
-                f"EMAIL_MAX_MESSAGES must be an integer, got {raw!r}"
-            ) from None
+            raise ValueError(f"EMAIL_MAX_MESSAGES must be an integer, got {raw!r}") from None
     if cap < 1:
         raise ValueError(f"The email cap must be at least 1, got {cap}")
     return cap
@@ -437,9 +423,7 @@ def _search_ids(mail: imaplib.IMAP4_SSL, since: str, senders: list[str]) -> list
 _INTERNALDATE_RE = re.compile(rb'INTERNALDATE "([^"]+)"')
 
 
-def _fetch_message(
-    mail: imaplib.IMAP4_SSL, msg_id: str
-) -> tuple[Optional[bytes], Optional[datetime]]:
+def _fetch_message(mail: imaplib.IMAP4_SSL, msg_id: str) -> tuple[bytes | None, datetime | None]:
     """Fetch one message without flagging it as seen.
 
     Returns (raw RFC 822 bytes, INTERNALDATE). Fetch responses may interleave
@@ -450,8 +434,8 @@ def _fetch_message(
     if status != "OK":
         return None, None
 
-    raw_email: Optional[bytes] = None
-    internal_date: Optional[datetime] = None
+    raw_email: bytes | None = None
+    internal_date: datetime | None = None
     for part in msg_data:
         envelope = part[0] if isinstance(part, tuple) else part
         if (
@@ -484,7 +468,7 @@ class ImapSession:
         self._host = host
         self._user = user
         self._password = password
-        self._mail: Optional[imaplib.IMAP4_SSL] = None
+        self._mail: imaplib.IMAP4_SSL | None = None
         self._lock = asyncio.Lock()
 
     async def __aenter__(self) -> imaplib.IMAP4_SSL:
@@ -540,7 +524,7 @@ class ImapSession:
         self._mail = None
 
 
-_SESSION: Optional[ImapSession] = None
+_SESSION: ImapSession | None = None
 
 
 def get_session() -> ImapSession:
@@ -618,14 +602,10 @@ async def fetch_transactions_for_pattern(
 ) -> list[ScrapedTransaction]:
     """Search the mailbox for emails matching `pattern` and return transactions."""
     async with get_session() as mail:
-        return await asyncio.to_thread(
-            _collect_transactions, mail, pattern, lookback_days
-        )
+        return await asyncio.to_thread(_collect_transactions, mail, pattern, lookback_days)
 
 
-def _received_at(
-    msg: email.message.Message, internal_date: Optional[datetime]
-) -> Optional[datetime]:
+def _received_at(msg: email.message.Message, internal_date: datetime | None) -> datetime | None:
     """When the mail server got `msg`: its INTERNALDATE, else its Date header.
 
     Always tz-aware (a naive time is taken as UTC); None when neither is usable.
@@ -637,7 +617,7 @@ def _received_at(
         except Exception:  # malformed headers raise ValueError, OverflowError, ...
             return None
     if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
+        moment = moment.replace(tzinfo=UTC)
     return moment
 
 
@@ -647,11 +627,11 @@ def _find_code(
     subject_contains: list[str],
     code_pattern: str,
     lookback_days: int,
-    received_after: Optional[datetime] = None,
-) -> Optional[str]:
+    received_after: datetime | None = None,
+) -> str | None:
     """Blocking half of `fetch_latest_code`; runs in a thread."""
     if received_after is not None and received_after.tzinfo is None:
-        received_after = received_after.replace(tzinfo=timezone.utc)
+        received_after = received_after.replace(tzinfo=UTC)
     since = (_today() - timedelta(days=lookback_days)).strftime("%d-%b-%Y")
     _select(mail, DEFAULT_MAILBOX)
     for sender_keyword in sender_contains:
@@ -694,8 +674,8 @@ async def fetch_latest_code(
     subject_contains: list[str],
     code_pattern: str = r"\b(\d{6})\b",
     lookback_days: int = 2,
-    received_after: Optional[datetime] = None,
-) -> Optional[str]:
+    received_after: datetime | None = None,
+) -> str | None:
     """Return the first code matching `code_pattern` from the newest matching email.
 
     Searches the INBOX (2FA codes are never auto-archived, whatever

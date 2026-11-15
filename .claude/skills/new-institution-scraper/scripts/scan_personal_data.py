@@ -27,9 +27,9 @@ import argparse
 import re
 import subprocess
 import sys
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Iterator
 
 # 1235 is the canonical USD 1.234,56 rounded to whole units.
 CANONICAL_CLP = {"2500000", "1000000", "999999", "1235"}
@@ -37,12 +37,32 @@ CANONICAL_USD = {"1.234,56"}
 CANONICAL_LAST4 = {"1234", "0000"}
 SYNTHETIC_DOMAINS = ("example.com", "example.org", "example.net", "anthropic.com")
 PERSONAL_DOMAINS = (
-    "gmail.com", "hotmail.com", "outlook.com", "live.com", "yahoo.com",
-    "icloud.com", "me.com", "uc.cl", "uchile.cl",
+    "gmail.com",
+    "hotmail.com",
+    "outlook.com",
+    "live.com",
+    "yahoo.com",
+    "icloud.com",
+    "me.com",
+    "uc.cl",
+    "uchile.cl",
 )
 SYNTHETIC_SECRET_PREFIXES = (
-    "synthetic", "test", "not-a-secret", "fake", "dummy", "example", "changeme",
-    "${", "<", "$(", "{", "http", "#", "/", ".",
+    "synthetic",
+    "test",
+    "not-a-secret",
+    "fake",
+    "dummy",
+    "example",
+    "changeme",
+    "${",
+    "<",
+    "$(",
+    "{",
+    "http",
+    "#",
+    "/",
+    ".",
 )
 # Keys that hold counts, not money, even when they say "total" or "limit".
 NON_MONEY_KEY = re.compile(r"(?i)page|count|size|per_?|items|rows|offset|retries|timeout")
@@ -259,9 +279,7 @@ def _scan_line(path: str, line_no: int, line: str) -> Iterator[Hit]:
 
 
 def _git(*args: str) -> str:
-    return subprocess.run(
-        ["git", *args], check=True, capture_output=True, text=True
-    ).stdout
+    return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout
 
 
 def _diff_added_lines(diff_args: list[str]) -> Iterator[tuple[str, int, str]]:

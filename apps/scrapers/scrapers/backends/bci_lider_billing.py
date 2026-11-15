@@ -50,7 +50,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any
 
 from scrapers.base import ProductRef, ScrapedExchangeRate
 
@@ -161,7 +161,7 @@ _RATE_RE = re.compile(r"^\d{1,12}(\.\d{1,8})?$")
 _DATE = r"(\d{2}/\d{2}/\d{4})"
 
 
-def parse_date(raw: Any) -> Optional[datetime.date]:
+def parse_date(raw: Any) -> datetime.date | None:
     """A "DD/MM/YYYY" date; None when it isn't one."""
     if not isinstance(raw, str):
         return None
@@ -174,7 +174,7 @@ def parse_date(raw: Any) -> Optional[datetime.date]:
         return None
 
 
-def parse_rate(raw: Any) -> Optional[Decimal]:
+def parse_rate(raw: Any) -> Decimal | None:
     """The portal's `valorDolar` as a positive Decimal; None when unusable.
 
     A dot-decimal string or a JSON number. Anything else (a comma decimal, an
@@ -189,7 +189,7 @@ def parse_rate(raw: Any) -> Optional[Decimal]:
     return rate if rate > 0 else None
 
 
-def parse_amount(raw: Any) -> Optional[float]:
+def parse_amount(raw: Any) -> float | None:
     """A billing figure: a JSON number or a plain-digit string; else None."""
     if isinstance(raw, bool):
         return None
@@ -200,11 +200,11 @@ def parse_amount(raw: Any) -> Optional[float]:
     return None
 
 
-def exchange_rate_from_rows(rows: Any) -> Optional[ScrapedExchangeRate]:
+def exchange_rate_from_rows(rows: Any) -> ScrapedExchangeRate | None:
     """The USD card's rate from the newest dated, parseable history row."""
     if not isinstance(rows, list):
         return None
-    best: Optional[tuple[datetime.date, Decimal]] = None
+    best: tuple[datetime.date, Decimal] | None = None
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -231,14 +231,14 @@ def exchange_rate_from_rows(rows: Any) -> Optional[ScrapedExchangeRate]:
 class CurrentBilling:
     """The portal's "Último Periodo Facturado" figures (currentBilling)."""
 
-    billing_date: Optional[datetime.date]
-    payment_due_date: Optional[datetime.date]
-    total_to_pay: Optional[float]
-    month_charges: Optional[float]
-    minimum_payment: Optional[float]
+    billing_date: datetime.date | None
+    payment_due_date: datetime.date | None
+    total_to_pay: float | None
+    month_charges: float | None
+    minimum_payment: float | None
 
 
-def current_billing_from_data(data: Any) -> Optional[CurrentBilling]:
+def current_billing_from_data(data: Any) -> CurrentBilling | None:
     """Shape the currentBilling fields; None when nothing in it is usable."""
     if not isinstance(data, dict):
         return None
@@ -264,17 +264,17 @@ class LiderStatement:
     the scraper's movements: a charge negative, a payment or credit positive.
     """
 
-    issued_on: Optional[datetime.date]
-    period_start: Optional[datetime.date]
-    period_end: Optional[datetime.date]
-    payment_due_date: Optional[datetime.date]
-    billed_amount: Optional[float]
-    minimum_payment: Optional[float]
-    next_period_end: Optional[datetime.date]
+    issued_on: datetime.date | None
+    period_start: datetime.date | None
+    period_end: datetime.date | None
+    payment_due_date: datetime.date | None
+    billed_amount: float | None
+    minimum_payment: float | None
+    next_period_end: datetime.date | None
     movements: list[tuple[datetime.date, int]] = field(default_factory=list)
 
     @property
-    def closing_date(self) -> Optional[datetime.date]:
+    def closing_date(self) -> datetime.date | None:
         """The statement's last billed day: the period's end, else the day
         before the issue date (the period ends the day before it is issued)."""
         if self.period_end is not None:
@@ -282,7 +282,7 @@ class LiderStatement:
         return closing_from_issue_date(self.issued_on)
 
 
-def closing_from_issue_date(issued_on: Optional[datetime.date]) -> Optional[datetime.date]:
+def closing_from_issue_date(issued_on: datetime.date | None) -> datetime.date | None:
     """The closing date of a statement issued on `issued_on` (the portal's
     "Fecha de facturación"): its billed period ends the day before."""
     return issued_on - datetime.timedelta(days=1) if issued_on is not None else None
@@ -309,7 +309,7 @@ _ROW_RE = re.compile(
 )
 
 
-def _pesos(raw: Optional[str]) -> Optional[int]:
+def _pesos(raw: str | None) -> int | None:
     """A "1.234.567" / "-999.999" statement figure as whole pesos."""
     if raw is None:
         return None
@@ -319,7 +319,7 @@ def _pesos(raw: Optional[str]) -> Optional[int]:
         return None
 
 
-def statement_from_text(text: Optional[str]) -> Optional[LiderStatement]:
+def statement_from_text(text: str | None) -> LiderStatement | None:
     """Read one statement's figures and movements off its PDF layout text.
 
     Returns None when the text names neither an issue date nor a billed period
@@ -329,11 +329,11 @@ def statement_from_text(text: Optional[str]) -> Optional[LiderStatement]:
     if not text:
         return None
 
-    def date_of(pattern: re.Pattern, group: int = 1) -> Optional[datetime.date]:
+    def date_of(pattern: re.Pattern, group: int = 1) -> datetime.date | None:
         match = pattern.search(text)
         return parse_date(match.group(group)) if match else None
 
-    def pesos_of(pattern: re.Pattern) -> Optional[float]:
+    def pesos_of(pattern: re.Pattern) -> float | None:
         match = pattern.search(text)
         value = _pesos(match.group(1)) if match else None
         return float(value) if value is not None else None
@@ -345,7 +345,7 @@ def statement_from_text(text: Optional[str]) -> Optional[LiderStatement]:
         return None
 
     detail = _DETAIL_RE.search(text)
-    region = text[detail.end():] if detail else ""
+    region = text[detail.end() :] if detail else ""
     end = _DETAIL_END_RE.search(region)
     if end:
         region = region[: end.start()]
@@ -380,13 +380,11 @@ def statement_text_from_pdf(data: bytes) -> str:
     reader = PdfReader(io.BytesIO(data))
     if len(reader.pages) > MAX_PDF_PAGES:
         raise ValueError("statement PDF has too many pages")
-    return "\n".join(
-        page.extract_text(extraction_mode="layout") or "" for page in reader.pages
-    )
+    return "\n".join(page.extract_text(extraction_mode="layout") or "" for page in reader.pages)
 
 
 def billing_metrics(
-    current: Optional[CurrentBilling], statements: list[LiderStatement]
+    current: CurrentBilling | None, statements: list[LiderStatement]
 ) -> dict[str, Any]:
     """The CLP card's statement fields of `CreditCardMetrics` (only those known).
 
@@ -424,11 +422,7 @@ def billing_metrics(
     if current is not None:
         if latest is None:
             fields["statement_date"] = closing_from_issue_date(current.billing_date)
-        billed = (
-            current.total_to_pay
-            if current.total_to_pay is not None
-            else current.month_charges
-        )
+        billed = current.total_to_pay if current.total_to_pay is not None else current.month_charges
         for name, value in (
             ("payment_due_date", current.payment_due_date),
             ("billed_amount", billed),
@@ -447,7 +441,7 @@ class BillingRead:
     """What one billing read got: each part may be missing (see `warnings`)."""
 
     exchange_rates: list[ScrapedExchangeRate] = field(default_factory=list)
-    current: Optional[CurrentBilling] = None
+    current: CurrentBilling | None = None
     statements: list[LiderStatement] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -506,7 +500,7 @@ def billing_from_result(result: Any) -> BillingRead:
     return read
 
 
-def _statement_from_entry(entry: Any) -> Optional[LiderStatement]:
+def _statement_from_entry(entry: Any) -> LiderStatement | None:
     """Decode and parse one statement PDF; None when anything fails."""
     if not isinstance(entry, dict) or entry.get("status") != "ok":
         return None

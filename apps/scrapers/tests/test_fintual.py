@@ -12,7 +12,7 @@ import json
 import os
 import re
 import stat
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -23,6 +23,7 @@ import pytest
 os.environ.setdefault("FINTUAL_EMAIL", "test@example.com")
 os.environ.setdefault("FINTUAL_TOKEN", "test_password")
 
+from scrapers.base import DailyPrice
 from scrapers.institutions import fintual as fintual_mod
 from scrapers.institutions.fintual import (
     APP_URL,
@@ -44,7 +45,6 @@ from scrapers.institutions.fintual import (
     stock_metrics,
     trading_date,
 )
-from scrapers.base import DailyPrice
 
 # Captured before any test swaps the module's AsyncClient for a fake.
 _REAL_ASYNC_CLIENT = httpx.AsyncClient
@@ -100,9 +100,7 @@ class _FakeClient:
 class TestScrapeProducts:
     def _scrape(self, monkeypatch, goals):
         """Run scrape_products() against a canned goals payload."""
-        monkeypatch.setattr(
-            FintualScraper, "_load_session", lambda self, client: True
-        )
+        monkeypatch.setattr(FintualScraper, "_load_session", lambda self, client: True)
         monkeypatch.setattr(
             fintual_mod.httpx,
             "AsyncClient",
@@ -220,7 +218,7 @@ class _RoutedClient:
 
     def _answer(self, url):
         self.calls.append(url)
-        self.first_called_at.setdefault(url, datetime.now(timezone.utc))
+        self.first_called_at.setdefault(url, datetime.now(UTC))
         answers = self._routes[url]
         answer = answers.pop(0) if len(answers) > 1 else answers[0]
         if isinstance(answer, Exception):
@@ -323,9 +321,7 @@ class _SingleUseRefreshServer:
 
 
 class TestSessionRefresh:
-    def test_an_expired_token_is_refreshed_without_a_login(
-        self, monkeypatch, session_file
-    ):
+    def test_an_expired_token_is_refreshed_without_a_login(self, monkeypatch, session_file):
         """goals 401 -> /app/goals re-issues the token -> goals 200, no 2FA;
         the rotated refresh token is saved at once, privately."""
         _write_session(
@@ -377,9 +373,7 @@ class TestSessionRefresh:
         assert client.calls == [GOALS_URL, APP_URL, GOALS_URL, GRAPHQL_URL]
         assert [p.external_ref for p in result.products] == ["34567"]
 
-    def test_failed_refresh_without_imap_match_keeps_manual_error(
-        self, monkeypatch, session_file
-    ):
+    def test_failed_refresh_without_imap_match_keeps_manual_error(self, monkeypatch, session_file):
         """With a different IMAP user, a dead session surfaces the
         manual-login error instead of attempting an automatic sign-in."""
         monkeypatch.delenv("EMAIL_IMAP_USER", raising=False)
@@ -411,14 +405,10 @@ class TestSessionRefresh:
         with pytest.raises(httpx.HTTPStatusError):
             asyncio.run(FintualScraper().scrape_products())
 
-        assert json.loads(session_file.read_text()) == {
-            "auth_refresh_token": "synthetic-refresh-2"
-        }
+        assert json.loads(session_file.read_text()) == {"auth_refresh_token": "synthetic-refresh-2"}
         _assert_owner_only(session_file)
 
-    def test_concurrent_runs_spend_the_refresh_token_once(
-        self, monkeypatch, session_file
-    ):
+    def test_concurrent_runs_spend_the_refresh_token_once(self, monkeypatch, session_file):
         """A manual refresh overlapping the startup scrape waits for it and
         reuses the rotated cache instead of spending the old token again."""
         monkeypatch.delenv("EMAIL_IMAP_USER", raising=False)
@@ -438,9 +428,7 @@ class TestSessionRefresh:
 
         assert server.refreshes == 1
         assert [len(r.products) for r in results] == [1, 1]
-        assert json.loads(session_file.read_text())["auth_refresh_token"] == (
-            "synthetic-refresh-2"
-        )
+        assert json.loads(session_file.read_text())["auth_refresh_token"] == ("synthetic-refresh-2")
 
     def test_a_run_never_signs_in_twice(self, monkeypatch):
         """If the session a run just signed in for is refused, the run fails
@@ -472,16 +460,12 @@ class TestSessionRefresh:
         assert client.calls == [GOALS_URL, GOALS_URL, GRAPHQL_URL]
         assert len(result.products) == 1
 
-    def test_a_refresh_outage_fails_the_run_without_a_login(
-        self, monkeypatch, session_file
-    ):
+    def test_a_refresh_outage_fails_the_run_without_a_login(self, monkeypatch, session_file):
         """A 5xx from /app/goals that outlives the retries is an outage, not a
         dead refresh token: the run fails and no code is e-mailed."""
         monkeypatch.setattr("scrapers.retry.BASE_DELAY_SECONDS", 0.0)
         _imap_is_the_fintual_account(monkeypatch)
-        monkeypatch.setattr(
-            fintual_mod, "fetch_latest_code", AsyncMock(return_value="000000")
-        )
+        monkeypatch.setattr(fintual_mod, "fetch_latest_code", AsyncMock(return_value="000000"))
         _write_session(session_file, auth_refresh_token="synthetic-refresh-1")
         client = _install(
             monkeypatch,
@@ -508,9 +492,7 @@ class TestAutoLogin:
 
         login.assert_awaited_once()
 
-    def test_only_a_code_sent_after_the_login_started_is_accepted(
-        self, monkeypatch, session_file
-    ):
+    def test_only_a_code_sent_after_the_login_started_is_accepted(self, monkeypatch, session_file):
         """The code lookup ignores e-mails from before initiate_login, so a
         previous login's spent code is never sent to finalize."""
         _imap_is_the_fintual_account(monkeypatch)
@@ -529,7 +511,7 @@ class TestAutoLogin:
             ),
         )
 
-        before = datetime.now(timezone.utc)
+        before = datetime.now(UTC)
 
         result = asyncio.run(FintualScraper().scrape_products())
 
@@ -538,21 +520,15 @@ class TestAutoLogin:
         assert len(lookups) == 1
         assert before - skew <= lookups[0]["received_after"] <= initiated - skew
         assert [p.external_ref for p in result.products] == ["34567"]
-        assert json.loads(session_file.read_text()) == {
-            "auth_refresh_token": "synthetic-refresh-1"
-        }
+        assert json.loads(session_file.read_text()) == {"auth_refresh_token": "synthetic-refresh-1"}
 
 
 class TestLoginFailureGuard:
-    def test_a_rejected_code_writes_the_marker_and_a_clean_error(
-        self, monkeypatch, session_file
-    ):
+    def test_a_rejected_code_writes_the_marker_and_a_clean_error(self, monkeypatch, session_file):
         """A failed automatic sign-in leaves the marker (private) and raises a
         short message with no URL or response body."""
         _imap_is_the_fintual_account(monkeypatch)
-        monkeypatch.setattr(
-            fintual_mod, "fetch_latest_code", AsyncMock(return_value="000000")
-        )
+        monkeypatch.setattr(fintual_mod, "fetch_latest_code", AsyncMock(return_value="000000"))
         _install(
             monkeypatch,
             _RoutedClient(
@@ -570,9 +546,7 @@ class TestLoginFailureGuard:
         assert "synthetic body" not in message
         _assert_owner_only(marker)
 
-    def test_a_code_that_never_arrives_also_trips_the_guard(
-        self, monkeypatch, session_file
-    ):
+    def test_a_code_that_never_arrives_also_trips_the_guard(self, monkeypatch, session_file):
         """The inbox is polled a bounded number of times, then the login fails."""
         _imap_is_the_fintual_account(monkeypatch)
         monkeypatch.setattr(fintual_mod, "_CODE_POLL_INTERVAL_SECONDS", 0)
@@ -587,9 +561,7 @@ class TestLoginFailureGuard:
         assert FINALIZE_LOGIN_URL not in client.calls
         assert _marker(session_file).exists()
 
-    def test_a_transport_error_trips_the_guard_with_only_its_type(
-        self, monkeypatch, session_file
-    ):
+    def test_a_transport_error_trips_the_guard_with_only_its_type(self, monkeypatch, session_file):
         """httpx error texts can carry URLs, so only the exception type shows."""
         _imap_is_the_fintual_account(monkeypatch)
         failure = httpx.ConnectError(
@@ -606,9 +578,7 @@ class TestLoginFailureGuard:
         assert "://" not in message and "synthetic failure" not in message
         assert _marker(session_file).exists()
 
-    def test_after_a_failure_the_next_run_does_not_sign_in(
-        self, monkeypatch, session_file
-    ):
+    def test_after_a_failure_the_next_run_does_not_sign_in(self, monkeypatch, session_file):
         """With the marker present, no login is attempted (no new code e-mail)
         until `make fintual-login` succeeds."""
         _imap_is_the_fintual_account(monkeypatch)
@@ -623,9 +593,7 @@ class TestLoginFailureGuard:
         login.assert_not_awaited()
         assert client.calls == []
 
-    def test_the_marker_does_not_block_a_working_refresh(
-        self, monkeypatch, session_file
-    ):
+    def test_the_marker_does_not_block_a_working_refresh(self, monkeypatch, session_file):
         """The guard only stops logins: a refresh still serves the run."""
         _imap_is_the_fintual_account(monkeypatch)
         _write_session(session_file, auth_refresh_token="synthetic-refresh-1")
@@ -676,9 +644,7 @@ class TestLoginFailureGuard:
         asyncio.run(FintualScraper().login(lambda: "000000"))
 
         assert not marker.exists()
-        assert json.loads(session_file.read_text()) == {
-            "auth_refresh_token": "synthetic-refresh-1"
-        }
+        assert json.loads(session_file.read_text()) == {"auth_refresh_token": "synthetic-refresh-1"}
 
 
 class TestRealCookieJar:
@@ -764,7 +730,7 @@ class TestLoadSession:
 # -- stocks -----------------------------------------------------------------
 
 _JWT_COOKIE = fintual_mod._PRICING_JWT_COOKIE
-_QUOTED_AT = datetime(2026, 1, 2, 15, 4, 5, tzinfo=timezone.utc)
+_QUOTED_AT = datetime(2026, 1, 2, 15, 4, 5, tzinfo=UTC)
 
 
 def _position(asset_id, symbol, name, shares):
@@ -1173,9 +1139,7 @@ class TestStockParsers:
                 None,
                 id="a-row-without-an-id",
             ),
-            pytest.param(
-                {"data": {"stocksPositionsV2": None}}, None, id="list-not-read"
-            ),
+            pytest.param({"data": {"stocksPositionsV2": None}}, None, id="list-not-read"),
         ],
     )
     def test_the_listed_asset_ids(self, portfolio, expected):
@@ -1278,9 +1242,7 @@ class TestStocksLeg:
         """A token saved by an earlier run spares the mint."""
         server = _FintualStocks(_portfolio(_ACME))
 
-        result = _run_stocks(
-            monkeypatch, session_file, server, **{_JWT_COOKIE: "synthetic-jwt"}
-        )
+        result = _run_stocks(monkeypatch, session_file, server, **{_JWT_COOKIE: "synthetic-jwt"})
 
         assert result.warnings == []
         assert "/auth/jwt" not in server.paths()
@@ -1499,9 +1461,7 @@ class TestStocksLeg:
         assert initk.metrics.profit == 20.0
         assert "/stocks-pricing-cl/current-prices" not in server.paths()
 
-    def test_a_position_without_a_price_is_skipped_with_a_warning(
-        self, monkeypatch, session_file
-    ):
+    def test_a_position_without_a_price_is_skipped_with_a_warning(self, monkeypatch, session_file):
         """Never valued at 0 silently: left out, counted in a warning."""
         server = _FintualStocks(_portfolio(_ACME, _GLBX), prices={"ACME": 100.0})
 
@@ -1509,13 +1469,9 @@ class TestStocksLeg:
 
         assert ("stock", "USD", "stock:000102") not in _by_ref(result.products)
         assert ("stock", "USD", "stock:000101") in _by_ref(result.products)
-        assert result.warnings == [
-            "Fintual: skipped 1 stock position(s) without a current price"
-        ]
+        assert result.warnings == ["Fintual: skipped 1 stock position(s) without a current price"]
 
-    def test_a_position_without_totals_is_skipped_with_a_warning(
-        self, monkeypatch, session_file
-    ):
+    def test_a_position_without_totals_is_skipped_with_a_warning(self, monkeypatch, session_file):
         """A null performance (a resolver error) skips that position only."""
         details = {**_DETAILS, "GLBX": (None, None)}
         server = _FintualStocks(_portfolio(_ACME, _GLBX), details=details)
@@ -1548,9 +1504,7 @@ class TestStocksLeg:
 
         assert ("wallet", "USD", None) not in _by_ref(result.products)
         assert ("stock", "USD", "stock:000101") in _by_ref(result.products)
-        assert result.warnings == [
-            "Fintual: skipped the stocks wallet (no readable USD balance)"
-        ]
+        assert result.warnings == ["Fintual: skipped the stocks wallet (no readable USD balance)"]
 
     def test_a_graphql_401_refreshes_the_session_once(self, monkeypatch, session_file):
         """An expired token on /gql/ gets the website's refresh, never a login."""
@@ -1566,9 +1520,7 @@ class TestStocksLeg:
         assert result.warnings == []
         assert server.paths().count("/app/goals") == 1
         assert ("stock", "USD", "stock:000101") in _by_ref(result.products)
-        assert json.loads(session_file.read_text())["auth_refresh_token"] == (
-            "synthetic-refresh-2"
-        )
+        assert json.loads(session_file.read_text())["auth_refresh_token"] == ("synthetic-refresh-2")
 
     def test_a_run_refreshes_the_session_at_most_once(self, monkeypatch, session_file):
         """Once the goals leg has refreshed, a /gql/ 401 doesn't spend the
@@ -1731,9 +1683,7 @@ class TestPriceHistoryLeg:
             },
         )
 
-        result = _run_stocks(
-            monkeypatch, session_file, server, **{_JWT_COOKIE: "synthetic-jwt"}
-        )
+        result = _run_stocks(monkeypatch, session_file, server, **{_JWT_COOKIE: "synthetic-jwt"})
 
         assert result.warnings == []
         assert len(result.price_histories) == 1
@@ -1790,9 +1740,7 @@ class TestPriceHistoryLeg:
             "Fintual: stock price history failed for 1 of 2 stock(s) (FintualStocksError)"
         ]
 
-    def test_a_series_the_envelope_refuses_costs_only_that_stock(
-        self, monkeypatch, session_file
-    ):
+    def test_a_series_the_envelope_refuses_costs_only_that_stock(self, monkeypatch, session_file):
         envelope = fintual_mod.ScrapedPriceHistory
 
         def refuse_acme(**fields):
@@ -1830,18 +1778,13 @@ class TestPriceHistoryLeg:
             },
         )
 
-        result = _run_stocks(
-            monkeypatch, session_file, server, **{_JWT_COOKIE: "synthetic-jwt"}
-        )
+        result = _run_stocks(monkeypatch, session_file, server, **{_JWT_COOKIE: "synthetic-jwt"})
 
         assert server.paths().count("/auth/jwt") == 1
-        assert [r.url.params["symbol"] for r in server.history_requests()] == (
-            ["ACME"] * asked
-        )
+        assert [r.url.params["symbol"] for r in server.history_requests()] == (["ACME"] * asked)
         assert result.price_histories == []
         assert result.warnings == [
-            "Fintual: stock price history failed for 2 of 2 stock(s) "
-            "(FintualPricingUnavailable)"
+            "Fintual: stock price history failed for 2 of 2 stock(s) (FintualPricingUnavailable)"
         ]
 
     @pytest.mark.parametrize(
@@ -1873,9 +1816,7 @@ class TestPriceHistoryLeg:
         """A hanging service costs the price history only, read after the
         movements: they and every product still land, and the jar is saved."""
         monkeypatch.setattr(fintual_mod, "PRICE_HISTORY_BUDGET_SECONDS", 0.05)
-        server = _FintualStocks(
-            _portfolio(_ACME_HELD, wallet=_LEDGER_BALANCE), ledger=_LEDGER
-        )
+        server = _FintualStocks(_portfolio(_ACME_HELD, wallet=_LEDGER_BALANCE), ledger=_LEDGER)
         answer = server.handler
 
         async def hanging(request):
@@ -1891,8 +1832,7 @@ class TestPriceHistoryLeg:
         assert len(server.history_requests()) == 1
         assert result.price_histories == []
         assert result.warnings == [
-            "Fintual: stock price history ran over its 0 s budget "
-            "(1 of 1 stock(s) not read)"
+            "Fintual: stock price history ran over its 0 s budget (1 of 1 stock(s) not read)"
         ]
         assert set(_by_ref(result.products)) == {
             ("investment", "CLP", "34567"),
@@ -1903,9 +1843,7 @@ class TestPriceHistoryLeg:
         assert server.paths()[-1] == "/stocks-pricing-cl/historical-prices"
         assert json.loads(session_file.read_text())[_JWT_COOKIE] == "synthetic-jwt"
 
-    def test_running_over_the_budget_keeps_the_series_already_read(
-        self, monkeypatch, session_file
-    ):
+    def test_running_over_the_budget_keeps_the_series_already_read(self, monkeypatch, session_file):
         """The budget spans the requests: a stock that hangs costs its own
         series and the ones after it, never one read before it."""
         monkeypatch.setattr(fintual_mod, "PRICE_HISTORY_BUDGET_SECONDS", 1.0)
@@ -1923,16 +1861,11 @@ class TestPriceHistoryLeg:
 
         assert [h.product.external_ref for h in result.price_histories] == ["stock:000101"]
         assert result.warnings == [
-            "Fintual: stock price history ran over its 1 s budget "
-            "(1 of 2 stock(s) not read)"
+            "Fintual: stock price history ran over its 1 s budget (1 of 2 stock(s) not read)"
         ]
 
-    def test_a_failure_of_the_whole_step_keeps_everything_else(
-        self, monkeypatch, session_file
-    ):
-        server = _FintualStocks(
-            _portfolio(_ACME_HELD, wallet=_LEDGER_BALANCE), ledger=_LEDGER
-        )
+    def test_a_failure_of_the_whole_step_keeps_everything_else(self, monkeypatch, session_file):
+        server = _FintualStocks(_portfolio(_ACME_HELD, wallet=_LEDGER_BALANCE), ledger=_LEDGER)
         monkeypatch.setattr(
             FintualScraper,
             "_price_histories",
@@ -1959,9 +1892,7 @@ class TestPriceHistoryLeg:
             pytest.param(_NO_STOCKS, id="no-stocks-account"),
         ],
     )
-    def test_no_held_stock_means_no_history_request(
-        self, monkeypatch, session_file, portfolio
-    ):
+    def test_no_held_stock_means_no_history_request(self, monkeypatch, session_file, portfolio):
         server = _FintualStocks(portfolio)
 
         result = _run_stocks(monkeypatch, session_file, server)
@@ -1970,9 +1901,7 @@ class TestPriceHistoryLeg:
         assert result.price_histories == []
         assert result.warnings == []
 
-    def test_only_the_held_stocks_of_a_mixed_portfolio_get_history(
-        self, monkeypatch, session_file
-    ):
+    def test_only_the_held_stocks_of_a_mixed_portfolio_get_history(self, monkeypatch, session_file):
         """INITK, sold out, keeps its zero-valued product but gets no series."""
         server = _FintualStocks(_portfolio(_ACME, _INITK_SOLD, _GLBX))
 
@@ -2067,7 +1996,7 @@ class TestSessionCycle:
 
         assert server.paths().count("/app/goals") == 1
         assert server.paths().count("/api/goals") == 2
-        assert [p.external_ref for p in result.products][0] == "34567"
+        assert next(p.external_ref for p in result.products) == "34567"
 
     def test_a_failed_sign_in_is_re_raised_without_a_second_login(self, monkeypatch):
         """The products leg re-raises the cached error: one 2FA mail per run."""
@@ -2130,8 +2059,7 @@ _LEDGER = {
 _LEDGER_BALANCE = 246.91
 
 _MISMATCH = (
-    "Fintual: the USD wallet movements don't add up to its balance; "
-    "a movement type may be missing"
+    "Fintual: the USD wallet movements don't add up to its balance; a movement type may be missing"
 )
 
 
@@ -2151,9 +2079,7 @@ class TestMovementsLeg:
     def test_the_ledger_lands_on_the_wallet_and_the_stock(self, monkeypatch, session_file):
         """Each stock row names a product the same run emits; the ledger adds
         up to the wallet, so no warning."""
-        server = _FintualStocks(
-            _portfolio(_ACME_HELD, wallet=_LEDGER_BALANCE), ledger=_LEDGER
-        )
+        server = _FintualStocks(_portfolio(_ACME_HELD, wallet=_LEDGER_BALANCE), ledger=_LEDGER)
 
         transactions, result = _run_cycle(monkeypatch, session_file, server)
 
@@ -2172,15 +2098,11 @@ class TestMovementsLeg:
         assert {t.product_external_ref for t in stock_rows} == {"stock:1001"}
         assert [t.amount for t in stock_rows] == [Decimal("999.99"), Decimal("12.34")]
 
-    def test_full_and_short_pages_are_followed_to_an_empty_one(
-        self, monkeypatch, session_file
-    ):
+    def test_full_and_short_pages_are_followed_to_an_empty_one(self, monkeypatch, session_file):
         """The offset moves by the longest list, nested ones included."""
         monkeypatch.setattr(fintual_mod, "PAGE_SIZE", 2)
         ledger = {
-            "stocksDomesticBankDeposits": [
-                _ledger_deposit(f"200{n}", 100.0) for n in range(1, 4)
-            ],
+            "stocksDomesticBankDeposits": [_ledger_deposit(f"200{n}", 100.0) for n in range(1, 4)],
             "stocksWalletAcatCashActivities": {
                 "fees": [],
                 "cashInbounds": [
@@ -2206,9 +2128,7 @@ class TestMovementsLeg:
     def test_a_list_capped_below_the_limit_loses_nothing(self, monkeypatch, session_file):
         """Fintual answering fewer rows than asked moves the offset by those."""
         ledger = {
-            "stocksDomesticBankDeposits": [
-                _ledger_deposit(f"200{n}", 100.0) for n in range(1, 4)
-            ]
+            "stocksDomesticBankDeposits": [_ledger_deposit(f"200{n}", 100.0) for n in range(1, 4)]
         }
         server = _FintualStocks(_portfolio(wallet=300.0), ledger=ledger, page_cap=1)
 
@@ -2218,16 +2138,12 @@ class TestMovementsLeg:
         assert len(transactions) == 3
         assert result.warnings == []
 
-    def test_a_list_ignoring_the_limit_skips_no_rows_of_the_others(
-        self, monkeypatch, session_file
-    ):
+    def test_a_list_ignoring_the_limit_skips_no_rows_of_the_others(self, monkeypatch, session_file):
         """The offset moves by the limit at most; the rows the list that
         ignores it repeats are deduplicated."""
         monkeypatch.setattr(fintual_mod, "PAGE_SIZE", 2)
         ledger = {
-            "stocksDomesticBankDeposits": [
-                _ledger_deposit(f"200{n}", 100.0) for n in range(1, 6)
-            ],
+            "stocksDomesticBankDeposits": [_ledger_deposit(f"200{n}", 100.0) for n in range(1, 6)],
             "stocksWalletCashInterests": [
                 {"id": f"610{n}", "date": "2026-01-15", "createdAt": None, "amount": 12.34}
                 for n in range(1, 6)
@@ -2248,16 +2164,12 @@ class TestMovementsLeg:
         ]
         assert result.warnings == []
 
-    def test_the_page_cap_is_a_warning_and_skips_the_balance_check(
-        self, monkeypatch, session_file
-    ):
+    def test_the_page_cap_is_a_warning_and_skips_the_balance_check(self, monkeypatch, session_file):
         """The pages read still land; the unread rest can't be reconciled."""
         monkeypatch.setattr(fintual_mod, "PAGE_SIZE", 1)
         monkeypatch.setattr(fintual_mod, "MAX_PAGES", 2)
         ledger = {
-            "stocksDomesticBankDeposits": [
-                _ledger_deposit(f"200{n}", 100.0) for n in range(1, 4)
-            ]
+            "stocksDomesticBankDeposits": [_ledger_deposit(f"200{n}", 100.0) for n in range(1, 4)]
         }
         server = _FintualStocks(_portfolio(wallet=300.0), ledger=ledger)
 
@@ -2295,9 +2207,7 @@ class TestMovementsLeg:
         """The goals and the stock products land; a short warning (no URL, no
         body) records the run as partial."""
         monkeypatch.setattr("scrapers.retry.BASE_DELAY_SECONDS", 0.0)
-        server = _FintualStocks(
-            _portfolio(_ACME_HELD), answers={"WalletMovements": [answer]}
-        )
+        server = _FintualStocks(_portfolio(_ACME_HELD), answers={"WalletMovements": [answer]})
 
         transactions, result = _run_cycle(monkeypatch, session_file, server)
 
@@ -2399,9 +2309,7 @@ class TestMovementWarnings:
     def test_a_stock_without_an_id_keeps_only_its_wallet_row(self, monkeypatch, session_file):
         order = _ledger_order("5002", None, None, "Acme Corp", 100.0)
         ledger = {**_LEDGER, "stocksWalletAssetRedemptionInstructions": [order]}
-        server = _FintualStocks(
-            _portfolio(_ACME_HELD, wallet=346.91), ledger=ledger
-        )
+        server = _FintualStocks(_portfolio(_ACME_HELD, wallet=346.91), ledger=ledger)
 
         transactions, result = _run_cycle(monkeypatch, session_file, server)
 
@@ -2417,7 +2325,7 @@ class TestMovementWarnings:
         """A buy not filled yet may already hold cash back in the balance."""
         pending = _ledger_order("5003", "1001", "ACME", "Acme Corp", 100.0)
         pending["assetOrder"]["fulfilledAt"] = None
-        pending["declaredAt"] = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        pending["declaredAt"] = (datetime.now(UTC) - timedelta(days=1)).isoformat()
         ledger = {
             **_LEDGER,
             "stocksWalletAssetSubscriptionInstructions": [
@@ -2487,9 +2395,7 @@ class TestSoldOutStocks:
     }
 
     def test_a_sold_out_stock_gets_a_zero_valued_product(self, monkeypatch, session_file):
-        server = _FintualStocks(
-            _portfolio(_ACME_HELD, wallet=246.91), ledger=self._GLBX_ROUND_TRIP
-        )
+        server = _FintualStocks(_portfolio(_ACME_HELD, wallet=246.91), ledger=self._GLBX_ROUND_TRIP)
 
         transactions, result = _run_cycle(monkeypatch, session_file, server)
 
@@ -2503,9 +2409,7 @@ class TestSoldOutStocks:
         assert "fintual_stock_sell_5012" in _ids(transactions)
         assert result.warnings == []
 
-    def test_a_held_stock_skipped_for_its_price_is_not_zeroed(
-        self, monkeypatch, session_file
-    ):
+    def test_a_held_stock_skipped_for_its_price_is_not_zeroed(self, monkeypatch, session_file):
         """It is still on the positions list: only the price is missing."""
         server = _FintualStocks(
             _portfolio(_ACME_HELD, _GLBX_HELD, wallet=246.91),
@@ -2516,13 +2420,9 @@ class TestSoldOutStocks:
         _, result = _run_cycle(monkeypatch, session_file, server)
 
         assert ("stock", "USD", "stock:1002") not in _by_ref(result.products)
-        assert result.warnings == [
-            "Fintual: skipped 1 stock position(s) without a current price"
-        ]
+        assert result.warnings == ["Fintual: skipped 1 stock position(s) without a current price"]
 
-    def test_a_listed_zero_share_position_is_not_duplicated(
-        self, monkeypatch, session_file
-    ):
+    def test_a_listed_zero_share_position_is_not_duplicated(self, monkeypatch, session_file):
         initk_round_trip = {
             "stocksWalletAssetSubscriptionInstructions": [
                 _ledger_order("5021", "1003", "INITK", "Initech Inc", 100.0)
@@ -2541,9 +2441,7 @@ class TestSoldOutStocks:
         assert refs.count("stock:1003") == 1
         assert result.warnings == []
 
-    def test_a_stock_that_left_without_a_sale_is_not_zeroed(
-        self, monkeypatch, session_file
-    ):
+    def test_a_stock_that_left_without_a_sale_is_not_zeroed(self, monkeypatch, session_file):
         """A share-only merger, a spinoff or shares moved out leave no cash
         leg: zeroing it would book a loss that never happened."""
         ledger = {
@@ -2569,9 +2467,7 @@ class TestSoldOutStocks:
         assert ("stock", "USD", "stock:1002") in _by_ref(result.products)
         assert result.warnings == []
 
-    def test_an_empty_list_next_to_unsold_stocks_zeroes_nothing(
-        self, monkeypatch, session_file
-    ):
+    def test_an_empty_list_next_to_unsold_stocks_zeroes_nothing(self, monkeypatch, session_file):
         """The ledger says ACME is still held, so the empty list is suspect:
         not even the GLBX it shows sold is zeroed this run."""
         ledger = {
@@ -2619,9 +2515,7 @@ class TestSoldOutStocks:
 
         assert ("stock", "USD", "stock:1002") not in _by_ref(result.products)
 
-    def test_no_zero_valued_products_from_an_incomplete_ledger(
-        self, monkeypatch, session_file
-    ):
+    def test_no_zero_valued_products_from_an_incomplete_ledger(self, monkeypatch, session_file):
         """Partial totals would be wrong figures; the next full run sets them."""
         monkeypatch.setattr(fintual_mod, "PAGE_SIZE", 1)
         monkeypatch.setattr(fintual_mod, "MAX_PAGES", 1)

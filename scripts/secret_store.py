@@ -41,8 +41,8 @@ import stat
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Callable, Mapping, Optional
 
 SERVICE_PREFIX = "chanchito."
 
@@ -67,9 +67,9 @@ SECRET_KEYS: tuple[str, ...] = (
 # name for FINTUAL_PASSWORD: still loaded, never prompted for.
 NOT_EXPORTED_BY_DEFAULT = frozenset({"DASHBOARD_PASSWORD"})
 LEGACY_KEYS: tuple[str, ...] = ("FINTUAL_TOKEN",)
-EXPORT_KEYS: tuple[str, ...] = tuple(
-    key for key in SECRET_KEYS if key not in NOT_EXPORTED_BY_DEFAULT
-) + LEGACY_KEYS
+EXPORT_KEYS: tuple[str, ...] = (
+    tuple(key for key in SECRET_KEYS if key not in NOT_EXPORTED_BY_DEFAULT) + LEGACY_KEYS
+)
 KNOWN_KEYS = frozenset(SECRET_KEYS + LEGACY_KEYS)
 
 BACKEND_ENV = "CHANCHITO_SECRETS_BACKEND"
@@ -110,7 +110,7 @@ class Backend:
     def describe(self) -> str:
         return self.name
 
-    def get(self, key: str) -> Optional[str]:
+    def get(self, key: str) -> str | None:
         raise NotImplementedError
 
     def has(self, key: str) -> bool:
@@ -119,7 +119,7 @@ class Backend:
     def set(self, key: str, value: str) -> None:
         raise NotImplementedError
 
-    def store_interactive(self, key: str, prompt: Callable[[str], Optional[str]]) -> bool:
+    def store_interactive(self, key: str, prompt: Callable[[str], str | None]) -> bool:
         """Ask for `key` with hidden input and store it; False when skipped."""
         value = prompt(key)
         if not value:
@@ -147,7 +147,7 @@ class KeychainBackend(Backend):
             args.append("-w")
         return self._run(args, capture_output=True, text=True)
 
-    def get(self, key: str) -> Optional[str]:
+    def get(self, key: str) -> str | None:
         result = self._find(key, with_value=True)
         if result.returncode != 0:
             return None
@@ -158,12 +158,20 @@ class KeychainBackend(Backend):
         # Without -w only the attributes are read: no access prompt.
         return self._find(key, with_value=False).returncode == 0
 
-    def store_interactive(self, key: str, prompt: Callable[[str], Optional[str]]) -> bool:
+    def store_interactive(self, key: str, prompt: Callable[[str], str | None]) -> bool:
         # A trailing bare -w makes `security` prompt (hidden, twice) itself, so
         # the value never sits in this process or on a command line.
         result = self._run(
-            ["security", "add-generic-password", "-U", "-a", self.user,
-             "-s", SERVICE_PREFIX + key, "-w"],
+            [
+                "security",
+                "add-generic-password",
+                "-U",
+                "-a",
+                self.user,
+                "-s",
+                SERVICE_PREFIX + key,
+                "-w",
+            ],
         )
         if result.returncode != 0:
             raise SecretStoreError(f"security could not store {key} (exit {result.returncode}).")
@@ -186,7 +194,7 @@ class KeyringBackend(Backend):
         except Exception:
             return "system keyring"
 
-    def get(self, key: str) -> Optional[str]:
+    def get(self, key: str) -> str | None:
         try:
             return self._keyring.get_password(SERVICE_PREFIX + key, self.user) or None
         except Exception as exc:
@@ -207,7 +215,7 @@ class FileBackend(Backend):
     def __init__(self, path: Path, is_windows: bool = os.name == "nt") -> None:
         self.path = Path(path)
         # Set by select_backend when it fell back here on its own.
-        self.fallback_reason: Optional[str] = None
+        self.fallback_reason: str | None = None
         self._is_windows = is_windows
         self._warned = False
 
@@ -217,7 +225,7 @@ class FileBackend(Backend):
             return f"file {self.path} (mode {mode:04o}, readable by others)"
         return f"file {self.path} (owner-only)"
 
-    def _loose_mode(self) -> Optional[int]:
+    def _loose_mode(self) -> int | None:
         """The file's mode when other users have access to it, else None."""
         if self._is_windows:
             return None
@@ -257,7 +265,7 @@ class FileBackend(Backend):
                 values[parsed[0]] = parsed[1]
         return values
 
-    def get(self, key: str) -> Optional[str]:
+    def get(self, key: str) -> str | None:
         return self.read_all().get(key) or None
 
     def set(self, key: str, value: str) -> None:
@@ -277,7 +285,9 @@ class FileBackend(Backend):
             out.append(line)
         if not replaced:
             if not out:
-                out.append("# El Chanchito secrets (scripts/secret_store.py). Owner-only; never commit.")
+                out.append(
+                    "# El Chanchito secrets (scripts/secret_store.py). Owner-only; never commit."
+                )
             out.append(new_line)
         self._write("\n".join(out) + "\n")
 
@@ -310,15 +320,12 @@ def format_dotenv_value(value: str) -> str:
     if _SAFE_UNQUOTED.match(value):
         return value
     escaped = (
-        value.replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("\n", "\\n")
-        .replace("\r", "\\r")
+        value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
     )
     return f'"{escaped}"'
 
 
-def parse_dotenv_line(line: str) -> Optional[tuple[str, str]]:
+def parse_dotenv_line(line: str) -> tuple[str, str] | None:
     """(key, value) for a `KEY=value` line, None for blanks and comments.
 
     Accepts an `export ` prefix, single quotes (literal), double quotes (with
@@ -328,7 +335,7 @@ def parse_dotenv_line(line: str) -> Optional[tuple[str, str]]:
     if not stripped or stripped.startswith("#"):
         return None
     if stripped.startswith("export "):
-        stripped = stripped[len("export "):].lstrip()
+        stripped = stripped[len("export ") :].lstrip()
     key, sep, raw = stripped.partition("=")
     key = key.strip()
     if not sep or not _KEY_RE.match(key):
@@ -364,7 +371,7 @@ def parse_dotenv_line(line: str) -> Optional[tuple[str, str]]:
 def import_keyring():
     """The keyring module, or None when it isn't installed or fails to import."""
     try:
-        import keyring  # noqa: PLC0415 (optional dependency)
+        import keyring  # optional dependency: imported only when used
     except Exception:
         return None
     return keyring
@@ -377,7 +384,7 @@ def secret_service_unlocked(backend) -> bool:
     get_preferred_collection() would pop an unlock dialog). A missing collection
     raises instead of being created, which would prompt too.
     """
-    import secretstorage  # noqa: PLC0415 (installed with keyring on Linux)
+    import secretstorage  # installed with keyring on Linux only
 
     bus = secretstorage.dbus_init()
     try:
@@ -394,7 +401,7 @@ def _is_secret_service(backend) -> bool:
     return type(backend).__module__ == "keyring.backends.SecretService"
 
 
-def keyring_unusable_reason(module, probe=secret_service_unlocked) -> Optional[str]:
+def keyring_unusable_reason(module, probe=secret_service_unlocked) -> str | None:
     """Why keyring can't be used here, or None when it can."""
     if module is None:
         return "the keyring package is not installed"
@@ -424,21 +431,21 @@ def keyring_unusable_reason(module, probe=secret_service_unlocked) -> Optional[s
 def select_backend(
     env: Mapping[str, str] = os.environ,
     platform: str = sys.platform,
-    which: Callable[[str], Optional[str]] = shutil.which,
+    which: Callable[[str], str | None] = shutil.which,
     keyring_loader: Callable[[], object] = import_keyring,
     probe: Callable[[object], bool] = secret_service_unlocked,
 ) -> Backend:
     forced = env.get(BACKEND_ENV, "").strip().lower()
     file_path = Path(env.get(FILE_ENV) or DEFAULT_SECRETS_FILE).expanduser()
 
-    def keychain() -> Optional[Backend]:
+    def keychain() -> Backend | None:
         if platform == "darwin" and which("security"):
             return KeychainBackend(current_user(env))
         return None
 
     keyring_reason: list[str] = []
 
-    def keyring_backend() -> Optional[Backend]:
+    def keyring_backend() -> Backend | None:
         module = keyring_loader()
         reason = keyring_unusable_reason(module, probe)
         if reason is None:
@@ -451,9 +458,7 @@ def select_backend(
     if forced == "keychain":
         backend = keychain()
         if backend is None:
-            raise SecretStoreError(
-                f"{BACKEND_ENV}=keychain needs macOS and the `security` CLI."
-            )
+            raise SecretStoreError(f"{BACKEND_ENV}=keychain needs macOS and the `security` CLI.")
         return backend
     if forced == "keyring":
         backend = keyring_backend()
@@ -465,9 +470,7 @@ def select_backend(
             )
         return backend
     if forced:
-        raise SecretStoreError(
-            f"Unknown {BACKEND_ENV}={forced!r}; use keychain, keyring or file."
-        )
+        raise SecretStoreError(f"Unknown {BACKEND_ENV}={forced!r}; use keychain, keyring or file.")
     backend = keychain() or keyring_backend()
     if backend is not None:
         return backend
@@ -487,7 +490,7 @@ def backend_banner(backend: Backend) -> str:
 # --- Commands -------------------------------------------------------------------
 
 
-def prompt_hidden(key: str) -> Optional[str]:
+def prompt_hidden(key: str) -> str | None:
     """Hidden prompt with confirmation; None (skip) on an empty first answer."""
     value = getpass.getpass(f"   {key}: ")
     if not value:
@@ -554,9 +557,7 @@ def cmd_status(backend: Backend, env: Mapping[str, str] = os.environ, out=print)
     return code
 
 
-def cmd_export(
-    backend: Backend, keys=None, env: Mapping[str, str] = os.environ, out=print
-) -> int:
+def cmd_export(backend: Backend, keys=None, env: Mapping[str, str] = os.environ, out=print) -> int:
     """`export VAR='value'` for each stored key not already set in `env`.
 
     Notes go to stderr and never carry a value. With explicit `keys`, a key
@@ -597,7 +598,7 @@ def cmd_export(
 USAGE = "usage: secret_store.py {init | set KEY | status | export [KEY ...]}"
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if not args:
         print(USAGE, file=sys.stderr)

@@ -13,15 +13,20 @@ from unittest.mock import MagicMock
 import psycopg
 import pytest
 
-from product_model import CheckingMetrics, CreditCardMetrics
-
 import main as main_mod
 from db.writer import (
     TransactionWriteResult,
     UnresolvedPriceScope,
     UnresolvedRateScope,
+    VanishedProductsResult,
 )
 from main import run_outcome, run_scraper
+from product_model import (
+    CheckingMetrics,
+    CreditCardMetrics,
+    DebitCardMetrics,
+    SavingsMetrics,
+)
 from scrapers.base import (
     BaseScraper,
     BilledStatement,
@@ -33,6 +38,7 @@ from scrapers.base import (
     ScrapedProduct,
     ScrapedTransaction,
     SupersededTransaction,
+    VanishedProductScope,
     VanishedWindow,
 )
 
@@ -55,6 +61,7 @@ class _StubScraper(BaseScraper):
         statements=(),
         exchange_rates=(),
         price_histories=(),
+        product_scopes=(),
     ):
         self._products = products or []
         self._warnings = warnings or []
@@ -66,6 +73,7 @@ class _StubScraper(BaseScraper):
         self._statements = list(statements)
         self._exchange_rates = list(exchange_rates)
         self._price_histories = list(price_histories)
+        self._product_scopes = list(product_scopes)
 
     def superseded_transactions(self):
         return self._superseded
@@ -89,6 +97,7 @@ class _StubScraper(BaseScraper):
             list(self._warnings),
             list(self._exchange_rates),
             list(self._price_histories),
+            list(self._product_scopes),
         )
 
 
@@ -129,6 +138,7 @@ def writer(monkeypatch):
         "upsert_price_history": MagicMock(return_value=0),
         "delete_superseded_transactions": MagicMock(),
         "soft_delete_vanished_transactions": MagicMock(),
+        "retire_vanished_products": MagicMock(return_value=VanishedProductsResult()),
         "mark_billed_statements": MagicMock(return_value=0),
         "finish_scraper_run": MagicMock(),
     }
@@ -194,16 +204,13 @@ class TestRunScraperStatus:
             "error",
             transactions_imported=0,
             error_message=(
-                "transactions: imap down; "
-                "BanChile: línea surface failed after 3 attempts"
+                "transactions: imap down; BanChile: línea surface failed after 3 attempts"
             ),
         )
 
     def test_a_failed_leg_with_the_other_written_records_partial(self, finish):
         """Balances that landed make a transactions failure partial, not error."""
-        scraper = _StubScraper(
-            products=[_product()], tx_exc=RuntimeError("session crashed")
-        )
+        scraper = _StubScraper(products=[_product()], tx_exc=RuntimeError("session crashed"))
 
         asyncio.run(run_scraper(scraper))
 
@@ -214,9 +221,7 @@ class TestRunScraperStatus:
             error_message="transactions: session crashed",
         )
 
-    def test_transactions_landing_make_a_products_failure_partial(
-        self, writer, finish
-    ):
+    def test_transactions_landing_make_a_products_failure_partial(self, writer, finish):
         writer["write_transactions"].return_value = TransactionWriteResult(inserted=2)
         scraper = _StubScraper(
             transactions=[_transaction(1), _transaction(2)],
@@ -247,15 +252,10 @@ class TestPerRowIsolation:
             "run-1",
             "partial",
             transactions_imported=0,
-            error_message=(
-                "products: 1 of 2 not written "
-                "(banchile/credit_card CLP: bad metrics)"
-            ),
+            error_message=("products: 1 of 2 not written (banchile/credit_card CLP: bad metrics)"),
         )
 
-    def test_a_database_outage_stops_the_remaining_product_writes(
-        self, writer, finish
-    ):
+    def test_a_database_outage_stops_the_remaining_product_writes(self, writer, finish):
         """Once retries are exhausted, the rest would each block on their own."""
         writer["upsert_product"].side_effect = psycopg.OperationalError("db down")
         scraper = _StubScraper(products=[_card(), _product(), _product()])
@@ -267,9 +267,7 @@ class TestPerRowIsolation:
             "run-1",
             "error",
             transactions_imported=0,
-            error_message=(
-                "products: 3 of 3 not written (banchile/credit_card CLP: db down)"
-            ),
+            error_message=("products: 3 of 3 not written (banchile/credit_card CLP: db down)"),
         )
 
     def test_every_product_failing_records_error(self, writer, finish):
@@ -281,9 +279,7 @@ class TestPerRowIsolation:
         assert finish.call_args.args[1] == "error"
 
     def test_failed_transaction_rows_record_partial(self, writer, finish):
-        writer["write_transactions"].return_value = TransactionWriteResult(
-            inserted=1, failed=1
-        )
+        writer["write_transactions"].return_value = TransactionWriteResult(inserted=1, failed=1)
         scraper = _StubScraper(transactions=[_transaction(1), _transaction(2)])
 
         asyncio.run(run_scraper(scraper))
@@ -298,9 +294,7 @@ class TestPerRowIsolation:
     def test_rows_waiting_for_their_product_are_a_warning(self, writer, finish):
         """They don't count as landed, so with nothing else stored the run is
         still partial, not error: the next run lands them."""
-        writer["write_transactions"].return_value = TransactionWriteResult(
-            inserted=0, unresolved=2
-        )
+        writer["write_transactions"].return_value = TransactionWriteResult(inserted=0, unresolved=2)
         scraper = _StubScraper(transactions=[_transaction(1), _transaction(2)])
 
         asyncio.run(run_scraper(scraper))
@@ -309,9 +303,7 @@ class TestPerRowIsolation:
             "run-1",
             "partial",
             transactions_imported=0,
-            error_message=(
-                "transactions: 2 of 2 not written: their product does not exist yet"
-            ),
+            error_message=("transactions: 2 of 2 not written: their product does not exist yet"),
         )
 
     def test_waiting_rows_are_not_counted_as_landed(self, writer, finish):
@@ -351,6 +343,20 @@ class TestRunOutcome:
     def test_status_and_message(self, errors, warnings, landed, expected):
         """A failure is `error` only when nothing landed."""
         assert run_outcome(errors, warnings, landed) == expected
+
+    @pytest.mark.parametrize(
+        ("errors", "warnings", "landed", "expected"),
+        [
+            ([], [], 1, ("success", "n")),
+            ([], ["w"], 1, ("partial", "w; n")),
+            (["e"], [], 0, ("error", "e; n")),
+        ],
+    )
+    def test_notes_join_the_message_without_changing_the_status(
+        self, errors, warnings, landed, expected
+    ):
+        """A note is information, not a problem: the status is the same as without it."""
+        assert run_outcome(errors, warnings, landed, ["n"]) == expected
 
 
 _TWIN = SupersededTransaction(
@@ -493,6 +499,153 @@ class TestVanishedCleanup:
         )
 
 
+_POT_SCOPE = VanishedProductScope(
+    institution="mercadopago",
+    product_kind="savings",
+    currency="CLP",
+    external_ref_prefix="mp_pot_",
+    present_refs=frozenset({"mp_pot_00000000-0000-0000-0000-000000000001"}),
+    closed_metrics=SavingsMetrics(balance=0),
+)
+
+
+class TestVanishedProducts:
+    """Products a complete listing no longer carries are retired after the write."""
+
+    def test_a_scope_needs_closed_metrics_with_a_headline(self):
+        """A retired product with no balance would drop out of the web, history included."""
+        with pytest.raises(ValueError, match="headline"):
+            VanishedProductScope(
+                institution="stub",
+                product_kind="debit_card",
+                currency="CLP",
+                external_ref_prefix="stub_",
+                present_refs=frozenset(),
+                closed_metrics=DebitCardMetrics(),
+            )
+
+    def test_runs_after_every_product_was_written(self, finish, monkeypatch):
+        """The write comes first, and the scope is handed over as declared."""
+        calls = []
+        monkeypatch.setattr(main_mod, "upsert_product", lambda sp: calls.append("upsert"))
+        monkeypatch.setattr(
+            main_mod,
+            "retire_vanished_products",
+            lambda scope: calls.append(("retire", scope)) or VanishedProductsResult(),
+        )
+        scraper = _StubScraper(products=[_product()], product_scopes=[_POT_SCOPE])
+
+        asyncio.run(run_scraper(scraper))
+
+        assert calls == ["upsert", ("retire", _POT_SCOPE)]
+        assert finish.call_args.args[1] == "success"
+
+    def test_skipped_when_a_product_was_not_written(self, writer):
+        """A product that failed to write must not look closed."""
+        writer["upsert_product"].side_effect = [RuntimeError("bad metrics"), None]
+        scraper = _StubScraper(products=[_card(), _product()], product_scopes=[_POT_SCOPE])
+
+        asyncio.run(run_scraper(scraper))
+
+        writer["retire_vanished_products"].assert_not_called()
+
+    @pytest.mark.parametrize(
+        "scraper",
+        [
+            pytest.param(_StubScraper(products=[_product()]), id="no-scope"),
+            pytest.param(
+                _StubScraper(prod_exc=RuntimeError("drive failed"), product_scopes=[_POT_SCOPE]),
+                id="products-leg-failed",
+            ),
+        ],
+    )
+    def test_not_called_without_a_trusted_scope(self, writer, scraper):
+        """No declared scope, or no products leg to trust, retires nothing."""
+        asyncio.run(run_scraper(scraper))
+
+        writer["retire_vanished_products"].assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("swept", "message"),
+        [
+            pytest.param(
+                VanishedProductsResult(retired=2),
+                "retired: 2 mercadopago savings CLP product(s) no longer listed",
+                id="retired",
+            ),
+            pytest.param(
+                VanishedProductsResult(pending=1),
+                "pending: 1 mercadopago savings CLP product(s) missing from this "
+                "listing; retired if the next complete one lacks them too",
+                id="pending",
+            ),
+            pytest.param(
+                VanishedProductsResult(retired=1, pending=1),
+                "retired: 1 mercadopago savings CLP product(s) no longer listed; "
+                "pending: 1 mercadopago savings CLP product(s) missing from this "
+                "listing; retired if the next complete one lacks them too",
+                id="both",
+            ),
+        ],
+    )
+    def test_the_counts_are_noted_on_a_successful_run(self, writer, finish, swept, message):
+        """The run's message says what was retired or flagged; the status stays success."""
+        # Arrange
+        writer["retire_vanished_products"].return_value = swept
+        scraper = _StubScraper(products=[_product()], product_scopes=[_POT_SCOPE])
+
+        # Act
+        asyncio.run(run_scraper(scraper))
+
+        # Assert
+        finish.assert_called_once_with(
+            "run-1", "success", transactions_imported=0, error_message=message
+        )
+
+    def test_a_note_follows_the_warnings_of_a_partial_run(self, writer, finish):
+        """A scraper warning still makes the run partial; the note rides along."""
+        # Arrange
+        writer["retire_vanished_products"].return_value = VanishedProductsResult(pending=1)
+        scraper = _StubScraper(
+            products=[_product()],
+            warnings=["stub: a surface was not read"],
+            product_scopes=[_POT_SCOPE],
+        )
+
+        # Act
+        asyncio.run(run_scraper(scraper))
+
+        # Assert
+        finish.assert_called_once_with(
+            "run-1",
+            "partial",
+            transactions_imported=0,
+            error_message=(
+                "stub: a surface was not read; "
+                "pending: 1 mercadopago savings CLP product(s) missing from this "
+                "listing; retired if the next complete one lacks them too"
+            ),
+        )
+
+    def test_nothing_swept_leaves_no_message(self, writer, finish):
+        """A complete listing that lacks nothing adds no note."""
+        asyncio.run(run_scraper(_StubScraper(products=[_product()], product_scopes=[_POT_SCOPE])))
+
+        finish.assert_called_once_with(
+            "run-1", "success", transactions_imported=0, error_message=None
+        )
+
+    def test_a_retirement_failure_is_a_warning(self, writer, finish):
+        """The products were written; a failed cleanup only makes the run partial."""
+        writer["retire_vanished_products"].side_effect = RuntimeError("db down")
+
+        asyncio.run(run_scraper(_StubScraper(products=[_product()], product_scopes=[_POT_SCOPE])))
+
+        finish.assert_called_once_with(
+            "run-1", "partial", transactions_imported=0, error_message="cleanup: db down"
+        )
+
+
 _STATEMENT = BilledStatement(
     institution="bci_lider",
     product_kind="credit_card",
@@ -573,12 +726,8 @@ class TestExchangeRates:
     def test_written_after_the_products(self, finish, monkeypatch):
         calls = []
         rate = _rate()
-        monkeypatch.setattr(
-            main_mod, "upsert_product", lambda sp: calls.append("product")
-        )
-        monkeypatch.setattr(
-            main_mod, "upsert_exchange_rate", lambda fx: calls.append(("rate", fx))
-        )
+        monkeypatch.setattr(main_mod, "upsert_product", lambda sp: calls.append("product"))
+        monkeypatch.setattr(main_mod, "upsert_exchange_rate", lambda fx: calls.append(("rate", fx)))
 
         scraper = _StubScraper(products=[_product()], exchange_rates=[rate])
 
@@ -658,9 +807,7 @@ def _history(external_ref="stock:0001"):
     """A synthetic two-day ACME series."""
     return ScrapedPriceHistory(
         institution="fintual",
-        product=ProductRef(
-            kind="stock", currency="USD", external_ref=external_ref
-        ),
+        product=ProductRef(kind="stock", currency="USD", external_ref=external_ref),
         points=[
             DailyPrice(date=date(2026, 1, 2), price="100.0"),
             DailyPrice(date=date(2026, 1, 5), price="250.5"),
@@ -678,9 +825,7 @@ class TestPriceHistories:
     def test_written_after_the_products(self, finish, monkeypatch):
         calls = []
         history = _history()
-        monkeypatch.setattr(
-            main_mod, "upsert_product", lambda sp: calls.append("product")
-        )
+        monkeypatch.setattr(main_mod, "upsert_product", lambda sp: calls.append("product"))
         monkeypatch.setattr(
             main_mod, "upsert_price_history", lambda h: calls.append(("history", h))
         )
@@ -701,9 +846,7 @@ class TestPriceHistories:
             MagicMock(side_effect=UnresolvedPriceScope(_UNRESOLVED_STOCK)),
         )
 
-        asyncio.run(
-            run_scraper(_StubScraper(products=[_stock()], price_histories=[_history()]))
-        )
+        asyncio.run(run_scraper(_StubScraper(products=[_stock()], price_histories=[_history()])))
 
         finish.assert_called_once_with(
             "run-1",
@@ -724,9 +867,7 @@ class TestPriceHistories:
 
         asyncio.run(
             run_scraper(
-                _StubScraper(
-                    products=[_stock()], price_histories=[_history(r) for r in refs]
-                )
+                _StubScraper(products=[_stock()], price_histories=[_history(r) for r in refs])
             )
         )
 
@@ -748,9 +889,7 @@ class TestPriceHistories:
         monkeypatch.setattr(main_mod, "upsert_price_history", upsert)
         histories = [_history(f"stock:000{n}") for n in (1, 2, 3)]
 
-        asyncio.run(
-            run_scraper(_StubScraper(products=[_stock()], price_histories=histories))
-        )
+        asyncio.run(run_scraper(_StubScraper(products=[_stock()], price_histories=histories)))
 
         assert upsert.call_count == 3
         finish.assert_called_once_with(
@@ -758,8 +897,7 @@ class TestPriceHistories:
             "partial",
             transactions_imported=0,
             error_message=(
-                "price histories: 3 of 3 not written "
-                "(RuntimeError, UnresolvedPriceScope)"
+                "price histories: 3 of 3 not written (RuntimeError, UnresolvedPriceScope)"
             ),
         )
 
@@ -776,9 +914,7 @@ class TestPriceHistories:
         second = _history("stock:0002")
 
         asyncio.run(
-            run_scraper(
-                _StubScraper(products=[_stock()], price_histories=[_history(), second])
-            )
+            run_scraper(_StubScraper(products=[_stock()], price_histories=[_history(), second]))
         )
 
         assert written == [None, second]
@@ -796,9 +932,7 @@ class TestPriceHistories:
         monkeypatch.setattr(main_mod, "upsert_price_history", upsert)
         histories = [_history(f"stock:000{n}") for n in (1, 2, 3)]
 
-        asyncio.run(
-            run_scraper(_StubScraper(products=[_stock()], price_histories=histories))
-        )
+        asyncio.run(run_scraper(_StubScraper(products=[_stock()], price_histories=histories)))
 
         upsert.assert_called_once()
         finish.assert_called_once_with(
@@ -812,9 +946,7 @@ class TestPriceHistories:
         caplog.set_level("INFO", logger="scraper-service")
         histories = [_history("stock:0001"), _history("stock:0002")]
 
-        asyncio.run(
-            run_scraper(_StubScraper(products=[_stock()], price_histories=histories))
-        )
+        asyncio.run(run_scraper(_StubScraper(products=[_stock()], price_histories=histories)))
 
         assert "1 products, 4 price points read" in caplog.text
 

@@ -25,7 +25,6 @@ import pytest
 
 from db import writer
 from db.writer import (
-    TransactionWriteResult,
     _adopts_stored_rows,
     _billing_fill,
     _canonical_metrics,
@@ -66,12 +65,8 @@ class TestCanonicalMetrics:
         assert _canonical_metrics(None) == _canonical_metrics(None)
 
     def test_nested_values_compared(self):
-        assert _canonical_metrics({"a": {"x": 1}}) == _canonical_metrics(
-            {"a": {"x": 1}}
-        )
-        assert _canonical_metrics({"a": {"x": 1}}) != _canonical_metrics(
-            {"a": {"x": 2}}
-        )
+        assert _canonical_metrics({"a": {"x": 1}}) == _canonical_metrics({"a": {"x": 1}})
+        assert _canonical_metrics({"a": {"x": 1}}) != _canonical_metrics({"a": {"x": 2}})
 
     def test_int_and_float_of_equal_value_are_unchanged(self):
         """A jsonb integer literal (e.g. the V011 seed's `"limit": 4000000`)
@@ -158,6 +153,23 @@ class TestWriteDecision:
         assert _write_decision(True, "dep-1", True) == "write"
         assert _write_decision(True, "dep-1", False) == "write"
 
+    @pytest.mark.parametrize(
+        ("is_active", "retired_by_scraper", "expected"),
+        [
+            pytest.param(False, True, "reactivate", id="scraper-retired"),
+            pytest.param(False, False, "skip_inactive", id="hand-deactivated"),
+            pytest.param(True, True, "write", id="active-with-a-stale-marker"),
+        ],
+    )
+    def test_only_a_scraper_retired_product_is_reactivated(
+        self, is_active, retired_by_scraper, expected
+    ):
+        """A product the user deactivated stays frozen; one the scraper retired
+        comes back when the source lists it again."""
+        decision = _write_decision(is_active, "mp_pot_1", False, retired_by_scraper)
+
+        assert decision == expected
+
 
 class _FakeCursor:
     def __init__(self, result=None, rowcount=0):
@@ -196,9 +208,17 @@ class _FakeConn:
         q = " ".join(sql.split())
         p = params or ()
         if "SELECT account_id, kind, currency, external_ref, is_active" in q:
-            r = self.products[p[0]]
+            r = self.products[p[-1]]
             return _FakeCursor(
-                (r["account_id"], r["kind"], r["currency"], r["external_ref"], r["is_active"])
+                (
+                    r["account_id"],
+                    r["kind"],
+                    r["currency"],
+                    r["external_ref"],
+                    r["is_active"],
+                    r.get("retired_by_scraper", False),
+                    r.get("vanished_pending", False),
+                )
             )
         if "SELECT 1 FROM products" in q and "external_ref IS NOT NULL" in q:
             account_id, kind, currency = p
@@ -440,28 +460,76 @@ class TestUpsertProductExclusivity:
         assert conn.products["dep-1"]["current_balance"] == Decimal("2500000")
 
 
+class TestUpsertProductMarkers:
+    """`upsert_product` drops the vanished-product markers without touching `is_active`."""
+
+    def _pot(self, **overrides):
+        return {
+            "account_id": "acc",
+            "kind": "term_deposit",
+            "currency": "CLP",
+            "external_ref": "dep_00000000000000001",
+            "is_active": True,
+            "metrics": None,
+            "current_balance": 999999,
+            "vanished_pending": True,
+            **overrides,
+        }
+
+    @pytest.mark.parametrize("is_active", [True, False], ids=["active", "inactive"])
+    def test_a_pending_stamp_goes_without_setting_is_active(self, monkeypatch, is_active):
+        """Only a scraper-retired row is reactivated; a hand toggle stays the user's."""
+        # Arrange
+        conn = _FakeConn({"pot": self._pot(is_active=is_active)})
+        _use_conn(monkeypatch, conn, "pot")
+
+        # Act
+        upsert_product(
+            ScrapedProduct(
+                institution="banchile",
+                kind="term_deposit",
+                external_ref="dep_00000000000000001",
+                metrics=TermDepositMetrics(balance=2500000),
+            )
+        )
+
+        # Assert
+        assert len(_executed(conn, "attributes = attributes -")) == 1
+        assert _executed(conn, "is_active = true") == []
+
+    def test_the_row_is_locked_before_the_decision(self, monkeypatch):
+        """A concurrent hand toggle must wait for the write, not slip under it."""
+        conn = _FakeConn({"pot": self._pot(vanished_pending=False)})
+        _use_conn(monkeypatch, conn, "pot")
+
+        upsert_product(
+            ScrapedProduct(
+                institution="banchile",
+                kind="term_deposit",
+                external_ref="dep_00000000000000001",
+                metrics=TermDepositMetrics(balance=2500000),
+            )
+        )
+
+        (read,) = _executed(conn, "SELECT account_id, kind, currency")
+        assert read.endswith("FOR NO KEY UPDATE")
+
+
 class TestResolveProductSlug:
     """`_resolve_product` mints an institution-unique slug on its INSERT path."""
 
     def _product_insert(self, conn):
-        return next(
-            (q, p) for q, p in conn.executed if "INSERT INTO products" in q
-        )
+        return next((q, p) for q, p in conn.executed if "INSERT INTO products" in q)
 
     def test_new_product_gets_suffixed_slug(self):
         """A name whose slug the institution already holds gets the -2 suffix,
         with columns and params in matching order (name, default_name, slug)."""
         conn = _FakeResolveConn(taken_slugs=["cuenta-corriente"])
 
-        writer._resolve_product(
-            conn, "banco-sintetico", "checking", name="Cuenta Corriente"
-        )
+        writer._resolve_product(conn, "banco-sintetico", "checking", name="Cuenta Corriente")
 
         q, p = self._product_insert(conn)
-        assert (
-            "(id, account_id, name, default_name, slug, kind, currency, "
-            "external_ref)" in q
-        )
+        assert "(id, account_id, name, default_name, slug, kind, currency, external_ref)" in q
         assert p[2] == p[3] == "Cuenta Corriente"
         assert p[4] == "cuenta-corriente-2"
 
@@ -469,9 +537,7 @@ class TestResolveProductSlug:
         """With no slugs taken the bare slugified name is used."""
         conn = _FakeResolveConn(taken_slugs=[])
 
-        writer._resolve_product(
-            conn, "banco-sintetico", "checking", name="Cuenta Corriente"
-        )
+        writer._resolve_product(conn, "banco-sintetico", "checking", name="Cuenta Corriente")
 
         _, p = self._product_insert(conn)
         assert p[4] == "cuenta-corriente"
@@ -523,9 +589,10 @@ class TestClaimDecision:
     def test_a_row_holding_one_of_this_scrapes_keys_is_never_stolen(self):
         """It belongs to the movement carrying that key."""
         siblings = [("row-1", "bch_op_12345678901")]
-        assert _claim_decision(
-            "bch_op_12345678902", siblings, set(), {"bch_op_12345678901"}
-        ) == ("insert", None)
+        assert _claim_decision("bch_op_12345678902", siblings, set(), {"bch_op_12345678901"}) == (
+            "insert",
+            None,
+        )
 
     def test_two_bank_ids_on_the_same_day_are_distinct_movements(self):
         """A row already identified by the bank is never re-keyed onto another."""
@@ -841,9 +908,7 @@ class _FakeTxConn:
             (row_id,) = p
             for row in self.rows:
                 if row["id"] == row_id:
-                    return _FakeCursor(
-                        (row.get("billing_status"), row.get("statement_date"))
-                    )
+                    return _FakeCursor((row.get("billing_status"), row.get("statement_date")))
             return _FakeCursor(None)
         if "UPDATE transactions SET billing_status" in q:
             status, statement_date, row_id = p
@@ -991,9 +1056,7 @@ class TestUpsertTransactionsIsolation:
 
         assert (result.inserted, result.failed) == (1, 1)
 
-    def test_a_dropped_connection_replays_the_batch_without_duplicates(
-        self, monkeypatch
-    ):
+    def test_a_dropped_connection_replays_the_batch_without_duplicates(self, monkeypatch):
         """A broken connection re-raises instead of failing row by row, and
         `with_db_retry` replays the batch: the row the lost attempt committed is
         found, not inserted again."""
@@ -1025,9 +1088,7 @@ class TestUpsertTransactionsIsolation:
         )
         _use_tx_conn(monkeypatch, conn)
 
-        result = write_transactions(
-            [_txn("bch_op_12345678901"), _txn("bch_op_12345678902")]
-        )
+        result = write_transactions([_txn("bch_op_12345678901"), _txn("bch_op_12345678902")])
 
         assert (result.inserted, result.failed) == (0, 1)
         assert [row["external_id"] for row in conn.rows] == ["bch_op_12345678902"]
@@ -1057,9 +1118,7 @@ class TestUpsertTransactionsAdoption:
         )
         _use_tx_conn(monkeypatch, conn)
 
-        inserted = write_transactions(
-            [_txn(f"bch_op_1234567890{n}") for n in range(3)]
-        ).inserted
+        inserted = write_transactions([_txn(f"bch_op_1234567890{n}") for n in range(3)]).inserted
 
         assert inserted == 0
         assert sorted(row["external_id"] for row in conn.rows) == [
@@ -1095,9 +1154,7 @@ class TestUpsertTransactionsAdoption:
         conn = _FakeTxConn([_legacy_row("row-1", "bch_fp_a1b2c3d4e5f60718", 1)])
         _use_tx_conn(monkeypatch, conn)
 
-        inserted = write_transactions(
-            [_txn("bch_ref_200812345678", kind="credit_card")]
-        ).inserted
+        inserted = write_transactions([_txn("bch_ref_200812345678", kind="credit_card")]).inserted
 
         assert inserted == 0
         assert conn.rows[0]["external_id"] == "bch_ref_200812345678"
@@ -1129,8 +1186,7 @@ class TestUpsertTransactionsAdoption:
 
         assert (inserted, len(conn.rows)) == (0, 1)
         assert not any(
-            query.startswith("UPDATE transactions SET external_id")
-            for query, _ in conn.executed
+            query.startswith("UPDATE transactions SET external_id") for query, _ in conn.executed
         )
 
     def test_a_lost_operation_id_does_not_duplicate(self, monkeypatch):
@@ -1270,9 +1326,7 @@ class TestAdoptionAcrossTheDateShift:
         )
         _use_tx_conn(monkeypatch, conn)
 
-        inserted = write_transactions(
-            [_txn("bch_ref_200812345678", kind="credit_card")]
-        ).inserted
+        inserted = write_transactions([_txn("bch_ref_200812345678", kind="credit_card")]).inserted
 
         assert (inserted, len(conn.rows)) == (0, 1)
         assert conn.rows[0]["external_id"] == "bch_ref_200812345678"
@@ -1326,9 +1380,7 @@ class TestWriteTransactionsPersistedKeys:
 
         conn.execute = failing
 
-        result = write_transactions(
-            [_txn("bch_op_10000000001"), _txn("bch_op_10000000002")]
-        )
+        result = write_transactions([_txn("bch_op_10000000001"), _txn("bch_op_10000000002")])
 
         assert result.persisted_external_ids == {"bch_op_10000000001"}
 
@@ -1377,9 +1429,7 @@ class TestProductRefTransactions:
 
     def test_each_ref_lands_on_its_own_product(self, monkeypatch):
         conn = _FakeTxConn()
-        calls = self._install(
-            monkeypatch, conn, {"stock:1001": "acme-1", "stock:1002": "glbx-1"}
-        )
+        calls = self._install(monkeypatch, conn, {"stock:1001": "acme-1", "stock:1002": "glbx-1"})
 
         result = write_transactions(
             [
@@ -1401,9 +1451,7 @@ class TestProductRefTransactions:
             ("fintual", "stock", "USD", "stock:1002"),
         ]
 
-    def test_a_missing_product_counts_unresolved_and_creates_nothing(
-        self, monkeypatch, caplog
-    ):
+    def test_a_missing_product_counts_unresolved_and_creates_nothing(self, monkeypatch, caplog):
         """Its rows wait for a later run; the ref itself stays out of the log."""
         conn = _FakeTxConn()
         calls = self._install(monkeypatch, conn, {"stock:1001": "acme-1"})
@@ -1509,9 +1557,7 @@ class TestTransactionLocation:
         conn = _FakeTxConn([_legacy_row("row-1", "bch_op_12345678901", 1)])
         _use_tx_conn(monkeypatch, conn)
 
-        inserted = upsert_transactions(
-            [_txn("bch_op_12345678901", location=_LOCATION)]
-        )
+        inserted = upsert_transactions([_txn("bch_op_12345678901", location=_LOCATION)])
 
         assert inserted == 0
         (fill,) = [q for q, _ in conn.executed if "SET location_" in q]
@@ -1715,9 +1761,7 @@ class TestTransactionBillingStatus:
         assert conn.rows[0]["external_id"] == "bch_ref_200812345678"
         assert conn.billing_fills == [("billed", _CLOSED, "row-1")]
 
-    def test_one_batch_seeing_a_charge_in_both_views_stores_it_billed(
-        self, monkeypatch
-    ):
+    def test_one_batch_seeing_a_charge_in_both_views_stores_it_billed(self, monkeypatch):
         """A source whose key survives billing (one key, two views) folds onto
         one row, billed, in either order."""
         for order in (("unbilled", "billed"), ("billed", "unbilled")):
@@ -1760,10 +1804,7 @@ class TestTransactionBillingStatus:
         (row,) = conn.rows
         assert row["id"] == "row-concurrent"
         assert (row["billing_status"], row["statement_date"]) == ("billed", _CLOSED)
-        assert conn.location_fills == [
-            ("CIUDAD FICTICIA", "PAIS FICTICIO", "row-concurrent")
-        ]
-
+        assert conn.location_fills == [("CIUDAD FICTICIA", "PAIS FICTICIO", "row-concurrent")]
 
 
 class TestSimilarDescriptions:
@@ -1779,7 +1820,9 @@ class TestSimilarDescriptions:
             pytest.param("TOTTUS", "TOTTUS", True, id="four-plus-chars"),
             pytest.param("PAYU *COMERCIO A", "PAYU *OTRO B", False, id="shared-processor"),
             pytest.param("MERCADOPAGO*TIENDA", "MERCADOPAGO*NEGOCIO", False, id="mercadopago"),
-            pytest.param("DLOCAL SINTETICO", "SINTETICO DLOCAL", True, id="merchant-beside-processor"),
+            pytest.param(
+                "DLOCAL SINTETICO", "SINTETICO DLOCAL", True, id="merchant-beside-processor"
+            ),
             pytest.param("COMPRA PAGO", "PAGO COMPRA", False, id="only-generic-words"),
             pytest.param("ABC", "ABC", False, id="too-short"),
             pytest.param(None, "COMERCIO", False, id="missing"),

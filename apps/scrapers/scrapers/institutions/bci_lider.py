@@ -208,8 +208,7 @@ class BciLiderScraper(BaseScraper):
                 currency="CLP",
                 statement_date=statement.closing_date,
                 external_ids=frozenset(
-                    movement_external_id(tx_date, amount)
-                    for tx_date, amount in statement.movements
+                    movement_external_id(tx_date, amount) for tx_date, amount in statement.movements
                 ),
             )
             for statement in self._statements
@@ -219,9 +218,7 @@ class BciLiderScraper(BaseScraper):
     async def login(self) -> str:
         """Manual sign-in: launch a real Chrome, autofill the login, leave it running."""
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None, save_login_session, self.rut, self.password
-        )
+        return await loop.run_in_executor(None, save_login_session, self.rut, self.password)
 
 
 def _login_cli() -> None:

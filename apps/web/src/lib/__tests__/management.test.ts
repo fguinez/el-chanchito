@@ -218,6 +218,63 @@ describe("planProductUpdate", () => {
     expect(changes).toEqual({ isActive: false });
   });
 
+  // A savings pot the scraper flagged or retired (synthetic uuid ref and stamps).
+  const pot: ProductEditRow = {
+    ...line,
+    kind: "savings",
+    attributes: {
+      retired_by_scraper: true,
+      retired_by_scraper_at: "2026-01-01T00:00:00+00:00",
+      vanished_pending_since: "2026-01-01T00:00:00+00:00",
+      sintetico: "se queda",
+    } as unknown as ProductEditRow["attributes"],
+  };
+
+  it.each([
+    ["deactivating", { ...pot, isActive: true }, false],
+    ["reactivating", { ...pot, isActive: false }, true],
+  ])("drops the scraper's retirement markers when %s", (_label, product, isActive) => {
+    const changes = expectValue(
+      planProductUpdate(product, { isActive }, [product])
+    );
+    expect(changes).toEqual({ isActive, attributes: { sintetico: "se queda" } });
+  });
+
+  it("writes no attributes on a toggle when there are no markers to drop", () => {
+    const changes = expectValue(
+      planProductUpdate(card, { isActive: false }, institutionProducts)
+    );
+    expect(changes).toEqual({ isActive: false });
+  });
+
+  it("leaves the markers alone when isActive does not change", () => {
+    const changes = expectValue(
+      planProductUpdate(pot, { isActive: true, name: "Bolsillo" }, [pot])
+    );
+    expect(changes).toEqual({ name: "Bolsillo" });
+  });
+
+  it("drops the markers from the billing-day merge too", () => {
+    const marked: ProductEditRow = {
+      ...card,
+      attributes: {
+        ...card.attributes,
+        vanished_pending_since: "2026-01-01",
+      } as unknown as ProductEditRow["attributes"],
+    };
+    const changes = expectValue(
+      planProductUpdate(marked, { isActive: false, statementDay: 20 }, [marked])
+    );
+    expect(changes.attributes).toEqual({
+      kind: "credit_card",
+      last4: "1234",
+      brand: "Visa Sintetica",
+      statement_day: 20,
+      due_day: 5,
+    });
+    expect(marked.attributes).toHaveProperty("vanished_pending_since");
+  });
+
   it("reactivates an inactive product that kept its balance", () => {
     const inactive = { ...line, isActive: false };
     const changes = expectValue(

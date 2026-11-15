@@ -23,19 +23,22 @@ import sqlite3
 import sys
 import threading
 import types
-from datetime import date
+from datetime import UTC, date
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 import main as main_mod
-from db.writer import TransactionWriteResult
+from db.writer import TransactionWriteResult, VanishedProductsResult
 from scrapers.backends import mercadopago_web as web
 from scrapers.backends import real_chrome
 from scrapers.backends.mercadopago_web import (
     MercadoPagoAccount,
     MercadoPagoConnectError,
+    MercadoPagoConnectionLostError,
     MercadoPagoFetchError,
     MercadoPagoPageError,
     MercadoPagoSessionError,
@@ -202,7 +205,9 @@ class TestExtractContext:
             pytest.param('<script>var s="_n.ctx.r=";</script>', id="inside-a-string"),
             pytest.param("<script>// set by _n.ctx.r= below\n</script>", id="inside-a-comment"),
             pytest.param("<script>_n.ctx.r={};</script>", id="an-empty-object-first"),
-            pytest.param('<script>_n.ctx.r={"other": {"appProps": 1}};</script>', id="nested-elsewhere"),
+            pytest.param(
+                '<script>_n.ctx.r={"other": {"appProps": 1}};</script>', id="nested-elsewhere"
+            ),
             pytest.param("<script>if(_n.ctx.r==null){}</script>", id="a-comparison"),
         ],
     )
@@ -215,12 +220,16 @@ class TestExtractContext:
     @pytest.mark.parametrize(
         ("html", "message"),
         [
-            pytest.param("<html><body>Ingresa a tu cuenta</body></html>", "marker missing", id="no-marker"),
+            pytest.param(
+                "<html><body>Ingresa a tu cuenta</body></html>", "marker missing", id="no-marker"
+            ),
             pytest.param("<script>_n.ctx.r=undefined;</script>", "not JSON", id="not-json"),
             pytest.param("<script>_n.ctx.r=</script>", "not JSON", id="nothing-after-marker"),
             pytest.param("<script>_n.ctx.r=_n.ctx.r||{};</script>", "not JSON", id="only-a-guard"),
             pytest.param("<script>_n.ctx.r=[1, 2];</script>", "no appProps", id="not-an-object"),
-            pytest.param('<script>_n.ctx.r={"a": 1};</script>', "no appProps", id="object-without-app-props"),
+            pytest.param(
+                '<script>_n.ctx.r={"a": 1};</script>', "no appProps", id="object-without-app-props"
+            ),
             pytest.param(None, "not text", id="not-text"),
         ],
     )
@@ -413,9 +422,7 @@ class TestParseWalletYield:
                 "Generando ganancias al \u22120,5% anual", -0.5, id="negative-unicode-minus"
             ),
             pytest.param("GENERANDO GANANCIAS AL 1,0% ANUAL", 1.0, id="upper-case"),
-            pytest.param(
-                "100% disponible, al 1,0% anual", 1.0, id="first-percent-not-anual"
-            ),
+            pytest.param("100% disponible, al 1,0% anual", 1.0, id="first-percent-not-anual"),
         ],
     )
     def test_rate_is_the_number_before_percent_anual(self, subtitle, expected):
@@ -487,9 +494,7 @@ class TestParsePots:
         """Its uuid, name and CLP amount."""
         pots, skipped = web.parse_pots(_pots_props([_pot()]))
 
-        assert pots == [
-            Pot(id=POT_ID, name="Reserva sintética", amount=1_000_000, rate_pct=1.0)
-        ]
+        assert pots == [Pot(id=POT_ID, name="Reserva sintética", amount=1_000_000, rate_pct=1.0)]
         assert skipped == 0
 
     def test_every_pot_gets_the_hub_rate_and_no_gain(self):
@@ -705,7 +710,10 @@ class TestParseMovements:
         """The ledger groups rows by day; all of them are read, newest first."""
         props = _movements_props([_item()])
         props["listData"]["groups"].append(
-            {"title": "Ayer", "items": [_item(movement_id=MOVEMENT_ID_2), _item(movement_id=MOVEMENT_ID_3)]}
+            {
+                "title": "Ayer",
+                "items": [_item(movement_id=MOVEMENT_ID_2), _item(movement_id=MOVEMENT_ID_3)],
+            }
         )
 
         rows, _, _ = web.parse_movements(props)
@@ -764,10 +772,18 @@ class TestParseMovements:
         ("props", "message"),
         [
             pytest.param({}, "listData missing", id="no-list-data"),
-            pytest.param({"listData": "synthetic"}, "pages is not a count", id="list-data-not-an-object"),
+            pytest.param(
+                {"listData": "synthetic"}, "pages is not a count", id="list-data-not-an-object"
+            ),
             pytest.param({"listData": {"groups": []}}, "pages is not a count", id="no-pages"),
-            pytest.param({"listData": {"pages": True, "groups": []}}, "pages is not a count", id="pages-bool"),
-            pytest.param({"listData": {"pages": -1, "groups": []}}, "pages is not a count", id="pages-negative"),
+            pytest.param(
+                {"listData": {"pages": True, "groups": []}}, "pages is not a count", id="pages-bool"
+            ),
+            pytest.param(
+                {"listData": {"pages": -1, "groups": []}},
+                "pages is not a count",
+                id="pages-negative",
+            ),
             pytest.param({"listData": {"pages": 1}}, "groups is not a list", id="no-groups"),
         ],
     )
@@ -778,6 +794,20 @@ class TestParseMovements:
 
 
 # --- Transport: the in-page fetch contract ------------------------------------
+
+
+class _TargetClosedError(PlaywrightError):
+    """Named like Playwright's private `TargetClosedError`, which is matched by name."""
+
+
+_TargetClosedError.__name__ = "TargetClosedError"
+
+
+def _raise(error):
+    def call(*args, **kwargs):
+        raise error
+
+    return call
 
 
 class _FakeHandle:
@@ -883,7 +913,10 @@ class TestFetchScript:
 class TestHtmlFromFetch:
     def test_ok_returns_the_page_text(self):
         """A 200 with text is the page."""
-        assert web.html_from_fetch({"status": "ok", "html": "<html></html>"}, "balance") == "<html></html>"
+        assert (
+            web.html_from_fetch({"status": "ok", "html": "<html></html>"}, "balance")
+            == "<html></html>"
+        )
 
     @pytest.mark.parametrize(
         "result",
@@ -910,7 +943,9 @@ class TestHtmlFromFetch:
             pytest.param({"status": "too_large"}, "pots: page too large", id="too-large"),
             pytest.param({"status": "not_allowed"}, "pots: page not allowed", id="not-allowed"),
             pytest.param({"status": "ok"}, "pots: no page text", id="ok-without-text"),
-            pytest.param({"status": "synthetic"}, "pots: unexpected fetch result", id="unknown-status"),
+            pytest.param(
+                {"status": "synthetic"}, "pots: unexpected fetch result", id="unknown-status"
+            ),
             pytest.param(None, "pots: unexpected fetch result", id="no-result"),
         ],
     )
@@ -1013,7 +1048,7 @@ class TestReadAccount:
             pytest.param({"status": "timeout"}, id="timeout"),
             pytest.param({"status": "error"}, id="network"),
             pytest.param({"status": "http", "code": 503}, id="http-503"),
-            pytest.param(RuntimeError("synthetic playwright failure"), id="call-raised"),
+            pytest.param(PlaywrightTimeoutError("synthetic"), id="call-timed-out"),
         ],
     )
     def test_an_unreachable_balance_page_is_not_a_lost_session(self, balance):
@@ -1032,8 +1067,16 @@ class TestReadAccount:
         [
             pytest.param({"status": "http", "code": 500}, "pots: HTTP 500", id="http-500"),
             pytest.param({"status": "timeout"}, "pots: timed out", id="timeout"),
-            pytest.param({"status": "ok", "html": "<html></html>"}, "page data marker missing", id="no-marker"),
-            pytest.param(_ok(_pots_props([], status="error")), "pots: status is not success", id="widget-failed"),
+            pytest.param(
+                {"status": "ok", "html": "<html></html>"},
+                "page data marker missing",
+                id="no-marker",
+            ),
+            pytest.param(
+                _ok(_pots_props([], status="error")),
+                "pots: status is not success",
+                id="widget-failed",
+            ),
             pytest.param(_ok({"synthetic": 1}), "pots: hub missing", id="changed-page"),
         ],
     )
@@ -1047,6 +1090,72 @@ class TestReadAccount:
         assert account.pots == []
         assert account.warnings == [f"MercadoPago: savings pots not read ({reason})"]
         assert len(account.movements) == 1
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            pytest.param(PlaywrightTimeoutError("synthetic"), id="timed-out"),
+            pytest.param(PlaywrightError("Execution context was destroyed"), id="navigated"),
+        ],
+    )
+    def test_a_pots_call_that_failed_on_a_live_tab_is_a_warning(self, error):
+        """A timeout or a navigation leaves the tab usable: read on."""
+        tab = _tab(pots=error)
+
+        account = web.read_account(tab)
+
+        assert account.warnings == [
+            f"MercadoPago: savings pots not read (pots: in-page fetch failed ({type(error).__name__}))"
+        ]
+        assert len(account.movements) == 1
+
+    @pytest.mark.parametrize(
+        ("overrides", "calls"),
+        [
+            pytest.param({"balance": RuntimeError("synthetic")}, ["balance"], id="balance"),
+            pytest.param({"pots": RuntimeError("synthetic")}, ["balance", "pots"], id="pots"),
+            pytest.param(
+                {("movements", 1): RuntimeError("synthetic")},
+                ["balance", "pots", ("movements", 1)],
+                id="movements",
+            ),
+            pytest.param(
+                {"pots": _TargetClosedError("synthetic")}, ["balance", "pots"], id="target-closed"
+            ),
+        ],
+    )
+    def test_a_call_that_failed_otherwise_ends_the_read(self, overrides, calls):
+        """A dead driver or a closed tab: no partial account, no call after it."""
+        tab = _tab()
+        tab.responses.update(overrides)
+
+        with pytest.raises(MercadoPagoConnectionLostError) as info:
+            web.read_account(tab)
+
+        assert "lost its connection to the tab" in str(info.value)
+        assert "make mercadopago-login" not in str(info.value)
+        assert tab.calls == calls
+
+    def test_a_failed_copy_out_ends_the_read_without_a_dispose(self):
+        """`json_value` failing may mean a dead connection: no call follows it."""
+        tab = _tab()
+        handles: list = []
+        fetch = tab.wait_for_function
+
+        def failing_copy(script, arg=None, timeout=None):
+            handle = fetch(script, arg=arg, timeout=timeout)
+            if arg["surface"] == "pots":
+                handle.json_value = _raise(RuntimeError("synthetic"))
+            handles.append(handle)
+            return handle
+
+        tab.wait_for_function = failing_copy
+
+        with pytest.raises(MercadoPagoConnectionLostError):
+            web.read_account(tab)
+
+        assert [handle.disposed for handle in handles] == [True, False]
+        assert tab.calls == ["balance", "pots"]
 
     def test_a_skipped_pot_is_a_warning(self):
         """A pot left out is money left out, so the run says so."""
@@ -1073,6 +1182,28 @@ class TestReadAccount:
         account = web.read_account(tab)
 
         assert (account.pots, account.warnings) == ([], [])
+
+    @pytest.mark.parametrize(
+        ("pots", "complete"),
+        [
+            pytest.param(_ok(_pots_props([_pot()])), True, id="success"),
+            pytest.param(_ok(_pots_props([])), True, id="empty-success"),
+            pytest.param({"status": "http", "code": 500}, False, id="page-error"),
+            pytest.param(_ok(_pots_props([_pot()], status="error")), False, id="not-success"),
+            pytest.param(
+                _ok(_pots_props([_pot(), _pot(pot_id=POT_ID_2, currency="USD")])),
+                False,
+                id="skipped-entry",
+            ),
+        ],
+    )
+    def test_pots_complete_only_for_a_full_successful_read(self, pots, complete):
+        """Only a pots list read whole can tell a closed pot from a failed read."""
+        tab = _tab(pots=pots)
+
+        account = web.read_account(tab)
+
+        assert account.pots_complete is complete
 
 
 class TestLedgerPaging:
@@ -1149,9 +1280,7 @@ class TestLedgerPaging:
         account = web.read_account(tab, movement_pages=0)
 
         assert [row.movement_id for row in account.movements] == ["A00000000000000B1"]
-        assert account.warnings == [
-            "MercadoPago: movements page 2 not read (movements: HTTP 500)"
-        ]
+        assert account.warnings == ["MercadoPago: movements page 2 not read (movements: HTTP 500)"]
         assert self._ledger_calls(tab) == [1, 2]
 
     def test_the_first_page_failing_is_a_warning_not_a_quiet_empty_ledger(self, no_sleep):
@@ -1162,9 +1291,7 @@ class TestLedgerPaging:
         account = web.read_account(tab)
 
         assert account.movements == []
-        assert account.warnings == [
-            "MercadoPago: movements page 1 not read (movements: timed out)"
-        ]
+        assert account.warnings == ["MercadoPago: movements page 1 not read (movements: timed out)"]
 
     def test_a_row_seen_on_two_pages_is_kept_once(self, no_sleep):
         """A movement arriving between two fetches shifts the pages by one row."""
@@ -1388,7 +1515,7 @@ class _Connections:
         monkeypatch.setattr(web, "_cdp_connection", self)
 
     @contextlib.contextmanager
-    def __call__(self, cdp_url, wait_s, process=None):
+    def __call__(self, cdp_url, wait_s, process=None, kill_switch=None):
         entry = self.script[min(self.attempts, len(self.script) - 1)]
         self.attempts += 1
         self.waits.append(wait_s)
@@ -1523,7 +1650,9 @@ class TestTabDiscovery:
 
         message = str(info.value)
         assert not isinstance(info.value, MercadoPagoSessionError)
-        assert "Chrome has the Mercado Pago page open, but Playwright never attached to it" in message
+        assert (
+            "Chrome has the Mercado Pago page open, but Playwright never attached to it" in message
+        )
         assert f"{connections.attempts} connection(s)" in message
         assert "Chrome targets: page: 1, service_worker: 2" in message
         assert "make mercadopago-login" not in message
@@ -1694,19 +1823,23 @@ class TestTabDiscovery:
         assert max(connections.waits[1:]) <= web.RECONNECT_WAIT_S
         assert connections.started_at[-1] <= port_answered_at + web.MANAGED_TAB_WAIT_S
         assert attach_phase > port_answered_at + web.MANAGED_TAB_WAIT_S
-        assert attach_phase <= (
-            web.CONNECT_WAIT_S + web.MANAGED_TAB_WAIT_S + web.ATTACH_OVERRUN_S
-        )
+        assert attach_phase <= (web.CONNECT_WAIT_S + web.MANAGED_TAB_WAIT_S + web.ATTACH_OVERRUN_S)
         assert attach_phase + web.READ_BUDGET_S < web.MANAGED_HARD_LIMIT_S < web.DRIVE_TIMEOUT_S
 
 
 class _FakeDriver:
-    """What `sync_playwright()` returns: logs its start, stop and connections."""
+    """What `sync_playwright()` returns: logs its start, stop and connections.
 
-    def __init__(self, log, connect):
+    `proc` stands in for the driver subprocess, where Playwright keeps it.
+    """
+
+    def __init__(self, log, connect, proc=None):
         self.log = log
         self.connect = connect
         self.chromium = self
+        if proc is not None:
+            transport = types.SimpleNamespace(_proc=proc)
+            self._connection = types.SimpleNamespace(_transport=transport)
 
     def __enter__(self):
         self.log.append("start")
@@ -1725,9 +1858,10 @@ class _FakeDriver:
 def driver_log(monkeypatch):
     """Install a fake `playwright.sync_api`; no driver process is started."""
     log: list = []
-    state = {"connect": lambda: "browser"}
+    state = {"connect": lambda: "browser", "proc": None}
     module = types.ModuleType("playwright.sync_api")
-    module.sync_playwright = lambda: _FakeDriver(log, lambda: state["connect"]())
+    module.sync_playwright = lambda: _FakeDriver(log, lambda: state["connect"](), state["proc"])
+    module.Error = PlaywrightError
     package = types.ModuleType("playwright")
     package.sync_api = module
     monkeypatch.setitem(sys.modules, "playwright", package)
@@ -1763,9 +1897,11 @@ class TestCdpConnection:
         log, state = driver_log
         self._refuse(state)
 
-        with pytest.raises(MercadoPagoConnectError) as info:
-            with web._cdp_connection(CDP_URL, 30):
-                raise AssertionError("the body must not run")
+        with (
+            pytest.raises(MercadoPagoConnectError) as info,
+            web._cdp_connection(CDP_URL, 30),
+        ):
+            raise AssertionError("the body must not run")
 
         assert log == ["start", ("connect", 30000), "stop"]
         assert "Chrome is up, but Playwright could not attach to it" in str(info.value)
@@ -1775,9 +1911,8 @@ class TestCdpConnection:
         """An error while reading still drops the connection."""
         log, _ = driver_log
 
-        with pytest.raises(MercadoPagoSessionError):
-            with web._cdp_connection(CDP_URL, 7):
-                raise MercadoPagoSessionError("synthetic")
+        with pytest.raises(MercadoPagoSessionError), web._cdp_connection(CDP_URL, 7):
+            raise MercadoPagoSessionError("synthetic")
 
         assert log[-1] == "stop"
 
@@ -1786,9 +1921,8 @@ class TestCdpConnection:
         _, state = driver_log
         self._refuse(state)
 
-        with pytest.raises(MercadoPagoConnectError) as info:
-            with web._cdp_connection(CDP_URL, 30):
-                pass
+        with pytest.raises(MercadoPagoConnectError) as info, web._cdp_connection(CDP_URL, 30):
+            pass
 
         assert "RuntimeError" in str(info.value)
         for link in _chain(info.value):
@@ -1801,9 +1935,11 @@ class TestCdpConnection:
         log, state = driver_log
         self._refuse(state)
 
-        with pytest.raises(MercadoPagoWebError, match="no longer running") as info:
-            with web._cdp_connection(CDP_URL, 30, _Exited()):
-                pass
+        with (
+            pytest.raises(MercadoPagoWebError, match="no longer running") as info,
+            web._cdp_connection(CDP_URL, 30, _Exited()),
+        ):
+            pass
 
         assert not isinstance(info.value, MercadoPagoConnectError)
         assert log[-1] == "stop"
@@ -1881,7 +2017,9 @@ class _Chrome:
         monkeypatch.setattr(web, "_require_playwright", lambda: None)
         self.reclaims: list[dict] = []
         monkeypatch.setattr(
-            web.real_chrome, "reclaim_orphaned_chrome", lambda **kwargs: self.reclaims.append(kwargs)
+            web.real_chrome,
+            "reclaim_orphaned_chrome",
+            lambda **kwargs: self.reclaims.append(kwargs),
         )
         monkeypatch.setattr(web.real_chrome, "port_in_use", lambda port: port_in_use)
         monkeypatch.setattr(web.real_chrome, "find_chrome", lambda env: "/synthetic/chrome")
@@ -1913,6 +2051,7 @@ class _Chrome:
         return self.outcome
 
 
+@pytest.mark.usefixtures("timers")
 class TestModes:
     def test_managed_launches_offscreen_reads_and_terminates(self, monkeypatch, tmp_path):
         """Default mode: its own Chrome, on the profile, on the balance page."""
@@ -2018,6 +2157,7 @@ class TestModes:
             assert "ws://" not in str(link) and "Call log" not in str(link)
 
 
+@pytest.mark.usefixtures("timers")
 class TestRealDrives:
     """Both modes through the real discovery loop, on fake looks and connections."""
 
@@ -2186,9 +2326,7 @@ class TestRealDrives:
         assert chrome.closed_via == ["http://127.0.0.1:9223"]
         assert waits == chrome.disk_checks == [1_700_000_000.0]
 
-    def test_a_session_missing_on_disk_after_the_close_is_no_success(
-        self, monkeypatch, tmp_path
-    ):
+    def test_a_session_missing_on_disk_after_the_close_is_no_success(self, monkeypatch, tmp_path):
         """The post-close check fails the login instead of reporting it signed in."""
         chrome = _Chrome(monkeypatch, tmp_path)
         chrome.on_disk = False
@@ -2248,8 +2386,13 @@ class TestSessionOnDisk:
         conn.executemany(
             "INSERT INTO cookies VALUES (?, ?, ?, 'synthetic', x'00', ?, ?)",
             [
-                (row[3] if len(row) > 3 else FRESH, row[0], row[1],
-                 row[4] if len(row) > 4 else LATER, row[2])
+                (
+                    row[3] if len(row) > 3 else FRESH,
+                    row[0],
+                    row[1],
+                    row[4] if len(row) > 4 else LATER,
+                    row[2],
+                )
                 for row in rows
             ],
         )
@@ -2259,16 +2402,17 @@ class TestSessionOnDisk:
 
     def test_chrome_time_converts_from_1601_microseconds(self):
         """Chrome's epoch is 1601-01-01 UTC; 0 Unix seconds is 11644473600 s after it."""
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        unix_epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
-        y2k = datetime(2000, 1, 1, tzinfo=timezone.utc)
-        chrome_epoch = datetime(1601, 1, 1, tzinfo=timezone.utc)
+        unix_epoch = datetime(1970, 1, 1, tzinfo=UTC)
+        y2k = datetime(2000, 1, 1, tzinfo=UTC)
+        chrome_epoch = datetime(1601, 1, 1, tzinfo=UTC)
 
         assert web.chrome_time_to_unix(11_644_473_600_000_000) == 0
-        assert web.chrome_time_to_unix(
-            int((y2k - chrome_epoch).total_seconds() * 1_000_000)
-        ) == (y2k - unix_epoch).total_seconds()
+        assert (
+            web.chrome_time_to_unix(int((y2k - chrome_epoch).total_seconds() * 1_000_000))
+            == (y2k - unix_epoch).total_seconds()
+        )
 
     @pytest.mark.parametrize(
         ("rows", "expected"),
@@ -2444,6 +2588,7 @@ class _FakeTimer:
         self.started = False
         self.cancelled = False
         self.daemon = False
+        self.finished = threading.Event()
         _FakeTimer.created.append(self)
 
     def start(self):
@@ -2454,6 +2599,7 @@ class _FakeTimer:
 
     def fire(self):
         self.function(*self.args)
+        self.finished.set()
 
 
 @pytest.fixture
@@ -2496,6 +2642,31 @@ class TestLaunchSafety:
         assert chrome.terminated == [chrome.proc, chrome.proc]
         assert timers[0].cancelled is True
 
+    def test_a_connection_cut_by_the_watchdog_reads_as_the_timeout(
+        self, monkeypatch, tmp_path, timers
+    ):
+        """Terminating Chrome is what lost the connection: say it overran."""
+        _Chrome(monkeypatch, tmp_path)
+
+        def overrun(cdp_url, movement_pages, **kwargs):
+            timers[0].fire()
+            raise MercadoPagoConnectionLostError("synthetic")
+
+        monkeypatch.setattr(web, "_drive_over_cdp", overrun)
+
+        with pytest.raises(MercadoPagoWebError, match="did not finish in time"):
+            web._drive_managed(1)
+
+    def test_a_connection_lost_before_the_watchdog_fired_keeps_its_reason(
+        self, monkeypatch, tmp_path, timers
+    ):
+        """Only the watchdog's own cut is reported as a timeout."""
+        chrome = _Chrome(monkeypatch, tmp_path)
+        chrome.outcome = MercadoPagoConnectionLostError("synthetic: lost")
+
+        with pytest.raises(MercadoPagoConnectionLostError, match="synthetic: lost"):
+            web._drive_managed(1)
+
     def test_chrome_is_closed_when_the_watchdog_cannot_start(self, monkeypatch, tmp_path):
         """Nothing between the launch and the cleanup may leak the Chrome."""
         chrome = _Chrome(monkeypatch, tmp_path)
@@ -2512,9 +2683,7 @@ class TestLaunchSafety:
         assert chrome.drives == []
         assert chrome.terminated == [chrome.proc]
 
-    def test_the_sign_in_window_is_closed_when_the_prompt_cannot_print(
-        self, monkeypatch, tmp_path
-    ):
+    def test_the_sign_in_window_is_closed_when_the_prompt_cannot_print(self, monkeypatch, tmp_path):
         """A closed stdout must not leave the visible Chrome behind."""
         chrome = _Chrome(monkeypatch, tmp_path)
 
@@ -2635,9 +2804,7 @@ class TestLaunchSafety:
         assert seen == [4242]
         assert not pidfile.exists()
 
-    def test_a_binary_that_cannot_start_names_the_setting_not_the_path(
-        self, monkeypatch, tmp_path
-    ):
+    def test_a_binary_that_cannot_start_names_the_setting_not_the_path(self, monkeypatch, tmp_path):
         """The override's path must not travel into the run's error message."""
         terminated = []
         monkeypatch.setenv("MERCADOPAGO_CHROME_PROFILE", str(tmp_path))
@@ -2663,6 +2830,250 @@ class TestLaunchSafety:
         assert terminated == []
 
 
+class _DriverProc:
+    """The driver subprocess, and how Playwright before 1.64 behaved once killed.
+
+    `kill` ends the call blocked on it. The first call after the kill fails;
+    any later one would spin forever on those versions, so here it is
+    recorded in `late_calls` (and fails, so a test cannot hang on it).
+    """
+
+    def __init__(self):
+        self.killed = threading.Event()
+        self.failed_once = False
+        self.late_calls: list[str] = []
+
+    def kill(self):
+        self.killed.set()
+
+    def call(self, name):
+        if not self.killed.is_set():
+            return
+        if self.failed_once:
+            self.late_calls.append(name)
+            raise RuntimeError("synthetic: a dead dispatcher would spin here")
+        self.failed_once = True
+        raise RuntimeError("Connection closed while reading from the driver")
+
+
+class _DriverHandle:
+    """A fetch result handle on the fake driver; `on_json` runs inside `json_value`."""
+
+    def __init__(self, proc, value, on_json=None):
+        self.proc = proc
+        self.value = value
+        self.on_json = on_json
+
+    def json_value(self):
+        self.proc.call("json_value")
+        if self.on_json is not None:
+            self.on_json()
+        return self.value
+
+    def dispose(self):
+        self.proc.call("dispose")
+
+
+class _DriverTab:
+    """A portal tab on the fake driver, answering each surface like `_tab()`.
+
+    `hooks` maps a surface (or a ("movements", N) pair) to a callable run
+    while that fetch copies its result out of the page.
+    """
+
+    url = web.START_URL
+
+    def __init__(self, proc, log, hooks):
+        self.proc = proc
+        self.log = log
+        self.hooks = hooks
+        self.responses = _tab().responses
+        self.calls: list = []
+
+    def wait_for_function(self, script, arg=None, timeout=None):
+        self.proc.call("wait_for_function")
+        surface, number = arg["surface"], arg["pageNumber"]
+        key = (surface, number) if surface == "movements" else surface
+        self.calls.append(key)
+        value = self.responses.get(key, self.responses.get(surface))
+        return _DriverHandle(self.proc, value, self.hooks.get(key))
+
+    def close(self):
+        self.log.append("page.close")
+
+
+class TestReuseWatchdog:
+    """Reuse mode, through the real `_cdp_connection` on a fake Playwright."""
+
+    def _install(self, monkeypatch, driver_log, hooks):
+        log, state = driver_log
+        proc = _DriverProc()
+        tab = _DriverTab(proc, log, hooks)
+        browser = _Browser()
+        browser.contexts[0].pages.append(tab)
+        browser.close = lambda: log.append("browser.close")
+        state["proc"] = proc
+        state["connect"] = lambda: browser
+        _Looks(monkeypatch, PORTAL)
+        return log, proc, tab
+
+    def _run_reuse(self):
+        with pytest.raises(MercadoPagoWebError) as info:
+            asyncio.run(web.scrape_account(cdp_url="http://localhost:9333"))
+        return info.value
+
+    def _frozen_until_killed(self, timers, proc, worker):
+        """A copy out of the page that never returns until the watchdog fires."""
+
+        def freeze():
+            worker.append(threading.current_thread())
+            firing = threading.Thread(target=timers[0].fire, daemon=True)
+            firing.start()
+            assert proc.killed.wait(timeout=5), "the driver was never killed"
+            firing.join(timeout=5)
+            proc.call("json_value")  # the pending call fails with the driver
+
+        return freeze
+
+    def test_the_watchdog_is_armed_for_the_reuse_limit_and_disarmed_after(
+        self, monkeypatch, tmp_path, timers
+    ):
+        """It lands before the run's own timeout; the drive gets its kill switch."""
+        chrome = _Chrome(monkeypatch, tmp_path)
+
+        web._drive_reuse("http://localhost:9333", 1)
+
+        (watchdog,) = timers
+        assert watchdog.interval == web.REUSE_HARD_LIMIT_S < web.DRIVE_TIMEOUT_S
+        assert (watchdog.started, watchdog.daemon, watchdog.cancelled) == (True, True, True)
+        assert isinstance(chrome.drives[0]["kill_switch"], real_chrome.DriverKillSwitch)
+
+    def test_managed_mode_keeps_its_chrome_watchdog_and_no_kill_switch(
+        self, monkeypatch, tmp_path, timers
+    ):
+        chrome = _Chrome(monkeypatch, tmp_path)
+
+        web._drive_managed(1)
+
+        (watchdog,) = timers
+        assert watchdog.args == (chrome.proc,)
+        assert "kill_switch" not in chrome.drives[0]
+
+    def test_a_frozen_balance_read_ends_without_another_playwright_call(
+        self, clock, monkeypatch, tmp_path, timers, driver_log
+    ):
+        """The worker thread ends, nothing is disposed, Chrome is left alone."""
+        chrome = _Chrome(monkeypatch, tmp_path, fake_drive=False)
+        worker: list = []
+        hooks: dict = {}
+        log, proc, tab = self._install(monkeypatch, driver_log, hooks)
+        hooks["balance"] = self._frozen_until_killed(timers, proc, worker)
+
+        error = self._run_reuse()
+
+        assert str(error) == "Mercado Pago read did not finish in time."
+        assert proc.late_calls == []
+        assert tab.calls == ["balance"]
+        worker[0].join(timeout=5)
+        assert not worker[0].is_alive()
+        assert log == ["start", ("connect", web.REUSE_TAB_WAIT_S * 1000), "stop"]
+        assert chrome.terminated == []
+        for link in _chain(error):
+            assert "Connection closed" not in str(link)
+
+    def test_a_frozen_pots_read_is_not_a_warning_to_carry_on_from(
+        self, clock, monkeypatch, tmp_path, timers, driver_log
+    ):
+        """No partial account: the ledger is not fetched after the kill."""
+        _Chrome(monkeypatch, tmp_path, fake_drive=False)
+        worker: list = []
+        hooks: dict = {}
+        _, proc, tab = self._install(monkeypatch, driver_log, hooks)
+        hooks["pots"] = self._frozen_until_killed(timers, proc, worker)
+
+        error = self._run_reuse()
+
+        assert "did not finish in time" in str(error)
+        assert proc.late_calls == []
+        assert tab.calls == ["balance", "pots"]
+
+    def test_a_kill_between_fetches_stops_before_the_next_call(
+        self, clock, monkeypatch, tmp_path, timers, driver_log
+    ):
+        """Fired while no call was pending: the result is not disposed, nothing follows."""
+        _Chrome(monkeypatch, tmp_path, fake_drive=False)
+        hooks: dict = {}
+        _, proc, tab = self._install(monkeypatch, driver_log, hooks)
+        hooks["balance"] = lambda: timers[0].fire()
+
+        error = self._run_reuse()
+
+        assert "did not finish in time" in str(error)
+        assert proc.killed.is_set()
+        assert (proc.failed_once, proc.late_calls) == (False, [])
+        assert tab.calls == ["balance"]
+
+    def test_no_attach_starts_once_the_watchdog_has_fired(
+        self, clock, monkeypatch, tmp_path, timers, driver_log
+    ):
+        """A watchdog that fires between attaches ends the drive before another driver."""
+        _Chrome(monkeypatch, tmp_path, fake_drive=False)
+        log, state = driver_log
+        state["proc"] = _DriverProc()
+        state["connect"] = lambda: _Browser(STALE)
+        looks = _Looks(monkeypatch, PORTAL)
+
+        def look(cdp_url, matches, **kwargs):
+            if looks.count == 1:
+                timers[0].fire()
+            return looks(cdp_url, matches)
+
+        monkeypatch.setattr(web.real_chrome, "summarize_targets", look)
+
+        with pytest.raises(MercadoPagoWebError, match="did not finish in time"):
+            web._drive_reuse("http://localhost:9333", 1)
+
+        assert log == ["start", ("connect", web.REUSE_TAB_WAIT_S * 1000), "stop"]
+        assert state["proc"].killed.is_set() is False  # no driver was live to kill
+
+    def test_a_kill_during_the_connect_ends_the_drive_as_a_timeout(
+        self, clock, monkeypatch, tmp_path, timers, driver_log
+    ):
+        """The failed attach is not retried, nor is a tab that then disappears
+        reported as missing: the drive ends as the timeout it is."""
+        _Chrome(monkeypatch, tmp_path, fake_drive=False)
+        log, state = driver_log
+        proc = state["proc"] = _DriverProc()
+        _Looks(monkeypatch, PORTAL, NO_TAB)
+
+        def connect():
+            timers[0].fire()
+            proc.call("connect_over_cdp")
+
+        state["connect"] = connect
+
+        with pytest.raises(MercadoPagoWebError, match="did not finish in time"):
+            web._drive_reuse("http://localhost:9333", 1)
+
+        assert proc.late_calls == []
+        assert log == ["start", ("connect", web.REUSE_TAB_WAIT_S * 1000), "stop"]
+
+    def test_a_scraper_error_after_the_kill_is_reported_as_itself(
+        self, monkeypatch, tmp_path, timers
+    ):
+        """Only a driver error becomes the timeout; a lost session stays one."""
+        _Chrome(monkeypatch, tmp_path)
+
+        def drive(*args, **kwargs):
+            timers[0].fire()
+            raise MercadoPagoSessionError("synthetic: sign in again")
+
+        monkeypatch.setattr(web, "_drive_over_cdp", drive)
+
+        with pytest.raises(MercadoPagoSessionError, match="sign in again"):
+            web._drive_reuse("http://localhost:9333", 1)
+
+
 def _patched_writer(monkeypatch):
     """Patch run_scraper's DB seam (no database); return the finish mock."""
     finish = MagicMock()
@@ -2671,6 +3082,11 @@ def _patched_writer(monkeypatch):
         main_mod, "write_transactions", MagicMock(return_value=TransactionWriteResult())
     )
     monkeypatch.setattr(main_mod, "upsert_product", MagicMock())
+    monkeypatch.setattr(
+        main_mod,
+        "retire_vanished_products",
+        MagicMock(return_value=VanishedProductsResult()),
+    )
     monkeypatch.setattr(main_mod, "finish_scraper_run", finish)
     return finish
 
@@ -2784,9 +3200,7 @@ class TestManualSignIn:
         assert (connections.opened, connections.closed) == (1, 1)
         assert capsys.readouterr().out.count("waiting for it to reach the profile on disk") == 1
 
-    def test_a_session_that_never_reaches_the_disk_fails_after_its_floor(
-        self, clock, monkeypatch
-    ):
+    def test_a_session_that_never_reaches_the_disk_fails_after_its_floor(self, clock, monkeypatch):
         """Closing Chrome now would lose it: an error, after the disk wait's own floor
         even though the sign-in deadline came first."""
         monkeypatch.setattr(web, "_balance_readable", lambda page: True)
@@ -2957,7 +3371,9 @@ class TestManualSignIn:
     def test_probes_sparingly_while_the_tab_does_not_move(self, clock, monkeypatch):
         """An unreadable portal tab is probed, and attached to, on an interval."""
         probes = []
-        monkeypatch.setattr(web, "_balance_readable", lambda page: probes.append(clock.now) and False)
+        monkeypatch.setattr(
+            web, "_balance_readable", lambda page: probes.append(clock.now) and False
+        )
         _Looks(monkeypatch, PORTAL)
         connections = _Connections(monkeypatch, _Browser("https://www.mercadopago.cl/"))
 
@@ -2970,7 +3386,9 @@ class TestManualSignIn:
     def test_a_tab_that_moves_is_probed_at_once(self, clock, monkeypatch):
         """Landing on a new portal page after signing in does not wait the interval."""
         probes = []
-        monkeypatch.setattr(web, "_balance_readable", lambda page: probes.append(clock.now) and False)
+        monkeypatch.setattr(
+            web, "_balance_readable", lambda page: probes.append(clock.now) and False
+        )
         _Looks(
             monkeypatch,
             _summary(portal=1, key="synthetic-key-1"),
@@ -2987,9 +3405,7 @@ class TestManualSignIn:
         """A connection made while the portal tab loads never sees it."""
         monkeypatch.setattr(web, "_balance_readable", lambda page: True)
         _Looks(monkeypatch, ELSEWHERE, ELSEWHERE, PORTAL)
-        connections = _Connections(
-            monkeypatch, _Browser(STALE), NO_ATTACH, _Browser(web.START_URL)
-        )
+        connections = _Connections(monkeypatch, _Browser(STALE), NO_ATTACH, _Browser(web.START_URL))
 
         web._await_sign_in(CDP_URL, timeout_s=600)
 
@@ -3161,7 +3577,9 @@ class TestIdentity:
         [
             pytest.param("COMERCIO SINTETICO", "Pago", "COMERCIO SINTETICO (Pago)", id="both"),
             pytest.param("COMERCIO SINTETICO", "", "COMERCIO SINTETICO", id="no-description"),
-            pytest.param("Rentabilidad", "rentabilidad", "Rentabilidad", id="description-repeats-title"),
+            pytest.param(
+                "Rentabilidad", "rentabilidad", "Rentabilidad", id="description-repeats-title"
+            ),
             pytest.param(
                 "Persona Sintética",
                 "Transferencia recibida",
@@ -3313,6 +3731,44 @@ class TestLegs:
         products = asyncio.run(self.scraper.scrape_products()).products
 
         assert [p.kind for p in products] == ["wallet"]
+
+    def test_a_complete_pots_read_declares_the_pots_scope(self, monkeypatch):
+        """Savings, CLP, the pot prefix, every pot's ref, closed at a zero balance."""
+        _install(monkeypatch, account=_account(pots_complete=True))
+
+        (scope,) = asyncio.run(self.scraper.scrape_products()).vanished_product_scopes
+
+        assert (
+            scope.institution,
+            scope.product_kind,
+            scope.currency,
+            scope.external_ref_prefix,
+            scope.present_refs,
+            scope.closed_metrics.balance,
+        ) == (
+            "mercadopago",
+            "savings",
+            "CLP",
+            "mp_pot_",
+            frozenset({f"mp_pot_{POT_ID}", f"mp_pot_{POT_ID_2}"}),
+            0,
+        )
+
+    def test_a_complete_read_without_pots_declares_an_empty_scope(self, monkeypatch):
+        """No pots at all is a real reading: every stored pot was closed."""
+        _install(monkeypatch, account=_account(pots=[], pots_complete=True))
+
+        (scope,) = asyncio.run(self.scraper.scrape_products()).vanished_product_scopes
+
+        assert scope.present_refs == frozenset()
+
+    def test_an_incomplete_pots_read_declares_no_scope(self, monkeypatch):
+        """A failed or partial pots read must never retire a pot."""
+        _install(monkeypatch, account=_account(pots_complete=False))
+
+        result = asyncio.run(self.scraper.scrape_products())
+
+        assert result.vanished_product_scopes == []
 
     def test_an_unnamed_pot_gets_the_default_name(self, monkeypatch):
         """A blank name is sent as none, so the writer names the product."""

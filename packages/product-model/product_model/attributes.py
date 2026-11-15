@@ -43,21 +43,15 @@ class RevolvingCreditAttributes(BaseAttributes):
 class InstallmentLoanAttributes(BaseAttributes):
     """Shared config fields for installment loans (loan/mortgage)."""
 
-    original_principal: int | None = Field(
-        None, description="Original loan principal in CLP."
-    )
+    original_principal: int | None = Field(None, description="Original loan principal in CLP.")
     interest_rate_pct: float | None = Field(
         None, description="Annual interest rate as a percent number (e.g. 18.9)."
     )
     installments_total: int | None = Field(
         None, description="Total number of installments (cuotas)."
     )
-    opened_date: datetime.date | None = Field(
-        None, description="Date the loan was granted."
-    )
-    due_day: int | None = Field(
-        None, description="Day of month each installment is due."
-    )
+    opened_date: datetime.date | None = Field(None, description="Date the loan was granted.")
+    due_day: int | None = Field(None, description="Day of month each installment is due.")
 
 
 class CheckingAttributes(BankAccountAttributes):
@@ -79,17 +73,13 @@ class SavingsAttributes(BankAccountAttributes):
 class VistaAttributes(BankAccountAttributes):
     """Identity fields for a vista account (cuenta vista)."""
 
-    kind: Literal["vista"] = Field(
-        "vista", description='Payload discriminator; always "vista".'
-    )
+    kind: Literal["vista"] = Field("vista", description='Payload discriminator; always "vista".')
 
 
 class WalletAttributes(BaseAttributes):
     """Identity fields for an app wallet (MACH, Tenpo, Mercado Pago)."""
 
-    kind: Literal["wallet"] = Field(
-        "wallet", description='Payload discriminator; always "wallet".'
-    )
+    kind: Literal["wallet"] = Field("wallet", description='Payload discriminator; always "wallet".')
 
 
 class TermDepositAttributes(BaseAttributes):
@@ -111,9 +101,7 @@ class TermDepositAttributes(BaseAttributes):
     deposit_type: str | None = Field(
         None, description="Deposit modality (e.g. 'Renovable', 'Plazo fijo')."
     )
-    principal: int | None = Field(
-        None, description="Invested principal in CLP (Monto invertido)."
-    )
+    principal: int | None = Field(None, description="Invested principal in CLP (Monto invertido).")
     maturity_value: int | None = Field(
         None, description="Amount payable at maturity in CLP (Monto al vencimiento)."
     )
@@ -179,9 +167,7 @@ class LineOfCreditAttributes(RevolvingCreditAttributes):
 class LoanAttributes(InstallmentLoanAttributes):
     """Config fields for a consumer loan (préstamo)."""
 
-    kind: Literal["loan"] = Field(
-        "loan", description='Payload discriminator; always "loan".'
-    )
+    kind: Literal["loan"] = Field("loan", description='Payload discriminator; always "loan".')
 
 
 class MortgageAttributes(InstallmentLoanAttributes):
@@ -201,9 +187,7 @@ class InvestmentAttributes(BaseAttributes):
     portfolio: str | None = Field(
         None, description="Portfolio the money is invested in (e.g. 'Risky Norris')."
     )
-    risk_profile: str | None = Field(
-        None, description="Risk profile label (e.g. 'Arriesgado')."
-    )
+    risk_profile: str | None = Field(None, description="Risk profile label (e.g. 'Arriesgado').")
     fund_name: str | None = Field(
         None, description="Fund name for single-fund products (e.g. a fondo mutuo)."
     )
@@ -212,9 +196,7 @@ class InvestmentAttributes(BaseAttributes):
 class StockAttributes(BaseAttributes):
     """Identity fields for a position in a listed security (acción)."""
 
-    kind: Literal["stock"] = Field(
-        "stock", description='Payload discriminator; always "stock".'
-    )
+    kind: Literal["stock"] = Field("stock", description='Payload discriminator; always "stock".')
     ticker: str | None = Field(
         None, description="Ticker symbol of a listed security (e.g. 'ACME')."
     )
@@ -233,17 +215,11 @@ class StockAttributes(BaseAttributes):
 class CryptoAttributes(BaseAttributes):
     """Identity fields for a crypto holding."""
 
-    kind: Literal["crypto"] = Field(
-        "crypto", description='Payload discriminator; always "crypto".'
-    )
+    kind: Literal["crypto"] = Field("crypto", description='Payload discriminator; always "crypto".')
 
 
 class OtherAttributes(BaseAttributes):
     """Identity fields for products that fit no other kind."""
 
-    kind: Literal["other"] = Field(
-        "other", description='Payload discriminator; always "other".'
-    )
-    note: str | None = Field(
-        None, description="Free-form note describing the product."
-    )
+    kind: Literal["other"] = Field("other", description='Payload discriminator; always "other".')
+    note: str | None = Field(None, description="Free-form note describing the product.")

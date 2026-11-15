@@ -18,14 +18,13 @@ import pytest
 os.environ.setdefault("BANCHILE_RUT", "test")
 os.environ.setdefault("BANCHILE_PASSWORD", "test")
 
+from db.writer import upsert_transactions
 from product_model import (
     CheckingMetrics,
     CreditCardAttributes,
     CreditCardMetrics,
     LineOfCreditMetrics,
 )
-
-from db.writer import upsert_transactions
 from scrapers.backends.banchile_movements import (
     BanChileSessionResult,
     BanChileStatement,
@@ -78,9 +77,7 @@ def _cartola_row(
     }
 
 
-def _unbilled_row(
-    monto=999999, comercio="COMERCIO SINTETICO", tbk="000000000001", origen="NAC"
-):
+def _unbilled_row(monto=999999, comercio="COMERCIO SINTETICO", tbk="000000000001", origen="NAC"):
     return {
         "origenTransaccion": origen,
         "fechaTransaccionString": "20/08/2026",
@@ -145,15 +142,11 @@ class TestCheckingMapping:
         self.scraper = BanChileScraper()
 
     def _convert(self, row, operation_id=None):
-        return self.scraper._movement_to_transaction(
-            parse_cartola_movement(row, operation_id)
-        )
+        return self.scraper._movement_to_transaction(parse_cartola_movement(row, operation_id))
 
     def test_inline_glosa_id_becomes_the_key(self):
         """A transfer carries its "ID Transacción" in `detalleGlosa`."""
-        row = _cartola_row(
-            detalle_glosa=["Banco: BANCO SINTETICO", "Id transaccion: 12345678901"]
-        )
+        row = _cartola_row(detalle_glosa=["Banco: BANCO SINTETICO", "Id transaccion: 12345678901"])
         operation_id = operation_id_from_glosa(row["detalleGlosa"])
 
         txn = self._convert(row, operation_id)
@@ -244,9 +237,7 @@ class TestCheckingMapping:
         rows = [_cartola_row(saldo=f"{n}.500.000") for n in range(1, 4)]
         forwards = [self._convert(row).external_id for row in rows]
         backwards = [self._convert(row).external_id for row in reversed(rows)]
-        with_a_repeat = [
-            self._convert(row).external_id for row in rows + [rows[0], rows[1]]
-        ]
+        with_a_repeat = [self._convert(row).external_id for row in [*rows, rows[0], rows[1]]]
 
         assert forwards == list(reversed(backwards))
         assert with_a_repeat[:3] == forwards
@@ -332,9 +323,7 @@ class TestCardBilling:
         return self.scraper._movement_to_transaction(movement)
 
     def test_an_unbilled_charge_is_unbilled_with_no_statement(self):
-        txn = self.scraper._movement_to_transaction(
-            parse_unbilled_movement(_unbilled_row())
-        )
+        txn = self.scraper._movement_to_transaction(parse_unbilled_movement(_unbilled_row()))
         assert (txn.billing_status, txn.statement_date) == ("unbilled", None)
 
     def test_a_usd_unbilled_charge_is_unbilled_too(self):
@@ -505,17 +494,13 @@ class TestScrapeTransactions:
         assert result.warnings == []
 
     def test_a_failed_rate_surface_becomes_a_warning(self, monkeypatch):
-        self._session(
-            monkeypatch, BanChileSessionResult(failed_surfaces=("tipo de cambio",))
-        )
+        self._session(monkeypatch, BanChileSessionResult(failed_surfaces=("tipo de cambio",)))
 
         asyncio.run(self.scraper.scrape_transactions())
         result = asyncio.run(self.scraper.scrape_products())
 
         assert result.exchange_rates == []
-        assert result.warnings == [
-            "BanChile: tipo de cambio surface failed after 3 attempts"
-        ]
+        assert result.warnings == ["BanChile: tipo de cambio surface failed after 3 attempts"]
 
     def test_movement_surface_failures_become_warnings(self, monkeypatch):
         """A movements surface that stayed empty is reported, not swallowed."""
@@ -589,10 +574,9 @@ class TestScrapeProducts:
 
     def test_per_holding_surface_labels_reach_warnings(self, monkeypatch):
         """The issue #36 surfaces warn as depósitos/fondos (not 'inversiones')."""
+
         async def fake_fetch(rut, password):
-            return BalanceFetchResult(
-                products=[], failed_surfaces=("depósitos", "fondos")
-            )
+            return BalanceFetchResult(products=[], failed_surfaces=("depósitos", "fondos"))
 
         monkeypatch.setattr(banchile_mod, "fetch_balances", fake_fetch)
 
@@ -605,6 +589,7 @@ class TestScrapeProducts:
 
     def test_backend_failure_is_swallowed(self, monkeypatch):
         """A heavy, flaky login must not fail the whole run."""
+
         async def boom(rut, password):
             raise RuntimeError("login failed")
 
@@ -617,6 +602,7 @@ class TestScrapeProducts:
 
     def test_the_balance_only_fallback_reads_no_statement(self, monkeypatch):
         """Its card keeps the cupo figures alone; no statement field is set."""
+
         async def fake_fetch(rut, password):
             return BalanceFetchResult(products=[_card()], failed_surfaces=())
 
@@ -785,28 +771,29 @@ class TestClpKeysAreUnchanged:
         assert external_id_for(parse_cartola_movement(_cartola_row())) == (
             "bch_fp_9d6fd81f7f7ea522"
         )
-        assert external_id_for(
-            parse_cartola_movement(_cartola_row(), "12345678901")
-        ) == "bch_op_12345678901"
+        assert (
+            external_id_for(parse_cartola_movement(_cartola_row(), "12345678901"))
+            == "bch_op_12345678901"
+        )
 
     def test_unbilled(self):
         assert external_id_for(parse_unbilled_movement(_unbilled_row(monto=999999.0))) == (
             "bch_fp_1197be75ceed32e2"
         )
-        assert external_id_for(
-            parse_unbilled_movement(_unbilled_row(monto=-2500000.0))
-        ) == "bch_fp_9532482b5aba64d1"
+        assert (
+            external_id_for(parse_unbilled_movement(_unbilled_row(monto=-2500000.0)))
+            == "bch_fp_9532482b5aba64d1"
+        )
 
     def test_billed(self):
         def key(row):
-            return external_id_for(
-                parse_billed_movements(_billed_payload([row]), "2026-08-25")[0]
-            )
+            return external_id_for(parse_billed_movements(_billed_payload([row]), "2026-08-25")[0])
 
         assert key(_billed_row()) == "bch_ref_200812345678"
-        assert key(
-            _billed_row(referencia="2008 00000000", monto=2500000, grupo="pagos")
-        ) == "bch_fp_1c5496267f26cc60"
+        assert (
+            key(_billed_row(referencia="2008 00000000", monto=2500000, grupo="pagos"))
+            == "bch_fp_1c5496267f26cc60"
+        )
 
 
 class TestUsdMapping:
@@ -822,9 +809,7 @@ class TestUsdMapping:
         assert txn.product_kind == "credit_card"
 
     def test_clp_transactions_stay_clp(self):
-        txn = self.scraper._movement_to_transaction(
-            parse_unbilled_movement(_unbilled_row())
-        )
+        txn = self.scraper._movement_to_transaction(parse_unbilled_movement(_unbilled_row()))
         assert (txn.currency, txn.amount) == ("CLP", -999999)
 
     def test_a_usd_key_never_equals_a_clp_one(self):
@@ -837,9 +822,7 @@ class TestUsdMapping:
     def test_a_usd_statement_location_reaches_the_transaction(self):
         """V025: `ciudadComercio` and `pais` ride onto the USD card's row."""
         (movement,) = parse_international_billed_movements(
-            _intl_payload(
-                [_intl_row(ciudadComercio=" CIUDAD SINTETICA ", pais="PAIS SINTETICO")]
-            )
+            _intl_payload([_intl_row(ciudadComercio=" CIUDAD SINTETICA ", pais="PAIS SINTETICO")])
         )
 
         txn = self.scraper._movement_to_transaction(movement)
@@ -921,24 +904,16 @@ class TestSupersededTransactions:
 
     def test_the_loose_match_needs_both_clp_card_legs(self, monkeypatch):
         """Otherwise a genuine CLP row of the window might not be protected."""
-        (exact,) = self._scrape(
-            monkeypatch, self._movements(), failed=("tarjeta facturados",)
-        )
+        (exact,) = self._scrape(monkeypatch, self._movements(), failed=("tarjeta facturados",))
         assert exact.external_id == "bch_fp_109da42d5aba2816"
 
-    def test_the_loose_match_needs_the_statement_read_on_the_national_leg(
-        self, monkeypatch
-    ):
+    def test_the_loose_match_needs_the_statement_read_on_the_national_leg(self, monkeypatch):
         """The legs pick their statements independently: an older USD one,
         outside every national statement read, has no CLP rows protecting it."""
-        (exact,) = self._scrape(
-            monkeypatch, self._movements(usd_statement="2026-07-05")
-        )
+        (exact,) = self._scrape(monkeypatch, self._movements(usd_statement="2026-07-05"))
         assert exact.external_id == "bch_fp_109da42d5aba2816"
 
-    def test_a_national_statement_with_no_rows_offers_no_loose_match(
-        self, monkeypatch
-    ):
+    def test_a_national_statement_with_no_rows_offers_no_loose_match(self, monkeypatch):
         """Nothing shows that statement was read, so nothing is assumed."""
         without_national_rows = self._movements()[:3]
         (exact,) = self._scrape(monkeypatch, without_national_rows)
