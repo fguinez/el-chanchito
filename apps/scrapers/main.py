@@ -827,7 +827,7 @@ class ScraperSet:
     def __init__(
         self,
         scheduler: AsyncIOScheduler,
-        scrapers: dict[str, BaseScraper],
+        scrapers: dict[str, BaseScraper] | None,
         build: Callable[[], dict[str, BaseScraper]] = lambda: build_scrapers(),
     ) -> None:
         self.scheduler = scheduler
@@ -835,7 +835,10 @@ class ScraperSet:
         self._build = build
         self._fingerprints: dict[str, str] = {}
         self._lock = threading.Lock()
-        for slug, scraper in scrapers.items():
+        # None: built by the first rebuild(), once the stored credentials
+        # are applied, as at a start (no marker or session is reset).
+        self._initialized = scrapers is not None
+        for slug, scraper in (scrapers or {}).items():
             self._add(slug, scraper)
 
     def snapshot(self) -> frozenset[str]:
@@ -856,8 +859,19 @@ class ScraperSet:
         self._fingerprints[slug] = fingerprint or self._fingerprint(slug)
         return True
 
+    def current(self) -> dict[str, BaseScraper]:
+        """The scheduled instance of each scraper."""
+        jobs = {slug: self.scheduler.get_job(slug) for slug in sorted(self._keys)}
+        return {slug: job.args[0] for slug, job in jobs.items() if job is not None}
+
     def rebuild(self) -> dict[str, list[str]]:
         with self._lock:
+            if not self._initialized:
+                self._initialized = True
+                added = [
+                    slug for slug, scraper in self._build().items() if self._add(slug, scraper)
+                ]
+                return {"added": sorted(added), "removed": [], "updated": []}
             # Fingerprint before building: if a concurrent apply changes the
             # env mid-build, the stored fingerprint is the older one, so the
             # next rebuild sees the change instead of skipping it.
@@ -924,11 +938,41 @@ _CREDENTIALS_TICK_SECONDS = 60
 
 
 def _start_credentials() -> CredentialManager:
-    """Load the key and lay the stored credentials over the env, before any
-    scraper reads it."""
+    """Load (or create) the key file. The database work runs in the
+    background, so the service comes up and reports status without it."""
     manager = CredentialManager()
     manager.start()
     return manager
+
+
+# How often the first scrape checks whether the stored credentials are applied.
+_SETTLE_POLL_SECONDS = 1.0
+
+
+async def _first_scrape(
+    manager: CredentialManager, scraper_set: "ScraperSet", control_port: str | None
+) -> None:
+    """Wait until the stored credentials are applied (or known to be
+    unusable), then build the scrapers and run each once. A scraper must
+    never log in with credentials the dashboard replaced, so with the
+    database down this waits; the control server answers meanwhile."""
+    waited = False
+    while not manager.settled.is_set():
+        if not waited:
+            logger.info("Waiting for the database before the first scrape...")
+            waited = True
+        await asyncio.sleep(_SETTLE_POLL_SECONDS)
+    scraper_set.rebuild()
+    scrapers = scraper_set.current()
+    if not scrapers:
+        if not control_port:
+            logger.error("No scrapers configured. Exiting.")
+            sys.exit(1)
+        # Credentials entered in the dashboard reach this service through
+        # the control server, so it stays up waiting for them.
+        logger.warning("No scrapers configured yet; add credentials in the dashboard")
+        return
+    await run_all_once(scrapers)
 
 
 def _require_database_url() -> None:
@@ -944,15 +988,6 @@ def main_scheduled() -> None:
     """Run scrapers on a schedule using APScheduler."""
     _require_database_url()
     credential_manager = _start_credentials()
-    scrapers = build_scrapers()
-
-    if not scrapers:
-        if not os.environ.get("SCRAPER_CONTROL_PORT"):
-            logger.error("No scrapers configured. Exiting.")
-            sys.exit(1)
-        # Credentials entered in the dashboard reach this service through
-        # the control server, so it stays up waiting for them.
-        logger.warning("No scrapers configured yet; add credentials in the dashboard")
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -962,7 +997,7 @@ def main_scheduled() -> None:
     # running, so hand it our loop up front.
     scheduler = AsyncIOScheduler(event_loop=loop)
 
-    scraper_set = ScraperSet(scheduler, scrapers)
+    scraper_set = ScraperSet(scheduler, None)
 
     heartbeat = Heartbeat()
 
@@ -1000,7 +1035,7 @@ def main_scheduled() -> None:
     signal.signal(signal.SIGINT, shutdown)
 
     scheduler.start()
-    logger.info("Scheduler started. Running initial scrape...")
+    logger.info("Scheduler started")
 
     credential_control = CredentialControl(credential_manager, scraper_set)
     # Sync, so the executor runs it on a worker thread: its DB retries never
@@ -1017,8 +1052,11 @@ def main_scheduled() -> None:
     control_server = _start_control_server(
         scheduler, scraper_set.snapshot, heartbeat, credential_control
     )
+    credential_manager.retry_in_background(on_loaded=scraper_set.rebuild)
 
-    loop.run_until_complete(run_all_once(scrapers))
+    loop.run_until_complete(
+        _first_scrape(credential_manager, scraper_set, os.environ.get("SCRAPER_CONTROL_PORT"))
+    )
 
     logger.info("Initial scrape complete. Scheduler running...")
     try:
