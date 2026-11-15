@@ -738,7 +738,7 @@ def _start_control_server(
     host = os.environ.get("SCRAPER_CONTROL_HOST") or "127.0.0.1"
     current_keys = scraper_keys if callable(scraper_keys) else lambda: frozenset(scraper_keys)
     logins = InteractiveLogins(
-        build_providers(set(current_keys())),
+        lambda: build_providers(current_keys()),
         lambda slug: _trigger_job(scheduler, slug),
         _RUN_GUARD,
     )

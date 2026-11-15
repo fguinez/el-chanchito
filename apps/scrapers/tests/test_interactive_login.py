@@ -216,6 +216,21 @@ def test_unknown_institution_is_404(trigger):
     assert [logins.start("banchile")[0], logins.status("banchile")[0]] == [404, 404]
 
 
+def test_callable_providers_follow_a_credentials_reload(trigger):
+    """Given a callable, the sign-ins track scrapers a reload adds or drops."""
+    providers: dict[str, LoginProvider] = {}
+    logins = InteractiveLogins(lambda: providers, trigger, RunGuard())
+    assert logins.status("fintual")[0] == 404
+
+    providers["fintual"] = _code_provider([])
+
+    assert logins.supported() == [{"institution": "fintual", "method": "code"}]
+    assert logins.status("fintual") == (
+        200,
+        {"institution": "fintual", "method": "code", "state": "idle"},
+    )
+
+
 @pytest.mark.parametrize(
     ("env", "keys", "expected"),
     [
