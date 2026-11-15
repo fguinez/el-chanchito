@@ -1,11 +1,21 @@
 """Open the scraper credentials the dashboard seals, and lay them over the env.
 
-The scraper service owns an X25519 key pair. The private key lives in an
-owner-only file (CREDENTIALS_KEY_FILE, default apps/scrapers/.credentials_key)
-and never leaves this process; the public key is published to the database,
-where the dashboard reads it to seal each credential field with HPKE
-(RFC 9180, base mode): DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, AES-256-GCM.
-The dashboard can seal but never open, and the database alone opens nothing.
+The scraper service owns an HPKE key pair (RFC 9180, base mode). The private
+key lives in an owner-only file (CREDENTIALS_KEY_FILE, default
+apps/scrapers/.credentials_key) and never leaves this process; the public key
+is published to the database, where the dashboard reads it to seal each
+credential field. The dashboard can seal but never open, and the database
+alone opens nothing.
+
+The key decides the suite, and the suite's scheme is stored on every row:
+
+- v1, `hpke-x25519-sha256-aes256gcm-v1`: DHKEM(X25519, HKDF-SHA256),
+  HKDF-SHA256, AES-256-GCM. Keys made before v2 keep working until they are
+  rotated.
+- v2, `hpke-mlkem768x25519-sha256-aes256gcm-v2`: the hybrid post-quantum KEM
+  ML-KEM-768 + X25519 (X-Wing, HPKE KEM 0x647a), HKDF-SHA256, AES-256-GCM.
+  The private key is a 32-byte X-Wing seed. New keys are v2, so rotating a
+  v1 key re-seals every row to v2.
 
 Each ciphertext is bound to its context through the HPKE `info` string
 (scheme, institution slug, field key, key id), so a row copied onto another
@@ -22,6 +32,8 @@ the institution slug and field key only.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import hmac
 import logging
@@ -31,25 +43,59 @@ import secrets
 import stat
 from collections.abc import Iterable, Iterator, Mapping, MutableMapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
 from cryptography.hazmat.primitives import hpke, serialization
+from cryptography.hazmat.primitives.asymmetric.mlkem import MLKEM768PrivateKey
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from product_model import CREDENTIAL_SPECS, CREDENTIALS_BY_SLUG
 
 logger = logging.getLogger(__name__)
 
-# The version of the whole construction below (suite, info layout, plaintext
-# encoding). Stored on every row; the dashboard writes the same value.
-SCHEME = "hpke-x25519-sha256-aes256gcm-v1"
-# Published next to the public key so the dashboard can refuse a key it
-# would seal to with the wrong suite.
-ALGORITHM = "HPKE-Base(DHKEM-X25519-HKDF-SHA256, HKDF-SHA256, AES-256-GCM)"
+
+@dataclass(frozen=True)
+class KeyKind:
+    """One version of the whole construction (suite, info layout, plaintext
+    encoding). `scheme` is stored on every row and `algorithm` is published
+    next to the public key; the dashboard has the same pairs."""
+
+    scheme: str
+    algorithm: str
+    suite: hpke.Suite
+    public_key_length: int
+
+
+V1 = KeyKind(
+    scheme="hpke-x25519-sha256-aes256gcm-v1",
+    algorithm="HPKE-Base(DHKEM-X25519-HKDF-SHA256, HKDF-SHA256, AES-256-GCM)",
+    suite=hpke.Suite(hpke.KEM.X25519, hpke.KDF.HKDF_SHA256, hpke.AEAD.AES_256_GCM),
+    public_key_length=32,
+)
+# X-Wing (draft-connolly-cfrg-xwing-kem), HPKE KEM 0x647a
+# (draft-ietf-hpke-pq). Public key: ML-KEM-768 (1184 bytes) || X25519 (32).
+V2 = KeyKind(
+    scheme="hpke-mlkem768x25519-sha256-aes256gcm-v2",
+    algorithm="HPKE-Base(MLKEM768-X25519, HKDF-SHA256, AES-256-GCM)",
+    suite=hpke.Suite(hpke.KEM.MLKEM768_X25519, hpke.KDF.HKDF_SHA256, hpke.AEAD.AES_256_GCM),
+    public_key_length=1216,
+)
+KEY_KINDS = (V1, V2)
+SCHEMES = frozenset(kind.scheme for kind in KEY_KINDS)
 _INFO_LABEL = "el-chanchito/credential"
-_SUITE = hpke.Suite(hpke.KEM.X25519, hpke.KDF.HKDF_SHA256, hpke.AEAD.AES_256_GCM)
+
+XWING_SEED_BYTES = 32
+# PKCS#8 OneAsymmetricKey { version 0, id-XWing (1.3.6.1.4.1.62253.25722, no
+# parameters), privateKey OCTET STRING (the 32-byte seed) }, as DER.
+_XWING_OID_DER = bytes.fromhex("060b2b0601040183e62d81c87a")
+_XWING_PKCS8_PREFIX = bytes.fromhex("3034020100300d") + _XWING_OID_DER + bytes.fromhex("0420")
+_PEM_PRIVATE_KEY_RE = re.compile(
+    rb"\A-----BEGIN PRIVATE KEY-----\r?\n"
+    rb"([A-Za-z0-9+/=\r\n]+?)\r?\n"
+    rb"-----END PRIVATE KEY-----\r?\n?\Z"
+)
 
 KEY_FILE_ENV = "CREDENTIALS_KEY_FILE"
 # apps/scrapers/, resolved from this file so cwd doesn't matter.
@@ -69,7 +115,8 @@ class CredentialOpenError(Exception):
 
 
 def key_id_for(public_raw: bytes) -> str:
-    """The id of a public key: the hex SHA-256 of its 32 raw bytes."""
+    """The id of a public key: the hex SHA-256 of its raw bytes (32 for v1,
+    1216 for v2)."""
     return hashlib.sha256(public_raw).hexdigest()
 
 
@@ -83,20 +130,25 @@ def binding_digest(values: Iterable[str]) -> str:
     return digest.hexdigest()
 
 
-def sealing_info(slug: str, field_key: str, key_id: str, binding: str | None = None) -> bytes:
+def sealing_info(
+    slug: str, field_key: str, key_id: str, binding: str | None = None, *, scheme: str
+) -> bytes:
     """The HPKE `info` that binds a ciphertext to where it belongs.
 
     The dashboard builds the same bytes (apps/web/src/lib/credentials/seal.ts).
     The parts are NUL-separated; slugs and keys are `[a-z][a-z0-9_]*` and the
-    key id and binding are hex, so the layout is unambiguous. A secret that
-    binds other fields (registry `binds`) adds `binding_digest` of their
-    values, so it only opens next to the destination it was saved with.
+    key id and binding are hex, so the layout is unambiguous. `scheme` is the
+    scheme of the key sealed to. A secret that binds other fields (registry
+    `binds`) adds `binding_digest` of their values, so it only opens next to
+    the destination it was saved with.
     """
+    if scheme not in SCHEMES:
+        raise CredentialOpenError("unknown credential scheme")
     if not _NAME_RE.match(slug) or not _NAME_RE.match(field_key):
         raise CredentialOpenError("malformed credential slug or field key")
     if not _KEY_ID_RE.match(key_id):
         raise CredentialOpenError("malformed credential key id")
-    parts = [_INFO_LABEL, SCHEME, slug, field_key, key_id]
+    parts = [_INFO_LABEL, scheme, slug, field_key, key_id]
     if binding is not None:
         if not _KEY_ID_RE.match(binding):
             raise CredentialOpenError("malformed credential binding")
@@ -104,28 +156,79 @@ def sealing_info(slug: str, field_key: str, key_id: str, binding: str | None = N
     return "\x00".join(parts).encode("ascii")
 
 
+def _xwing_private(seed: bytes) -> tuple[hpke.MLKEM768X25519PrivateKey, bytes]:
+    """The HPKE private key and the 1216-byte public key an X-Wing seed
+    expands to: SHAKE256(seed, 96) = ML-KEM-768 seed (64) || X25519 key (32)."""
+    expanded = hashlib.shake_256(seed).digest(96)
+    mlkem = MLKEM768PrivateKey.from_seed_bytes(expanded[:64])
+    x25519 = X25519PrivateKey.from_private_bytes(expanded[64:])
+    public_raw = mlkem.public_key().public_bytes_raw() + x25519.public_key().public_bytes_raw()
+    return hpke.MLKEM768X25519PrivateKey(mlkem, x25519), public_raw
+
+
 @dataclass(frozen=True)
 class CredentialKey:
-    """The service's key pair. `repr` never shows the private half."""
+    """The service's key pair, of either kind. `repr` never shows the
+    private half. A v2 key keeps its seed, which is what its file stores."""
 
-    private_key: X25519PrivateKey
+    private_key: X25519PrivateKey | hpke.MLKEM768X25519PrivateKey
     public_raw: bytes
     key_id: str
+    kind: KeyKind = V1
+    seed: bytes | None = field(default=None, repr=False, compare=False)
 
     def __repr__(self) -> str:
-        return f"CredentialKey(key_id={self.key_id!r})"
+        return f"CredentialKey(key_id={self.key_id!r}, scheme={self.scheme!r})"
+
+    @property
+    def scheme(self) -> str:
+        return self.kind.scheme
+
+    @property
+    def algorithm(self) -> str:
+        return self.kind.algorithm
 
     @classmethod
     def from_private(cls, private_key: X25519PrivateKey) -> CredentialKey:
+        """A v1 key."""
         public_raw = private_key.public_key().public_bytes(
             serialization.Encoding.Raw, serialization.PublicFormat.Raw
         )
-        return cls(private_key, public_raw, key_id_for(public_raw))
+        return cls(private_key, public_raw, key_id_for(public_raw), V1)
+
+    @classmethod
+    def from_seed(cls, seed: bytes) -> CredentialKey:
+        """A v2 (X-Wing) key from its 32-byte seed."""
+        if len(seed) != XWING_SEED_BYTES:
+            raise CredentialKeyError("an X-Wing seed is 32 bytes")
+        private_key, public_raw = _xwing_private(bytes(seed))
+        return cls(private_key, public_raw, key_id_for(public_raw), V2, bytes(seed))
+
+    def private_pem(self) -> bytes:
+        """The PKCS#8 PEM the key file holds."""
+        if self.seed is not None:  # v2: the X-Wing PKCS#8 holds the seed
+            der = _XWING_PKCS8_PREFIX + self.seed
+            body = base64.b64encode(der)
+            lines = [body[i : i + 64] for i in range(0, len(body), 64)]
+            return (
+                b"-----BEGIN PRIVATE KEY-----\n"
+                + b"\n".join(lines)
+                + b"\n-----END PRIVATE KEY-----\n"
+            )
+        return self.private_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
 
     def seal(self, slug: str, field_key: str, value: str, binding: str | None = None) -> bytes:
         """Seal like the dashboard does (tests and tooling only)."""
-        info = sealing_info(slug, field_key, self.key_id, binding)
-        return _SUITE.encrypt(value.encode("utf-8"), self.private_key.public_key(), info=info)
+        info = sealing_info(slug, field_key, self.key_id, binding, scheme=self.scheme)
+        return self.kind.suite.encrypt(
+            value.encode("utf-8"),
+            self.private_key.public_key(),
+            info=info,
+        )
 
     def open(
         self, slug: str, field_key: str, key_id: str, sealed: bytes, binding: str | None = None
@@ -133,9 +236,13 @@ class CredentialKey:
         """The plaintext of one stored field; CredentialOpenError on any failure."""
         if key_id != self.key_id:
             raise CredentialOpenError("sealed to another key")
-        info = sealing_info(slug, field_key, key_id, binding)
+        info = sealing_info(slug, field_key, key_id, binding, scheme=self.scheme)
         try:
-            plaintext = _SUITE.decrypt(bytes(sealed), self.private_key, info=info)
+            plaintext = self.kind.suite.decrypt(
+                bytes(sealed),
+                self.private_key,
+                info=info,
+            )
             return plaintext.decode("utf-8")
         except Exception as exc:  # InvalidTag, short input, bad UTF-8
             raise CredentialOpenError(type(exc).__name__) from None
@@ -176,17 +283,41 @@ def load_key(path: Path) -> CredentialKey:
     with os.fdopen(fd, "rb") as handle:
         _check_owner_only(os.fstat(handle.fileno()), path)
         data = handle.read(64 * 1024)
+    seed = _xwing_seed_from_pem(data, path)
+    if seed is not None:
+        return CredentialKey.from_seed(seed)
     try:
         private_key = serialization.load_pem_private_key(data, password=None)
     except Exception:
         raise CredentialKeyError(f"{path} is not a PEM private key") from None
     if not isinstance(private_key, X25519PrivateKey):
-        raise CredentialKeyError(f"{path} does not hold an X25519 key")
+        raise CredentialKeyError(f"{path} does not hold an X-Wing or X25519 key")
     return CredentialKey.from_private(private_key)
 
 
+def _xwing_seed_from_pem(data: bytes, path: Path) -> bytes | None:
+    """The seed of an X-Wing PKCS#8 PEM; None when the file is some other
+    PKCS#8 key (left to `cryptography`). A file that names X-Wing but is not
+    exactly the expected encoding raises CredentialKeyError."""
+    match = _PEM_PRIVATE_KEY_RE.match(data)
+    if match is None:
+        return None
+    try:
+        der = base64.b64decode(re.sub(rb"\r?\n", b"", match.group(1)), validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    if _XWING_OID_DER not in der:
+        return None
+    if len(der) != len(_XWING_PKCS8_PREFIX) + XWING_SEED_BYTES or not der.startswith(
+        _XWING_PKCS8_PREFIX
+    ):
+        raise CredentialKeyError(f"{path} is a malformed X-Wing key")
+    return der[len(_XWING_PKCS8_PREFIX) :]
+
+
 def generate_key() -> CredentialKey:
-    return CredentialKey.from_private(X25519PrivateKey.generate())
+    """A new key: always v2 (X-Wing)."""
+    return CredentialKey.from_seed(secrets.token_bytes(XWING_SEED_BYTES))
 
 
 def _fsync_dir(path: Path) -> None:
@@ -203,11 +334,7 @@ def _write_new_file(path: Path, key: CredentialKey) -> bool:
     """Write `key` to `path` owner-only from the first byte, durably, only if
     nothing is there yet (link() is an atomic create-if-absent). False when
     another file was already in place."""
-    pem = key.private_key.private_bytes(
-        serialization.Encoding.PEM,
-        serialization.PrivateFormat.PKCS8,
-        serialization.NoEncryption(),
-    )
+    pem = key.private_pem()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{secrets.token_hex(8)}.tmp")
     flags = (
@@ -467,7 +594,7 @@ def open_rows(
                 row.field_key,
             )
             continue
-        if row.scheme != SCHEME or row.key_id != key.key_id:
+        if row.scheme != key.scheme or row.key_id != key.key_id:
             flag(row, field.env_var, "was sealed to another key")
             continue
         by_field[(row.institution_slug, row.field_key)] = row
@@ -534,8 +661,11 @@ def open_rows(
 
 @dataclass(frozen=True)
 class ResealedCredential:
+    """A row re-sealed to a new key, under that key's `scheme`."""
+
     institution_slug: str
     field_key: str
+    scheme: str
     sealed: bytes
 
     def __repr__(self) -> str:
@@ -549,9 +679,10 @@ def reseal_rows(
     fallback: Mapping[str, str | None] | None = None,
 ) -> tuple[list[ResealedCredential], list[SealedCredential]]:
     """Open every row sealed to `old` and seal its value to `new`, in the same
-    context (a binding secret keeps its binding). Returns the re-sealed rows
-    and the ones left as they were: sealed to another key or scheme, or not
-    openable (they already needed re-entry)."""
+    context (a binding secret keeps its binding) but under `new`'s scheme, so
+    a v1 key's rows come out as v2 when `new` is v2. Returns the re-sealed
+    rows and the ones left as they were: sealed to another key or scheme, or
+    not openable (they already needed re-entry)."""
     fallback = fallback or {}
     rows = list(rows)
     plain: dict[tuple[str, str], str] = {}
@@ -569,11 +700,12 @@ def reseal_rows(
             ResealedCredential(
                 row.institution_slug,
                 row.field_key,
+                new.scheme,
                 new.seal(row.institution_slug, row.field_key, value, binding),
             )
         )
 
-    ours = [r for r in rows if r.scheme == SCHEME and r.key_id == old.key_id]
+    ours = [r for r in rows if r.scheme == old.scheme and r.key_id == old.key_id]
     skipped.extend(r for r in rows if r not in ours)
     binding_rows = []
     for row in ours:

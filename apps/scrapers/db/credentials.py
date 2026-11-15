@@ -1,4 +1,4 @@
-"""Sealed scraper credentials (V048/V049): the key ring and the rows.
+"""Sealed scraper credentials (V048-V050): the key ring and the rows.
 
 The rows hold only HPKE ciphertext (see scrapers/credentials.py); nothing
 here sees a plaintext value, except `rotate_key`, which hands the rows to a
@@ -19,7 +19,6 @@ from datetime import datetime
 
 from db.connection import get_pool, with_db_retry
 from scrapers.credentials import (
-    ALGORITHM,
     CredentialKey,
     ResealedCredential,
     SealedCredential,
@@ -68,7 +67,7 @@ def _activate(conn, key: CredentialKey) -> ActiveKey:
               rotation_failed_at = NULL, rotation_error = NULL
         RETURNING key_id, created_at
         """,
-        (key.key_id, ALGORITHM, key.public_raw),
+        (key.key_id, key.algorithm, key.public_raw),
     ).fetchone()
     return ActiveKey(row[0], row[1])
 
@@ -178,8 +177,9 @@ def rotate_key(
         [list[SealedCredential]], tuple[list[ResealedCredential], list[SealedCredential]]
     ],
 ) -> tuple[int, int]:
-    """In one transaction: re-seal every row sealed to `old` to `new`, retire
-    `old` and make `new` the active key. Returns (re-sealed, left as they
+    """In one transaction: re-seal every row sealed to `old` to `new` (each
+    row takes `new`'s scheme, so a v1 key's rows become v2), retire `old` and
+    make `new` the active key. Returns (re-sealed, left as they
     were). Raises KeyRingConflict when `old` is not the active key. Must
     stay un-retried: the caller decides an unknown outcome from the ring, and
     discards `.next` on KeyRingConflict, which a retried commit would make
@@ -195,9 +195,16 @@ def rotate_key(
         _activate(conn, new)
         for row in resealed:
             conn.execute(
-                "UPDATE institution_credentials SET key_id = %s, sealed = %s"
+                "UPDATE institution_credentials SET key_id = %s, scheme = %s, sealed = %s"
                 " WHERE institution_slug = %s AND field_key = %s AND key_id = %s",
-                (new.key_id, row.sealed, row.institution_slug, row.field_key, old.key_id),
+                (
+                    new.key_id,
+                    row.scheme,
+                    row.sealed,
+                    row.institution_slug,
+                    row.field_key,
+                    old.key_id,
+                ),
             )
     return len(resealed), len(skipped)
 
