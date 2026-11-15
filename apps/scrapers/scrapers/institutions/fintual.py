@@ -84,6 +84,7 @@ from product_model import (
     StockMetrics,
     WalletMetrics,
 )
+from scrapers import session_account
 from scrapers.backends.email import fetch_latest_code
 from scrapers.backends.fintual_stocks import (
     MAX_PAGES,
@@ -576,11 +577,16 @@ class FintualScraper(BaseScraper):
         except BaseException:
             Path(tmp).unlink(missing_ok=True)
             raise
+        session_account.write_account(self.session_file, self.email)
         logger.info("Saved Fintual session to %s", self.session_file)
 
     def _load_session(self, client: httpx.AsyncClient) -> bool:
         """Restore cached cookies onto `client`; return True if a session exists."""
         if not self.session_file.exists():
+            return False
+        if not session_account.belongs_to(self.session_file, self.email):
+            logger.info("Fintual: the cached session is another account's; discarded")
+            session_account.discard(self.session_file)
             return False
         try:
             cookies = json.loads(self.session_file.read_text())

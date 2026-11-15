@@ -51,6 +51,7 @@ from product_model import (
     TermDepositAttributes,
     TermDepositMetrics,
 )
+from scrapers import session_account
 from scrapers.base import ScrapedProduct
 
 logger = logging.getLogger(__name__)
@@ -1810,7 +1811,7 @@ def _load_session_state(path: Path) -> tuple[dict | None, str]:
     return state, ""
 
 
-def _save_session(context, path: Path) -> None:
+def _save_session(context, path: Path, rut: str) -> None:
     """Persist `context`'s storage state to `path`; best-effort, never raises.
 
     Written to a fresh same-directory `mkstemp` file (0o600, created
@@ -1824,6 +1825,7 @@ def _save_session(context, path: Path) -> None:
         with os.fdopen(fd, "w") as fh:
             fh.write(payload)
         os.replace(tmp, path)
+        session_account.write_account(path, rut)
     except Exception as exc:
         logger.warning("BanChile: could not save the session cache (%s)", type(exc).__name__)
         if tmp is not None:
@@ -1980,6 +1982,8 @@ def _authenticated_session(browser, rut: str, password: str) -> Iterator:
     """
     path = _session_file()
     state, reason = _load_session_state(path)
+    if state is not None and not session_account.belongs_to(path, rut):
+        state, reason = None, "session belongs to another account"
     context = page = None
     if state is not None:
         context, page, reason = _restore_session(browser, state)
@@ -1988,12 +1992,13 @@ def _authenticated_session(browser, rut: str, password: str) -> Iterator:
     else:
         logger.info("BanChile session cache miss (%s)", reason)
         _discard_session(path)
+        session_account.discard(path)
         context = _new_context(browser)
         page = context.new_page()
         page.set_default_timeout(DEFAULT_TIMEOUT)
         _claim_login_attempt()
         _login(page, rut, password)
-    _save_session(context, path)
+    _save_session(context, path, rut)
     reads_deadline = _read_deadline()  # the callers' read budget starts here too
     yield page
     if _deadline_passed(reads_deadline) and not _page_answers(page):
@@ -2003,7 +2008,7 @@ def _authenticated_session(browser, rut: str, password: str) -> Iterator:
         # that was only slow still answers the bounded probe and re-saves.
         logger.warning("BanChile: read budget spent; session cache not re-saved")
         return
-    _save_session(context, path)
+    _save_session(context, path, rut)
 
 
 def _page_answers(page) -> bool:

@@ -1969,7 +1969,8 @@ class TestSessionCache:
         finally:
             os.umask(old_umask)
 
-        assert len(swapped_in) == 2  # after authenticating and after the reads
+        # After authenticating and after the reads, each with its account marker.
+        assert len(swapped_in) == 4
         for tmp, mode in swapped_in:
             assert mode == 0o600
             # Same directory, and still matched by the `.banchile_session.json*`
@@ -1978,7 +1979,9 @@ class TestSessionCache:
             assert tmp.name.startswith(session_file.name)
         assert stat.S_IMODE(session_file.stat().st_mode) == 0o600
         assert json.loads(session_file.read_text()) == FRESH_STATE
-        assert list(session_file.parent.iterdir()) == [session_file]
+        marker = session_file.with_name(session_file.name + ".account")
+        assert sorted(session_file.parent.iterdir()) == sorted([session_file, marker])
+        assert stat.S_IMODE(marker.stat().st_mode) == 0o600
 
     @pytest.mark.parametrize("failure", ["storage_state", "replace"])
     def test_save_failure_is_only_a_warning(
@@ -2046,7 +2049,7 @@ class TestSessionCache:
         """`Path(".")` used to raise while naming the temp file, outside the try."""
         monkeypatch.chdir(tmp_path)
 
-        banchile_web_mod._save_session(_fake_context(), Path("."))
+        banchile_web_mod._save_session(_fake_context(), Path("."), "11.111.111-1")
 
         assert list(tmp_path.iterdir()) == []
         assert "could not save the session cache" in caplog.text

@@ -1662,9 +1662,14 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
   credential env changed (compared by an in-memory keyed digest, never the
   values) gets a fresh instance through `job.modify(args=...)`. A run in
   flight keeps its instance; `max_instances=1` still prevents overlap. A
-  change clears Fintual's `.login-failed` marker, an account change (RUT or
-  e-mail digest) also deletes the Fintual or BanChile cached session, and a
-  Tenpo change resets the IMAP session. The control server reads an immutable
+  change clears Fintual's `.login-failed` marker and a Tenpo change resets the
+  IMAP session. Cached sessions (Fintual cookies, BanChile storage state) carry
+  a `<session>.account` marker (0600, a salted SHA-256 of the RUT or e-mail,
+  never the identifier), written on every save and checked on every load: a
+  session of another account is discarded, whether the change came from the
+  dashboard or the env, and even when a run on the old credentials writes its
+  session back afterwards. A session with no marker yet is adopted. `POST
+  /refresh/{slug}` only accepts scraper slugs, never the internal jobs. The control server reads an immutable
   snapshot of the scraper set, swapped on each rebuild. The dashboard runs a
   scraper the save just enabled through `POST /refresh/{slug}`. With the
   control port set, the scheduled service stays up with no scrapers, waiting

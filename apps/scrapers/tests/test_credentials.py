@@ -650,7 +650,7 @@ class FakeFintual:
         self._login_failed_file = folder / ".fintual_session.json.login-failed"
 
 
-def test_fintual_change_clears_the_marker_and_an_old_accounts_session(tmp_path, monkeypatch):
+def test_fintual_change_clears_the_login_failed_marker(tmp_path, monkeypatch):
     for name in main._credential_env_vars("fintual"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("FINTUAL_EMAIL", "user@example.com")
@@ -661,19 +661,51 @@ def test_fintual_change_clears_the_marker_and_an_old_accounts_session(tmp_path, 
         build=lambda: {"fintual": FakeFintual(tmp_path)},
     )
     fake = FakeFintual(tmp_path)
-
-    fake.session_file.write_text("{}")
     fake._login_failed_file.write_text("x")
     monkeypatch.setenv("FINTUAL_PASSWORD", "synthetic-new")
     assert scrapers.rebuild()["updated"] == ["fintual"]
     assert not fake._login_failed_file.exists()
-    assert fake.session_file.exists()  # same account: keep the session
 
-    fake._login_failed_file.write_text("x")
-    monkeypatch.setenv("FINTUAL_EMAIL", "other@example.com")
-    scrapers.rebuild()
-    assert not fake._login_failed_file.exists()
-    assert not fake.session_file.exists()
+
+def test_status_never_waits_on_the_database(tmp_path, store):
+    """A reload stuck in DB retries must not block GET /credentials/status."""
+    import threading
+
+    manager = _manager(tmp_path, store, {})
+    release = threading.Event()
+    entered = threading.Event()
+
+    def slow_fetch():
+        entered.set()
+        release.wait(5)
+        return []
+
+    manager._fetch = slow_fetch
+    worker = threading.Thread(target=manager.reload)
+    worker.start()
+    assert entered.wait(2)
+    done = []
+    reader = threading.Thread(target=lambda: done.append(manager.status()))
+    reader.start()
+    reader.join(1)
+    release.set()
+    worker.join(5)
+    assert done, "status() blocked behind the database"
+
+
+def test_refresh_never_triggers_internal_jobs():
+    scheduler = FakeScheduler()
+    scheduler.add_job(None, None, [], "credentials")
+    scheduler.add_job(None, None, [], "heartbeat")
+    handler = _make_control_handler(scheduler, frozenset(), Heartbeat())
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    try:
+        assert _call(f"{base}/refresh/credentials", "POST")[0] == 404
+        assert _call(f"{base}/refresh/heartbeat", "POST")[0] == 404
+    finally:
+        httpd.shutdown()
 
 
 def test_snapshot_is_immutable_and_swapped(monkeypatch):

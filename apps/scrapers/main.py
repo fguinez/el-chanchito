@@ -565,6 +565,10 @@ def _make_control_handler(
                 self._send(202, {"triggered": triggered, "skipped": skipped})
             elif self.path.startswith("/refresh/"):
                 slug = self.path[len("/refresh/") :]
+                if slug not in current_keys():
+                    # Only scrapers: never the heartbeat or credentials jobs.
+                    self._send(404, {"error": f"unknown scraper: {slug}"})
+                    return
                 wait = seconds_left(slug) if scheduler.get_job(slug) else 0
                 if wait:
                     logger.info("Manual trigger for %s refused: cooldown, %ds left", slug, wait)
@@ -648,29 +652,25 @@ def _schedule_scraper(scheduler: AsyncIOScheduler, key: str, scraper: BaseScrape
     return True
 
 
-def _credential_env_vars(slug: str, identifiers_only: bool = False) -> tuple[str, ...]:
-    """The env vars (legacy names included) whose credentials feed `slug`;
-    with `identifiers_only`, those naming the account (RUT, e-mail, user)."""
+def _credential_env_vars(slug: str) -> tuple[str, ...]:
+    """The env vars (legacy names included) whose credentials feed `slug`."""
     return tuple(
         name
         for spec in CREDENTIAL_SPECS
         if slug in spec.scraper_slugs
         for f in spec.fields
-        if not identifiers_only or f.kind == "identifier"
         for name in (f.env_var, *f.fallback_env_vars)
     )
 
 
-def _reset_scraper_state(slug: str, scraper: BaseScraper, account_changed: bool) -> None:
-    """Forget what a scraper kept from its previous credentials: a sign-in
-    refusal marker always, and a cached session when the account changed."""
+def _reset_scraper_state(slug: str, scraper: BaseScraper) -> None:
+    """Forget what a scraper kept from its previous credentials. A cached
+    session of another account is discarded where it is loaded (see
+    scrapers/session_account.py), so a session written back by a run still
+    on the old credentials is caught too."""
     try:
         if slug == "fintual":
             scraper._login_failed_file.unlink(missing_ok=True)
-            if account_changed:
-                scraper.session_file.unlink(missing_ok=True)
-        elif slug == "banchile" and account_changed:
-            banchile_web._session_file().unlink(missing_ok=True)
         elif slug == "tenpo":
             reset_email_session()
     except OSError as exc:
@@ -684,9 +684,9 @@ class ScraperSet:
     whole on each change, so other threads never iterate one being edited.
     `rebuild()` runs `build_scrapers()` again: a scraper that lost its
     credentials loses its job, a newly configured one gets one, and one whose
-    credentials changed gets a fresh instance for its next run (with its
-    sign-in marker cleared, and its cached session too if the account
-    changed). A run in flight keeps the instance it started with, and
+    credentials changed gets a fresh instance for its next run, with its
+    sign-in marker cleared (a cached session of another account is discarded
+    where it is loaded). A run in flight keeps the instance it started with, and
     `max_instances=1` still stops the next run from overlapping it. A scraper
     whose credentials did not change keeps its instance and its session.
     """
@@ -700,7 +700,7 @@ class ScraperSet:
         self.scheduler = scheduler
         self._keys: frozenset[str] = frozenset()
         self._build = build
-        self._fingerprints: dict[str, tuple[str, str]] = {}
+        self._fingerprints: dict[str, str] = {}
         self._lock = threading.Lock()
         for slug, scraper in scrapers.items():
             self._add(slug, scraper)
@@ -713,11 +713,8 @@ class ScraperSet:
         return self._keys
 
     @staticmethod
-    def _fingerprint(slug: str) -> tuple[str, str]:
-        return (
-            env_fingerprint(_credential_env_vars(slug)),
-            env_fingerprint(_credential_env_vars(slug, identifiers_only=True)),
-        )
+    def _fingerprint(slug: str) -> str:
+        return env_fingerprint(_credential_env_vars(slug))
 
     def _add(self, slug: str, scraper: BaseScraper) -> bool:
         if not _schedule_scraper(self.scheduler, slug, scraper):
@@ -745,12 +742,10 @@ class ScraperSet:
                 fingerprint = self._fingerprint(slug)
                 if slug not in self._keys:
                     if self._add(slug, wanted[slug]):
-                        _reset_scraper_state(slug, wanted[slug], account_changed=False)
+                        _reset_scraper_state(slug, wanted[slug])
                         added.append(slug)
                 elif fingerprint != self._fingerprints.get(slug):
-                    previous = self._fingerprints.get(slug)
-                    account_changed = previous is None or previous[1] != fingerprint[1]
-                    _reset_scraper_state(slug, wanted[slug], account_changed)
+                    _reset_scraper_state(slug, wanted[slug])
                     job = self.scheduler.get_job(slug)
                     if job is not None:
                         job.modify(args=[wanted[slug]])
