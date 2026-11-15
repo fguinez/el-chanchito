@@ -30,6 +30,7 @@ from .credentials import (
     CredentialInputMode,
     CredentialSpecError,
     InstitutionCredentials,
+    binding_groups,
     credential_env_vars,
     validate_credential_specs,
 )
@@ -160,6 +161,7 @@ __all__ = [
     "VistaMetrics",
     "WalletAttributes",
     "WalletMetrics",
+    "binding_groups",
     "credential_env_vars",
     "family_kinds",
     "resolve_columns",

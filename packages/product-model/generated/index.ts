@@ -682,6 +682,11 @@ export interface CredentialFieldSpec {
   helpEs: string | null;
   maxLength: number;
   fallbackEnvVars: readonly string[];
+  /** Fields this secret is sealed to; always saved together with it. */
+  binds: readonly string[];
+  /** Known values a stored one must be in, unless allowCustomEnv is set. */
+  allowedValues: readonly string[];
+  allowCustomEnv: string | null;
 }
 
 export interface InstitutionCredentialSpec {
@@ -715,6 +720,9 @@ export const CREDENTIAL_SPECS: readonly InstitutionCredentialSpec[] = [
         helpEs: "Tal como lo escribes al entrar al sitio.",
         maxLength: 16,
         fallbackEnvVars: [],
+        binds: [],
+        allowedValues: [],
+        allowCustomEnv: null,
       },
       {
         key: "password",
@@ -730,6 +738,9 @@ export const CREDENTIAL_SPECS: readonly InstitutionCredentialSpec[] = [
         helpEs: null,
         maxLength: 256,
         fallbackEnvVars: [],
+        binds: [],
+        allowedValues: [],
+        allowCustomEnv: null,
       },
     ],
   },
@@ -754,21 +765,27 @@ export const CREDENTIAL_SPECS: readonly InstitutionCredentialSpec[] = [
         helpEs: "Tal como lo escribes al entrar al sitio.",
         maxLength: 16,
         fallbackEnvVars: [],
+        binds: [],
+        allowedValues: [],
+        allowCustomEnv: null,
       },
       {
         key: "password",
         labelEs: "Clave",
         envVar: "LIDER_BCI_PASSWORD",
         kind: "secret",
-        required: true,
+        required: false,
         inputMode: "text",
         placeholder: null,
         pattern: null,
         patternHintEs: null,
         defaultValue: null,
-        helpEs: null,
+        helpEs: "Opcional: sin ella, alguien debe escribirla en la ventana de Chrome.",
         maxLength: 256,
         fallbackEnvVars: [],
+        binds: [],
+        allowedValues: [],
+        allowCustomEnv: null,
       },
     ],
   },
@@ -793,6 +810,9 @@ export const CREDENTIAL_SPECS: readonly InstitutionCredentialSpec[] = [
         helpEs: "Tal como lo escribes al entrar al sitio.",
         maxLength: 16,
         fallbackEnvVars: [],
+        binds: [],
+        allowedValues: [],
+        allowCustomEnv: null,
       },
       {
         key: "password",
@@ -808,6 +828,9 @@ export const CREDENTIAL_SPECS: readonly InstitutionCredentialSpec[] = [
         helpEs: null,
         maxLength: 256,
         fallbackEnvVars: [],
+        binds: [],
+        allowedValues: [],
+        allowCustomEnv: null,
       },
     ],
   },
@@ -832,6 +855,9 @@ export const CREDENTIAL_SPECS: readonly InstitutionCredentialSpec[] = [
         helpEs: "Tal como lo escribes al entrar al sitio.",
         maxLength: 16,
         fallbackEnvVars: [],
+        binds: [],
+        allowedValues: [],
+        allowCustomEnv: null,
       },
       {
         key: "password",
@@ -847,6 +873,9 @@ export const CREDENTIAL_SPECS: readonly InstitutionCredentialSpec[] = [
         helpEs: null,
         maxLength: 6,
         fallbackEnvVars: [],
+        binds: [],
+        allowedValues: [],
+        allowCustomEnv: null,
       },
     ],
   },
@@ -855,7 +884,7 @@ export const CREDENTIAL_SPECS: readonly InstitutionCredentialSpec[] = [
     labelEs: "Fintual",
     logoSlug: "fintual",
     scraperSlugs: ["fintual"],
-    noteEs: "La primera vez Fintual pide un código que llega por correo: corre `make fintual-login` una vez para guardar la sesión.",
+    noteEs: "Al iniciar sesión Fintual envía un código por correo. Se lee solo si el correo de Tenpo usa la misma cuenta; si no, corre `make fintual-login` después de guardar o cambiar estas credenciales.",
     fields: [
       {
         key: "email",
@@ -871,6 +900,9 @@ export const CREDENTIAL_SPECS: readonly InstitutionCredentialSpec[] = [
         helpEs: null,
         maxLength: 256,
         fallbackEnvVars: [],
+        binds: [],
+        allowedValues: [],
+        allowCustomEnv: null,
       },
       {
         key: "password",
@@ -886,6 +918,9 @@ export const CREDENTIAL_SPECS: readonly InstitutionCredentialSpec[] = [
         helpEs: null,
         maxLength: 256,
         fallbackEnvVars: ["FINTUAL_TOKEN"],
+        binds: [],
+        allowedValues: [],
+        allowCustomEnv: null,
       },
     ],
   },
@@ -910,6 +945,9 @@ export const CREDENTIAL_SPECS: readonly InstitutionCredentialSpec[] = [
         helpEs: null,
         maxLength: 256,
         fallbackEnvVars: [],
+        binds: [],
+        allowedValues: [],
+        allowCustomEnv: null,
       },
       {
         key: "api_secret",
@@ -925,6 +963,9 @@ export const CREDENTIAL_SPECS: readonly InstitutionCredentialSpec[] = [
         helpEs: null,
         maxLength: 256,
         fallbackEnvVars: [],
+        binds: [],
+        allowedValues: [],
+        allowCustomEnv: null,
       },
     ],
   },
@@ -949,6 +990,9 @@ export const CREDENTIAL_SPECS: readonly InstitutionCredentialSpec[] = [
         helpEs: "Usa una key de solo lectura.",
         maxLength: 256,
         fallbackEnvVars: [],
+        binds: [],
+        allowedValues: [],
+        allowCustomEnv: null,
       },
     ],
   },
@@ -957,7 +1001,7 @@ export const CREDENTIAL_SPECS: readonly InstitutionCredentialSpec[] = [
     labelEs: "Correo (Tenpo)",
     logoSlug: "tenpo",
     scraperSlugs: ["tenpo"],
-    noteEs: "Lee las notificaciones de Tenpo desde tu bandeja de entrada.",
+    noteEs: "Lee las notificaciones de Tenpo desde tu bandeja de entrada. Los tres campos se guardan juntos: la contraseña solo se usa con el servidor y el usuario con que la guardaste.",
     fields: [
       {
         key: "imap_host",
@@ -973,6 +1017,9 @@ export const CREDENTIAL_SPECS: readonly InstitutionCredentialSpec[] = [
         helpEs: null,
         maxLength: 253,
         fallbackEnvVars: [],
+        binds: [],
+        allowedValues: ["imap.gmail.com", "outlook.office365.com", "imap-mail.outlook.com", "imap.mail.yahoo.com", "imap.mail.me.com", "imap.fastmail.com", "imap.zoho.com", "imap.proton.me"],
+        allowCustomEnv: "EMAIL_IMAP_ALLOW_CUSTOM_HOST",
       },
       {
         key: "imap_user",
@@ -988,6 +1035,9 @@ export const CREDENTIAL_SPECS: readonly InstitutionCredentialSpec[] = [
         helpEs: null,
         maxLength: 256,
         fallbackEnvVars: [],
+        binds: [],
+        allowedValues: [],
+        allowCustomEnv: null,
       },
       {
         key: "imap_password",
@@ -1003,6 +1053,9 @@ export const CREDENTIAL_SPECS: readonly InstitutionCredentialSpec[] = [
         helpEs: "En Gmail, una contraseña de aplicación, no la de tu cuenta.",
         maxLength: 256,
         fallbackEnvVars: [],
+        binds: ["imap_host", "imap_user"],
+        allowedValues: [],
+        allowCustomEnv: null,
       },
     ],
   },

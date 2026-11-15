@@ -77,3 +77,48 @@ def test_slug_charset_is_enforced(monkeypatch):
     monkeypatch.setattr(credentials_module, "CREDENTIAL_SPECS", (*CREDENTIAL_SPECS, bad))
     with pytest.raises(CredentialSpecError):
         credentials_module.validate_credential_specs()
+
+
+def test_max_length_fits_the_sealed_column(monkeypatch):
+    from product_model.credentials import HPKE_OVERHEAD_BYTES, MAX_FIELD_LENGTH, MAX_SEALED_BYTES
+
+    assert MAX_FIELD_LENGTH * 4 + HPKE_OVERHEAD_BYTES <= MAX_SEALED_BYTES
+    for spec in CREDENTIAL_SPECS:
+        for f in spec.fields:
+            assert f.max_length * 4 + HPKE_OVERHEAD_BYTES <= MAX_SEALED_BYTES
+    spec = CREDENTIALS_BY_SLUG["skipo"]
+    too_long = type(spec)(
+        slug="too_long",
+        label_es="Too long",
+        logo_slug="skipo",
+        scraper_slugs=(),
+        fields=(
+            type(spec.fields[0])(
+                **{
+                    **_field_kwargs(spec.fields[0]),
+                    "env_var": "TOO_LONG",
+                    "max_length": MAX_FIELD_LENGTH + 1,
+                }
+            ),
+        ),
+    )
+    monkeypatch.setattr(credentials_module, "CREDENTIAL_SPECS", (*CREDENTIAL_SPECS, too_long))
+    with pytest.raises(CredentialSpecError):
+        credentials_module.validate_credential_specs()
+
+
+def _field_kwargs(f):
+    from dataclasses import fields
+
+    return {x.name: getattr(f, x.name) for x in fields(f)}
+
+
+def test_imap_password_binds_its_destination():
+    from product_model import binding_groups
+
+    assert binding_groups(CREDENTIALS_BY_SLUG["email"]) == [
+        ("imap_password", "imap_host", "imap_user")
+    ]
+    host = CREDENTIALS_BY_SLUG["email"].fields[0]
+    assert "imap.gmail.com" in host.allowed_values
+    assert host.allow_custom_env == "EMAIL_IMAP_ALLOW_CUSTOM_HOST"

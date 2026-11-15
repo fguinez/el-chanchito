@@ -326,6 +326,9 @@ def _ts_credential_field(f: CredentialField) -> str:
             f"        helpEs: {_ts_str(f.help_es)},",
             f"        maxLength: {f.max_length},",
             f"        fallbackEnvVars: [{fallbacks}],",
+            f"        binds: [{', '.join(json.dumps(k) for k in f.binds)}],",
+            f"        allowedValues: [{', '.join(json.dumps(v) for v in f.allowed_values)}],",
+            f"        allowCustomEnv: {_ts_str(f.allow_custom_env)},",
             "      },",
         ]
     )
@@ -354,6 +357,11 @@ def _emit_credential_specs() -> str:
         "  helpEs: string | null;",
         "  maxLength: number;",
         "  fallbackEnvVars: readonly string[];",
+        "  /** Fields this secret is sealed to; always saved together with it. */",
+        "  binds: readonly string[];",
+        "  /** Known values a stored one must be in, unless allowCustomEnv is set. */",
+        "  allowedValues: readonly string[];",
+        "  allowCustomEnv: string | null;",
         "}",
         "",
         "export interface InstitutionCredentialSpec {",

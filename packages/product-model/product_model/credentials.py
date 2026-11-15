@@ -37,6 +37,25 @@ _ENV_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 # Generous for any password or API secret, small enough to bound a request.
 DEFAULT_MAX_LENGTH = 256
+# Every stored ciphertext must fit V048's CHECK (octet_length(sealed) <= 4096):
+# 4 UTF-8 bytes per character at most, plus the 32-byte HPKE encapsulated key
+# and the 16-byte AES-GCM tag.
+MAX_SEALED_BYTES = 4096
+HPKE_OVERHEAD_BYTES = 32 + 16
+MAX_FIELD_LENGTH = (MAX_SEALED_BYTES - HPKE_OVERHEAD_BYTES) // 4
+
+# IMAP servers a stored host may name without EMAIL_IMAP_ALLOW_CUSTOM_HOST=1:
+# the IMAP password goes wherever the host points.
+KNOWN_IMAP_HOSTS = (
+    "imap.gmail.com",
+    "outlook.office365.com",
+    "imap-mail.outlook.com",
+    "imap.mail.yahoo.com",
+    "imap.mail.me.com",
+    "imap.fastmail.com",
+    "imap.zoho.com",
+    "imap.proton.me",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +67,15 @@ class CredentialField:
     suggestion shown in the form, never stored unless submitted.
     `fallback_env_vars` are legacy names the scraper still reads for the same
     value (they count as the local fallback, never written).
+
+    `binds` (secrets only) names the fields that decide where this secret is
+    sent, e.g. the IMAP password binds the IMAP host and user. The secret and
+    the fields it binds are always saved together, the secret is sealed to
+    their values, and the scraper service never pairs a stored destination
+    with a secret that was not sealed to it (not even the secret store's).
+    `allowed_values` limits a stored value to a known list (case-insensitive)
+    unless the env var `allow_custom_env` is set to a true value, in the
+    dashboard and in the scraper service alike.
     """
 
     key: str
@@ -63,6 +91,9 @@ class CredentialField:
     help_es: str | None = None
     max_length: int = DEFAULT_MAX_LENGTH
     fallback_env_vars: tuple[str, ...] = ()
+    binds: tuple[str, ...] = ()
+    allowed_values: tuple[str, ...] = ()
+    allow_custom_env: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,7 +151,14 @@ CREDENTIAL_SPECS: tuple[InstitutionCredentials, ...] = (
         label_es="Tarjeta Lider Bci",
         logo_slug="bci_lider",
         scraper_slugs=("bci_lider",),
-        fields=(_rut("LIDER_BCI_RUT"), _clave("LIDER_BCI_PASSWORD")),
+        fields=(
+            _rut("LIDER_BCI_RUT"),
+            _clave(
+                "LIDER_BCI_PASSWORD",
+                required=False,
+                help_es="Opcional: sin ella, alguien debe escribirla en la ventana de Chrome.",
+            ),
+        ),
         note_es=(
             "Abre un Chrome real en cada lectura (el sitio bloquea navegadores "
             "automatizados), así que necesita un equipo con pantalla."
@@ -169,8 +207,9 @@ CREDENTIAL_SPECS: tuple[InstitutionCredentials, ...] = (
             _clave("FINTUAL_PASSWORD", label_es="Contraseña", fallback_env_vars=("FINTUAL_TOKEN",)),
         ),
         note_es=(
-            "La primera vez Fintual pide un código que llega por correo: corre "
-            "`make fintual-login` una vez para guardar la sesión."
+            "Al iniciar sesión Fintual envía un código por correo. Se lee solo si "
+            "el correo de Tenpo usa la misma cuenta; si no, corre "
+            "`make fintual-login` después de guardar o cambiar estas credenciales."
         ),
     ),
     InstitutionCredentials(
@@ -225,6 +264,8 @@ CREDENTIAL_SPECS: tuple[InstitutionCredentials, ...] = (
                 pattern="[A-Za-z0-9.-]+",
                 pattern_hint_es="solo el nombre del servidor, sin puerto ni protocolo.",
                 max_length=253,
+                allowed_values=KNOWN_IMAP_HOSTS,
+                allow_custom_env="EMAIL_IMAP_ALLOW_CUSTOM_HOST",
             ),
             CredentialField(
                 key="imap_user",
@@ -240,9 +281,14 @@ CREDENTIAL_SPECS: tuple[InstitutionCredentials, ...] = (
                 env_var="EMAIL_IMAP_PASSWORD",
                 kind=CredentialFieldKind.SECRET,
                 help_es="En Gmail, una contraseña de aplicación, no la de tu cuenta.",
+                binds=("imap_host", "imap_user"),
             ),
         ),
-        note_es="Lee las notificaciones de Tenpo desde tu bandeja de entrada.",
+        note_es=(
+            "Lee las notificaciones de Tenpo desde tu bandeja de entrada. Los tres "
+            "campos se guardan juntos: la contraseña solo se usa con el servidor y "
+            "el usuario con que la guardaste."
+        ),
     ),
     InstitutionCredentials(
         slug="mercadopago",
@@ -272,6 +318,12 @@ def credential_env_vars() -> tuple[str, ...]:
     return tuple(f.env_var for spec in CREDENTIAL_SPECS for f in spec.fields)
 
 
+def binding_groups(spec: InstitutionCredentials) -> list[tuple[str, ...]]:
+    """Field keys that are always saved together: each binding secret with the
+    fields it binds."""
+    return [(f.key, *f.binds) for f in spec.fields if f.binds]
+
+
 def validate_credential_specs() -> None:
     """Raise CredentialSpecError on a duplicate or malformed key, env var or pattern."""
     seen_slugs: set[str] = set()
@@ -290,8 +342,21 @@ def validate_credential_specs() -> None:
                 if not _ENV_RE.match(env) or env in seen_envs:
                     raise CredentialSpecError(f"bad or duplicate env var {env!r} ({where})")
                 seen_envs.add(env)
-            if not 1 <= f.max_length <= 1024:
-                raise CredentialSpecError(f"{where}: max_length out of range")
+            if not 1 <= f.max_length <= MAX_FIELD_LENGTH:
+                raise CredentialSpecError(
+                    f"{where}: max_length must be 1..{MAX_FIELD_LENGTH} to fit V048"
+                )
+            if f.binds:
+                if f.kind is not CredentialFieldKind.SECRET:
+                    raise CredentialSpecError(f"{where}: only a secret can bind fields")
+                for bound in f.binds:
+                    target = next((g for g in spec.fields if g.key == bound), None)
+                    if target is None or target.kind is CredentialFieldKind.SECRET:
+                        raise CredentialSpecError(f"{where}: binds unknown or secret {bound!r}")
+            if f.allowed_values and not f.allow_custom_env:
+                raise CredentialSpecError(f"{where}: allowed_values needs allow_custom_env")
+            if f.allow_custom_env and not _ENV_RE.match(f.allow_custom_env):
+                raise CredentialSpecError(f"{where}: bad allow_custom_env")
             if f.pattern is not None:
                 re.compile(f.pattern)
             if f.default is not None and f.pattern and not re.fullmatch(f.pattern, f.default):
