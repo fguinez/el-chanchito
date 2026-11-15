@@ -19,10 +19,12 @@ import contextlib
 import inspect
 import json
 import logging
+import sqlite3
 import sys
 import threading
 import types
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -1358,14 +1360,39 @@ class TestLedgerPaging:
 # --- Transport: Chrome plumbing (never launched) --------------------------------
 
 
+LASTING_SSID = {"name": "ssid", "value": "synthetic", "expires": 1_900_000_000.0}
+SESSION_SSID = {"name": "ssid", "value": "synthetic", "expires": -1}
+
+
+class _Jar:
+    """Chrome's cookie jar: each read returns the next scripted entry (last repeats).
+
+    With no script it holds a persistent `ssid`. An entry that is an exception
+    makes that read fail.
+    """
+
+    def __init__(self, *script):
+        self.script = list(script) or [[LASTING_SSID]]
+        self.reads: list[str] = []
+
+    def cookies(self, url):
+        entry = self.script[min(len(self.reads), len(self.script) - 1)]
+        self.reads.append(url)
+        if isinstance(entry, Exception):
+            raise entry
+        return entry
+
+
 class _Tab:
-    def __init__(self, url):
+    def __init__(self, url, jar=None):
         self.url = url
+        self.context = jar if jar is not None else _Jar()
 
 
 class _Browser:
-    def __init__(self, *urls):
-        self.contexts = [type("Context", (), {"pages": [_Tab(url) for url in urls]})()]
+    def __init__(self, *urls, jar=None):
+        tabs = [_Tab(url, jar) for url in urls]
+        self.contexts = [type("Context", (), {"pages": tabs})()]
 
 
 class _Clock:
@@ -1976,7 +2003,10 @@ class _Chrome:
     ):
         self.launches: list[dict] = []
         self.terminated: list = []
+        self.closed_via: list = []
         self.drives: list[dict] = []
+        self.on_disk = True
+        self.disk_checks: list[float] = []
         self.proc = _FakeProc()
         self.outcome = MercadoPagoAccount(balance=2_500_000)
         profile = tmp_path / "profile"
@@ -1996,6 +2026,7 @@ class _Chrome:
         monkeypatch.setattr(web.real_chrome, "find_chrome", lambda env: "/synthetic/chrome")
         monkeypatch.setattr(web.real_chrome, "launch_chrome", self._launch)
         monkeypatch.setattr(web.real_chrome, "terminate_chrome", self._terminate)
+        monkeypatch.setattr(web, "_session_on_disk_after_close", self._on_disk)
         self.terminate_stops = True
         if fake_drive:
             monkeypatch.setattr(web, "_drive_over_cdp", self._drive)
@@ -2004,8 +2035,13 @@ class _Chrome:
         self.launches.append({"executable": executable, **kwargs})
         return self.proc
 
-    def _terminate(self, proc):
+    def _on_disk(self, profile, since):
+        self.disk_checks.append(since)
+        return self.on_disk
+
+    def _terminate(self, proc, cdp_url=None):
         self.terminated.append(proc)
+        self.closed_via.append(cdp_url)
         if self.terminate_stops:
             proc.returncode = 0
 
@@ -2260,6 +2296,318 @@ class TestRealDrives:
         assert clock.now == web.CONNECT_WAIT_S
         assert chrome.terminated == [chrome.proc]
 
+    def test_the_login_closes_through_cdp_then_checks_the_disk(self, monkeypatch, tmp_path):
+        """Wait, CDP close, then the disk once more, all keyed to the login's start."""
+        chrome = _Chrome(monkeypatch, tmp_path)
+        events = []
+        waits = []
+
+        def wait(url, timeout, process=None, since=None):
+            events.append("wait")
+            waits.append(since)
+
+        monkeypatch.setattr(web, "_await_sign_in", wait)
+        monkeypatch.setattr(web.time, "time", lambda: 1_700_000_000.0)
+        recorded_terminate = chrome._terminate
+        monkeypatch.setattr(
+            web.real_chrome,
+            "terminate_chrome",
+            lambda proc, cdp_url=None: events.append("close") or recorded_terminate(proc, cdp_url),
+        )
+        recorded_disk = chrome._on_disk
+        monkeypatch.setattr(
+            web,
+            "_session_on_disk_after_close",
+            lambda profile, since: events.append("disk") or recorded_disk(profile, since),
+        )
+
+        web.save_login_session(timeout_s=60)
+
+        assert events == ["wait", "close", "disk"]
+        assert chrome.closed_via == ["http://127.0.0.1:9223"]
+        assert waits == chrome.disk_checks == [1_700_000_000.0]
+
+    def test_a_session_missing_on_disk_after_the_close_is_no_success(self, monkeypatch, tmp_path):
+        """The post-close check fails the login instead of reporting it signed in."""
+        chrome = _Chrome(monkeypatch, tmp_path)
+        chrome.on_disk = False
+        monkeypatch.setattr(
+            web, "_await_sign_in", lambda url, timeout, process=None, since=None: None
+        )
+
+        with pytest.raises(MercadoPagoSessionError, match="not in the profile on disk"):
+            web.save_login_session(timeout_s=60)
+
+        assert chrome.terminated == [chrome.proc]
+
+    def test_a_failed_sign_in_skips_the_disk_check(self, monkeypatch, tmp_path):
+        """The wait's own error is what the human sees."""
+        chrome = _Chrome(monkeypatch, tmp_path)
+
+        def never(url, timeout, process=None, since=None):
+            raise MercadoPagoSessionError("Sign-in not detected in time.")
+
+        monkeypatch.setattr(web, "_await_sign_in", never)
+
+        with pytest.raises(MercadoPagoSessionError, match="not detected"):
+            web.save_login_session(timeout_s=60)
+
+        assert chrome.disk_checks == []
+
+
+LOGIN_START = 1_700_000_000.0  # synthetic Unix time of the login's start
+
+
+def _chrome_time(unix_s: float) -> int:
+    """Unix seconds as Chrome's cookie time (microseconds since 1601-01-01 UTC)."""
+    return int((unix_s + 11_644_473_600) * 1_000_000)
+
+
+FRESH = _chrome_time(LOGIN_START + 5)
+CREATED_BEFORE_LOGIN = _chrome_time(LOGIN_START - 3600)
+LATER = _chrome_time(LOGIN_START + 400 * 86_400)
+PAST = _chrome_time(LOGIN_START - 86_400)
+
+
+class TestSessionOnDisk:
+    """The profile's cookie store, built in tmp_path with synthetic rows only."""
+
+    @pytest.fixture(autouse=True)
+    def _now(self, monkeypatch):
+        monkeypatch.setattr(web.time, "time", lambda: LOGIN_START + 60)
+
+    def _store(self, profile, rows, relative="Default/Network/Cookies"):
+        db = profile / relative
+        db.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(db)
+        conn.execute(
+            "CREATE TABLE cookies (creation_utc INTEGER, host_key TEXT, name TEXT, "
+            "value TEXT, encrypted_value BLOB, expires_utc INTEGER, is_persistent INTEGER)"
+        )
+        conn.executemany(
+            "INSERT INTO cookies VALUES (?, ?, ?, 'synthetic', x'00', ?, ?)",
+            [
+                (
+                    row[3] if len(row) > 3 else FRESH,
+                    row[0],
+                    row[1],
+                    row[4] if len(row) > 4 else LATER,
+                    row[2],
+                )
+                for row in rows
+            ],
+        )
+        conn.commit()
+        conn.close()
+        return db
+
+    def test_chrome_time_converts_from_1601_microseconds(self):
+        """Chrome's epoch is 1601-01-01 UTC; 0 Unix seconds is 11644473600 s after it."""
+        from datetime import datetime
+
+        unix_epoch = datetime(1970, 1, 1, tzinfo=UTC)
+        y2k = datetime(2000, 1, 1, tzinfo=UTC)
+        chrome_epoch = datetime(1601, 1, 1, tzinfo=UTC)
+
+        assert web.chrome_time_to_unix(11_644_473_600_000_000) == 0
+        assert (
+            web.chrome_time_to_unix(int((y2k - chrome_epoch).total_seconds() * 1_000_000))
+            == (y2k - unix_epoch).total_seconds()
+        )
+
+    @pytest.mark.parametrize(
+        ("rows", "expected"),
+        [
+            pytest.param([(".mercadopago.cl", "ssid", 1)], True, id="persistent-portal"),
+            pytest.param([("www.mercadopago.cl", "ssid", 1)], True, id="persistent-www"),
+            pytest.param([(".mercadopago.cl", "ssid", 0)], False, id="session-row"),
+            pytest.param([(".mercadolibre.cl", "ssid", 1)], False, id="other-domain"),
+            pytest.param([(".mercadopago.cl", "orguserid", 1)], False, id="other-cookie"),
+            pytest.param(
+                [(".mercadopago.cl", "ssid", 1, CREATED_BEFORE_LOGIN)], False, id="before-login"
+            ),
+            pytest.param([(".mercadopago.cl", "ssid", 1, FRESH, PAST)], False, id="expired"),
+            pytest.param(
+                [(".mercadopago.cl", "ssid", 1, _chrome_time(LOGIN_START))], True, id="at-start"
+            ),
+            pytest.param(
+                [
+                    (".mercadopago.cl", "ssid", 1, CREATED_BEFORE_LOGIN),
+                    (".mercadopago.cl", "ssid", 1),
+                ],
+                True,
+                id="stale-and-fresh",
+            ),
+            pytest.param([], False, id="empty"),
+        ],
+    )
+    def test_only_a_fresh_persistent_portal_ssid_counts(self, tmp_path, rows, expected):
+        """A leftover from an earlier sign-in, an expired row or a session row does not."""
+        self._store(tmp_path, rows)
+
+        assert web._session_on_disk(tmp_path, LOGIN_START) is expected
+
+    def _store_with_update_time(self, profile, created, updated):
+        """A store in the newer schema, which has `last_update_utc`; one portal `ssid` row."""
+        db = profile / "Default" / "Network" / "Cookies"
+        db.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(db)
+        conn.execute(
+            "CREATE TABLE cookies (creation_utc INTEGER, host_key TEXT, name TEXT, "
+            "value TEXT, encrypted_value BLOB, expires_utc INTEGER, is_persistent INTEGER, "
+            "last_update_utc INTEGER)"
+        )
+        conn.execute(
+            "INSERT INTO cookies VALUES (?, '.mercadopago.cl', 'ssid', 'synthetic', x'00', ?, 1, ?)",
+            (created, LATER, updated),
+        )
+        conn.commit()
+        conn.close()
+
+    @pytest.mark.parametrize(
+        ("created", "updated", "expected"),
+        [
+            pytest.param(CREATED_BEFORE_LOGIN, FRESH, True, id="same-value-reset"),
+            pytest.param(FRESH, FRESH, True, id="new-cookie"),
+            pytest.param(CREATED_BEFORE_LOGIN, CREATED_BEFORE_LOGIN, False, id="untouched"),
+            pytest.param(FRESH, 0, True, id="no-update-time"),
+        ],
+    )
+    def test_a_cookie_updated_since_the_login_counts(self, tmp_path, created, updated, expected):
+        """Chrome keeps the old creation time when the same value is set again."""
+        self._store_with_update_time(tmp_path, created, updated)
+
+        assert web._session_on_disk(tmp_path, LOGIN_START) is expected
+
+    @pytest.mark.parametrize("relative", ["Default/Network/Cookies", "Default/Cookies"])
+    def test_both_cookie_store_locations_are_read(self, tmp_path, relative):
+        """Newer Chrome keeps the store under `Network/`; older ones do not."""
+        self._store(tmp_path, [(".mercadopago.cl", "ssid", 1)], relative)
+
+        assert web._session_on_disk(tmp_path, LOGIN_START) is True
+
+    @pytest.mark.parametrize(
+        "content",
+        [pytest.param(b"not a database", id="corrupt"), pytest.param(None, id="missing")],
+    )
+    def test_an_unreadable_store_is_not_yet(self, tmp_path, content):
+        """A sqlite error or a missing file means "keep waiting", never a crash."""
+        if content is not None:
+            db = tmp_path / "Default" / "Network" / "Cookies"
+            db.parent.mkdir(parents=True)
+            db.write_bytes(content)
+
+        assert web._session_on_disk(tmp_path, LOGIN_START) is False
+
+    def _hot_journal(self, db):
+        """Leave `db` mid-write with a non-empty journal; returns the open writer."""
+        writer = sqlite3.connect(db, isolation_level=None)
+        writer.execute("PRAGMA cache_size=1")
+        writer.execute("BEGIN")
+        for _ in range(500):
+            writer.execute(
+                "INSERT INTO cookies VALUES (?, 'x.example.invalid', 'filler', 'synthetic', "
+                "x'00', ?, 0)",
+                (FRESH, LATER),
+            )
+        assert (db.parent / "Cookies-journal").stat().st_size > 0
+        return writer
+
+    def test_a_copied_hot_journal_is_not_yet(self, tmp_path):
+        """A write in flight cannot be rolled back on a read-only copy: keep waiting."""
+        db = self._store(tmp_path, [(".mercadopago.cl", "ssid", 1)])
+        writer = self._hot_journal(db)
+        try:
+            assert web._session_on_disk(tmp_path, LOGIN_START) is False
+        finally:
+            writer.execute("ROLLBACK")
+            writer.close()
+
+    def test_a_store_that_changes_while_copied_is_not_yet(self, tmp_path, monkeypatch):
+        """The copy is not atomic: a write between the stamps means "not yet"."""
+        db = self._store(tmp_path, [(".mercadopago.cl", "ssid", 1)])
+        real_copy = web.shutil.copyfile
+
+        def copy_then_write(src, dst):
+            result = real_copy(src, dst)
+            if Path(src) == db:
+                with open(db, "ab") as handle:
+                    handle.write(b"\0" * 4096)
+            return result
+
+        monkeypatch.setattr(web.shutil, "copyfile", copy_then_write)
+
+        assert web._session_on_disk(tmp_path, LOGIN_START) is False
+
+    def test_a_copy_is_read_and_the_live_file_is_untouched(self, tmp_path, monkeypatch):
+        """Chrome's own file is never opened; the copy is gone afterwards."""
+        db = self._store(tmp_path, [(".mercadopago.cl", "ssid", 1)])
+        (db.parent / "Cookies-journal").write_bytes(b"")
+        opened = []
+        real_connect = sqlite3.connect
+        monkeypatch.setattr(
+            web.sqlite3,
+            "connect",
+            lambda target, **kwargs: opened.append(target) or real_connect(target, **kwargs),
+        )
+
+        assert web._session_on_disk(tmp_path, LOGIN_START) is True
+
+        (target,) = opened
+        assert target.endswith("?mode=ro")
+        assert db.as_uri() not in target
+        assert not Path(target.split("?")[0].removeprefix("file://")).exists()
+
+    def test_no_value_column_is_ever_selected(self, tmp_path, monkeypatch):
+        """Only host, name, persistence, creation and expiry are read."""
+        self._store(tmp_path, [(".mercadopago.cl", "ssid", 1)])
+        statements = []
+        real_connect = sqlite3.connect
+
+        def traced(target, **kwargs):
+            conn = real_connect(target, **kwargs)
+            conn.set_trace_callback(statements.append)
+            return conn
+
+        monkeypatch.setattr(web.sqlite3, "connect", traced)
+
+        web._session_on_disk(tmp_path, LOGIN_START)
+
+        assert statements
+        assert not any("value" in statement for statement in statements)
+
+    def test_the_post_close_check_retries_while_chrome_still_holds_the_store(
+        self, tmp_path, monkeypatch
+    ):
+        """A hot journal right after the exit: retried, then read once Chrome lets go."""
+        db = self._store(tmp_path, [(".mercadopago.cl", "ssid", 1)])
+        writer = self._hot_journal(db)
+        fake = _Clock()
+        monkeypatch.setattr(web.time, "monotonic", fake.monotonic)
+        sleeps = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            fake.sleep(seconds)
+            if len(sleeps) == 2:
+                writer.execute("ROLLBACK")
+                writer.close()
+
+        monkeypatch.setattr(web.time, "sleep", sleep)
+
+        assert web._session_on_disk_after_close(tmp_path, LOGIN_START) is True
+        assert sleeps == [web._POST_CLOSE_DISK_POLL_S] * 2
+
+    def test_the_post_close_check_gives_up_after_its_bound(self, tmp_path, monkeypatch):
+        """Nothing on disk: False after about 10 s of retries, never longer."""
+        self._store(tmp_path, [(".mercadopago.cl", "ssid", 0)])
+        fake = _Clock()
+        monkeypatch.setattr(web.time, "monotonic", fake.monotonic)
+        monkeypatch.setattr(web.time, "sleep", fake.sleep)
+
+        assert web._session_on_disk_after_close(tmp_path, LOGIN_START) is False
+        assert fake.now == web._POST_CLOSE_DISK_WAIT_S
+
 
 class _FakeTimer:
     """Stands in for `threading.Timer`: records itself and fires only on demand."""
@@ -2387,7 +2735,9 @@ class TestLaunchSafety:
         chrome = _Chrome(monkeypatch, tmp_path)
         seen = {}
         monkeypatch.setattr(
-            web, "_await_sign_in", lambda url, timeout, process=None: seen.update(process=process)
+            web,
+            "_await_sign_in",
+            lambda url, timeout, process=None, since=None: seen.update(process=process),
         )
 
         web.save_login_session(timeout_s=60)
@@ -2401,6 +2751,18 @@ class TestLaunchSafety:
         web._drive_managed(1)
 
         assert chrome.drives[0]["process"] is chrome.proc
+
+    def test_the_drive_timeout_leaves_room_for_a_whole_teardown(self):
+        """After the watchdog fires, the drive timeout must outlast `terminate_chrome`."""
+        assert web.DRIVE_TIMEOUT_S - web.MANAGED_HARD_LIMIT_S > real_chrome.TERMINATE_WORST_CASE_S
+
+    def test_the_managed_run_closes_chrome_through_cdp(self, monkeypatch, tmp_path, timers):
+        """So cookies the portal rotated during the read reach the profile."""
+        chrome = _Chrome(monkeypatch, tmp_path)
+
+        web._drive_managed(1)
+
+        assert chrome.closed_via == ["http://127.0.0.1:9223"]
 
     def test_an_orphan_is_reclaimed_before_the_busy_port_check(self, monkeypatch, tmp_path):
         """A killed run's Chrome is stopped first; the port check still guards the rest."""
@@ -2465,7 +2827,9 @@ class TestLaunchSafety:
         monkeypatch.setattr(
             web,
             "_await_sign_in",
-            lambda url, timeout, process=None: seen.append(json.loads(pidfile.read_text())["pid"]),
+            lambda url, timeout, process=None, since=None: seen.append(
+                json.loads(pidfile.read_text())["pid"]
+            ),
         )
 
         web.save_login_session(timeout_s=60)
@@ -2824,6 +3188,18 @@ class TestRunStatus:
 
 
 class TestManualSignIn:
+    @pytest.fixture(autouse=True)
+    def _session_reaches_disk(self, monkeypatch):
+        """Unless a test says otherwise, the cookie is already on disk."""
+        self.disk_reads: list[float] = []
+        self.disk_from = 0.0
+        monkeypatch.setattr(web, "_session_on_disk", self._disk)
+
+    def _disk(self, profile, since):
+        now = web.time.monotonic()
+        self.disk_reads.append(now)
+        return now >= self.disk_from
+
     def test_nothing_is_attached_or_fetched_while_the_tab_is_on_the_sign_in_site(
         self, clock, monkeypatch
     ):
@@ -2840,6 +3216,76 @@ class TestManualSignIn:
         assert probes == []
         assert looks.count > 10
 
+    def test_the_disk_is_read_only_after_the_jar_holds_the_lasting_cookie(
+        self, clock, monkeypatch, capsys
+    ):
+        """Jar first, then the cookie store on disk; Chrome stays open meanwhile."""
+        monkeypatch.setattr(web, "_balance_readable", lambda page: True)
+        _Looks(monkeypatch, PORTAL)
+        jar = _Jar([SESSION_SSID], [SESSION_SSID], [LASTING_SSID])
+        connections = _Connections(monkeypatch, _Browser(web.START_URL, jar=jar))
+        self.disk_from = 8.0
+
+        web._await_sign_in(CDP_URL, timeout_s=30)
+
+        assert self.disk_reads == [4.0, 6.0, 8.0]
+        assert clock.now == 8.0
+        assert (connections.opened, connections.closed) == (1, 1)
+        assert capsys.readouterr().out.count("waiting for it to reach the profile on disk") == 1
+
+    def test_a_session_that_never_reaches_the_disk_fails_after_its_floor(self, clock, monkeypatch):
+        """Closing Chrome now would lose it: an error, after the disk wait's own floor
+        even though the sign-in deadline came first."""
+        monkeypatch.setattr(web, "_balance_readable", lambda page: True)
+        _Looks(monkeypatch, PORTAL)
+        _Connections(monkeypatch, _Browser(web.START_URL))
+        self.disk_from = float("inf")
+
+        with pytest.raises(MercadoPagoSessionError, match="did not write the session"):
+            web._await_sign_in(CDP_URL, timeout_s=20)
+
+        assert clock.now == web._DISK_WAIT_FLOOR_S
+
+    def test_the_disk_wait_runs_to_the_sign_in_deadline_when_that_is_later(
+        self, clock, monkeypatch
+    ):
+        """The floor only ever lengthens the wait."""
+        monkeypatch.setattr(web, "_balance_readable", lambda page: True)
+        _Looks(monkeypatch, PORTAL)
+        _Connections(monkeypatch, _Browser(web.START_URL))
+        self.disk_from = float("inf")
+
+        with pytest.raises(MercadoPagoSessionError, match="did not write the session"):
+            web._await_sign_in(CDP_URL, timeout_s=200)
+
+        assert clock.now == 200
+
+    def test_the_login_start_reaches_the_disk_check(self, clock, monkeypatch):
+        """Only cookies set after this login started may count on disk."""
+        monkeypatch.setattr(web, "_balance_readable", lambda page: True)
+        _Looks(monkeypatch, PORTAL)
+        _Connections(monkeypatch, _Browser(web.START_URL))
+        seen = []
+        monkeypatch.setattr(
+            web, "_session_on_disk", lambda profile, since: seen.append(since) or True
+        )
+
+        web._await_sign_in(CDP_URL, timeout_s=30, since=1_700_000_000.0)
+
+        assert seen == [1_700_000_000.0]
+
+    def test_a_window_closed_while_waiting_for_the_disk_ends_the_wait(self, clock, monkeypatch):
+        """The launched Chrome is gone: no waiting out the clock."""
+        monkeypatch.setattr(web, "_balance_readable", lambda page: True)
+        _Looks(monkeypatch, PORTAL)
+        _Connections(monkeypatch, _Browser(web.START_URL))
+        self.disk_from = float("inf")
+
+        with pytest.raises(MercadoPagoWebError, match="no longer running"):
+            web._await_sign_in(CDP_URL, timeout_s=600, process=_Exited())
+
+        assert clock.now == 0
+
     def test_returns_once_the_balance_page_reads(self, clock, monkeypatch):
         """Signed in: the first successful probe ends the wait."""
         monkeypatch.setattr(web, "_balance_readable", lambda page: True)
@@ -2850,6 +3296,110 @@ class TestManualSignIn:
 
         assert clock.now == 0
         assert (connections.opened, connections.closed) == (1, 1)
+
+    def test_a_readable_balance_waits_for_the_lasting_login_cookie(self, clock, monkeypatch):
+        """The cookie lands on a later local read: no second balance probe, one connection."""
+        probes = []
+        monkeypatch.setattr(web, "_balance_readable", lambda page: probes.append(clock.now) or True)
+        _Looks(monkeypatch, PORTAL)
+        jar = _Jar([], [SESSION_SSID], [SESSION_SSID, LASTING_SSID])
+        connections = _Connections(monkeypatch, _Browser(web.START_URL, jar=jar))
+
+        web._await_sign_in(CDP_URL, timeout_s=30)
+
+        assert probes == [0.0]
+        assert len(jar.reads) == 3
+        assert clock.now == 2 * web._LOGIN_POLL_S
+        assert (connections.opened, connections.closed) == (1, 1)
+
+    def test_only_a_session_cookie_fails_at_the_shared_deadline(self, clock, monkeypatch, capsys):
+        """Signed in late with nothing lasting: the cookie wait ends at the sign-in deadline."""
+        probes = []
+        monkeypatch.setattr(
+            web, "_balance_readable", lambda page: probes.append(clock.now) or clock.now >= 16
+        )
+        _Looks(monkeypatch, PORTAL)
+        _Connections(monkeypatch, _Browser(web.START_URL, jar=_Jar([SESSION_SSID])))
+
+        with pytest.raises(MercadoPagoSessionError, match="would not survive Chrome closing"):
+            web._await_sign_in(CDP_URL, timeout_s=30)
+
+        assert probes == [0.0, 16.0]
+        assert clock.now == 30
+        assert capsys.readouterr().out.count("waiting for Mercado Pago to save the session") == 1
+
+    @pytest.mark.parametrize(
+        "jar",
+        [
+            pytest.param(_Jar(RuntimeError("closed")), id="jar-unreadable"),
+            pytest.param(_Jar([SESSION_SSID]), id="session-ssid-only"),
+        ],
+    )
+    def test_a_window_closed_while_waiting_for_the_cookie_ends_the_wait(
+        self, clock, monkeypatch, jar
+    ):
+        """The launched Chrome is gone: no waiting out the clock."""
+        monkeypatch.setattr(web, "_balance_readable", lambda page: True)
+        _Looks(monkeypatch, PORTAL)
+        _Connections(monkeypatch, _Browser(web.START_URL, jar=jar))
+
+        with pytest.raises(MercadoPagoWebError, match="no longer running"):
+            web._await_sign_in(CDP_URL, timeout_s=600, process=_Exited())
+
+        assert clock.now == 0
+
+    def test_a_jar_that_keeps_failing_is_a_chrome_problem(self, clock, monkeypatch):
+        """Failed reads in a row end the wait early, naming the failure type only."""
+        monkeypatch.setattr(web, "_balance_readable", lambda page: True)
+        _Looks(monkeypatch, PORTAL)
+        jar = _Jar(RuntimeError("synthetic"))
+        _Connections(monkeypatch, _Browser(web.START_URL, jar=jar))
+
+        with pytest.raises(MercadoPagoWebError, match=r"5 times in a row \(RuntimeError\)"):
+            web._await_sign_in(CDP_URL, timeout_s=600)
+
+        assert len(jar.reads) == web._MAX_JAR_READ_FAILURES
+        assert clock.now == (web._MAX_JAR_READ_FAILURES - 1) * web._LOGIN_POLL_S
+
+    def test_a_failed_jar_read_followed_by_the_cookie_succeeds(self, clock, monkeypatch):
+        """One unreadable moment is not fatal; the count resets on a good read."""
+        monkeypatch.setattr(web, "_balance_readable", lambda page: True)
+        _Looks(monkeypatch, PORTAL)
+        failed = RuntimeError("synthetic")
+        jar = _Jar(failed, [SESSION_SSID], failed, [LASTING_SSID])
+        _Connections(monkeypatch, _Browser(web.START_URL, jar=jar))
+
+        web._await_sign_in(CDP_URL, timeout_s=600)
+
+        assert len(jar.reads) == 4
+
+    def test_the_deadline_logs_cookie_names_never_values(self, clock, monkeypatch, caplog):
+        """What Chrome held is logged by name and persistence only."""
+        monkeypatch.setattr(web, "_balance_readable", lambda page: True)
+        _Looks(monkeypatch, PORTAL)
+        _Connections(monkeypatch, _Browser(web.START_URL, jar=_Jar([SESSION_SSID])))
+
+        with caplog.at_level("INFO"), pytest.raises(MercadoPagoSessionError):
+            web._await_sign_in(CDP_URL, timeout_s=10)
+
+        assert "ssid(session)" in caplog.text
+        assert "synthetic" not in caplog.text
+
+    @pytest.mark.parametrize(
+        ("cookies", "expected"),
+        [
+            pytest.param([LASTING_SSID], True, id="persistent-ssid"),
+            pytest.param([SESSION_SSID], False, id="session-only-ssid"),
+            pytest.param([{"name": "orguserid", "expires": 1_900_000_000.0}], False, id="other"),
+            pytest.param([], False, id="none"),
+        ],
+    )
+    def test_only_a_persistent_ssid_is_a_lasting_session(self, cookies, expected):
+        """Read from Chrome's jar for the portal; a session cookie does not count."""
+        jar = _Jar(cookies)
+
+        assert web._has_lasting_session(_Tab(web.START_URL, jar)) is expected
+        assert jar.reads == [f"https://{web.PORTAL_HOST}/"]
 
     def test_probes_sparingly_while_the_tab_does_not_move(self, clock, monkeypatch):
         """An unreadable portal tab is probed, and attached to, on an interval."""
@@ -2943,7 +3493,7 @@ class TestManualSignIn:
         chrome = _Chrome(monkeypatch, tmp_path, profile_exists=False)
         waits = []
         monkeypatch.setattr(
-            web, "_await_sign_in", lambda url, timeout, process=None: waits.append(url)
+            web, "_await_sign_in", lambda url, timeout, process=None, since=None: waits.append(url)
         )
 
         web.save_login_session(timeout_s=60)
@@ -2959,7 +3509,7 @@ class TestManualSignIn:
         """A timeout still tears the window down."""
         chrome = _Chrome(monkeypatch, tmp_path)
 
-        def never(url, timeout, process=None):
+        def never(url, timeout, process=None, since=None):
             raise MercadoPagoSessionError("Sign-in not detected in time.")
 
         monkeypatch.setattr(web, "_await_sign_in", never)
@@ -3138,18 +3688,36 @@ class TestSignInMarker:
         """`make mercadopago-login` that reads the balance lifts the skip."""
         _Chrome(monkeypatch, tmp_path)
         self._marker(tmp_path).write_text(SYNTHETIC_SINCE)
-        monkeypatch.setattr(web, "_await_sign_in", lambda url, timeout, process=None: None)
+        monkeypatch.setattr(
+            web, "_await_sign_in", lambda url, timeout, process=None, since=None: None
+        )
 
         web.save_login_session(timeout_s=60)
 
         assert not self._marker(tmp_path).exists()
+
+    def test_a_session_missing_on_disk_after_the_login_keeps_the_marker(
+        self, monkeypatch, tmp_path
+    ):
+        """A login whose session did not reach the profile would only be signed out again."""
+        chrome = _Chrome(monkeypatch, tmp_path)
+        chrome.on_disk = False
+        self._marker(tmp_path).write_text(SYNTHETIC_SINCE)
+        monkeypatch.setattr(
+            web, "_await_sign_in", lambda url, timeout, process=None, since=None: None
+        )
+
+        with pytest.raises(MercadoPagoSessionError, match="not in the profile on disk"):
+            web.save_login_session(timeout_s=60)
+
+        assert self._marker(tmp_path).read_text() == SYNTHETIC_SINCE
 
     def test_a_failed_sign_in_keeps_the_marker(self, monkeypatch, tmp_path):
         """Runs keep skipping until a sign-in actually works."""
         _Chrome(monkeypatch, tmp_path)
         self._marker(tmp_path).write_text(SYNTHETIC_SINCE)
 
-        def never(url, timeout, process=None):
+        def never(url, timeout, process=None, since=None):
             raise MercadoPagoSessionError("Sign-in not detected in time.")
 
         monkeypatch.setattr(web, "_await_sign_in", never)
