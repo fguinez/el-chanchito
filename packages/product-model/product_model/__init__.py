@@ -22,6 +22,18 @@ from .attributes import (
     VistaAttributes,
     WalletAttributes,
 )
+from .credentials import (
+    CREDENTIAL_SPECS,
+    CREDENTIALS_BY_SLUG,
+    CredentialField,
+    CredentialFieldKind,
+    CredentialInputMode,
+    CredentialSpecError,
+    InstitutionCredentials,
+    binding_groups,
+    credential_env_vars,
+    validate_credential_specs,
+)
 from .display import (
     FAMILIES,
     ColumnFormat,
@@ -77,6 +89,8 @@ from .metrics import (
 from .registry import REGISTRY, KindSpec, ProductAttributes, ProductMetrics
 
 __all__ = [
+    "CREDENTIALS_BY_SLUG",
+    "CREDENTIAL_SPECS",
     "FAMILIES",
     "LOCATION_TEXT_MAX_LENGTH",
     "PRODUCT_FAMILIES",
@@ -94,6 +108,10 @@ __all__ = [
     "ColumnFormat",
     "ColumnSource",
     "ColumnSpec",
+    "CredentialField",
+    "CredentialFieldKind",
+    "CredentialInputMode",
+    "CredentialSpecError",
     "CreditCardAttributes",
     "CreditCardMetrics",
     "CryptoAttributes",
@@ -105,6 +123,7 @@ __all__ = [
     "FamilySpec",
     "InstallmentLoanAttributes",
     "InstallmentLoanMetrics",
+    "InstitutionCredentials",
     "InvestmentAttributes",
     "InvestmentMetrics",
     "KindSpec",
@@ -142,7 +161,10 @@ __all__ = [
     "VistaMetrics",
     "WalletAttributes",
     "WalletMetrics",
+    "binding_groups",
+    "credential_env_vars",
     "family_kinds",
     "resolve_columns",
+    "validate_credential_specs",
     "validate_display_specs",
 ]

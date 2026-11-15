@@ -21,6 +21,7 @@ import imaplib
 import logging
 import os
 import re
+import ssl
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -37,6 +38,26 @@ DEFAULT_MAILBOX = "INBOX"
 DEFAULT_MAX_MESSAGES = 100
 IMAP_TIMEOUT_SECONDS = 60
 _MAX_MERCHANT_LEN = 80
+
+
+def imap_ssl_context() -> ssl.SSLContext:
+    """A TLS context that verifies the IMAP server's certificate and hostname.
+
+    imaplib.IMAP4_SSL defaults to an unverified context, which would let anyone
+    on the path read the mailbox password. This one trusts the OS store plus
+    certifi's bundle when it is installed (httpx pulls it in), because
+    python.org builds on macOS ship without a usable system CA file until
+    "Install Certificates.command" runs. A failed verification raises; there is
+    no unverified fallback.
+    """
+    context = ssl.create_default_context()
+    try:
+        import certifi
+    except ImportError:
+        return context
+    context.load_verify_locations(cafile=certifi.where())
+    return context
+
 
 # A CLP figure such as "$ 2.500.000", "$999.999" or "$ 1.234,56"; group 1 is
 # the number. `\s` also covers the non-breaking space HTML emails use, and
@@ -509,7 +530,16 @@ class ImapSession:
             self._mail = None
 
         logger.info("IMAP login to %s as %s", self._host, self._user)
-        mail = imaplib.IMAP4_SSL(self._host, timeout=IMAP_TIMEOUT_SECONDS)
+        try:
+            mail = imaplib.IMAP4_SSL(
+                self._host, ssl_context=imap_ssl_context(), timeout=IMAP_TIMEOUT_SECONDS
+            )
+        except ssl.SSLCertVerificationError as exc:
+            raise ConnectionError(
+                f"IMAP server {self._host} failed TLS certificate verification "
+                f"({exc}); refusing to send the password. For a server with a "
+                "private CA, point SSL_CERT_FILE at a bundle that includes it"
+            ) from exc
         mail.login(self._user, self._password)
         self._mail = mail
 
@@ -540,6 +570,14 @@ def get_session() -> ImapSession:
             password=os.environ["EMAIL_IMAP_PASSWORD"],
         )
     return _SESSION
+
+
+def reset_session() -> None:
+    """Forget the session so the next use reads the EMAIL_IMAP_* values again
+    (they changed in Credenciales). A scan in flight keeps the old one, which
+    is left to close with it rather than logged out under it."""
+    global _SESSION
+    _SESSION = None
 
 
 def _collect_transactions(

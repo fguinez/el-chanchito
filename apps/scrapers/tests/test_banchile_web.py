@@ -20,6 +20,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from product_model import CheckingMetrics, CreditCardMetrics
+from scrapers import session_account
 from scrapers.backends import banchile_web as banchile_web_mod
 from scrapers.backends.banchile_web import (
     BalanceFetchResult,
@@ -1826,6 +1827,12 @@ def _authenticate(browser):
         return page
 
 
+def _cache_session(path):
+    """A session cached by the configured RUT (marker included)."""
+    path.write_text(json.dumps(CACHED_STATE))
+    session_account.write_account(path, RUT)
+
+
 @pytest.fixture
 def session_file(tmp_path, monkeypatch):
     """Point BANCHILE_SESSION_FILE at a temp path; zero the validation budget so
@@ -1873,7 +1880,7 @@ def _dead_context_error():
 
 class TestSessionCache:
     def test_valid_cached_session_skips_login(self, session_file, login, caplog):
-        session_file.write_text(json.dumps(CACHED_STATE))
+        _cache_session(session_file)
         restored = _fake_context()
         browser = _fake_browser(restored)
 
@@ -1924,7 +1931,7 @@ class TestSessionCache:
         ids=["lands-on-login", "no-dashboard-data", "goto-error", "context-error"],
     )
     def test_dead_restored_session_takes_full_login(self, session_file, login, scenario):
-        session_file.write_text(json.dumps(CACHED_STATE))
+        _cache_session(session_file)
         restored, restored_context = scenario()
         fresh = _fake_context()
         browser = _fake_browser(restored, fresh)
@@ -1940,7 +1947,7 @@ class TestSessionCache:
     def test_stale_file_is_discarded_even_when_login_fails(self, session_file, login):
         """A session that proved dead is not retried by the next run, and the
         login failure still raises exactly as it did before the cache."""
-        session_file.write_text(json.dumps(CACHED_STATE))
+        _cache_session(session_file)
         login.side_effect = BanChileWebError("Login did not reach the post-login page")
         restored, _ = _dead_on_login_page()
         browser = _fake_browser(restored, _fake_context())
@@ -1969,7 +1976,8 @@ class TestSessionCache:
         finally:
             os.umask(old_umask)
 
-        assert len(swapped_in) == 2  # after authenticating and after the reads
+        # After authenticating and after the reads, each with its account marker.
+        assert len(swapped_in) == 4
         for tmp, mode in swapped_in:
             assert mode == 0o600
             # Same directory, and still matched by the `.banchile_session.json*`
@@ -1978,7 +1986,9 @@ class TestSessionCache:
             assert tmp.name.startswith(session_file.name)
         assert stat.S_IMODE(session_file.stat().st_mode) == 0o600
         assert json.loads(session_file.read_text()) == FRESH_STATE
-        assert list(session_file.parent.iterdir()) == [session_file]
+        marker = session_file.with_name(session_file.name + ".account")
+        assert sorted(session_file.parent.iterdir()) == sorted([session_file, marker])
+        assert stat.S_IMODE(marker.stat().st_mode) == 0o600
 
     @pytest.mark.parametrize("failure", ["storage_state", "replace"])
     def test_save_failure_is_only_a_warning(
@@ -2046,7 +2056,7 @@ class TestSessionCache:
         """`Path(".")` used to raise while naming the temp file, outside the try."""
         monkeypatch.chdir(tmp_path)
 
-        banchile_web_mod._save_session(_fake_context(), Path("."))
+        banchile_web_mod._save_session(_fake_context(), Path("."), "11.111.111-1")
 
         assert list(tmp_path.iterdir()) == []
         assert "could not save the session cache" in caplog.text
@@ -2082,7 +2092,7 @@ class TestLoginAttempts:
         assert before <= _last_attempt() <= time.monotonic()
 
     def test_a_reused_session_is_not_an_attempt(self, session_file, login):
-        session_file.write_text(json.dumps(CACHED_STATE))
+        _cache_session(session_file)
 
         _authenticate(_fake_browser(_fake_context()))
 
@@ -2108,7 +2118,7 @@ class TestLoginCooldown:
         at = attempted_ago(60)
         contexts = [_fake_context()]
         if cache == "dead":
-            session_file.write_text(json.dumps(CACHED_STATE))
+            _cache_session(session_file)
             contexts.insert(0, _dead_on_login_page()[0])
 
         with pytest.raises(LoginCooldownError) as raised:
@@ -2138,7 +2148,7 @@ class TestLoginCooldown:
 
     def test_a_hit_inside_the_window_reuses_the_session(self, session_file, login, attempted_ago):
         at = attempted_ago(60)
-        session_file.write_text(json.dumps(CACHED_STATE))
+        _cache_session(session_file)
         restored = _fake_context()
 
         page = _authenticate(_fake_browser(restored))
@@ -2243,7 +2253,7 @@ class TestLoginCooldownRetryAfter:
         if cached == "dir":
             session_file.mkdir()
         elif cached:
-            session_file.write_text(json.dumps(CACHED_STATE))
+            _cache_session(session_file)
 
         assert login_cooldown_retry_after(now=now) == expected
 
@@ -2279,7 +2289,7 @@ class TestScrapeSyncSession:
 
     def test_cache_is_refreshed_after_the_reads(self, session_file, login, monkeypatch):
         """Cookies rotated during the reads are what the next run restores."""
-        session_file.write_text(json.dumps(CACHED_STATE))
+        _cache_session(session_file)
         restored = _fake_context()
         after_reads = {"cookies": [], "origins": [{"origin": "synthetic", "localStorage": []}]}
         restored.storage_state.side_effect = [FRESH_STATE, after_reads]

@@ -6,6 +6,8 @@
 **/.banchile_session.json*
 **/.fintual_session.json*
 **/.*_chrome_profile*
+# The private key that opens the credentials saved from the dashboard.
+**/.credentials_key*
 **/.env
 **/.env.*
 !**/.env.example

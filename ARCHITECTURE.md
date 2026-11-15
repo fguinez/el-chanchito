@@ -508,6 +508,8 @@ suggested category, cascading with the category.
 | `V044__transactions_billing_status.sql` | transactions gain `billing_status` (`unbilled` / `billed`, NULL = not reported; CHECK) and `statement_date` (only on billed rows; CHECK); the writer only moves them forward (see "Card billing status"); no backfill |
 | `V045__transactions_deleted_by.sql` | transactions gain `deleted_by` (`scraper` when a scraper cleanup soft-deleted the row, NULL when visible or deleted by the user; CHECK): scraper-deleted rows are never adopted and are restored when a scrape lists their key again; scraper logic only, no backfill |
 | `V046__category_subcategories.sql` | subcategories one level deep on the existing `categories.parent_id`: index on `parent_id` and a `BEFORE INSERT OR UPDATE OF parent_id` trigger (`trg_categories_one_level`) rejecting a self parent, a parent that is itself a subcategory, and re-parenting a category that has subcategories; no backfill |
+| `V048__institution_credentials.sql` | `credential_keys` (the scraper service's single X25519 public key, `key_id` = hex SHA-256 of it) and `institution_credentials` (one HPKE-sealed field per `(institution_slug, field_key)`, with its `scheme` and `key_id`); see "Sealed credentials" |
+| `V049__credential_key_ring.sql` | `credential_keys` becomes a key ring: `key_id` primary key, `status` `active`/`retired` (at most one active, partial unique index `credential_keys_one_active`), `created_at`, `retired_at`, `rotation_failed_at`, `rotation_error`; the V048 singleton becomes the active key (`created_at` from its `updated_at`); a trigger lets `institution_credentials` be written only under the active key, locking it FOR SHARE; idempotent |
 
 ## Scraper Architecture
 
@@ -755,8 +757,22 @@ mode, driving a long-running Chrome from `make bci-lider-login` instead.
 Its managed Chrome has no pidfile yet, so one orphaned by a killed service
 still blocks later runs until it is closed by hand; that arrives when BCI
 Lider moves onto `backends/real_chrome.py`.
-Either way it reuses an already-signed-in tab or re-logs-in via autofill. A portal
-that stays signed out (the autofill times out with the login form still showing,
+Either way it reuses an already-signed-in tab or re-logs-in via autofill, and
+nothing is read from a tab of another account than `LIDER_BCI_RUT`: the
+managed profile carries a `session_account` marker and is deleted before
+launch when it is not this RUT's (a changed RUT, or a profile from before
+markers), and a tab the run did not sign in itself must show this RUT as the
+portal's sessionStorage `user` (compared inside the page, the id never reaches
+Python; an id equal to the RUT's bare digits counts only when its own last
+digit is not a valid mod-11 check digit, since it could otherwise be another
+account's full RUT). A mismatch in managed mode (`BciLiderAccountMismatch`) resets the
+profile once Chrome exits and the visible retry signs in on a fresh one; in
+reuse mode, whose Chrome is the user's and never wiped, it raises
+`BciLiderSignInRequired` asking for a sign-out and `make bci-lider-login`. A mismatch right
+after the run signed in with the RUT is taken as a changed id format
+(`BciLiderAccountFormatError`): logged, never retried, no profile reset and no
+second clave. A
+portal that stays signed out (the autofill times out with the login form still showing,
 or a read bounces to /login after the retry) raises `BciLiderSignInRequired`, so
 the run is `needs_sign_in` and the message asks for `make bci-lider-login` plus
 `LIDER_BCI_CDP_URL` (a managed run would otherwise collide with that Chrome's
@@ -1629,6 +1645,172 @@ Browser → web POST /api/institutions/refresh {institution?}
 | `BANCHILE_LOGIN_COOLDOWN_MINUTES` | scrapers | Minimum minutes between full BanChile logins, which also gates manual refreshes (default `10`; `0` disables) |
 | `BANCHILE_BILLED_STATEMENTS` | scrapers | Card statements per currency each BanChile run reads, newest first (default `2`, at most `12`); raise it for a one-off backfill of older billed history |
 
+### Sealed credentials (V048, V049)
+
+Scraper credentials can be entered in the dashboard (Credenciales) instead of
+the host secret store. The design goal is that the dashboard can **write** a
+credential but never **read** one, and that the database alone opens nothing:
+
+```
+Browser → web PUT /api/credentials/{slug} { fields }        (validated vs registry)
+        → seal each field with HPKE to credential_keys.public_key
+        → institution_credentials (slug, field, scheme, key_id, sealed)
+        → scrapers POST /credentials/reload
+        → open rows with the private key file → overlay os.environ → rebuild jobs
+```
+
+- **Keys.** The scraper service owns an X25519 key pair. The private key is a
+  PKCS#8 PEM file (`CREDENTIALS_KEY_FILE`, default
+  `apps/scrapers/.credentials_key`, Compose `/data/credentials_key`), created on
+  first start with `O_EXCL` + mode `0600` and linked into place atomically (a
+  concurrent creator's key wins). It is opened with `O_NOFOLLOW` and refused
+  when group/others can read it or another user owns it; the service then
+  runs on the env fallback only. The public key and its id (hex SHA-256 of the
+  32 raw bytes) go into the `credential_keys` ring (V049), where at most one
+  key is `active`. Every read or write of the private key goes through
+  `KeyFile` (scrapers/credentials.py), the seam a secret manager can replace.
+- **Scheme.** HPKE (RFC 9180) base mode, DHKEM(X25519, HKDF-SHA256),
+  HKDF-SHA256, AES-256-GCM: `@hpke/core` on the web (WebCrypto), Python
+  `cryptography`'s `hazmat.primitives.hpke` in the scraper. The HPKE `info`
+  is `el-chanchito/credential \0 scheme \0 slug \0 field \0 key_id`, so a
+  ciphertext opens only for its own institution, field and key; `sealed` is
+  `enc || ciphertext`. A checked-in fixture sealed by the TypeScript code
+  (with a throwaway key) is opened by the Python tests to keep both sides in
+  step.
+- **Registry.** `packages/product-model/product_model/credentials.py` lists
+  each institution's fields (label, env var, identifier or secret, input
+  hints, pattern) and is generated into the TS index, so the form, the API
+  validation and the scraper overlay share one list. Identifiers (RUT,
+  e-mail) are sealed too. `required` is exactly what `build_scrapers()` gates
+  on (a test checks every spec). `max_length` is capped so 4 bytes per
+  character plus the HPKE overhead fit V048's 4096-byte CHECK.
+- **Bound secrets.** A secret with `binds` (the IMAP password binds the IMAP
+  host and user) is always saved together with the fields it binds (the API
+  refuses a partial group, and deleting one member deletes the group), and is
+  sealed with `bind:<sha256 of the bound values>` appended to its `info`. On
+  open, the scraper computes that digest from the effective host and user; if
+  the password does not open, or there is no stored password while the host or
+  user came from the store, `EMAIL_IMAP_PASSWORD` is left unset, the secret
+  store's value included. HPKE base mode does not authenticate the sender, so
+  a database writer can plant rows; this binding keeps a planted host from
+  receiving the real password. A stored host must also be in the registry's
+  `allowed_values` unless `EMAIL_IMAP_ALLOW_CUSTOM_HOST` is set (checked by
+  both the API and the scraper). Values with C0/C1 controls or unpaired
+  surrogates are refused on both sides.
+- **Overlay.** At startup (both modes) and on `POST /credentials/reload`, the
+  service opens every row and writes the values over `os.environ` under the
+  registry's env var names, the ones the scrapers already read. Stored values
+  win; a field with no row gets the environment's original value back (a
+  snapshot taken before the first overlay), so deleting a stored credential
+  restores the secret store's. Rows sealed to another key, or that fail to
+  open, are skipped with a warning naming slug and field only and reported as
+  needing re-entry.
+- **Reload.** `ScraperSet.rebuild()` re-runs `build_scrapers()`: a scraper that
+  lost its credentials loses its job, a new one gets one, and one whose
+  credential env changed (compared by an in-memory keyed digest, never the
+  values) gets a fresh instance through `job.modify(args=...)`. A run in
+  flight keeps its instance; `max_instances=1` still prevents overlap. A
+  change clears Fintual's `.login-failed` marker and a Tenpo change resets the
+  IMAP session. That marker also holds a salted scrypt fingerprint of the
+  Fintual and IMAP credentials the failed sign-in used, so the scraper itself
+  lifts the block when any of them differs (an IMAP fix included); a legacy
+  timestamp-only marker keeps blocking and is rewritten with the current
+  fingerprint. Cached sessions (Fintual cookies, BanChile storage state) carry
+  a `<session>.account` marker (0600, a salted SHA-256 of the RUT or e-mail,
+  never the identifier; normalized first, so `11.111.111-1` and `11111111-1`
+  are one account (without a hyphen the last digit is the check digit only
+  when mod-11 validates it), and a marker from before normalization still matches and
+  is rewritten), written on every save and checked on every load: a
+  session of another account is discarded, whether the change came from the
+  dashboard or the env, and even when a run on the old credentials writes its
+  session back afterwards. A session with no marker (saved before markers
+  existed) is discarded too: nothing says whose it is, and the env value at
+  load time does not prove it either. The cost is one sign-in after upgrading
+  (BanChile signs in with its clave; Fintual mails a code, read from the inbox
+  when IMAP is the same account, else the run ends `needs_sign_in`). `POST
+  /refresh/{slug}` only accepts scraper slugs, never the internal jobs. The control server reads an immutable
+  snapshot of the scraper set, swapped on each rebuild. The dashboard runs a
+  scraper the save just enabled through `POST /refresh/{slug}`. With the
+  control port set, the scheduled service stays up with no scrapers, waiting
+  for credentials.
+- **Startup.** `CredentialManager.start()` only loads (or creates) the key
+  file; the database work runs on a background thread and in a `credentials`
+  scheduler job (every 60 s, on a worker thread), so the control server and
+  heartbeat answer while the database is down. The first scrape waits on
+  `CredentialManager.settled` (rows applied, or known unusable: no key, key
+  mismatch, missing tables), so no scraper logs in with credentials the
+  dashboard replaced; the scraper set is built then, without resetting
+  sign-in markers. `GET /credentials/status` also kicks a background attempt
+  while the key or rows are pending.
+- **One key per database.** Each sync runs `sync_key` in one transaction under
+  an advisory lock: an empty ring gets the service's key; a different active
+  key is never replaced while any row is sealed to it (`key_mismatch`: the
+  service opens nothing, reports it in its status and logs the fix); with no
+  row sealed to it, a service that has not yet published in this process
+  takes it over. A service displaced later stays in `key_mismatch` (no
+  ping-pong). `make credentials-reset-key` retires the active key for the
+  local one whatever it owns, after a typed confirmation.
+- **Rotation.** `rotate_key_file` (credential_manager.py), used by the
+  service when the active key is older than `CREDENTIALS_KEY_MAX_AGE_DAYS`
+  (default 90, 0 off; checked on the `credentials` job, retried an hour after
+  a failure, which is recorded on the key row) and by `make
+  credentials-rotate`: under the key file's `flock`, write the new key to
+  `<key file>.next` (O_EXCL, 0600, fsync), then in one transaction lock the
+  active key row FOR UPDATE, open every row sealed to it and seal it to the
+  new key (the `info` binds the key id, so this is a full re-encrypt; binding
+  secrets keep their binding), retire the old key and insert the new active
+  one; then `rename(.next, key file)`, which unlinks the old private key, so
+  older database backups open with nothing the app keeps (snapshots, volume
+  backups or copies of the key file still hold it: the rename does not erase
+  the disk). Rows that cannot be opened stay as they were and need re-entry.
+  Recovery (`recover_pending`, on every sync and before every rotation or
+  reset, under the key file lock): key temp files are swept (every key write,
+  first start included, happens under that lock, so any temp is stale); then,
+  after taking the ring's advisory lock (so an in-flight rotation's COMMIT is
+  visible first), a `.next` whose key the ring knows is promoted, one is
+  discarded only when the ring shows the key file's current key active
+  without it, and anything else (another database, a recreated one, no key
+  file) keeps both files: status `pending_unresolved`, logged once, Guardar
+  disabled. `make credentials-reset-key` then renames it to
+  `.next.aside-<time>` (never deleted; the sweep ignores it). A rotation the
+  database refused (`KeyRingConflict`, rolled back) discards its `.next` at
+  once. With the database unreachable both files stay. A key or lock file
+  error (EACCES, EROFS, ENOLCK) settles on the env fallback as
+  `key_unavailable` instead of being retried as an outage. Rotation and reset
+  are refused where flock is missing (native Windows). The running
+  service picks up a key the CLI rotated or reset on disk at its next sync
+  (the CLI also calls `POST /credentials/reload` best effort).
+- **Concurrent saves.** The dashboard seals to the active key, checks the
+  running service holds it, then stores in a transaction that first locks
+  that key row FOR SHARE (`upsertSealedFields`): a rotation waiting on it
+  re-seals the new rows; a save waiting on a rotation finds its key retired,
+  stores nothing, and the route seals once more to the new key (409 if it
+  changes again). V049's trigger enforces "only under the active key" for any
+  writer. Only the long-running service creates, publishes or rotates a key:
+  `main_once` and the login CLIs load an existing key (or a pending `.next`)
+  read-only and use the rows only when it is the active one. The dashboard
+  seals only after the running service confirms it holds the active key
+  (`saveBlocker`, shared by `GET /api/credentials` to disable Guardar and by
+  PUT to answer 503 with the same `reason`).
+- **Never a value out.** `GET /api/credentials` selects metadata columns only
+  and merges the control server's `GET /credentials/status` (booleans per env
+  var and the key id). No route, log line, error message or exception text
+  carries a value; responses are `no-store`. The routes sit behind the same
+  proxy guards (session, cross-site write refusal) as every other API route.
+- **Threat model.** Database dump or leaked `DATABASE_URL`: nothing opens. Key
+  file plus database, or the scraper process's memory: everything opens. An
+  old database backup plus a key file stolen after the next rotation: nothing
+  opens, unless the old key survives in a filesystem snapshot, a volume
+  backup or a copy of the key file. Out of scope for now: moving the existing secret store into the
+  database automatically, and a secret manager (Docker secrets, a KMS) behind
+  `KeyFile`.
+
+| Var | Service | Meaning |
+|---|---|---|
+| `CREDENTIALS_KEY_FILE` | scrapers | Private key file for the sealed credentials on host runs (default `apps/scrapers/.credentials_key`); Compose hardcodes `/data/credentials_key` |
+| `CREDENTIALS_KEY_MAX_AGE_DAYS` | scrapers | Rotate the credentials key once it is this many days old (default 90; `0` never) |
+| `EMAIL_IMAP_ALLOW_CUSTOM_HOST` | web, scrapers | `1` allows a stored IMAP host outside the known-provider list |
+
 ## Dashboard authentication
 
 The dashboard is single-user by design, so auth is a **shared secret**, not a
@@ -1850,14 +2032,17 @@ el-chanchito/
 │   │
 │   └── scrapers/                     # Python scraper service
 │       ├── scrapers/
+│       │   ├── credentials.py        # HPKE open, key file, env overlay (sealed credentials)
 │       │   ├── backends/             # email, banchile_web, banchile_movements, bci_lider_web,
 │       │   │                         #   real_chrome, mercadopago_web, santander_web,
 │       │   │                         #   banco_falabella_web, fintual_stocks
 │       │   └── institutions/         # 10 scrapers: banchile, banco_falabella, bci_lider, buda,
 │       │                             #   fintual, mach, mercadopago, santander, skipo, tenpo
-│       ├── db/                       # Connection pool + writer + slug
+│       ├── db/                       # Connection pool + writer + slug + credentials
 │       ├── tests/                    # pytest (conftest.py: per-test DB fixtures)
 │       ├── main.py                   # Entry point + scheduler + control endpoint
+│       ├── credential_manager.py     # Key + overlay lifecycle for the stored credentials
+│       ├── credentials_admin.py      # make credentials-status / -rotate / -reset-key
 │       ├── requirements.txt
 │       ├── requirements-dev.txt     # + pytest
 │       ├── pyproject.toml           # pytest config only

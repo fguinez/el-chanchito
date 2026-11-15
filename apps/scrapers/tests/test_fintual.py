@@ -23,6 +23,7 @@ import pytest
 os.environ.setdefault("FINTUAL_EMAIL", "test@example.com")
 os.environ.setdefault("FINTUAL_TOKEN", "test_password")
 
+from scrapers import session_account
 from scrapers.base import DailyPrice
 from scrapers.institutions import fintual as fintual_mod
 from scrapers.institutions.fintual import (
@@ -252,7 +253,9 @@ def _install(monkeypatch, client):
 
 
 def _write_session(path, **cookies):
+    """A session cached by the configured account (marker included)."""
     path.write_text(json.dumps(cookies))
+    session_account.write_account(path, os.environ["FINTUAL_EMAIL"])
 
 
 def _imap_is_the_fintual_account(monkeypatch):
@@ -645,6 +648,85 @@ class TestLoginFailureGuard:
 
         assert not marker.exists()
         assert json.loads(session_file.read_text()) == {"auth_refresh_token": "synthetic-refresh-1"}
+
+
+class TestLoginFailureFingerprint:
+    """The guard blocks only the credentials that failed. Every value here is
+    synthetic."""
+
+    @pytest.fixture(autouse=True)
+    def _credentials(self, monkeypatch):
+        monkeypatch.setenv("FINTUAL_EMAIL", "test@example.com")
+        monkeypatch.setenv("FINTUAL_PASSWORD", "synthetic-password")
+        monkeypatch.setenv("EMAIL_IMAP_HOST", "imap.example.com")
+        monkeypatch.setenv("EMAIL_IMAP_USER", "test@example.com")
+        monkeypatch.setenv("EMAIL_IMAP_PASSWORD", "synthetic-imap-password")
+
+    def test_the_marker_holds_a_fingerprint_not_the_secrets(self, session_file):
+        FintualScraper()._mark_login_failed()
+        marker = _marker(session_file)
+        raw = marker.read_text()
+        for secret in ("synthetic-password", "synthetic-imap-password", "test@example.com"):
+            assert secret not in raw
+        record = json.loads(raw)
+        assert set(record) == {"failed_at", "salt", "credentials"}
+        _assert_owner_only(marker)
+
+    def test_the_same_credentials_stay_blocked(self, session_file):
+        FintualScraper()._mark_login_failed()
+        assert FintualScraper()._login_blocked()
+        assert _marker(session_file).exists()
+
+    @pytest.mark.parametrize(
+        ("env", "value"),
+        [
+            ("EMAIL_IMAP_PASSWORD", "synthetic-imap-password-2"),
+            ("EMAIL_IMAP_HOST", "imap2.example.com"),
+            ("FINTUAL_PASSWORD", "synthetic-password-2"),
+        ],
+    )
+    def test_changed_credentials_unblock(self, monkeypatch, session_file, env, value):
+        FintualScraper()._mark_login_failed()
+        monkeypatch.setenv(env, value)
+        assert not FintualScraper()._login_blocked()
+        assert not _marker(session_file).exists()
+
+    def test_the_email_spelling_alone_is_not_a_change(self, monkeypatch, session_file):
+        FintualScraper()._mark_login_failed()
+        monkeypatch.setenv("FINTUAL_EMAIL", " Test@Example.com")
+        assert FintualScraper()._login_blocked()
+
+    @pytest.mark.parametrize("legacy", ["2026-01-01T00:00:00+00:00", "", "\xff"])
+    def test_a_legacy_marker_blocks_until_the_credentials_change(
+        self, monkeypatch, session_file, legacy
+    ):
+        _marker(session_file).write_text(legacy, encoding="latin-1")
+        assert FintualScraper()._login_blocked()
+        assert "credentials" in json.loads(_marker(session_file).read_text())
+        assert FintualScraper()._login_blocked()
+        monkeypatch.setenv("EMAIL_IMAP_PASSWORD", "synthetic-imap-password-2")
+        assert not FintualScraper()._login_blocked()
+
+    def test_fixing_imap_lets_the_next_run_sign_in(self, monkeypatch, session_file):
+        """End to end: a failed sign-in, then the IMAP password is corrected
+        (from the dashboard, say), and the next run signs in again."""
+        monkeypatch.setattr(fintual_mod, "_CODE_POLL_INTERVAL_SECONDS", 0)
+        monkeypatch.setattr(fintual_mod, "fetch_latest_code", AsyncMock(return_value=None))
+        _install(monkeypatch, _RoutedClient(_LOGIN_ROUTES))
+        with pytest.raises(FintualSessionError, match="IMAP inbox"):
+            asyncio.run(FintualScraper().scrape_products())
+        assert _marker(session_file).exists()
+
+        client = _install(monkeypatch, _RoutedClient(_LOGIN_ROUTES))
+        with pytest.raises(FintualSessionError, match="failed earlier"):
+            asyncio.run(FintualScraper().scrape_products())
+        assert not _LOGIN_URLS & set(client.calls)
+
+        monkeypatch.setenv("EMAIL_IMAP_PASSWORD", "synthetic-imap-password-2")
+        client = _install(monkeypatch, _RoutedClient(_LOGIN_ROUTES))
+        with pytest.raises(FintualSessionError, match="IMAP inbox"):
+            asyncio.run(FintualScraper().scrape_products())
+        assert INITIATE_LOGIN_URL in client.calls
 
 
 class TestRealCookieJar:

@@ -20,6 +20,7 @@ load_dotenv()
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+from credential_manager import CredentialManager
 
 from db.connection import close_pool, database_url, is_transient_db_error
 from db.writer import (
@@ -37,8 +38,10 @@ from db.writer import (
     write_transactions,
 )
 from interactive_login import InteractiveLogins, RunGuard, build_providers
+from product_model import CREDENTIAL_SPECS
 from scrapers.backends import banchile_web
 from scrapers.backends.email import get_session as get_email_session
+from scrapers.backends.email import reset_session as reset_email_session
 from scrapers.base import (
     BaseScraper,
     RunSkipped,
@@ -46,6 +49,7 @@ from scrapers.base import (
     ScrapedPriceHistory,
     SignInRequired,
 )
+from scrapers.credentials import env_fingerprint
 from scrapers.institutions import (
     BanChileScraper,
     BancoFalabellaScraper,
@@ -518,10 +522,11 @@ def _trigger_job(scheduler: AsyncIOScheduler, slug: str) -> bool:
 
 def _make_control_handler(
     scheduler: AsyncIOScheduler,
-    scraper_keys: set[str],
+    scraper_keys: "set[str] | Callable[[], frozenset[str]]",
     heartbeat: Heartbeat,
     cooldowns: dict[str, Callable[[], float | None]] | None = None,
     logins: InteractiveLogins | None = None,
+    credentials: "CredentialControl | None" = None,
 ):
     """Build the HTTP handler for the internal scraper control server.
 
@@ -551,8 +556,18 @@ def _make_control_handler(
     refused (a page reaching this port directly, DNS rebinding included), and
     a POST must be labelled JSON, so a cross-origin one always needs a
     preflight this server never grants.
+
+    With `credentials` (refused to browsers like the /login routes),
+    GET /credentials/status reports per env var whether a
+    fallback value exists and whether a stored one was opened or needs
+    re-entry (booleans only, never a value), and POST /credentials/reload
+    re-reads the stored credentials and adds, drops or rebuilds scrapers to
+    match, without touching a run in flight.
     """
     cooldowns = cooldowns or {}
+    # A callable returns an immutable snapshot (ScraperSet.snapshot); a plain
+    # set is copied, so no request iterates a set another thread edits.
+    current_keys = scraper_keys if callable(scraper_keys) else lambda: frozenset(scraper_keys)
 
     def seconds_left(slug: str) -> int:
         retry_after = cooldowns.get(slug)
@@ -573,9 +588,9 @@ def _make_control_handler(
             self.end_headers()
             self.wfile.write(body)
 
-        def _login_refused(self) -> bool:
-            """Send the refusal for a /login request a browser made, or a POST
-            not labelled JSON; True when one was sent."""
+        def _browser_refused(self) -> bool:
+            """Send the refusal for a /login or /credentials request a browser
+            made, or a POST not labelled JSON; True when one was sent."""
             if self.headers.get("Origin") or self.headers.get("Sec-Fetch-Site"):
                 self._send(403, {"error": "browser requests are not accepted"})
                 return True
@@ -603,7 +618,7 @@ def _make_control_handler(
             if logins is None:
                 self._send(404, {"error": "not found"})
                 return
-            if self._login_refused():
+            if self._browser_refused():
                 return
             parts = self.path.strip("/").split("/")
             if self.command == "GET" and parts == ["login"]:
@@ -630,14 +645,19 @@ def _make_control_handler(
                     self._send(200, {"status": "ok", "heartbeat_age_seconds": age})
                 else:
                     self._send(503, {"status": "stale", "heartbeat_age_seconds": age})
+            elif self.path == "/credentials/status":
+                if credentials is None:
+                    self._send(404, {"error": "not found"})
+                elif not self._browser_refused():
+                    self._send(200, credentials.status())
             elif self.path == "/scrapers":
-                # Which scrapers exist is decided at startup by env vars
-                # (build_scrapers()), so expose the list for the dashboard
+                # Which scrapers exist is decided by build_scrapers(), at
+                # startup and on each credentials reload, so expose the list for the dashboard
                 # instead of letting it hardcode a stale copy. Advertise only
                 # slugs with a scheduler job: POST /refresh/{slug} 404s on the
                 # rest (no _SCHEDULES entry ⇒ never registered), and the two
                 # endpoints must agree on the set.
-                enabled = sorted(s for s in scraper_keys if scheduler.get_job(s))
+                enabled = sorted(s for s in current_keys() if scheduler.get_job(s))
                 self._send(200, {"scrapers": enabled})
             else:
                 self._send(404, {"error": "not found"})
@@ -645,10 +665,21 @@ def _make_control_handler(
         def do_POST(self) -> None:
             if self.path.startswith("/login/"):
                 self._handle_login()
+            elif self.path == "/credentials/reload":
+                if credentials is None:
+                    self._send(404, {"error": "not found"})
+                    return
+                if self._browser_refused():
+                    return
+                try:
+                    self._send(200, credentials.reload())
+                except Exception:
+                    logger.exception("Credentials reload failed")
+                    self._send(500, {"error": "credentials reload failed"})
             elif self.path == "/refresh":
                 triggered: list[str] = []
                 skipped: list[dict] = []
-                for slug in sorted(s for s in scraper_keys if scheduler.get_job(s)):
+                for slug in sorted(s for s in current_keys() if scheduler.get_job(s)):
                     wait = seconds_left(slug)
                     if wait:
                         logger.info("Manual trigger for %s skipped: cooldown, %ds left", slug, wait)
@@ -658,6 +689,10 @@ def _make_control_handler(
                 self._send(202, {"triggered": triggered, "skipped": skipped})
             elif self.path.startswith("/refresh/"):
                 slug = self.path[len("/refresh/") :]
+                if slug not in current_keys():
+                    # Only scrapers: never the heartbeat or credentials jobs.
+                    self._send(404, {"error": f"unknown scraper: {slug}"})
+                    return
                 wait = seconds_left(slug) if scheduler.get_job(slug) else 0
                 if wait:
                     logger.info("Manual trigger for %s refused: cooldown, %ds left", slug, wait)
@@ -687,7 +722,10 @@ def _make_control_handler(
 
 
 def _start_control_server(
-    scheduler: AsyncIOScheduler, scraper_keys: set[str], heartbeat: Heartbeat
+    scheduler: AsyncIOScheduler,
+    scraper_keys: "set[str] | Callable[[], frozenset[str]]",
+    heartbeat: Heartbeat,
+    credentials: "CredentialControl | None" = None,
 ) -> ThreadingHTTPServer | None:
     """Start the internal HTTP control server when SCRAPER_CONTROL_PORT is set.
 
@@ -701,22 +739,251 @@ def _start_control_server(
         return None
 
     host = os.environ.get("SCRAPER_CONTROL_HOST") or "127.0.0.1"
+    current_keys = scraper_keys if callable(scraper_keys) else lambda: frozenset(scraper_keys)
     logins = InteractiveLogins(
-        build_providers(scraper_keys),
+        lambda: build_providers(current_keys()),
         lambda slug: _trigger_job(scheduler, slug),
         _RUN_GUARD,
     )
-    handler = _make_control_handler(scheduler, scraper_keys, heartbeat, _REFRESH_COOLDOWNS, logins)
+    handler = _make_control_handler(
+        scheduler, scraper_keys, heartbeat, _REFRESH_COOLDOWNS, logins, credentials
+    )
     server = ThreadingHTTPServer((host, int(port)), handler)
     thread = threading.Thread(target=server.serve_forever, name="scraper-control", daemon=True)
     thread.start()
     logger.info(
         "Control server listening on %s:%s (POST /refresh[/{slug}], /login[/{slug}], "
-        "GET /scrapers, GET /health)",
+        "GET /scrapers, GET /health, GET /credentials/status, POST /credentials/reload)",
         host,
         port,
     )
     return server
+
+
+def _schedule_scraper(scheduler: AsyncIOScheduler, key: str, scraper: BaseScraper) -> bool:
+    """Add `scraper`'s interval job; False when `key` has no schedule."""
+    cfg = _SCHEDULES.get(key)
+    if not cfg:
+        logger.warning("No schedule configured for %s; skipping", key)
+        return False
+    trigger_kwargs = {k: v for k, v in cfg.items() if k != "label"}
+    scheduler.add_job(
+        run_scraper,
+        IntervalTrigger(**trigger_kwargs),
+        args=[scraper],
+        id=key,
+        name=cfg["label"],
+        # A manual trigger reuses these guards so it can never overlap a
+        # scheduled or in-flight run of the same institution.
+        max_instances=1,
+        coalesce=True,
+        # APScheduler's default grace is 1s: a run (or a manual trigger)
+        # that comes due while sync work holds the event loop would be
+        # dropped as missed. Run it late instead; `coalesce` keeps it to one.
+        misfire_grace_time=None,
+    )
+    return True
+
+
+def _credential_env_vars(slug: str) -> tuple[str, ...]:
+    """The env vars (legacy names included) whose credentials feed `slug`."""
+    return tuple(
+        name
+        for spec in CREDENTIAL_SPECS
+        if slug in spec.scraper_slugs
+        for f in spec.fields
+        for name in (f.env_var, *f.fallback_env_vars)
+    )
+
+
+def _reset_scraper_state(slug: str, scraper: BaseScraper) -> None:
+    """Forget what a scraper kept from its previous credentials. A cached
+    session of another account is discarded where it is loaded (see
+    scrapers/session_account.py), so a session written back by a run still
+    on the old credentials is caught too."""
+    try:
+        if slug == "fintual":
+            scraper._login_failed_file.unlink(missing_ok=True)
+        elif slug == "tenpo":
+            reset_email_session()
+    except OSError as exc:
+        logger.warning("Could not reset %s's cached state: %s", slug, type(exc).__name__)
+
+
+class ScraperSet:
+    """The scheduled scrapers, kept in step with the credentials.
+
+    `snapshot()` is what the control server reads: an immutable set, swapped
+    whole on each change, so other threads never iterate one being edited.
+    `rebuild()` runs `build_scrapers()` again: a scraper that lost its
+    credentials loses its job, a newly configured one gets one, and one whose
+    credentials changed gets a fresh instance for its next run, with its
+    sign-in marker cleared (a cached session of another account is discarded
+    where it is loaded). A run in flight keeps the instance it started with, and
+    `max_instances=1` still stops the next run from overlapping it. A scraper
+    whose credentials did not change keeps its instance and its session.
+    """
+
+    def __init__(
+        self,
+        scheduler: AsyncIOScheduler,
+        scrapers: dict[str, BaseScraper] | None,
+        build: Callable[[], dict[str, BaseScraper]] = lambda: build_scrapers(),
+    ) -> None:
+        self.scheduler = scheduler
+        self._keys: frozenset[str] = frozenset()
+        self._build = build
+        self._fingerprints: dict[str, str] = {}
+        self._lock = threading.Lock()
+        # None: built by the first rebuild(), once the stored credentials
+        # are applied, as at a start (no marker or session is reset).
+        self._initialized = scrapers is not None
+        for slug, scraper in (scrapers or {}).items():
+            self._add(slug, scraper)
+
+    def snapshot(self) -> frozenset[str]:
+        return self._keys
+
+    @property
+    def keys(self) -> frozenset[str]:
+        return self._keys
+
+    @staticmethod
+    def _fingerprint(slug: str) -> str:
+        return env_fingerprint(_credential_env_vars(slug))
+
+    def _add(self, slug: str, scraper: BaseScraper, fingerprint: str | None = None) -> bool:
+        if not _schedule_scraper(self.scheduler, slug, scraper):
+            return False
+        self._keys = self._keys | {slug}
+        self._fingerprints[slug] = fingerprint or self._fingerprint(slug)
+        return True
+
+    def current(self) -> dict[str, BaseScraper]:
+        """The scheduled instance of each scraper."""
+        jobs = {slug: self.scheduler.get_job(slug) for slug in sorted(self._keys)}
+        return {slug: job.args[0] for slug, job in jobs.items() if job is not None}
+
+    def rebuild(self) -> dict[str, list[str]]:
+        with self._lock:
+            # Fingerprint before building: if a concurrent apply changes the
+            # env mid-build, the stored fingerprint is the older one, so the
+            # next rebuild sees the change instead of skipping it.
+            slugs = self._keys | {s for spec in CREDENTIAL_SPECS for s in spec.scraper_slugs}
+            fingerprints = {slug: self._fingerprint(slug) for slug in slugs}
+            wanted = self._build()
+            if not self._initialized:
+                self._initialized = True
+                added = [
+                    slug
+                    for slug, scraper in wanted.items()
+                    if self._add(slug, scraper, fingerprints.get(slug))
+                ]
+                return {"added": sorted(added), "removed": [], "updated": []}
+            added: list[str] = []
+            removed: list[str] = []
+            updated: list[str] = []
+            for slug in sorted(self._keys - wanted.keys()):
+                if self.scheduler.get_job(slug):
+                    self.scheduler.remove_job(slug)
+                self._keys = self._keys - {slug}
+                self._fingerprints.pop(slug, None)
+                removed.append(slug)
+                if slug == "tenpo":
+                    reset_email_session()
+                logger.info("Scraper %s disabled: its credentials are gone", slug)
+            for slug in sorted(wanted):
+                fingerprint = fingerprints.get(slug) or self._fingerprint(slug)
+                if slug not in self._keys:
+                    if self._add(slug, wanted[slug], fingerprint):
+                        _reset_scraper_state(slug, wanted[slug])
+                        added.append(slug)
+                elif fingerprint != self._fingerprints.get(slug):
+                    _reset_scraper_state(slug, wanted[slug])
+                    job = self.scheduler.get_job(slug)
+                    if job is not None:
+                        job.modify(args=[wanted[slug]])
+                    self._fingerprints[slug] = fingerprint
+                    updated.append(slug)
+                    logger.info("Scraper %s picks up its new credentials on its next run", slug)
+            return {"added": added, "removed": removed, "updated": updated}
+
+
+class CredentialControl:
+    """What the control server's /credentials endpoints and the periodic
+    credentials job call."""
+
+    def __init__(self, manager: CredentialManager, scrapers: ScraperSet) -> None:
+        self.manager = manager
+        self.scrapers = scrapers
+
+    def rebuild(self) -> dict[str, list[str]]:
+        """Rebuild the scrapers, but only once the stored credentials are
+        applied or known unusable: before that the env may still hold
+        credentials the dashboard replaced, and a scraper built on them
+        could log in with them (POST /refresh)."""
+        if not self.manager.settled.is_set():
+            return {"added": [], "removed": [], "updated": []}
+        return self.scrapers.rebuild()
+
+    def status(self) -> dict:
+        # Not published or not loaded yet (database down, V048 missing): try
+        # again now, off this request's thread.
+        self.manager.retry_in_background(on_loaded=self.rebuild)
+        return self.manager.status()
+
+    def reload(self) -> dict:
+        applied = self.manager.reload()
+        changes = self.rebuild()
+        enabled = sorted(s for s in self.scrapers.snapshot() if self.scrapers.scheduler.get_job(s))
+        return {"applied": applied, **changes, "scrapers": enabled}
+
+    def tick(self) -> None:
+        if self.manager.tick():
+            self.rebuild()
+
+
+# How often the service retries publishing its key and reading the stored
+# credentials until both work, and checks nobody replaced its key.
+_CREDENTIALS_TICK_SECONDS = 60
+
+
+def _start_credentials() -> CredentialManager:
+    """Load (or create) the key file. The database work runs in the
+    background, so the service comes up and reports status without it."""
+    manager = CredentialManager()
+    manager.start()
+    return manager
+
+
+# How often the first scrape checks whether the stored credentials are applied.
+_SETTLE_POLL_SECONDS = 1.0
+
+
+async def _first_scrape(
+    manager: CredentialManager, scraper_set: "ScraperSet", control_port: str | None
+) -> None:
+    """Wait until the stored credentials are applied (or known to be
+    unusable), then build the scrapers and run each once. A scraper must
+    never log in with credentials the dashboard replaced, so with the
+    database down this waits; the control server answers meanwhile."""
+    waited = False
+    while not manager.settled.is_set():
+        if not waited:
+            logger.info("Waiting for the database before the first scrape...")
+            waited = True
+        await asyncio.sleep(_SETTLE_POLL_SECONDS)
+    scraper_set.rebuild()
+    scrapers = scraper_set.current()
+    if not scrapers:
+        if not control_port:
+            logger.error("No scrapers configured. Exiting.")
+            sys.exit(1)
+        # Credentials entered in the dashboard reach this service through
+        # the control server, so it stays up waiting for them.
+        logger.warning("No scrapers configured yet; add credentials in the dashboard")
+        return
+    await run_all_once(scrapers)
 
 
 def _require_database_url() -> None:
@@ -731,11 +998,7 @@ def _require_database_url() -> None:
 def main_scheduled() -> None:
     """Run scrapers on a schedule using APScheduler."""
     _require_database_url()
-    scrapers = build_scrapers()
-
-    if not scrapers:
-        logger.error("No scrapers configured. Exiting.")
-        sys.exit(1)
+    credential_manager = _start_credentials()
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -745,27 +1008,7 @@ def main_scheduled() -> None:
     # running, so hand it our loop up front.
     scheduler = AsyncIOScheduler(event_loop=loop)
 
-    for key, scraper in scrapers.items():
-        cfg = _SCHEDULES.get(key)
-        if not cfg:
-            logger.warning("No schedule configured for %s; skipping", key)
-            continue
-        trigger_kwargs = {k: v for k, v in cfg.items() if k != "label"}
-        scheduler.add_job(
-            run_scraper,
-            IntervalTrigger(**trigger_kwargs),
-            args=[scraper],
-            id=key,
-            name=cfg["label"],
-            # A manual trigger reuses these guards so it can never overlap a
-            # scheduled or in-flight run of the same institution.
-            max_instances=1,
-            coalesce=True,
-            # APScheduler's default grace is 1s: a run (or a manual trigger)
-            # that comes due while sync work holds the event loop would be
-            # dropped as missed. Run it late instead; `coalesce` keeps it to one.
-            misfire_grace_time=None,
-        )
+    scraper_set = ScraperSet(scheduler, None)
 
     heartbeat = Heartbeat()
 
@@ -803,11 +1046,28 @@ def main_scheduled() -> None:
     signal.signal(signal.SIGINT, shutdown)
 
     scheduler.start()
-    logger.info("Scheduler started. Running initial scrape...")
+    logger.info("Scheduler started")
 
-    control_server = _start_control_server(scheduler, set(scrapers), heartbeat)
+    credential_control = CredentialControl(credential_manager, scraper_set)
+    # Sync, so the executor runs it on a worker thread: its DB retries never
+    # hold the event loop.
+    scheduler.add_job(
+        credential_control.tick,
+        IntervalTrigger(seconds=_CREDENTIALS_TICK_SECONDS),
+        id="credentials",
+        name="Credentials key and rows",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=None,
+    )
+    control_server = _start_control_server(
+        scheduler, scraper_set.snapshot, heartbeat, credential_control
+    )
+    credential_manager.retry_in_background(on_loaded=credential_control.rebuild)
 
-    loop.run_until_complete(run_all_once(scrapers))
+    loop.run_until_complete(
+        _first_scrape(credential_manager, scraper_set, os.environ.get("SCRAPER_CONTROL_PORT"))
+    )
 
     logger.info("Initial scrape complete. Scheduler running...")
     try:
@@ -834,6 +1094,9 @@ def main_scheduled() -> None:
 def main_once() -> None:
     """Run all scrapers once and exit (for cron-based scheduling)."""
     _require_database_url()
+    # A one-off run never creates or publishes a key: it would replace the
+    # long-running service's, whose stored credentials would then go unread.
+    CredentialManager().start_readonly()
     scrapers = build_scrapers()
     try:
         asyncio.run(run_all_once(scrapers))

@@ -12,6 +12,8 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      // Server-only modules (lib/credentials) are tested directly.
+      "server-only": path.resolve(__dirname, "./src/lib/__tests__/stubs/server-only.ts"),
     },
   },
 });

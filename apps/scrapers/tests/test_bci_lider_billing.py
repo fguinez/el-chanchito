@@ -616,6 +616,43 @@ class TestLivePortalTab:
         assert web._live_portal_tab(_Browser([_BrokenTab(PRIVATE_URL), live])) is live
 
 
+class TestLiveTabAccount:
+    """With a RUT, billing never falls back to another account's tab."""
+
+    RUT = "11.111.111-1"
+
+    def test_only_a_matching_tab_is_reacquired(self, monkeypatch):
+        other, own = _Tab(PRIVATE_URL), _Tab(PRIVATE_URL)
+        verdicts = {id(other): "mismatch", id(own): "match"}
+        monkeypatch.setattr(web, "_account_check", lambda page, rut: verdicts[id(page)])
+
+        assert web._live_portal_tab(_Browser([other, own]), rut=self.RUT) is own
+
+    @pytest.mark.parametrize("verdict", ["mismatch", "unknown"])
+    def test_no_matching_tab_is_none(self, monkeypatch, verdict):
+        monkeypatch.setattr(web, "_account_check", lambda page, rut: verdict)
+
+        assert web._live_portal_tab(_Browser([_Tab(PRIVATE_URL)]), rut=self.RUT) is None
+
+    def test_read_card_hands_its_rut_to_the_reacquire(self, monkeypatch):
+        seen = {}
+        checked = []
+        monkeypatch.setattr(web, "_read_balances", lambda page: [])
+        monkeypatch.setattr(web, "_read_movements", lambda page: [])
+        monkeypatch.setattr(
+            web, "_read_billing_into", lambda page, result, reacquire=None: seen.update(r=reacquire)
+        )
+        monkeypatch.setattr(
+            web, "_account_check", lambda page, rut: checked.append(rut) or "mismatch"
+        )
+        failed = object()
+
+        web._read_card(failed, web.BciLiderCardResult(), _Browser([_Tab(PRIVATE_URL)]), self.RUT)
+
+        assert seen["r"]() is None
+        assert checked == [self.RUT]
+
+
 class TestReadCardRetryWiring:
     @pytest.mark.parametrize("with_browser", [True, False], ids=["browser", "no-browser"])
     def test_read_card_hands_billing_a_reacquire_only_with_a_browser(

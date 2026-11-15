@@ -83,13 +83,12 @@ make install
 
 # 2. Set up environment
 cp .env.example .env
-# Edit .env with your identifiers (see "Configuration" below)
-make secrets-init   # store passwords and API keys in the secret store
 
 # 3. Start everything: postgres + migrations + scrapers (with on-demand refresh) + dashboard
 make dev
 
-# Open http://localhost:3000
+# Open http://localhost:3000 and enter each institution's credentials in
+# Credenciales (see "Configuration" below)
 ```
 
 `make dev` brings up PostgreSQL (Docker), runs migrations, starts the scraper
@@ -103,22 +102,26 @@ dashboard on `127.0.0.1:3000`), so other machines on your network cannot reach
 it. To open the dashboard from your phone, see
 [Reaching the dashboard from another device](#reaching-the-dashboard-from-another-device).
 
-With no scraper configured the scraper service exits right away: `make dev`
-says so and keeps the dashboard running, but it stays empty and on-demand
-refresh is unavailable until at least one scraper is enabled.
+With no scraper configured the scraper service keeps running with nothing
+scheduled, waiting for credentials from the Credenciales page; each one you
+save there enables its scraper without a restart.
 
 ## Configuration
 
-Configuration is split in two:
+Scraper credentials (RUTs, e-mails, passwords, API keys) are best entered in
+the dashboard's **Credenciales** page; see
+[Credentials from the dashboard](#credentials-from-the-dashboard). The older
+path still works and is the fallback for any field not stored there:
 
-- **`.env`** — non-secret config: Postgres settings and scraper identifiers.
+- **`.env`**: non-secret config: Postgres settings and scraper identifiers.
 - **The secret store**: secrets (passwords, tokens, API keys): the macOS
   Keychain, the system keyring or an owner-only file (see "Secret store
   backends" below). Loaded automatically by `make dev`, `make scrapers-once`,
   `make scrapers-start`, `make up`, `make fintual-login` and
   `make bci-lider-login` via `scripts/load-secrets.sh`.
 
-Copy `.env.example` to `.env` and fill in the identifiers:
+Copy `.env.example` to `.env` and, if you are not using Credenciales, fill in
+the identifiers:
 
 ```bash
 # Required - PostgreSQL (defaults work out of the box)
@@ -199,7 +202,144 @@ none to store, so it is switched on by a flag):
 | MACH, Tenpo | `EMAIL_IMAP_HOST` + `EMAIL_IMAP_USER` + `EMAIL_IMAP_PASSWORD` |
 
 A value already exported in your shell wins over the store, so you can also
-export the secret env vars directly (e.g. in a CI or Docker-only deploy).
+export the secret env vars directly (e.g. in a CI or Docker-only deploy). A
+credential saved in Credenciales wins over all of these.
+
+### Credentials from the dashboard
+
+The **Credenciales** page has one card per institution with the fields its
+scraper needs: RUT and clave for the banks, e-mail and password for Fintual,
+API key and secret for Buda, the read-only API key for Skipo, and the IMAP
+server, user and app password for the e-mail parser (Tenpo). Mercado Pago has
+nothing to store: its card explains the manual sign-in
+(`make mercadopago-login`) and `MERCADOPAGO_ENABLED`.
+
+The page is write-only. Each field shows only its state: **Guardado aquí**
+(stored from the dashboard), **Desde almacén local** (the secret store, `.env`
+or the environment provides it), **Falta**, or **Requiere reingreso** (stored,
+but the scraper service can no longer open it), plus when it was last saved.
+No API ever returns a stored value, not even masked: to fix one, type it
+again. You can save a single field (e.g. only the clave) and delete one field
+or all of a card's; a deleted field falls back to the secret store. Saving or
+deleting applies at once (the scraper service rebuilds its scrapers without a
+restart; a scrape already running finishes with the old values). A save that
+enables a scraper which was off also starts its first scrape right away,
+through the same refresh endpoint as the **Actualizar** buttons (so its
+cooldown and in-flight guards apply). Changing an institution's credentials
+clears its "sign-in failed" marker, and changing the account itself (the RUT
+or e-mail) also discards its cached session; Fintual then mails a sign-in code,
+read automatically when the e-mail card uses the same mailbox, or else enter it
+with `make fintual-login`. Fields marked optional (the Tarjeta Lider Bci clave)
+never decide whether a scraper runs.
+
+The e-mail card's three fields (IMAP server, user, app password) are always
+saved together: the password is sealed to that server and user, and the
+scraper service never sends a password to a server or user it was not saved
+with, not even the secret store's password. A stored IMAP server must also be
+a known provider (Gmail, Outlook, Yahoo, iCloud, Fastmail, Zoho, Proton) unless
+`EMAIL_IMAP_ALLOW_CUSTOM_HOST=1` is set for both the dashboard and the scraper
+service (export it in your shell for `make dev`; `.env` alone reaches only the
+scraper service). Deleting any of the three deletes all three.
+
+How it is protected:
+
+- The scraper service owns an X25519 key pair. The private key lives in an
+  owner-only (`0600`) file, `apps/scrapers/.credentials_key` (gitignored; in
+  Compose `/data/credentials_key` on the `scraper_state` volume; move it with
+  `CREDENTIALS_KEY_FILE`). It is created on first start, and the service
+  refuses a key file that other users can read. Only the public key goes to
+  the database.
+- The dashboard's server seals each field to that public key with HPKE
+  (RFC 9180: DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, AES-256-GCM) and stores
+  only the ciphertext. Each ciphertext is bound to its institution, field and
+  key, so it cannot be moved to another field. The dashboard can write a
+  credential but never read one back.
+- **Threat model.** The database alone (a dump, a backup, a leaked
+  `DATABASE_URL`) opens nothing. The database together with the key file opens
+  everything, as does the running scraper service's memory. Keep the key file
+  out of shared backups, but do back it up somewhere private: without it every
+  stored credential has to be entered again. Rotation (below) limits how long
+  an old database backup and a stolen key file stay useful together.
+- **One key per database.** The database keeps a key ring with one active
+  key, the one the dashboard seals to. A starting scraper service never
+  replaces an active key it does not hold: if the database seals to another
+  key file's key (for example `make dev` and `make up` against the same
+  database, each with its own key file; Compose always uses
+  `/data/credentials_key` on its volume, never your host's
+  `CREDENTIALS_KEY_FILE`), it opens nothing, the Credenciales page shows the
+  key mismatch and disables Guardar, and the service log names the fix: run
+  one scraper service per database, the one whose key file sealed them, and
+  stop the other. Do not copy the key file from one stack to the other: after
+  a rotation the copy still holds the old key, which keeps old backups
+  readable and leaves the other service in mismatch. The only exception is an
+  active key no stored credential is sealed to (nothing is lost): a service
+  that has not published yet takes it over.
+- **Lost key file.** If the key file that sealed your credentials is gone for
+  good, `make credentials-reset-key` (`STACK=up` for the Compose stack) makes
+  the local key file the active key and retires the old one. It asks you to
+  type `RESET` first. Every stored credential then shows **Requiere
+  reingreso** and must be typed again.
+- The HPKE base mode used here does not authenticate who sealed a row, so
+  someone able to write the database could plant a value; they still cannot
+  read one. The e-mail binding above is what keeps a planted IMAP server from
+  receiving your password.
+
+Saving needs the long-running scraper service (`make dev`, `make
+scrapers-start`, `make up`) to be up and to hold the database's active key:
+the dashboard seals to that key only once the running service confirms it
+holds it (the database row alone could be stale, another service's, or
+planted). Otherwise the page says why (service unreachable, key file
+unusable, key mismatch, no key published yet, key not confirmed yet right
+after a rotation) and disables Guardar, and the API answers `503` with the
+same `reason`. Deleting works without the service. The service comes up
+without waiting for the database; until it can reach it (or the V048/V049
+tables), it retries every minute and whenever the page asks, and its first
+scrape waits so no scraper logs in with credentials the dashboard replaced.
+One-off runs (`make scrapers-once`) and the login CLIs (`make fintual-login`,
+`make bci-lider-login`) use the stored credentials too, but only with the key
+the database currently seals to; they never create, publish or rotate a key.
+
+### Rotating the credentials key
+
+Rotating makes a new key pair, re-seals every stored credential to it in one
+database transaction, and then deletes the old private key file. Old
+database backups (which hold the old ciphertext) then no longer open with
+anything the app keeps: that is the point. Nothing has to be typed again.
+
+Deleting the file unlinks it; it does not erase the disk. A filesystem
+snapshot (APFS local snapshots, Time Machine), a backup of the Docker volume
+or of the key file, or a copy of the key file in another stack still holds
+the old key, and together with an old database backup still opens it. Keep
+the key file out of backups you cannot delete, or treat those backups as
+being as sensitive as the credentials.
+
+- **Automatic.** The scraper service rotates the key once it is older than
+  `CREDENTIALS_KEY_MAX_AGE_DAYS` (default 90; `0` turns it off), checked every
+  minute. A failed attempt is logged, shown on the Credenciales page, and
+  retried an hour later; the current key keeps working meanwhile.
+- **By hand.** `make credentials-rotate` rotates `make dev`'s key file now;
+  `make credentials-rotate STACK=up` does it inside the running `scrapers`
+  container for `make up`. `make credentials-status` (same `STACK`) compares
+  the key file with the database's active key. The command takes the key
+  file's lock, so it never races the service's own rotation, and asks the
+  running service to load the new key at once (it would within a minute
+  anyway). The dashboard has no rotate button on purpose.
+- **Crash safety.** The new key is written next to the key file
+  (`<key file>.next`) before the database switches; the old one is deleted
+  only after the switch commits. If anything stops halfway, the service's
+  next start (or sync) keeps whichever key the database ended up with, so no
+  credential is ever left unopenable. A save in the dashboard that races a
+  rotation is either re-sealed by it or sealed again to the new key. A
+  leftover new key is deleted only when the database shows the old key still
+  active without it; if the database cannot tell (`DATABASE_URL` points
+  elsewhere, or the database was recreated), both files are kept, the page
+  shows the interrupted rotation and disables Guardar, and the log says what
+  to do once: fix `DATABASE_URL`, or run `make credentials-reset-key`, which
+  moves the leftover to `<key file>.next.aside-<time>` instead of deleting
+  it. That file still holds a private key: delete it yourself once you are
+  sure nothing was sealed to it.
+- Rotating and resetting need file locking, so they are refused on native
+  Windows (WSL2 works).
 
 ### Secret store backends
 
@@ -340,9 +480,15 @@ Scheduled scrapes refresh the cached session the way the website does, with no
   (`EMAIL_IMAP_USER`); the scraper reports ``Fintual session expired. Run
   `make fintual-login`…``. When the account *is* the IMAP mailbox, the scraper
   reads the e-mailed code and signs in by itself.
-- an automatic sign-in failed. It is not retried (each attempt e-mails you a
-  new code) until a manual login succeeds; the scraper reports `Fintual
-  automatic sign-in failed earlier…`.
+- an automatic sign-in failed. It is not retried with the same credentials
+  (each attempt e-mails you a new code) until a manual login succeeds; the
+  scraper reports `Fintual automatic sign-in failed earlier…`. Correcting the
+  Fintual e-mail or password, or the IMAP server, user or password (in
+  Credenciales or your secrets), allows one new attempt: the
+  `.login-failed` marker keeps a salted fingerprint of those values (never
+  the values). A marker written before fingerprints existed keeps blocking
+  and takes the credentials in effect as the failed ones, so the next change
+  unblocks it.
 
 Don't let two scraper processes share one session cache at the same time (for
 example `make scrapers-once` while `make dev` or `make scrapers-start` runs):
@@ -448,6 +594,19 @@ check nobody ticked, or a wrong clave), the run shows `inicia sesión` and asks 
 `make bci-lider-login` and `LIDER_BCI_CDP_URL`, in managed mode too: a managed
 run can't share the debug port with that Chrome.
 (Override the debug port with `LIDER_BCI_CDP_PORT`.)
+
+A run never reads a portal tab signed in to another account than
+`LIDER_BCI_RUT` (say, after you change the RUT in Credenciales). The managed
+profile (`apps/scrapers/.bci_lider_chrome_profile`) is tied to the RUT that
+last signed in with it, by a gitignored `.bci_lider_chrome_profile.account`
+marker holding a salted hash, never the RUT; a profile of another RUT, or one
+from before the marker existed, is deleted before Chrome starts and the run
+signs in afresh. While any Chrome still holds that profile (on any port) it is
+never deleted: the run fails asking you to close that Chrome. A tab the run did not sign in itself must also show that
+RUT as the portal's signed-in customer (checked inside the page). In reuse
+mode the Chrome is yours and is never wiped: a tab of another account, or
+one that does not show its account, ends the run as `inicia sesión` asking
+you to sign out of the portal in that Chrome and run `make bci-lider-login`.
 
 Each card movement is marked billed or not by the period view it was read in
 ("Por facturar" or "Último periodo facturado"), and the statements the portal
@@ -704,6 +863,16 @@ instead of spinning forever.
     are enabled)
   - `GET /health`: liveness check; `503` once the scheduler's heartbeat has
     stalled for 10 minutes (the Compose healthcheck reads it)
+  - `GET /credentials/status`: per credential env var, booleans only
+    (`fallback`, `stored`, `needs_reentry`), plus the key state (`state`:
+    `ok`, `starting`, `key_mismatch`, `pending_unresolved` or
+    `key_unavailable`), the public key
+    ids, the active key's creation date, `max_age_days` and the last
+    rotation failure; never a value
+  - `POST /credentials/reload`: re-read the credentials stored from the
+    dashboard and add, drop or rebuild scrapers to match (`added`, `removed`,
+    `updated`, `scrapers`); both refuse browser requests the way the
+    `/login` routes below do
   - `GET /login`, `POST /login/{slug}`, `GET /login/{slug}`,
     `POST /login/{slug}/code`: the dashboard's sign-ins (see
     [Signing in from the dashboard](#signing-in-from-the-dashboard)); they
@@ -991,6 +1160,8 @@ All API routes are under `/api/`:
 | GET/PATCH | `/api/institutions/[slug]/products/[product]` | One product (with its `defaultName`) plus its balance history, recent transactions (shown `description` and original `rawDescription`) and, for a stock, its daily closes (`prices`: `{date, price}` oldest first, empty without a ticker); edit `name` (`null` resets it to `defaultName`), `slug`, `parentProductId`, `isActive`, `displayOrder`, and for a credit card `statementDay` / `dueDay` (1 to 31, `null` clears; merged into `attributes`) |
 | PATCH | `/api/accounts/[id]` | Rename an account (`name`) |
 | POST | `/api/institutions/refresh` | Trigger a scrape (all, or `{institution}`) |
+| GET | `/api/credentials` | Per institution and field: `stored`, `needsReentry`, `fallback` (`null` when the scraper service is down) and `updatedAt`; whether saving works (`canSave`, `saveBlocked`, `keyMismatch`) and the active key's dates (`key`); never a value |
+| PUT/DELETE | `/api/credentials/[slug]` | PUT `{ fields: { key: value } }` seals and stores some or all fields (`503` with a `reason` while the scraper service cannot confirm the active key; a retryable `409` if the key rotated twice under the request); DELETE forgets every field, or one with `?field=`. Both answer `applied` (whether the scraper service picked the change up; `null` when unreachable) |
 | GET | `/api/scrapers` | Latest run per scraper |
 | GET | `/api/scrapers/available` | Enabled scraper slugs, from the scraper service |
 | GET/POST | `/api/transactions` | Transactions (list, create; create takes an optional `location`); the list filters by `month`, `from`/`to`, `productId`, `institution`, `categoryId` and `q` (every word in the original or the displayed description, ignoring case and accents) |

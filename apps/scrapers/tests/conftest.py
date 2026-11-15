@@ -32,6 +32,12 @@ def _no_load_dotenv(*args, **kwargs) -> bool:
 dotenv.load_dotenv = _no_load_dotenv
 dotenv.main.load_dotenv = _no_load_dotenv
 os.environ.pop("DATABASE_URL", None)
+# Nothing in the suite may create or read the checkout's real credentials key.
+import tempfile  # noqa: E402
+
+os.environ["CREDENTIALS_KEY_FILE"] = os.path.join(
+    tempfile.mkdtemp(prefix="chanchito-test-key-"), "credentials_key"
+)
 
 import psycopg  # noqa: E402
 import pytest  # noqa: E402

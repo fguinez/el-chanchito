@@ -11,6 +11,8 @@ import {
   uniqueIndex,
   unique,
   index,
+  primaryKey,
+  customType,
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import { relations, sql } from "drizzle-orm";
@@ -689,6 +691,68 @@ export const monitorAdjustments = pgTable(
     ),
     index("idx_monitor_adjustments_transaction").on(table.transactionId),
   ]
+);
+
+// ---------------------------------------------------------------------------
+// Scraper credentials (V048, V049)
+// ---------------------------------------------------------------------------
+
+const bytea = customType<{ data: Uint8Array; driverData: Buffer }>({
+  dataType() {
+    return "bytea";
+  },
+  toDriver(value) {
+    return Buffer.from(value);
+  },
+  fromDriver(value) {
+    return new Uint8Array(value);
+  },
+});
+
+// The scraper service's key ring (V049): every public key it published, at
+// most one `active` (the one the dashboard seals to; see lib/credentials).
+// The private halves never leave the scraper service. A row can only be
+// written under the active key (V049's trigger locks it FOR SHARE).
+export const credentialKeys = pgTable(
+  "credential_keys",
+  {
+    keyId: text("key_id").primaryKey(),
+    algorithm: text("algorithm").notNull(),
+    publicKey: bytea("public_key").notNull(),
+    status: text("status").$type<"active" | "retired">().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+    rotationFailedAt: timestamp("rotation_failed_at", { withTimezone: true }),
+    rotationError: text("rotation_error"),
+  },
+  (table) => [
+    uniqueIndex("credential_keys_one_active")
+      .on(sql`(true)`)
+      .where(sql`${table.status} = 'active'`),
+  ]
+);
+
+// One sealed field per row: HPKE enc || ciphertext, bound to its scheme,
+// institution, field and key. Never selected by the dashboard's read paths:
+// they read the metadata columns only.
+export const institutionCredentials = pgTable(
+  "institution_credentials",
+  {
+    institutionSlug: text("institution_slug").notNull(),
+    fieldKey: text("field_key").notNull(),
+    scheme: text("scheme").notNull(),
+    keyId: text("key_id").notNull(),
+    sealed: bytea("sealed").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.institutionSlug, table.fieldKey] })]
 );
 
 // ---------------------------------------------------------------------------

@@ -233,6 +233,11 @@ def _login_cli() -> None:
 
     load_dotenv()  # walks up to the repo-root .env for LIDER_BCI_RUT
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
+    # Credentials saved in the dashboard win over .env and the secret store,
+    # as in the service. Imported here: the CLI runs from apps/scrapers.
+    from credential_manager import apply_stored_credentials
+
+    apply_stored_credentials()
 
     scraper = BciLiderScraper()
     cdp_url = asyncio.run(scraper.login())

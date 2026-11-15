@@ -11,6 +11,10 @@ httpx>=0.27,<1
 # sync calls raise, instead of spinning forever, once the driver has died.
 playwright>=1.64,<2
 pydantic>=2.7,<3
+# Opens the scraper credentials the dashboard seals (HPKE, RFC 9180; see
+# scrapers/credentials.py). 47 added hazmat.primitives.hpke; 50.0.2 is the
+# release this was built and tested against.
+cryptography>=50.0.2,<52
 # Pure-Python PDF text extraction: the Tarjeta Lider Bci statements
 # (estado de cuenta) are only served as PDFs.
 pypdf>=6.21.4,<7

@@ -27,7 +27,7 @@ import logging
 import os
 import re
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -110,17 +110,19 @@ class InteractiveLogins:
 
     `trigger` asks the scheduler to run an institution now (False when it has
     no job). It starts `refresh` sign-ins and follows every successful one.
+    `providers` may be a callable, read on every request, so the sign-ins
+    follow scrapers added or dropped by a credentials reload.
     """
 
     def __init__(
         self,
-        providers: dict[str, LoginProvider],
+        providers: dict[str, LoginProvider] | Callable[[], dict[str, LoginProvider]],
         trigger: Callable[[str], bool],
         guard: RunGuard,
         code_timeout: float = CODE_TIMEOUT_SECONDS,
         spawn: Callable[[Callable[[], None]], None] | None = None,
     ) -> None:
-        self._providers = providers
+        self._get_providers = providers if callable(providers) else lambda: providers
         self._trigger = trigger
         self._guard = guard
         self._code_timeout = code_timeout
@@ -129,10 +131,12 @@ class InteractiveLogins:
         self._sessions: dict[str, LoginSession] = {}
 
     def supported(self) -> list[dict]:
-        return [{"institution": s, "method": p.method} for s, p in sorted(self._providers.items())]
+        providers = self._get_providers()
+        return [{"institution": s, "method": p.method} for s, p in sorted(providers.items())]
 
     def status(self, slug: str) -> tuple[int, dict]:
-        if slug not in self._providers:
+        provider = self._get_providers().get(slug)
+        if provider is None:
             return 404, {"error": f"no interactive sign-in for {slug}"}
         with self._lock:
             session = self._sessions.get(slug)
@@ -140,12 +144,12 @@ class InteractiveLogins:
                 return 200, session.public()
         return 200, {
             "institution": slug,
-            "method": self._providers[slug].method,
+            "method": provider.method,
             "state": "idle",
         }
 
     def start(self, slug: str) -> tuple[int, dict]:
-        provider = self._providers.get(slug)
+        provider = self._get_providers().get(slug)
         if provider is None:
             return 404, {"error": f"no interactive sign-in for {slug}"}
         if provider.run is None:
@@ -173,7 +177,7 @@ class InteractiveLogins:
         return 202, session.public()
 
     def submit_code(self, slug: str, code: object) -> tuple[int, dict]:
-        if slug not in self._providers:
+        if slug not in self._get_providers():
             return 404, {"error": f"no interactive sign-in for {slug}"}
         if not isinstance(code, str) or not CODE_PATTERN.match(code.strip()):
             return 400, {"error": "code must be 6 digits", "field": "code"}
@@ -263,7 +267,7 @@ def _mercadopago_provider() -> LoginProvider:
     return LoginProvider("browser", run)
 
 
-def build_providers(scraper_keys: set[str]) -> dict[str, LoginProvider]:
+def build_providers(scraper_keys: Collection[str]) -> dict[str, LoginProvider]:
     """The sign-ins the dashboard can start, among the enabled scrapers.
 
     Fintual needs its password configured (`FINTUAL_TOKEN` is its legacy
