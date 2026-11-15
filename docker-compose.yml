@@ -93,6 +93,9 @@ services:
       # it survives rebuilds. Without it they must be entered again. Fixed on
       # purpose: a host CREDENTIALS_KEY_FILE (make dev's) must not leak in.
       CREDENTIALS_KEY_FILE: /data/credentials_key
+      # Rotate that key once it is this many days old (empty = 90, 0 = never).
+      # `make credentials-rotate STACK=up` rotates it now.
+      CREDENTIALS_KEY_MAX_AGE_DAYS: ${CREDENTIALS_KEY_MAX_AGE_DAYS:-}
       # 1 lets a stored IMAP host be a server outside the known list (set it
       # on the web service too).
       EMAIL_IMAP_ALLOW_CUSTOM_HOST: ${EMAIL_IMAP_ALLOW_CUSTOM_HOST:-}

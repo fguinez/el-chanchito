@@ -509,6 +509,7 @@ suggested category, cascading with the category.
 | `V045__transactions_deleted_by.sql` | transactions gain `deleted_by` (`scraper` when a scraper cleanup soft-deleted the row, NULL when visible or deleted by the user; CHECK): scraper-deleted rows are never adopted and are restored when a scrape lists their key again; scraper logic only, no backfill |
 | `V046__category_subcategories.sql` | subcategories one level deep on the existing `categories.parent_id`: index on `parent_id` and a `BEFORE INSERT OR UPDATE OF parent_id` trigger (`trg_categories_one_level`) rejecting a self parent, a parent that is itself a subcategory, and re-parenting a category that has subcategories; no backfill |
 | `V048__institution_credentials.sql` | `credential_keys` (the scraper service's single X25519 public key, `key_id` = hex SHA-256 of it) and `institution_credentials` (one HPKE-sealed field per `(institution_slug, field_key)`, with its `scheme` and `key_id`); see "Sealed credentials" |
+| `V049__credential_key_ring.sql` | `credential_keys` becomes a key ring: `key_id` primary key, `status` `active`/`retired` (at most one active, partial unique index `credential_keys_one_active`), `created_at`, `retired_at`, `rotation_failed_at`, `rotation_error`; the V048 singleton becomes the active key (`created_at` from its `updated_at`); a trigger lets `institution_credentials` be written only under the active key, locking it FOR SHARE; idempotent |
 
 ## Scraper Architecture
 
@@ -1644,7 +1645,7 @@ Browser → web POST /api/institutions/refresh {institution?}
 | `BANCHILE_LOGIN_COOLDOWN_MINUTES` | scrapers | Minimum minutes between full BanChile logins, which also gates manual refreshes (default `10`; `0` disables) |
 | `BANCHILE_BILLED_STATEMENTS` | scrapers | Card statements per currency each BanChile run reads, newest first (default `2`, at most `12`); raise it for a one-off backfill of older billed history |
 
-### Sealed credentials (V048)
+### Sealed credentials (V048, V049)
 
 Scraper credentials can be entered in the dashboard (Credenciales) instead of
 the host secret store. The design goal is that the dashboard can **write** a
@@ -1665,7 +1666,9 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
   concurrent creator's key wins). It is opened with `O_NOFOLLOW` and refused
   when group/others can read it or another user owns it; the service then
   runs on the env fallback only. The public key and its id (hex SHA-256 of the
-  32 raw bytes) are upserted into the single `credential_keys` row on start.
+  32 raw bytes) go into the `credential_keys` ring (V049), where at most one
+  key is `active`. Every read or write of the private key goes through
+  `KeyFile` (scrapers/credentials.py), the seam a secret manager can replace.
 - **Scheme.** HPKE (RFC 9180) base mode, DHKEM(X25519, HKDF-SHA256),
   HKDF-SHA256, AES-256-GCM: `@hpke/core` on the web (WebCrypto), Python
   `cryptography`'s `hazmat.primitives.hpke` in the scraper. The HPKE `info`
@@ -1730,29 +1733,68 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
   scraper the save just enabled through `POST /refresh/{slug}`. With the
   control port set, the scheduled service stays up with no scrapers, waiting
   for credentials.
-- **Retries and key ownership.** A `credentials` scheduler job (every 60 s, on
-  a worker thread) publishes the key until it sticks, reads the rows until
-  they load (then rebuilds the scrapers), and republishes the key with a
-  warning if another process replaced it; `GET /credentials/status` also
-  kicks a background attempt while either is pending. Only the long-running
-  service creates or publishes a key: `main_once` and the login CLIs load an
-  existing key read-only and use the rows only when the published key id is
-  theirs. The dashboard seals only after the running service confirms it holds
-  the published key (503 otherwise, including when it is unreachable).
+- **Startup.** `CredentialManager.start()` only loads (or creates) the key
+  file; the database work runs on a background thread and in a `credentials`
+  scheduler job (every 60 s, on a worker thread), so the control server and
+  heartbeat answer while the database is down. The first scrape waits on
+  `CredentialManager.settled` (rows applied, or known unusable: no key, key
+  mismatch, missing tables), so no scraper logs in with credentials the
+  dashboard replaced; the scraper set is built then, without resetting
+  sign-in markers. `GET /credentials/status` also kicks a background attempt
+  while the key or rows are pending.
+- **One key per database.** Each sync runs `sync_key` in one transaction under
+  an advisory lock: an empty ring gets the service's key; a different active
+  key is never replaced while any row is sealed to it (`key_mismatch`: the
+  service opens nothing, reports it in its status and logs the fix); with no
+  row sealed to it, a service that has not yet published in this process
+  takes it over. A service displaced later stays in `key_mismatch` (no
+  ping-pong). `make credentials-reset-key` retires the active key for the
+  local one whatever it owns, after a typed confirmation.
+- **Rotation.** `rotate_key_file` (credential_manager.py), used by the
+  service when the active key is older than `CREDENTIALS_KEY_MAX_AGE_DAYS`
+  (default 90, 0 off; checked on the `credentials` job, retried an hour after
+  a failure, which is recorded on the key row) and by `make
+  credentials-rotate`: under the key file's `flock`, write the new key to
+  `<key file>.next` (O_EXCL, 0600, fsync), then in one transaction lock the
+  active key row FOR UPDATE, open every row sealed to it and seal it to the
+  new key (the `info` binds the key id, so this is a full re-encrypt; binding
+  secrets keep their binding), retire the old key and insert the new active
+  one; then `rename(.next, key file)`, which deletes the old private key, so
+  older database backups open nothing. Rows that cannot be opened stay as
+  they were and need re-entry. Recovery (`recover_pending`, on every sync and
+  before every rotation or reset): a leftover `.next` whose key the ring
+  knows means the commit happened, so it is promoted; otherwise it is
+  discarded; with the database unreachable both files stay. The running
+  service picks up a key the CLI rotated or reset on disk at its next sync
+  (the CLI also calls `POST /credentials/reload` best effort).
+- **Concurrent saves.** The dashboard seals to the active key, checks the
+  running service holds it, then stores in a transaction that first locks
+  that key row FOR SHARE (`upsertSealedFields`): a rotation waiting on it
+  re-seals the new rows; a save waiting on a rotation finds its key retired,
+  stores nothing, and the route seals once more to the new key (409 if it
+  changes again). V049's trigger enforces "only under the active key" for any
+  writer. Only the long-running service creates, publishes or rotates a key:
+  `main_once` and the login CLIs load an existing key (or a pending `.next`)
+  read-only and use the rows only when it is the active one. The dashboard
+  seals only after the running service confirms it holds the active key
+  (`saveBlocker`, shared by `GET /api/credentials` to disable Guardar and by
+  PUT to answer 503 with the same `reason`).
 - **Never a value out.** `GET /api/credentials` selects metadata columns only
   and merges the control server's `GET /credentials/status` (booleans per env
   var and the key id). No route, log line, error message or exception text
   carries a value; responses are `no-store`. The routes sit behind the same
   proxy guards (session, cross-site write refusal) as every other API route.
 - **Threat model.** Database dump or leaked `DATABASE_URL`: nothing opens. Key
-  file plus database, or the scraper process's memory: everything opens. Out of
-  scope for now: key rotation (re-sealing rows to a new key needs the
-  plaintext, so it has to happen in the scraper service), and moving the
-  existing secret store into the database automatically.
+  file plus database, or the scraper process's memory: everything opens. An
+  old database backup plus a key file stolen after the next rotation: nothing
+  opens. Out of scope for now: moving the existing secret store into the
+  database automatically, and a secret manager (Docker secrets, a KMS) behind
+  `KeyFile`.
 
 | Var | Service | Meaning |
 |---|---|---|
 | `CREDENTIALS_KEY_FILE` | scrapers | Private key file for the sealed credentials on host runs (default `apps/scrapers/.credentials_key`); Compose hardcodes `/data/credentials_key` |
+| `CREDENTIALS_KEY_MAX_AGE_DAYS` | scrapers | Rotate the credentials key once it is this many days old (default 90; `0` never) |
 | `EMAIL_IMAP_ALLOW_CUSTOM_HOST` | web, scrapers | `1` allows a stored IMAP host outside the known-provider list |
 
 ## Dashboard authentication
@@ -1986,6 +2028,7 @@ el-chanchito/
 │       ├── tests/                    # pytest (conftest.py: per-test DB fixtures)
 │       ├── main.py                   # Entry point + scheduler + control endpoint
 │       ├── credential_manager.py     # Key + overlay lifecycle for the stored credentials
+│       ├── credentials_admin.py      # make credentials-status / -rotate / -reset-key
 │       ├── requirements.txt
 │       ├── requirements-dev.txt     # + pytest
 │       ├── pyproject.toml           # pytest config only

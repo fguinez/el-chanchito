@@ -258,29 +258,70 @@ How it is protected:
   `DATABASE_URL`) opens nothing. The database together with the key file opens
   everything, as does the running scraper service's memory. Keep the key file
   out of shared backups, but do back it up somewhere private: without it every
-  stored credential has to be entered again.
-- A key file that changes (deleted, or a different one, such as `make dev` and
-  `make up` each with their own against the same database) makes the rows
-  sealed to the old one show **Requiere reingreso**; the service log says how
-  many. Restore the old key file or enter them again. The service checks every
-  minute that the database still seals to its key and publishes it again if
-  not, logging a warning: two services with different key files on one
-  database keep replacing each other, so give them one. Compose always uses
+  stored credential has to be entered again. Rotation (below) limits how long
+  an old database backup and a stolen key file stay useful together.
+- **One key per database.** The database keeps a key ring with one active
+  key, the one the dashboard seals to. A starting scraper service never
+  replaces an active key it does not hold: if the database seals to another
+  key file's key (for example `make dev` and `make up` against the same
+  database, each with its own key file; Compose always uses
   `/data/credentials_key` on its volume, never your host's
-  `CREDENTIALS_KEY_FILE`. Key rotation is not automated yet.
+  `CREDENTIALS_KEY_FILE`), it opens nothing, the Credenciales page shows the
+  key mismatch and disables Guardar, and the service log names the fix: run
+  the stack whose key file sealed them, or give both the same key file. The
+  only exception is an active key no stored credential is sealed to (nothing
+  is lost): a service that has not published yet takes it over.
+- **Lost key file.** If the key file that sealed your credentials is gone for
+  good, `make credentials-reset-key` (`STACK=up` for the Compose stack) makes
+  the local key file the active key and retires the old one. It asks you to
+  type `RESET` first. Every stored credential then shows **Requiere
+  reingreso** and must be typed again.
 - The HPKE base mode used here does not authenticate who sealed a row, so
   someone able to write the database could plant a value; they still cannot
   read one. The e-mail binding above is what keeps a planted IMAP server from
   receiving your password.
 
 Saving needs the long-running scraper service (`make dev`, `make
-scrapers-start`, `make up`) to be up and to have published its key; otherwise
-the API answers `503` asking you to start it. If the database or its V048
-tables were not there when it started, it keeps retrying every minute (and
-whenever the page asks), so saving starts working once they are. One-off runs
-(`make scrapers-once`) and the login CLIs (`make fintual-login`,
+scrapers-start`, `make up`) to be up and to hold the database's active key:
+the dashboard seals to that key only once the running service confirms it
+holds it (the database row alone could be stale, another service's, or
+planted). Otherwise the page says why (service unreachable, key file
+unusable, key mismatch, no key published yet, key not confirmed yet right
+after a rotation) and disables Guardar, and the API answers `503` with the
+same `reason`. Deleting works without the service. The service comes up
+without waiting for the database; until it can reach it (or the V048/V049
+tables), it retries every minute and whenever the page asks, and its first
+scrape waits so no scraper logs in with credentials the dashboard replaced.
+One-off runs (`make scrapers-once`) and the login CLIs (`make fintual-login`,
 `make bci-lider-login`) use the stored credentials too, but only with the key
-the database currently seals to; they never create or publish a key.
+the database currently seals to; they never create, publish or rotate a key.
+
+### Rotating the credentials key
+
+Rotating makes a new key pair, re-seals every stored credential to it in one
+database transaction, and then deletes the old private key. Old database
+backups (which hold the old ciphertext) can no longer be opened by anyone:
+that is the point. Nothing has to be typed again.
+
+- **Automatic.** The scraper service rotates the key once it is older than
+  `CREDENTIALS_KEY_MAX_AGE_DAYS` (default 90; `0` turns it off), checked every
+  minute. A failed attempt is logged, shown on the Credenciales page, and
+  retried an hour later; the current key keeps working meanwhile.
+- **By hand.** `make credentials-rotate` rotates `make dev`'s key file now;
+  `make credentials-rotate STACK=up` does it inside the running `scrapers`
+  container for `make up`. `make credentials-status` (same `STACK`) compares
+  the key file with the database's active key. The command takes the key
+  file's lock, so it never races the service's own rotation, and asks the
+  running service to load the new key at once (it would within a minute
+  anyway). The dashboard has no rotate button on purpose.
+- **Crash safety.** The new key is written next to the key file
+  (`<key file>.next`) before the database switches; the old one is deleted
+  only after the switch commits. If anything stops halfway, the service's
+  next start (or sync) keeps whichever key the database ended up with, so no
+  credential is ever left unopenable. A save in the dashboard that races a
+  rotation is either re-sealed by it or sealed again to the new key.
+- Back the key file up privately, but know that a backup of it plus an old
+  database backup is exactly what rotation is meant to make useless.
 
 ### Secret store backends
 
@@ -805,7 +846,10 @@ instead of spinning forever.
   - `GET /health`: liveness check; `503` once the scheduler's heartbeat has
     stalled for 10 minutes (the Compose healthcheck reads it)
   - `GET /credentials/status`: per credential env var, booleans only
-    (`fallback`, `stored`, `needs_reentry`) plus the public key id; never a value
+    (`fallback`, `stored`, `needs_reentry`), plus the key state (`state`:
+    `ok`, `starting`, `key_mismatch` or `key_unavailable`), the public key
+    ids, the active key's creation date, `max_age_days` and the last
+    rotation failure; never a value
   - `POST /credentials/reload`: re-read the credentials stored from the
     dashboard and add, drop or rebuild scrapers to match (`added`, `removed`,
     `updated`, `scrapers`); both refuse browser requests the way the
@@ -1097,8 +1141,8 @@ All API routes are under `/api/`:
 | GET/PATCH | `/api/institutions/[slug]/products/[product]` | One product (with its `defaultName`) plus its balance history, recent transactions (shown `description` and original `rawDescription`) and, for a stock, its daily closes (`prices`: `{date, price}` oldest first, empty without a ticker); edit `name` (`null` resets it to `defaultName`), `slug`, `parentProductId`, `isActive`, `displayOrder`, and for a credit card `statementDay` / `dueDay` (1 to 31, `null` clears; merged into `attributes`) |
 | PATCH | `/api/accounts/[id]` | Rename an account (`name`) |
 | POST | `/api/institutions/refresh` | Trigger a scrape (all, or `{institution}`) |
-| GET | `/api/credentials` | Per institution and field: `stored`, `needsReentry`, `fallback` (`null` when the scraper service is down) and `updatedAt`; never a value |
-| PUT/DELETE | `/api/credentials/[slug]` | PUT `{ fields: { key: value } }` seals and stores some or all fields (`503` until the scraper service has published its key); DELETE forgets every field, or one with `?field=`. Both answer `applied` (whether the scraper service picked the change up; `null` when unreachable) |
+| GET | `/api/credentials` | Per institution and field: `stored`, `needsReentry`, `fallback` (`null` when the scraper service is down) and `updatedAt`; whether saving works (`canSave`, `saveBlocked`, `keyMismatch`) and the active key's dates (`key`); never a value |
+| PUT/DELETE | `/api/credentials/[slug]` | PUT `{ fields: { key: value } }` seals and stores some or all fields (`503` with a `reason` while the scraper service cannot confirm the active key; a retryable `409` if the key rotated twice under the request); DELETE forgets every field, or one with `?field=`. Both answer `applied` (whether the scraper service picked the change up; `null` when unreachable) |
 | GET | `/api/scrapers` | Latest run per scraper |
 | GET | `/api/scrapers/available` | Enabled scraper slugs, from the scraper service |
 | GET/POST | `/api/transactions` | Transactions (list, create; create takes an optional `location`); the list filters by `month`, `from`/`to`, `productId`, `institution`, `categoryId` and `q` (every word in the original or the displayed description, ignoring case and accents) |
