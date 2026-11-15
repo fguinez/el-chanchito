@@ -675,8 +675,8 @@ there):
 The banner follows the sign-in and shows its result. When it succeeds the
 service clears the failure marker (`.login-failed` for Fintual, the sign-in
 marker for Mercado Pago) and refreshes that institution; the banner clears once
-that run lands. Institutions without a button (Lider in reuse mode, or Fintual
-with a token and no password) still use their `make <institution>-login`.
+that run lands. Institutions without a button (Lider or Mercado Pago in reuse mode) still use
+their `make <institution>-login`.
 
 ### On-demand refresh (from the dashboard)
 

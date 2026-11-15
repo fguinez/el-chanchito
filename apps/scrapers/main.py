@@ -587,8 +587,11 @@ def _make_control_handler(
             return False
 
         def _read_json(self) -> dict | None:
-            length = int(self.headers.get("Content-Length") or 0)
-            if length > _MAX_CONTROL_BODY:
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                return None
+            if not 0 <= length <= _MAX_CONTROL_BODY:
                 return None
             try:
                 body = json.loads(self.rfile.read(length) or b"{}")
@@ -666,6 +669,9 @@ def _make_control_handler(
                         },
                         {"Retry-After": str(wait)},
                     )
+                elif _RUN_GUARD.holder(slug) == "login":
+                    # The run would be dropped; the sign-in refreshes it when it succeeds.
+                    self._send(409, {"error": f"a sign-in to {slug} is in progress"})
                 elif trigger(slug):
                     self._send(202, {"triggered": [slug]})
                 else:

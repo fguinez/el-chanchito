@@ -15,6 +15,7 @@ from interactive_login import (
     InteractiveLogins,
     LoginError,
     LoginProvider,
+    LoginSession,
     RunGuard,
     build_providers,
 )
@@ -106,6 +107,15 @@ def test_code_sign_in_waits_for_the_code_then_refreshes(spawner, trigger):
         ["fintual"],
     )
     assert guard.holder("fintual") is None
+
+
+def test_a_code_posted_as_the_wait_times_out_still_counts(trigger):
+    """The timeout re-checks under the lock, so an accepted code is never dropped."""
+    logins = InteractiveLogins({"fintual": _code_provider([])}, trigger, RunGuard(), code_timeout=0)
+    session = LoginSession("fintual", "code")
+    session._code = "123456"
+
+    assert logins._await_code(session) == "123456"
 
 
 def test_code_sign_in_times_out(spawner, trigger):
@@ -210,15 +220,17 @@ def test_unknown_institution_is_404(trigger):
     ("env", "keys", "expected"),
     [
         ({"FINTUAL_PASSWORD": "synthetic"}, {"fintual"}, {"fintual": "code"}),
+        ({"FINTUAL_TOKEN": "synthetic"}, {"fintual"}, {"fintual": "code"}),
         ({}, {"fintual"}, {}),
         ({}, {"mercadopago", "bci_lider"}, {"mercadopago": "browser", "bci_lider": "refresh"}),
+        ({"MERCADOPAGO_CDP_URL": "http://localhost:9333"}, {"mercadopago"}, {}),
         ({"LIDER_BCI_CDP_URL": "http://localhost:9333"}, {"bci_lider"}, {}),
         ({"FINTUAL_PASSWORD": "synthetic"}, {"buda"}, {}),
     ],
 )
 def test_build_providers(monkeypatch, env, keys, expected):
     """Only enabled scrapers whose sign-in can run unattended by a terminal."""
-    for name in ("FINTUAL_PASSWORD", "LIDER_BCI_CDP_URL"):
+    for name in ("FINTUAL_PASSWORD", "FINTUAL_TOKEN", "LIDER_BCI_CDP_URL", "MERCADOPAGO_CDP_URL"):
         monkeypatch.delenv(name, raising=False)
     for name, value in env.items():
         monkeypatch.setenv(name, value)
@@ -328,3 +340,20 @@ def test_run_is_skipped_while_a_sign_in_holds_the_institution(monkeypatch):
         main._RUN_GUARD.release("fintual")
 
     assert started == []
+
+
+def test_cancelled_sign_in_does_not_stay_running(trigger):
+    """A BaseException out of the provider still ends the sign-in as failed."""
+
+    def run(_):
+        raise KeyboardInterrupt
+
+    logins = InteractiveLogins({"mercadopago": LoginProvider("browser", run)}, trigger, RunGuard())
+    session_started = []
+    logins._spawn = lambda target: session_started.append(target)
+    logins.start("mercadopago")
+
+    with pytest.raises(KeyboardInterrupt):
+        session_started[0]()
+
+    assert logins.status("mercadopago")[1]["state"] == "failed"

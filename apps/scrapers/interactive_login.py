@@ -136,13 +136,13 @@ class InteractiveLogins:
             return 404, {"error": f"no interactive sign-in for {slug}"}
         with self._lock:
             session = self._sessions.get(slug)
-        if session is None:
-            return 200, {
-                "institution": slug,
-                "method": self._providers[slug].method,
-                "state": "idle",
-            }
-        return 200, session.public()
+            if session is not None:
+                return 200, session.public()
+        return 200, {
+            "institution": slug,
+            "method": self._providers[slug].method,
+            "state": "idle",
+        }
 
     def start(self, slug: str) -> tuple[int, dict]:
         provider = self._providers.get(slug)
@@ -189,25 +189,31 @@ class InteractiveLogins:
     def _await_code(self, session: LoginSession) -> str:
         with self._lock:
             session.state = "awaiting_code"
-        if not session._code_ready.wait(self._code_timeout):
-            raise LoginError("No code arrived in time; start the sign-in again.")
-        assert session._code is not None
-        return session._code
+        session._code_ready.wait(self._code_timeout)
+        with self._lock:
+            # Under the lock: a code posted as the wait times out still counts.
+            if session._code is None:
+                session.state = "running"
+                raise LoginError("No code arrived in time; start the sign-in again.")
+            return session._code
 
     def _run(self, session: LoginSession, provider: LoginProvider) -> None:
         assert provider.run is not None
         await_code = (lambda: self._await_code(session)) if provider.method == "code" else None
         try:
             provider.run(await_code)
-        except Exception as exc:
+        except BaseException as exc:
             # Only our own messages are safe to show: library errors can carry
-            # URLs or account details.
+            # URLs or account details. BaseException too (a cancelled
+            # asyncio.run), or the sign-in would read `running` forever.
             message = str(exc) if isinstance(exc, LoginError) else _safe_message(exc)
             logger.warning("Interactive sign-in for %s failed: %s", session.slug, message)
-            self._finish(session, "failed", message)
-            return
-        finally:
             self._guard.release(session.slug)
+            self._finish(session, "failed", message)
+            if not isinstance(exc, Exception):
+                raise
+            return
+        self._guard.release(session.slug)
         self._finish(session, "succeeded", None)
         logger.info("Interactive sign-in for %s succeeded; refreshing it", session.slug)
         self._trigger(session.slug)
@@ -219,7 +225,7 @@ class InteractiveLogins:
             session.finished_at = datetime.now(UTC).isoformat()
 
 
-def _safe_message(exc: Exception) -> str:
+def _safe_message(exc: BaseException) -> str:
     """A failure message for the dashboard: the scrapers' own sign-in errors
     are written to be shown (they are what a needs_sign_in run displays);
     anything else is reduced to its type."""
@@ -260,15 +266,17 @@ def _mercadopago_provider() -> LoginProvider:
 def build_providers(scraper_keys: set[str]) -> dict[str, LoginProvider]:
     """The sign-ins the dashboard can start, among the enabled scrapers.
 
-    Fintual needs its password configured (a token-only setup has no sign-in
-    to run). Lider only in managed mode: with `LIDER_BCI_CDP_URL` set, runs
-    drive a Chrome someone else started, so a run cannot open a sign-in
-    window.
+    Fintual needs its password configured (`FINTUAL_TOKEN` is its legacy
+    name). Lider and Mercado Pago only in managed mode: with their
+    `*_CDP_URL` set, runs drive a Chrome someone else started, so the sign-in
+    belongs in that Chrome.
     """
     providers: dict[str, LoginProvider] = {}
-    if "fintual" in scraper_keys and os.environ.get("FINTUAL_PASSWORD"):
+    if "fintual" in scraper_keys and (
+        os.environ.get("FINTUAL_PASSWORD") or os.environ.get("FINTUAL_TOKEN")
+    ):
         providers["fintual"] = _fintual_provider()
-    if "mercadopago" in scraper_keys:
+    if "mercadopago" in scraper_keys and not os.environ.get("MERCADOPAGO_CDP_URL"):
         providers["mercadopago"] = _mercadopago_provider()
     if "bci_lider" in scraper_keys and not os.environ.get("LIDER_BCI_CDP_URL"):
         providers["bci_lider"] = LoginProvider("refresh")

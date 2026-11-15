@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, LogIn } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -42,6 +42,9 @@ export function SignInAction({
   const [code, setCode] = useState("");
   const [sending, setSending] = useState(false);
   const base = `/api/scrapers/login/${encodeURIComponent(institution)}`;
+  // Bumped by every POST: a poll that began before one answers with a state
+  // the POST has already moved past, so its result is dropped.
+  const generation = useRef(0);
 
   const apply = useCallback(
     (next: SignInStatus | null) => {
@@ -71,11 +74,12 @@ export function SignInAction({
   useEffect(() => {
     if (!pending) return;
     const timer = setInterval(() => {
+      const startedAt = generation.current;
       fetch(base)
         .then((res) => (res.ok ? res.json() : null))
         .then((data) => {
           const next = parseSignInStatus(data);
-          if (next) apply(next);
+          if (next && generation.current === startedAt) apply(next);
         })
         .catch(() => {});
     }, POLL_MS);
@@ -85,6 +89,7 @@ export function SignInAction({
   async function start() {
     setError(null);
     setSending(true);
+    generation.current += 1;
     try {
       const res = await fetch(base, {
         method: "POST",
@@ -107,6 +112,7 @@ export function SignInAction({
     event.preventDefault();
     setError(null);
     setSending(true);
+    generation.current += 1;
     try {
       const res = await fetch(`${base}/code`, {
         method: "POST",
