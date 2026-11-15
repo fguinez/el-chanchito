@@ -870,26 +870,13 @@ def _evaluate_bounded(page, script: str, arg: dict, timeout_ms: int, kill_switch
     return value
 
 
-def _connection_lost(exc: Exception) -> bool:
-    """Whether a failed Playwright call means the tab or its connection is gone.
-
-    A dead driver raises a bare `Exception` (1.64) or `TargetClosedError`
-    (1.65, also for a closed tab or Chrome); `TargetClosedError` is not public,
-    so it is matched by name. Any other Playwright `Error` (a timeout, a
-    navigation that destroyed the script's context) leaves the tab usable.
-    """
-    from playwright.sync_api import Error as PlaywrightError
-
-    return not isinstance(exc, PlaywrightError) or type(exc).__name__ == "TargetClosedError"
-
-
 def _fetch_props(page, surface: str, page_number: int = 1, kill_switch=None) -> dict:
     """Fetch one allowed page from inside the tab and return its `pageProps`.
 
     The in-page script turns every fetch failure into a status, so a call that
     raises is either a page failure to carry on from (`MercadoPagoFetchError`:
     the script outlived its timeout, the tab navigated) or a lost tab or
-    connection (`MercadoPagoConnectionLostError`, see `_connection_lost`),
+    connection (`MercadoPagoConnectionLostError`, see `real_chrome.connection_lost`),
     which ends the read: further calls would only fail the same way.
     """
     failure: str | None = None
@@ -905,7 +892,7 @@ def _fetch_props(page, surface: str, page_number: int = 1, kill_switch=None) -> 
         )
     except Exception as exc:
         failure = type(exc).__name__
-        lost = _connection_lost(exc)
+        lost = real_chrome.connection_lost(exc)
     if failure is not None:
         # A killed driver is not a page failure to carry on from.
         _check_killed(kill_switch)
