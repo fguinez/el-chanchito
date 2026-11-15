@@ -103,8 +103,19 @@ def run_outcome(
     return "success", message
 
 
+# Names of the scrapers with a run in flight. The startup run is no scheduler
+# job, so `max_instances=1` can't stop a manual trigger from overlapping it;
+# this does, for every caller of `run_scraper`. Only touched on the event loop.
+_in_flight: set[str] = set()
+
+
 async def run_scraper(scraper: BaseScraper) -> None:
     """Run a single scraper with logging and DB tracking.
+
+    A call while the same scraper's run is still in flight records nothing and
+    returns: that run is already fetching what the call asked for, and two
+    sessions at once would fight over one login (BanChile's second run would
+    lose its restored session and hit the login cooldown).
 
     Transactions and products are scraped as independent legs: a failure in one
     must not stop the other. BanChile in particular reads both from one browser
@@ -131,6 +142,18 @@ async def run_scraper(scraper: BaseScraper) -> None:
     products, each on its own: one that names an unknown product, or fails to
     write, is a warning. Neither counts as landed.
     """
+    if scraper.name in _in_flight:
+        logger.info("Scraper %s already running; this trigger joins that run", scraper.name)
+        return
+    _in_flight.add(scraper.name)
+    try:
+        await _run_scraper(scraper)
+    finally:
+        _in_flight.discard(scraper.name)
+
+
+async def _run_scraper(scraper: BaseScraper) -> None:
+    """`run_scraper`'s body, once no other run of `scraper` is in flight."""
     run_id = start_scraper_run(scraper.method, scraper.institution)
     logger.info("Starting scraper: %s (run=%s)", scraper.name, run_id)
 
@@ -471,8 +494,8 @@ def _make_control_handler(
     the seconds until it may be triggered again (None: now). Until then
     `POST /refresh/{slug}` answers 429 with `Retry-After`, and `POST /refresh`
     triggers the rest and lists it under `skipped`. The startup run isn't a
-    job, so a trigger during it isn't absorbed (BanChile's login gate still
-    stops a second login).
+    job, so a trigger during it isn't absorbed by `max_instances`;
+    `run_scraper`'s in-flight guard absorbs it instead.
 
     GET /health reports the scheduler, not just this thread: it answers 503
     when `heartbeat` has gone stale, which is what the compose healthcheck

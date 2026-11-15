@@ -376,6 +376,52 @@ class TestRunOutcome:
         assert run_outcome(errors, [], landed, None, sign_in) == expected
 
 
+class _GatedScraper(_StubScraper):
+    """A stub whose transactions leg waits for `release` and counts its calls."""
+
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+        self.release = asyncio.Event()
+
+    async def scrape_transactions(self):
+        self.calls += 1
+        await self.release.wait()
+        return []
+
+
+class TestInFlightGuard:
+    """A second run of a scraper whose run is still in flight records nothing."""
+
+    def test_an_overlapping_trigger_joins_the_run_in_flight(self, finish):
+        """The startup run and a manual trigger of one scraper never overlap."""
+        scraper = _GatedScraper()
+
+        async def overlap():
+            first = asyncio.create_task(run_scraper(scraper))
+            await asyncio.sleep(0)
+            await run_scraper(scraper)
+            scraper.release.set()
+            await first
+
+        asyncio.run(overlap())
+
+        assert scraper.calls == 1
+        finish.assert_called_once()
+
+    def test_the_next_run_goes_through_once_it_finished(self, finish):
+        """The guard is released even when the run crashed."""
+        scraper = _StubScraper(tx_exc=RuntimeError("boom"), prod_exc=RuntimeError("boom"))
+        main_mod.start_scraper_run.side_effect = ["run-1", RuntimeError("db down"), "run-3"]
+
+        asyncio.run(run_scraper(scraper))
+        with pytest.raises(RuntimeError, match="db down"):
+            asyncio.run(run_scraper(scraper))
+        asyncio.run(run_scraper(scraper))
+
+        assert finish.call_count == 2
+
+
 class TestSignInRequired:
     """A leg that needs a human sign-in finishes the run as `needs_sign_in`."""
 
