@@ -36,6 +36,7 @@ from db.writer import (
     upsert_product,
     write_transactions,
 )
+from interactive_login import InteractiveLogins, RunGuard, build_providers
 from scrapers.backends import banchile_web
 from scrapers.backends.email import get_session as get_email_session
 from scrapers.base import (
@@ -115,14 +116,16 @@ def run_outcome(
     return "success", message
 
 
-# Names of the scrapers with a run in flight. The startup run is no scheduler
-# job, so `max_instances=1` can't stop a manual trigger from overlapping it;
-# this does, for every caller of `run_scraper`. Only touched on the event loop.
-_in_flight: set[str] = set()
+# Institutions a run or a dashboard-started sign-in holds right now: the two
+# never overlap (a sign-in rewrites the session a run reads). It also keeps a
+# manual trigger from overlapping the startup run, which is no scheduler job, so
+# `max_instances=1` can't stop it.
+_RUN_GUARD = RunGuard()
 
 
 async def run_scraper(scraper: BaseScraper) -> None:
-    """Run a single scraper with logging and DB tracking.
+    """Run a single scraper with logging and DB tracking, unless a sign-in
+    to its institution is in progress (that sign-in refreshes it when done).
 
     A call while the same scraper's run is still in flight records nothing and
     returns: that run is already fetching what the call asked for, and two
@@ -154,18 +157,22 @@ async def run_scraper(scraper: BaseScraper) -> None:
     products, each on its own: one that names an unknown product, or fails to
     write, is a warning. Neither counts as landed.
     """
-    if scraper.name in _in_flight:
-        logger.info("Scraper %s already running; this trigger joins that run", scraper.name)
+    if not _RUN_GUARD.claim(scraper.institution, "run"):
+        logger.info(
+            "Scraper %s skipped: %s is busy (%s)",
+            scraper.name,
+            scraper.institution,
+            _RUN_GUARD.holder(scraper.institution),
+        )
         return
-    _in_flight.add(scraper.name)
     try:
         await _run_scraper(scraper)
     finally:
-        _in_flight.discard(scraper.name)
+        _RUN_GUARD.release(scraper.institution)
 
 
 async def _run_scraper(scraper: BaseScraper) -> None:
-    """`run_scraper`'s body, once no other run of `scraper` is in flight."""
+    """`run_scraper`'s body, once it holds the scraper's institution."""
     run_id = start_scraper_run(scraper.method, scraper.institution)
     logger.info("Starting scraper: %s (run=%s)", scraper.name, run_id)
 
@@ -495,11 +502,26 @@ class Heartbeat:
         return self._clock() - self._last
 
 
+# The largest request body the control server reads (a sign-in code).
+_MAX_CONTROL_BODY = 1024
+
+
+def _trigger_job(scheduler: AsyncIOScheduler, slug: str) -> bool:
+    """Run `slug`'s scheduled job now; False when it has none."""
+    job = scheduler.get_job(slug)
+    if job is None:
+        return False
+    job.modify(next_run_time=datetime.now(UTC))
+    logger.info("Manual trigger for %s", slug)
+    return True
+
+
 def _make_control_handler(
     scheduler: AsyncIOScheduler,
     scraper_keys: set[str],
     heartbeat: Heartbeat,
     cooldowns: dict[str, Callable[[], float | None]] | None = None,
+    logins: InteractiveLogins | None = None,
 ):
     """Build the HTTP handler for the internal scraper control server.
 
@@ -519,6 +541,16 @@ def _make_control_handler(
     GET /health reports the scheduler, not just this thread: it answers 503
     when `heartbeat` has gone stale, which is what the compose healthcheck
     reads.
+
+    `/login` routes start the interactive sign-ins of `logins`
+    (`interactive_login`): `GET /login` lists them, `POST /login/{slug}`
+    starts one, `GET /login/{slug}` reports it, and `POST /login/{slug}/code`
+    hands a `code` sign-in its one-time code. A sign-in opens windows on this
+    machine and mails codes, so these routes answer only the dashboard's
+    server: a request carrying a browser's `Origin` or `Sec-Fetch-Site` is
+    refused (a page reaching this port directly, DNS rebinding included), and
+    a POST must be labelled JSON, so a cross-origin one always needs a
+    preflight this server never grants.
     """
     cooldowns = cooldowns or {}
 
@@ -528,12 +560,7 @@ def _make_control_handler(
         return math.ceil(wait) if wait and wait > 0 else 0
 
     def trigger(slug: str) -> bool:
-        job = scheduler.get_job(slug)
-        if job is None:
-            return False
-        job.modify(next_run_time=datetime.now(UTC))
-        logger.info("Manual trigger for %s", slug)
-        return True
+        return _trigger_job(scheduler, slug)
 
     class ControlHandler(BaseHTTPRequestHandler):
         def _send(self, code: int, payload: dict, headers: dict[str, str] | None = None) -> None:
@@ -546,8 +573,58 @@ def _make_control_handler(
             self.end_headers()
             self.wfile.write(body)
 
+        def _login_refused(self) -> bool:
+            """Send the refusal for a /login request a browser made, or a POST
+            not labelled JSON; True when one was sent."""
+            if self.headers.get("Origin") or self.headers.get("Sec-Fetch-Site"):
+                self._send(403, {"error": "browser requests are not accepted"})
+                return True
+            if self.command == "POST":
+                content_type = (self.headers.get("Content-Type") or "").split(";")[0]
+                if content_type.strip().lower() != "application/json":
+                    self._send(415, {"error": "expected application/json"})
+                    return True
+            return False
+
+        def _read_json(self) -> dict | None:
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                return None
+            if not 0 <= length <= _MAX_CONTROL_BODY:
+                return None
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return None
+            return body if isinstance(body, dict) else None
+
+        def _handle_login(self) -> None:
+            if logins is None:
+                self._send(404, {"error": "not found"})
+                return
+            if self._login_refused():
+                return
+            parts = self.path.strip("/").split("/")
+            if self.command == "GET" and parts == ["login"]:
+                self._send(200, {"logins": logins.supported()})
+            elif self.command == "GET" and len(parts) == 2:
+                self._send(*logins.status(parts[1]))
+            elif self.command == "POST" and len(parts) == 2:
+                self._send(*logins.start(parts[1]))
+            elif self.command == "POST" and len(parts) == 3 and parts[2] == "code":
+                body = self._read_json()
+                if body is None:
+                    self._send(400, {"error": "invalid JSON body"})
+                else:
+                    self._send(*logins.submit_code(parts[1], body.get("code")))
+            else:
+                self._send(404, {"error": "not found"})
+
         def do_GET(self) -> None:
-            if self.path == "/health":
+            if self.path == "/login" or self.path.startswith("/login/"):
+                self._handle_login()
+            elif self.path == "/health":
                 age = round(heartbeat.age())
                 if age < _HEARTBEAT_STALE_SECONDS:
                     self._send(200, {"status": "ok", "heartbeat_age_seconds": age})
@@ -566,7 +643,9 @@ def _make_control_handler(
                 self._send(404, {"error": "not found"})
 
         def do_POST(self) -> None:
-            if self.path == "/refresh":
+            if self.path.startswith("/login/"):
+                self._handle_login()
+            elif self.path == "/refresh":
                 triggered: list[str] = []
                 skipped: list[dict] = []
                 for slug in sorted(s for s in scraper_keys if scheduler.get_job(s)):
@@ -590,6 +669,9 @@ def _make_control_handler(
                         },
                         {"Retry-After": str(wait)},
                     )
+                elif _RUN_GUARD.holder(slug) == "login":
+                    # The run would be dropped; the sign-in refreshes it when it succeeds.
+                    self._send(409, {"error": f"a sign-in to {slug} is in progress"})
                 elif trigger(slug):
                     self._send(202, {"triggered": [slug]})
                 else:
@@ -619,12 +701,18 @@ def _start_control_server(
         return None
 
     host = os.environ.get("SCRAPER_CONTROL_HOST") or "127.0.0.1"
-    handler = _make_control_handler(scheduler, scraper_keys, heartbeat, _REFRESH_COOLDOWNS)
+    logins = InteractiveLogins(
+        build_providers(scraper_keys),
+        lambda slug: _trigger_job(scheduler, slug),
+        _RUN_GUARD,
+    )
+    handler = _make_control_handler(scheduler, scraper_keys, heartbeat, _REFRESH_COOLDOWNS, logins)
     server = ThreadingHTTPServer((host, int(port)), handler)
     thread = threading.Thread(target=server.serve_forever, name="scraper-control", daemon=True)
     thread.start()
     logger.info(
-        "Control server listening on %s:%s (POST /refresh[/{slug}], GET /scrapers, GET /health)",
+        "Control server listening on %s:%s (POST /refresh[/{slug}], /login[/{slug}], "
+        "GET /scrapers, GET /health)",
         host,
         port,
     )

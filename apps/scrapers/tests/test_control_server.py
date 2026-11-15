@@ -153,6 +153,18 @@ class TestControlServer:
         assert status == 404
         assert "nope" in body["error"]
 
+    def test_refresh_one_is_409_while_a_sign_in_holds_it(self, server):
+        """The run would be dropped, so the trigger is refused instead of a silent 202."""
+        scheduler, base = server
+        main._RUN_GUARD.claim("fintual", "login")
+        try:
+            status, body = _request(f"{base}/refresh/fintual", "POST")
+        finally:
+            main._RUN_GUARD.release("fintual")
+
+        assert (status, scheduler.jobs["fintual"].modified_with) == (409, None)
+        assert "sign-in" in body["error"]
+
     def test_unknown_path_404(self, server):
         _, base = server
         status, _ = _request(f"{base}/whatever", "GET")

@@ -1235,9 +1235,10 @@ Writes are isolated per row: `run_scraper` writes each product separately, and
 its own `conn.transaction()` block, so a row that fails is rolled back alone
 instead of aborting the transaction for every row after it. The dashboard's
 `ScraperStatus` widget shows `partial` runs with an amber badge and banner,
-`needs_sign_in` runs with a violet badge and banner, `skipped` runs with a
-neutral badge and no banner, and every finished row
-with a message expands to its `error_message`.
+`needs_sign_in` runs with a violet badge and banner (with an **Iniciar
+sesión** button where the control server supports that institution's sign-in,
+see "On-demand refresh"), `skipped` runs with a neutral badge and no banner,
+and every finished row with a message expands to its `error_message`.
 
 **Retries.** `scrapers/retry.py` retries idempotent work only, three attempts
 with 1 s / 2 s backoff: Buda's and Fintual's GETs, Fintual's read-only `/gql/`
@@ -1593,6 +1594,26 @@ Browser → web POST /api/institutions/refresh {institution?}
   The Compose `scrapers` service polls it as its `healthcheck`, so a wedged
   scheduler shows as `unhealthy` in `docker compose ps`. Compose only marks
   the container; restarting it on that is up to whatever runs the stack.
+- `/login` routes start the `make *-login` flows from the dashboard
+  (`interactive_login.py`). `GET /login` lists `{institution, method}` for the
+  enabled scrapers that support one: `code` (Fintual: the service signs in with
+  its configured credentials, in a thread with its own event loop, and blocks
+  until the dashboard posts the e-mailed code to `POST /login/{slug}/code`, at
+  most 10 minutes), `browser` (Mercado Pago: `save_login_session` opens a
+  visible Chrome for the human), or `refresh` (Lider in managed mode: its run
+  already falls back to a visible window when sign-in needs a human, so
+  `POST /login/bci_lider` just triggers the job). `POST /login/{slug}` starts
+  one (`409` while one is under way, or while a run holds the institution) and
+  `GET /login/{slug}` reports `idle|running|awaiting_code|succeeded|failed`
+  with a showable `message`. A `code` or `browser` sign-in and a run of the
+  same institution never overlap: both claim it in `RunGuard` (`main._RUN_GUARD`),
+  and a run that finds it held is skipped without a run row. A successful
+  sign-in triggers that institution's job, which is what clears the dashboard's
+  violet banner. Because a sign-in opens windows and mails codes, these routes
+  refuse any request with a browser `Origin` or `Sec-Fetch-Site` header (a page
+  reaching the port directly, DNS rebinding included) and any POST not labelled
+  `application/json`; the web reaches them server-side through
+  `/api/scrapers/login[/{slug}[/code]]`, behind the proxy's Origin check.
 - The server runs on a daemon thread and binds `SCRAPER_CONTROL_HOST`, which
   defaults to `127.0.0.1` (host-dev); Compose sets `0.0.0.0` inside the
   container so `web` can reach it. It's an **unauthenticated** trigger: keep it

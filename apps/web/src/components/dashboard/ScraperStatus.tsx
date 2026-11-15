@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import {
   Card,
   CardContent,
@@ -17,6 +17,12 @@ import {
   runStatusStyle,
   truncateRunMessage,
 } from "@/lib/scraper-runs";
+import {
+  parseSupportedSignIns,
+  pruneSignInWatches,
+  type SignInMethod,
+} from "@/lib/scraper-login";
+import { SignInAction } from "@/components/dashboard/sign-in-action";
 import { AlertTriangle } from "lucide-react";
 
 interface ScraperRun {
@@ -70,11 +76,13 @@ function RunBanner({
   title,
   runs,
   fallback,
+  action,
 }: {
   tone: keyof typeof BANNER_TONES;
   title: string;
   runs: ScraperRun[];
   fallback: string;
+  action?: (run: ScraperRun) => ReactNode;
 }) {
   const t = BANNER_TONES[tone];
   return (
@@ -83,26 +91,81 @@ function RunBanner({
       <div className="flex-1 text-sm">
         <p className={cn("font-medium", t.title)}>{title}</p>
         {runs.map((r) => (
-          <p key={runKey(r)} className={cn("mt-1", t.body)}>
-            {runLabel(r)}:{" "}
-            {r.error_message ? truncateRunMessage(r.error_message) : fallback}
-          </p>
+          <div key={runKey(r)} className={cn("mt-1", t.body)}>
+            <p>
+              {runLabel(r)}:{" "}
+              {r.error_message ? truncateRunMessage(r.error_message) : fallback}
+            </p>
+            {action?.(r)}
+          </div>
         ))}
       </div>
     </div>
   );
 }
 
+// After a sign-in goes through, the runs are re-read this often until the
+// institution's refresh has finished, for at most WATCH_MAX_MS.
+const WATCH_POLL_MS = 3000;
+const WATCH_MAX_MS = 10 * 60 * 1000;
+
 export function ScraperStatus() {
   const [runs, setRuns] = useState<ScraperRun[]>([]);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [signIns, setSignIns] = useState<Record<string, SignInMethod>>({});
+  // Institution -> when its sign-in went through (ms since epoch).
+  const [watching, setWatching] = useState<Record<string, number>>({});
+
+  const loadRuns = useCallback(async (): Promise<ScraperRun[] | null> => {
+    try {
+      const res = await fetch("/api/scrapers");
+      const data: ScraperRun[] = await res.json();
+      setRuns(data);
+      return data;
+    } catch {
+      return null;
+    }
+  }, []);
 
   useEffect(() => {
     fetch("/api/scrapers")
       .then((res) => res.json())
       .then(setRuns)
       .catch(() => {});
-  }, []);
+    fetch("/api/scrapers/login")
+      .then((res) => res.json())
+      .then((data) =>
+        setSignIns(
+          Object.fromEntries(
+            parseSupportedSignIns(data).map((s) => [s.institution, s.method])
+          )
+        )
+      )
+      .catch(() => {});
+  }, [loadRuns]);
+
+  const watched = Object.keys(watching).length > 0;
+  useEffect(() => {
+    if (!watched) return;
+    const timer = setInterval(async () => {
+      const latest = await loadRuns();
+      if (latest) {
+        setWatching((current) =>
+          pruneSignInWatches(current, latest, Date.now(), WATCH_MAX_MS)
+        );
+      }
+    }, WATCH_POLL_MS);
+    return () => clearInterval(timer);
+  }, [watched, loadRuns]);
+
+  const onSignedIn = useCallback(
+    (institution: string) => {
+      // A small margin: the run row's started_at comes from the service's clock.
+      setWatching((current) => ({ ...current, [institution]: Date.now() - 5000 }));
+      loadRuns();
+    },
+    [loadRuns]
+  );
 
   if (runs.length === 0) {
     return null;
@@ -112,7 +175,7 @@ export function ScraperStatus() {
   // A partial run is no outage, but its numbers may be partly stale.
   const partials = runs.filter((r) => r.status === "partial");
   // Nothing is broken: the session is gone and only a sign-in brings it back.
-  const signIns = runs.filter((r) => r.status === "needs_sign_in");
+  const signInRuns = runs.filter((r) => r.status === "needs_sign_in");
 
   return (
     <div className="space-y-3">
@@ -128,16 +191,27 @@ export function ScraperStatus() {
           fallback="Error desconocido"
         />
       )}
-      {signIns.length > 0 && (
+      {signInRuns.length > 0 && (
         <RunBanner
           tone="needsSignIn"
           title={
-            signIns.length === 1
-              ? `${runLabel(signIns[0])} necesita que inicies sesión`
-              : `${signIns.length} scrapers necesitan que inicies sesión`
+            signInRuns.length === 1
+              ? `${runLabel(signInRuns[0])} necesita que inicies sesión`
+              : `${signInRuns.length} scrapers necesitan que inicies sesión`
           }
-          runs={signIns}
+          runs={signInRuns}
           fallback="Sesión perdida"
+          action={(r) =>
+            signIns[r.institution] ? (
+              // Keyed by run, so a new needs_sign_in run starts it afresh.
+              <SignInAction
+                key={`${runKey(r)}:${r.started_at}`}
+                institution={r.institution}
+                method={signIns[r.institution]}
+                onSucceeded={onSignedIn}
+              />
+            ) : null
+          }
         />
       )}
       {partials.length > 0 && (

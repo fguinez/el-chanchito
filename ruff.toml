@@ -37,4 +37,4 @@ ignore = [
 "packages/product-model/scripts/generate.py" = ["E402"]
 
 [lint.isort]
-known-first-party = ["scrapers", "db", "product_model", "main"]
+known-first-party = ["scrapers", "db", "product_model", "main", "interactive_login"]
