@@ -430,6 +430,20 @@ class BciLiderAccountMismatch(BciLiderSessionError):
     afresh, never read."""
 
 
+class BciLiderAccountFormatError(BciLiderSessionError):
+    """The portal named another account right after this run signed in with
+    LIDER_BCI_RUT: more likely its account id format changed than a wrong
+    account. Never retried, never resets the profile, never resends the clave."""
+
+
+# Its message, shared by the scrape and `make bci-lider-login`.
+_ACCOUNT_FORMAT_MESSAGE = (
+    "BciLider: right after signing in with LIDER_BCI_RUT the portal reported another "
+    "account; its account id format has likely changed, so nothing was read. The "
+    "account check in bci_lider_web needs updating."
+)
+
+
 class BciLiderSignInRequired(BciLiderSessionError, SignInRequired):
     """Chrome was reachable but the portal stayed signed out: a human must sign in.
 
@@ -546,6 +560,9 @@ def _verify_account(page, rut: str | None, *, signed_in_now: bool, managed: bool
     verdict = _account_check(page, rut)
     if verdict == "match" or (verdict == "unknown" and signed_in_now):
         return
+    if verdict == "mismatch" and signed_in_now:
+        logger.error("BciLider: the portal's account id did not match right after sign-in")
+        raise BciLiderAccountFormatError(_ACCOUNT_FORMAT_MESSAGE)
     what = (
         "is signed in to another account than LIDER_BCI_RUT"
         if verdict == "mismatch"
@@ -804,6 +821,9 @@ def _tie_login_profile(page, rut: str, *, own_autofill: bool, deadline: float) -
     while verdict == "unknown" and time.monotonic() < settle:
         time.sleep(1)
         verdict = _account_check(page, rut)
+    if verdict == "mismatch" and own_autofill:
+        logger.error("BciLider: the portal's account id did not match right after sign-in")
+        raise BciLiderAccountFormatError(_ACCOUNT_FORMAT_MESSAGE)
     if verdict == "mismatch":
         raise BciLiderSessionError(
             "This Chrome is signed in to another account than LIDER_BCI_RUT. Sign out "
@@ -1246,6 +1266,8 @@ def _scrape_managed_sync(rut: str | None, password: str | None) -> BciLiderCardR
         if exc.submitted:
             raise
         first_error: Exception = exc
+    except BciLiderAccountFormatError:
+        raise
     except BciLiderAccountMismatch as exc:
         _reset_profile()
         first_error = exc

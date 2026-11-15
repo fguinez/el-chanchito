@@ -1002,7 +1002,7 @@ class TestAccountBinding:
 
     @pytest.mark.parametrize(
         ("verdict", "signed_in_now"),
-        [("mismatch", False), ("mismatch", True), ("unknown", False)],
+        [("mismatch", False), ("unknown", False)],
     )
     def test_reuse_mode_refuses_and_asks_for_a_sign_out(self, monkeypatch, verdict, signed_in_now):
         monkeypatch.setattr(web, "_account_check", lambda page, rut: verdict)
@@ -1014,13 +1014,58 @@ class TestAccountBinding:
 
     @pytest.mark.parametrize(
         ("verdict", "signed_in_now"),
-        [("mismatch", False), ("mismatch", True), ("unknown", False)],
+        [("mismatch", False), ("unknown", False)],
     )
     def test_managed_mode_raises_a_mismatch_to_reset(self, monkeypatch, verdict, signed_in_now):
         monkeypatch.setattr(web, "_account_check", lambda page, rut: verdict)
         with pytest.raises(web.BciLiderAccountMismatch) as info:
             web._verify_account(object(), self.RUT, signed_in_now=signed_in_now, managed=True)
         assert not isinstance(info.value, SignInRequired)
+
+    @pytest.mark.parametrize("managed", [True, False], ids=["managed", "reuse"])
+    def test_a_mismatch_right_after_our_sign_in_is_a_format_problem(
+        self, monkeypatch, managed, caplog
+    ):
+        monkeypatch.setattr(web, "_account_check", lambda page, rut: "mismatch")
+        with caplog.at_level("ERROR"), pytest.raises(web.BciLiderAccountFormatError) as info:
+            web._verify_account(object(), self.RUT, signed_in_now=True, managed=managed)
+        assert not isinstance(info.value, (SignInRequired, web.BciLiderAccountMismatch))
+        assert "format" in str(info.value)
+        assert "11" not in str(info.value) + caplog.text
+
+    def test_a_format_problem_is_neither_retried_nor_resets_the_profile(self, profile, monkeypatch):
+        monkeypatch.setattr(web.real_chrome, "port_in_use", lambda port: False)
+        self._make_profile(profile, self.RUT)
+        calls = []
+
+        def fake_once(port, cdp_url, rut, password, offscreen):
+            calls.append(offscreen)
+            raise web.BciLiderAccountFormatError("synthetic")
+
+        monkeypatch.setattr(web, "_scrape_managed_once", fake_once)
+        with pytest.raises(web.BciLiderAccountFormatError):
+            web._scrape_managed_sync(self.RUT, "synthetic-clave")
+        assert calls == [True]
+        assert (profile / "Default" / "Cookies").exists()
+
+    def test_a_reset_that_still_mismatches_after_sign_in_stops_there(self, profile, monkeypatch):
+        """Managed: a mismatch resets once; the fresh sign-in mismatching too is
+        the format error, raised without a third attempt."""
+        monkeypatch.setattr(web.real_chrome, "port_in_use", lambda port: False)
+        outcomes = [
+            web.BciLiderAccountMismatch("synthetic"),
+            web.BciLiderAccountFormatError("synthetic"),
+        ]
+        calls = []
+
+        def fake_once(port, cdp_url, rut, password, offscreen):
+            calls.append(offscreen)
+            raise outcomes.pop(0)
+
+        monkeypatch.setattr(web, "_scrape_managed_once", fake_once)
+        with pytest.raises(web.BciLiderAccountFormatError):
+            web._scrape_managed_sync(self.RUT, "synthetic-clave")
+        assert calls == [True, False]
 
     def test_without_a_rut_there_is_nothing_to_compare(self, monkeypatch):
         def never(page, rut):
@@ -1310,10 +1355,18 @@ class TestLoginProfileMarker:
         state["submitted"] = False
         assert not run(["unknown"])
 
-    def test_another_account_fails_and_ties_nothing(self, login, tmp_path):
+    def test_our_autofill_then_a_mismatch_is_a_format_problem(self, login):
         _, run = login
-        with pytest.raises(web.BciLiderSessionError, match="another account"):
+        with pytest.raises(web.BciLiderAccountFormatError):
             run(["mismatch"])
+        assert not web.session_account.marker_path(web._CHROME_PROFILE).exists()
+
+    def test_another_account_fails_and_ties_nothing(self, login, tmp_path):
+        state, run = login
+        state["submitted"] = False
+        with pytest.raises(web.BciLiderSessionError, match="another account") as info:
+            run(["mismatch"])
+        assert not isinstance(info.value, web.BciLiderAccountFormatError)
         assert not web.session_account.marker_path(web._CHROME_PROFILE).exists()
 
     def test_the_wait_for_an_id_polls_until_it_shows(self, monkeypatch, tmp_path):

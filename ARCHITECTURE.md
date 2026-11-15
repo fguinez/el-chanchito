@@ -767,7 +767,10 @@ digit is not a valid mod-11 check digit, since it could otherwise be another
 account's full RUT). A mismatch in managed mode (`BciLiderAccountMismatch`) resets the
 profile once Chrome exits and the visible retry signs in on a fresh one; in
 reuse mode, whose Chrome is the user's and never wiped, it raises
-`BciLiderSignInRequired` asking for a sign-out and `make bci-lider-login`. A
+`BciLiderSignInRequired` asking for a sign-out and `make bci-lider-login`. A mismatch right
+after the run signed in with the RUT is taken as a changed id format
+(`BciLiderAccountFormatError`): logged, never retried, no profile reset and no
+second clave. A
 portal that stays signed out (the autofill times out with the login form still showing,
 or a read bounces to /login after the retry) raises `BciLiderSignInRequired`, so
 the run is `needs_sign_in` and the message asks for `make bci-lider-login` plus
