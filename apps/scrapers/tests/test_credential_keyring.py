@@ -23,9 +23,12 @@ from credential_manager import (
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from scrapers.credentials import (
+    V1,
+    V2,
     CredentialKey,
     KeyFile,
     load_key,
+    load_or_create_key,
     open_rows,
 )
 from tests.fakes_credentials import FakeRing
@@ -213,6 +216,34 @@ def test_a_reset_with_nothing_retired_still_names_unreadable_rows(tmp_path, monk
     monkeypatch.setattr(credentials_admin, "reset_key_file", lambda key_file, ring: (key, None, 2))
     assert credentials_admin._reset(KeyFile(tmp_path / "k"), object(), assume_yes=True) == 0
     assert "2 stored credential(s) must be entered again" in capsys.readouterr().out
+
+
+def test_status_names_the_scheme_of_each_key(tmp_path, store, capsys):
+    """An operator tells a v1 key from a v2 one, and never sees key material."""
+    key_file = KeyFile(tmp_path / "credentials_key")
+    local = load_or_create_key(key_file.path)
+    store.activate(local)
+    assert credentials_admin._status(key_file, store) == 0
+    out = capsys.readouterr().out
+    assert f"{local.key_id[:12]}, {V2.scheme}" in out
+    assert f"Algorithm:  {V2.algorithm} ({V2.scheme})" in out
+    assert local.seed.hex() not in out and local.public_raw.hex() not in out
+
+    store.activate(_other_key())
+    assert credentials_admin._status(key_file, store) == 1
+    assert f"Algorithm:  {V1.algorithm} ({V1.scheme})" in capsys.readouterr().out
+
+
+def test_reset_names_the_algorithm_of_each_key(tmp_path, store, monkeypatch, capsys):
+    store.activate(_other_key())
+    key_file = KeyFile(tmp_path / "credentials_key")
+    load_or_create_key(key_file.path)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: "no")
+    assert credentials_admin._reset(key_file, store, assume_yes=False) == 1
+    out = capsys.readouterr().out
+    assert f"Database's active key: {store.active.key_id[:12]}, {V1.algorithm}" in out
+    assert f"Local key file:        {key_file.load().key_id[:12]}, {V2.algorithm}" in out
 
 
 def test_reset_refuses_without_a_terminal(tmp_path, store, monkeypatch):

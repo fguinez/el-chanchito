@@ -33,7 +33,7 @@ from dotenv import load_dotenv
 from psycopg.conninfo import conninfo_to_dict
 
 from db.connection import close_pool
-from scrapers.credentials import CredentialKeyError, KeyFile, key_file_path
+from scrapers.credentials import KEY_KINDS, CredentialKeyError, KeyFile, key_file_path
 
 CONFIRM_WORD = "RESET"
 
@@ -60,13 +60,25 @@ def _poke_service() -> None:
     print(f"The scraper service reloaded its credentials (applied: {applied}).")
 
 
+def _scheme_of(algorithm: str) -> str:
+    """The scheme a key's published algorithm seals with (v1 or v2)."""
+    for kind in KEY_KINDS:
+        if kind.algorithm == algorithm:
+            return kind.scheme
+    return "unknown scheme"
+
+
 def _status(key_file: KeyFile, ring: DatabaseKeyRing) -> int:
     try:
-        local = key_file.load().key_id
+        local_key = key_file.load()
     except FileNotFoundError:
-        local = None
+        local_key = None
+    local = local_key.key_id if local_key else None
     active = ring.active_key()
-    print(f"Key file:   {key_file.path} ({local[:12] if local else 'missing'})")
+    print(
+        f"Key file:   {key_file.path} "
+        f"({f'{local[:12]}, {local_key.scheme}' if local_key else 'missing'})"
+    )
     if key_file.next_path.exists():
         print(
             f"Pending:    {key_file.next_path} (an interrupted rotation; the service resolves it)"
@@ -78,6 +90,7 @@ def _status(key_file: KeyFile, ring: DatabaseKeyRing) -> int:
     print(
         f"Database:   active key {active.key_id[:12]}, created {active.created_at:%Y-%m-%d} ({age.days} days ago)"
     )
+    print(f"Algorithm:  {active.algorithm} ({_scheme_of(active.algorithm)})")
     max_age = max_age_days_from_env()
     print(
         f"Rotation:   every {max_age} days (CREDENTIALS_KEY_MAX_AGE_DAYS)"
@@ -126,12 +139,13 @@ def _target() -> str:
 
 def _reset(key_file: KeyFile, ring: DatabaseKeyRing, assume_yes: bool) -> int:
     try:
-        local = key_file.load().key_id[:12]
+        local_key = key_file.load()
+        local = f"{local_key.key_id[:12]}, {local_key.algorithm}"
     except FileNotFoundError:
         local = "none yet; it will be created"
     try:
         active = ring.active_key()
-        active_id = active.key_id[:12] if active else "none"
+        active_id = f"{active.key_id[:12]}, {active.algorithm}" if active else "none"
     except Exception as exc:
         active_id = f"unknown ({type(exc).__name__})"
     print(

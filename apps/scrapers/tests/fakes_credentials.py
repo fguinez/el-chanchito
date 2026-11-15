@@ -37,7 +37,7 @@ class FakeRing:
         if self.active is not None:
             self.statuses[self.active.key_id] = "retired"
         self.statuses[key.key_id] = "active"
-        self.active = ActiveKey(key.key_id, self.now)
+        self.active = ActiveKey(key.key_id, self.now, key.algorithm)
         self.activated.append(key.key_id)
         return self.active
 

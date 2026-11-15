@@ -7,6 +7,7 @@ published test-vector or fixture key, which protects nothing.
 """
 
 import base64
+import dataclasses
 import hashlib
 import json
 import os
@@ -81,13 +82,23 @@ def test_v2_ciphertext_is_encapsulated_key_then_aes_gcm():
     assert key.open("banchile", "password", key.key_id, sealed) == SECRET
 
 
-def test_a_v2_ciphertext_does_not_open_as_v1_and_back():
-    """The scheme is part of the sealing context: the same key id under the
-    other scheme fails."""
-    v1, v2 = make_v1_key(), generate_key()
-    forged_v1 = CredentialKey(v1.private_key, v1.public_raw, v1.key_id, V2)
+def test_the_scheme_is_part_of_the_sealing_context():
+    """The same X25519 key under a kind that differs only in its scheme
+    string opens nothing the other sealed, either way."""
+    key = make_v1_key()
+    relabelled = dataclasses.replace(key, kind=dataclasses.replace(V1, scheme=V2.scheme))
+    assert relabelled.key_id == key.key_id
+    by_key = key.seal("banchile", "password", SECRET)
+    by_relabelled = relabelled.seal("banchile", "password", SECRET)
+    assert relabelled.open("banchile", "password", key.key_id, by_relabelled) == SECRET
     with pytest.raises(CredentialOpenError):
-        forged_v1.open("banchile", "password", v1.key_id, v1.seal("banchile", "password", SECRET))
+        relabelled.open("banchile", "password", key.key_id, by_key)
+    with pytest.raises(CredentialOpenError):
+        key.open("banchile", "password", key.key_id, by_relabelled)
+
+
+def test_a_v2_ciphertext_does_not_open_with_a_v1_key():
+    v1, v2 = make_v1_key(), generate_key()
     with pytest.raises(CredentialOpenError):
         v1.open("banchile", "password", v1.key_id, v2.seal("banchile", "password", SECRET))
 

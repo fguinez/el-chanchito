@@ -31,6 +31,7 @@ _RING_LOCK = "SELECT pg_advisory_xact_lock(hashtext('el-chanchito/credential_key
 class ActiveKey:
     key_id: str
     created_at: datetime
+    algorithm: str
 
 
 @dataclass(frozen=True)
@@ -51,10 +52,10 @@ class KeyRingConflict(Exception):
 
 def _active(conn, lock: bool = False) -> ActiveKey | None:
     row = conn.execute(
-        "SELECT key_id, created_at FROM credential_keys WHERE status = 'active'"
+        "SELECT key_id, created_at, algorithm FROM credential_keys WHERE status = 'active'"
         + (" FOR UPDATE" if lock else "")
     ).fetchone()
-    return ActiveKey(row[0], row[1]) if row else None
+    return ActiveKey(row[0], row[1], row[2]) if row else None
 
 
 def _activate(conn, key: CredentialKey) -> ActiveKey:
@@ -65,11 +66,11 @@ def _activate(conn, key: CredentialKey) -> ActiveKey:
         ON CONFLICT (key_id) DO UPDATE
           SET status = 'active', retired_at = NULL, created_at = now(),
               rotation_failed_at = NULL, rotation_error = NULL
-        RETURNING key_id, created_at
+        RETURNING key_id, created_at, algorithm
         """,
         (key.key_id, key.algorithm, key.public_raw),
     ).fetchone()
-    return ActiveKey(row[0], row[1])
+    return ActiveKey(row[0], row[1], row[2])
 
 
 def _retire(conn, key_id: str) -> None:

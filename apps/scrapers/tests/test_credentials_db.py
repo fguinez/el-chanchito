@@ -60,7 +60,8 @@ def _web_save(conn, key: CredentialKey, slug: str, field: str, value: str) -> bo
             " (institution_slug, field_key, scheme, key_id, sealed)"
             " VALUES (%s, %s, %s, %s, %s)"
             " ON CONFLICT (institution_slug, field_key) DO UPDATE"
-            " SET key_id = excluded.key_id, sealed = excluded.sealed, updated_at = now()",
+            " SET scheme = excluded.scheme, key_id = excluded.key_id,"
+            " sealed = excluded.sealed, updated_at = now()",
             (slug, field, key.scheme, key.key_id, key.seal(slug, field, value)),
         )
     return True

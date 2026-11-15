@@ -329,7 +329,8 @@ being as sensitive as the credentials.
 - **By hand.** `make credentials-rotate` rotates `make dev`'s key file now;
   `make credentials-rotate STACK=up` does it inside the running `scrapers`
   container for `make up`. `make credentials-status` (same `STACK`) compares
-  the key file with the database's active key. The command takes the key
+  the key file with the database's active key and names each one's scheme
+  (v1 X25519 or v2 X-Wing). The command takes the key
   file's lock, so it never races the service's own rotation, and asks the
   running service to load the new key at once (it would within a minute
   anyway). The dashboard has no rotate button on purpose.
