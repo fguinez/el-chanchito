@@ -26,7 +26,7 @@ import {
   credentialField,
   credentialSpec,
 } from "@/lib/credentials/registry";
-import { CREDENTIAL_SCHEME, bindingDigest, sealCredential } from "@/lib/credentials/seal";
+import { bindingDigest, credentialScheme, sealCredential } from "@/lib/credentials/seal";
 
 export const dynamic = "force-dynamic";
 
@@ -172,8 +172,10 @@ export async function PUT(request: NextRequest, { params }: Context) {
     if (blocked || !key) {
       return noStoreJson({ error: SAVE_BLOCKED_MESSAGES[blocked ?? "no_key"], reason: blocked }, 503);
     }
+    let scheme: string;
     let sealed: SealedField[];
     try {
+      scheme = credentialScheme(key);
       sealed = await Promise.all(
         values.map(async ({ fieldKey, value }) => {
           const binds = credentialField(spec, fieldKey)?.binds ?? [];
@@ -191,7 +193,7 @@ export async function PUT(request: NextRequest, { params }: Context) {
         503
       );
     }
-    if (await upsertSealedFields(slug, CREDENTIAL_SCHEME, key.keyId, sealed)) {
+    if (await upsertSealedFields(slug, scheme, key.keyId, sealed)) {
       return noStoreJson({
         saved: sealed.map((field) => field.fieldKey),
         ...(await applyToService()),
