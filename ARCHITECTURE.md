@@ -1701,7 +1701,11 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
   is rewritten), written on every save and checked on every load: a
   session of another account is discarded, whether the change came from the
   dashboard or the env, and even when a run on the old credentials writes its
-  session back afterwards. A session with no marker yet is adopted. `POST
+  session back afterwards. A session with no marker (saved before markers
+  existed) is discarded too: nothing says whose it is, and the env value at
+  load time does not prove it either. The cost is one sign-in after upgrading
+  (BanChile signs in with its clave; Fintual mails a code, read from the inbox
+  when IMAP is the same account, else the run ends `needs_sign_in`). `POST
   /refresh/{slug}` only accepts scraper slugs, never the internal jobs. The control server reads an immutable
   snapshot of the scraper set, swapped on each rebuild. The dashboard runs a
   scraper the save just enabled through `POST /refresh/{slug}`. With the

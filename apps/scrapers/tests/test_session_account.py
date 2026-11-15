@@ -38,11 +38,22 @@ def test_marker_is_owner_only(tmp_path):
     assert stat.S_IMODE(session_account.marker_path(path).stat().st_mode) == 0o600
 
 
-def test_a_session_without_a_marker_is_adopted(tmp_path):
+def test_a_session_without_a_marker_is_not_adopted(tmp_path):
+    """Saved before markers: nothing says whose it is, so no account gets it."""
     path = _session(tmp_path)
-    assert session_account.belongs_to(path, A)
-    assert session_account.marker_path(path).exists()
+    assert not session_account.belongs_to(path, A)
     assert not session_account.belongs_to(path, B)
+    assert not session_account.marker_path(path).exists()
+
+
+def test_no_session_and_no_marker_is_nothing_to_refuse(tmp_path):
+    assert session_account.belongs_to(tmp_path / "missing.json", A)
+
+
+def test_a_saved_session_then_belongs_to_its_account(tmp_path):
+    path = _session(tmp_path)
+    session_account.write_account(path, A)
+    assert session_account.belongs_to(path, A)
 
 
 @pytest.mark.parametrize(
@@ -131,3 +142,52 @@ def test_fintual_discards_another_accounts_session(tmp_path, monkeypatch):
     assert scraper._load_session(Client()) is False
     assert not path.exists()
     assert not session_account.marker_path(path).exists()
+
+
+def _fintual(tmp_path, monkeypatch, *, imap_user):
+    path = tmp_path / ".fintual_session.json"
+    monkeypatch.setenv("FINTUAL_SESSION_FILE", str(path))
+    monkeypatch.setenv("FINTUAL_PASSWORD", "synthetic-password")
+    monkeypatch.setenv("FINTUAL_EMAIL", A)
+    if imap_user:
+        monkeypatch.setenv("EMAIL_IMAP_USER", imap_user)
+    else:
+        monkeypatch.delenv("EMAIL_IMAP_USER", raising=False)
+    path.write_text('{"synthetic": "cookie"}')  # cached before markers existed
+    return path, FintualScraper()
+
+
+class _NoCookies:
+    def __init__(self):
+        self.cookies = self
+
+    def set(self, *args, **kwargs):
+        raise AssertionError("an unmarked session's cookies were loaded")
+
+
+def test_fintual_unmarked_session_signs_in_again_via_imap(tmp_path, monkeypatch):
+    """The re-login after discarding an unmarked session is unattended when
+    the IMAP mailbox is the Fintual account."""
+    import asyncio
+
+    path, scraper = _fintual(tmp_path, monkeypatch, imap_user=A)
+    signed_in = []
+
+    async def fake_auto_login():
+        signed_in.append(True)
+
+    scraper._auto_login = fake_auto_login
+    assert asyncio.run(scraper._ensure_session(_NoCookies())) is True
+    assert signed_in == [True]
+    assert not path.exists()
+
+
+def test_fintual_unmarked_session_without_imap_asks_for_a_sign_in(tmp_path, monkeypatch):
+    import asyncio
+
+    from scrapers.base import SignInRequired
+
+    path, scraper = _fintual(tmp_path, monkeypatch, imap_user=None)
+    with pytest.raises(SignInRequired, match="make fintual-login"):
+        asyncio.run(scraper._ensure_session(_NoCookies()))
+    assert not path.exists()

@@ -585,7 +585,7 @@ class FintualScraper(BaseScraper):
         if not self.session_file.exists():
             return False
         if not session_account.belongs_to(self.session_file, self.email):
-            logger.info("Fintual: the cached session is another account's; discarded")
+            logger.info("Fintual: the cached session is not tied to this account; discarded")
             session_account.discard(self.session_file)
             return False
         try:

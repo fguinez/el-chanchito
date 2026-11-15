@@ -1983,7 +1983,7 @@ def _authenticated_session(browser, rut: str, password: str) -> Iterator:
     path = _session_file()
     state, reason = _load_session_state(path)
     if state is not None and not session_account.belongs_to(path, rut):
-        state, reason = None, "session belongs to another account"
+        state, reason = None, "session not tied to this account"
     context = page = None
     if state is not None:
         context, page, reason = _restore_session(browser, state)

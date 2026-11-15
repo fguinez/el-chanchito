@@ -23,6 +23,7 @@ import pytest
 os.environ.setdefault("FINTUAL_EMAIL", "test@example.com")
 os.environ.setdefault("FINTUAL_TOKEN", "test_password")
 
+from scrapers import session_account
 from scrapers.base import DailyPrice
 from scrapers.institutions import fintual as fintual_mod
 from scrapers.institutions.fintual import (
@@ -252,7 +253,9 @@ def _install(monkeypatch, client):
 
 
 def _write_session(path, **cookies):
+    """A session cached by the configured account (marker included)."""
     path.write_text(json.dumps(cookies))
+    session_account.write_account(path, os.environ["FINTUAL_EMAIL"])
 
 
 def _imap_is_the_fintual_account(monkeypatch):

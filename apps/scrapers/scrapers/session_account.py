@@ -9,9 +9,13 @@ identifier, never the identifier itself, and every load checks it. The
 identifier is normalized first (`normalize`), so a RUT typed with or without
 dots, or an e-mail in another case, is still the same account.
 
-A session with no marker yet (cached before markers existed) is adopted for
-the current account rather than discarded, so upgrading does not force a new
-sign-in (a Fintual one needs an e-mailed code).
+A session with no marker (cached before markers existed) is discarded, not
+adopted: nothing records which account saved it. Comparing the identifier
+with the env or secret-store value would not prove it either, since before
+markers that value could change across restarts with the session kept. The
+cost is one sign-in after upgrading: BanChile signs in again with its clave,
+Fintual mails a code (read from the inbox when IMAP is the same account, else
+the run asks for a sign-in).
 """
 
 from __future__ import annotations
@@ -85,16 +89,17 @@ def write_account(session: Path, identifier: str) -> None:
 
 
 def belongs_to(session: Path, identifier: str) -> bool:
-    """False when `session`'s marker names another account (or is corrupt).
-    A missing marker adopts the session for `identifier`."""
+    """False when `session`'s marker names another account, is corrupt, or
+    is missing while the session exists (see the module docstring)."""
     marker = marker_path(session)
     try:
         salt_hex, digest = marker.read_text().strip().split(":", 1)
         salt = bytes.fromhex(salt_hex)
     except FileNotFoundError:
-        if session.exists():
-            write_account(session, identifier)
-        return True
+        if not session.exists():
+            return True
+        logger.info("%s has no account marker; it is not reused", session.name)
+        return False
     except (OSError, ValueError):
         return False
     if hmac.compare_digest(digest, _digest(salt, identifier)):
