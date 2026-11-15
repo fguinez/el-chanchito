@@ -1,5 +1,5 @@
 """Tests for run_scraper's final status decision (success / partial / error /
-needs_sign_in).
+needs_sign_in / skipped).
 
 The DB writer functions are patched out (no database): what's asserted is the
 status + error_message handed to `finish_scraper_run` for each combination of
@@ -28,13 +28,14 @@ from product_model import (
     DebitCardMetrics,
     SavingsMetrics,
 )
-from scrapers.backends import mercadopago_web
+from scrapers.backends import banchile_web, mercadopago_web
 from scrapers.base import (
     BaseScraper,
     BilledStatement,
     DailyPrice,
     ProductRef,
     ProductScrapeResult,
+    RunSkipped,
     ScrapedExchangeRate,
     ScrapedPriceHistory,
     ScrapedProduct,
@@ -374,6 +375,47 @@ class TestRunOutcome:
     def test_sign_in(self, sign_in, errors, landed, expected):
         """Only a run stopped by nothing but a sign-in needs one; the message is kept once."""
         assert run_outcome(errors, [], landed, None, sign_in) == expected
+
+    @pytest.mark.parametrize(
+        ("skipped", "sign_in", "errors", "landed", "expected"),
+        [
+            (["k"], [], [], 0, ("skipped", "k")),
+            (["k", "k"], [], [], 0, ("skipped", "k")),
+            (["k"], ["s"], [], 0, ("needs_sign_in", "s; k")),
+            (["k"], [], ["e"], 0, ("error", "k; e")),
+            (["k"], [], [], 1, ("partial", "k")),
+        ],
+    )
+    def test_skipped(self, skipped, sign_in, errors, landed, expected):
+        """Only a run stopped by nothing but a skip is `skipped`; the message is kept once."""
+        assert run_outcome(errors, [], landed, None, sign_in, skipped) == expected
+
+    def test_skipped_keeps_warnings_in_the_message(self):
+        """Warnings from a run that landed nothing join a `skipped` run's message."""
+        assert run_outcome([], ["w"], 0, None, [], ["k"]) == ("skipped", "k; w")
+
+
+class TestRunSkipped:
+    """A leg the scraper chose to skip finishes the run as `skipped`, not `error`."""
+
+    def test_both_legs_record_one_message(self, finish, caplog):
+        """The same refusal on both legs is one message and no traceback."""
+        exc = RunSkipped("Stub skipped: retry later.")
+        scraper = _StubScraper(tx_exc=exc, prod_exc=exc)
+
+        asyncio.run(run_scraper(scraper))
+
+        finish.assert_called_once_with(
+            "run-1",
+            "skipped",
+            transactions_imported=0,
+            error_message="Stub skipped: retry later.",
+        )
+        assert not any(r.exc_info for r in caplog.records)
+
+    def test_the_banchile_login_cooldown_is_a_skip(self):
+        """A full login the cooldown refused is the cooldown working, not a bug."""
+        assert issubclass(banchile_web.LoginCooldownError, RunSkipped)
 
 
 class _GatedScraper(_StubScraper):

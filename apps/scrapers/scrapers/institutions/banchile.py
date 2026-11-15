@@ -277,6 +277,9 @@ class BanChileScraper(BaseScraper):
         # transactions first: that call opens the session and stashes the
         # products half here for `scrape_products` to serve.
         self._session: BanChileSessionResult | None = None
+        # The cooldown refusal the transactions leg got, if any: the products
+        # leg raises it again rather than try a fallback login it would refuse.
+        self._refused: LoginCooldownError | None = None
         self._superseded: list[SupersededTransaction] = []
         self._vanished: list[VanishedWindow] = []
 
@@ -457,15 +460,20 @@ class BanChileScraper(BaseScraper):
         A crash here is raised so the run is recorded as `error`, and the cache
         is left empty on purpose: the products leg then opens its own
         balance-only session rather than inheriting this failure, which keeps
-        the two legs independent the way `run_scraper` expects.
+        the two legs independent the way `run_scraper` expects. A login the
+        cooldown refused (`LoginCooldownError`, a `RunSkipped`) is the
+        exception: it is kept for the products leg, whose fallback would need
+        the same refused login.
         """
         self._session = None
+        self._refused = None
         self._superseded = []
         self._vanished = []
         try:
             session = await fetch_session(self.rut, self.password)
         except LoginCooldownError as e:
             logger.warning("BanChile scrape skipped: %s", e)
+            self._refused = e
             raise
         except Exception:
             logger.exception("BanChile scrape failed")
@@ -509,7 +517,11 @@ class BanChileScraper(BaseScraper):
         movements failure can't cost the balances the dashboard shows.
 
         Either way a failure here is a warning, not a raise: a flaky login must
-        not fail the whole run or lose transactions already imported. Surfaces
+        not fail the whole run or lose transactions already imported. A login
+        the cooldown refused is raised instead (`LoginCooldownError`, a
+        `RunSkipped`), so a run it stopped is `skipped`; when the transactions
+        leg was refused, its refusal is raised again with no second attempt,
+        and `run_outcome` keeps the shared message once. Surfaces
         that stayed empty after all their retries (product *and* movement ones,
         since one session read both) become warnings too, so the run records
         `partial` coverage instead of silently losing figures.
@@ -522,12 +534,15 @@ class BanChileScraper(BaseScraper):
         dashboard.
         """
         session, self._session = self._session, None
+        refused, self._refused = self._refused, None
+        if refused is not None:
+            raise refused
         if session is None:
             try:
                 result = await fetch_balances(self.rut, self.password)
             except LoginCooldownError as e:
                 logger.warning("BanChile balance scrape skipped: %s", e)
-                return ProductScrapeResult([], [f"BanChile: {e}"])
+                raise
             except Exception as e:
                 logger.exception("BanChile balance scrape failed")
                 return ProductScrapeResult([], [f"BanChile: product scrape crashed: {e}"])

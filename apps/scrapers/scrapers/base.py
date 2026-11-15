@@ -191,6 +191,16 @@ class SignInRequired(RuntimeError):
     """
 
 
+class RunSkipped(RuntimeError):
+    """The scraper chose not to read this time, on purpose; nothing is broken.
+
+    E.g. BanChile's login cooldown refusing a full login. A leg that raises it
+    finishes the run as `skipped` instead of `error` when nothing else failed
+    and nothing landed (see `main.run_outcome`); the data of the last run that
+    read stays as it was.
+    """
+
+
 class BaseScraper(ABC):
     """Interface that all scrapers must implement.
 
