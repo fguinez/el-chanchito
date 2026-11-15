@@ -48,9 +48,7 @@ class TestRetrySync:
         operation = _Calls(_Transient("reset"), "ok")
         delays = []
 
-        result = retry_sync(
-            operation, is_transient=_is_transient, label="op", sleep=delays.append
-        )
+        result = retry_sync(operation, is_transient=_is_transient, label="op", sleep=delays.append)
 
         assert (result, operation.count, delays) == ("ok", 2, [1.0])
 
@@ -58,9 +56,7 @@ class TestRetrySync:
         operation = _Calls(ValueError("bad row"), "ok")
 
         with pytest.raises(ValueError):
-            retry_sync(
-                operation, is_transient=_is_transient, label="op", sleep=lambda _: None
-            )
+            retry_sync(operation, is_transient=_is_transient, label="op", sleep=lambda _: None)
 
         assert operation.count == 1
 
@@ -133,9 +129,7 @@ class TestSendWithRetry:
         assert (response.status_code, calls.count, delays) == (503, 3, [1.0, 2.0])
 
     def test_a_transport_error_on_the_last_attempt_propagates(self):
-        send, _ = _send(
-            httpx.ConnectError("1"), httpx.ConnectError("2"), httpx.ConnectError("3")
-        )
+        send, _ = _send(httpx.ConnectError("1"), httpx.ConnectError("2"), httpx.ConnectError("3"))
 
         with pytest.raises(httpx.ConnectError, match="3"):
             _run(send)

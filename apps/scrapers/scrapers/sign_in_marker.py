@@ -8,9 +8,8 @@ reason a run fails.
 import logging
 import os
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -24,14 +23,14 @@ def mark(path: Path) -> None:
         return
     try:
         with os.fdopen(fd, "w") as f:
-            f.write(datetime.now(timezone.utc).isoformat())
+            f.write(datetime.now(UTC).isoformat())
         os.replace(tmp, path)
     except OSError:
         Path(tmp).unlink(missing_ok=True)
         logger.warning("Could not write the sign-in marker %s", path)
 
 
-def marked_since(path: Path) -> Optional[str]:
+def marked_since(path: Path) -> str | None:
     """When the marker was written, or None when there is none.
 
     An unreadable or empty marker still counts as marked, with an empty

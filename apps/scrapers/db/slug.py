@@ -17,9 +17,7 @@ def slugify(name: str, kind: str) -> str:
     single hyphen. A name with nothing to keep (e.g. symbols only) falls back
     to the kind with underscores hyphenated, which is never empty.
     """
-    ascii_name = (
-        unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
-    )
+    ascii_name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
     slug = re.sub(r"[^a-z0-9]+", "-", ascii_name.lower()).strip("-")
     return slug or kind.replace("_", "-")
 

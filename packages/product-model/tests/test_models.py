@@ -2,7 +2,7 @@
 
 import json
 import re
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -176,9 +176,7 @@ def test_headline_promotes_the_right_field(kind):
 
 def test_date_round_trips_through_json_dump():
     """Dates survive model_dump(mode="json") + model_validate unchanged."""
-    original = TermDepositAttributes(
-        issue_date=date(2026, 1, 15), maturity_date=date(2026, 7, 15)
-    )
+    original = TermDepositAttributes(issue_date=date(2026, 1, 15), maturity_date=date(2026, 7, 15))
 
     dumped = original.model_dump(mode="json")
     restored = TermDepositAttributes.model_validate(dumped)
@@ -196,6 +194,57 @@ def test_wallet_balance_keeps_cents():
     assert clp.headline() == 999_999
 
 
+@pytest.mark.parametrize(
+    ("kind", "gain_field"),
+    [("wallet", "profit_12m"), ("savings", "profit")],
+)
+def test_yielding_balances_carry_a_rate_and_a_gain(kind, gain_field):
+    """Wallets take a 12-month gain, savings an accumulated one; all optional."""
+    full = METRICS_ADAPTER.validate_python(
+        {"kind": kind, "balance": 1_000_000, "annual_rate_pct": 4.5, gain_field: 999_999}
+    )
+    bare = METRICS_ADAPTER.validate_python({"kind": kind, "balance": 1_000_000})
+
+    assert (full.annual_rate_pct, getattr(full, gain_field)) == (4.5, 999_999)
+    assert (bare.annual_rate_pct, getattr(bare, gain_field)) == (None, None)
+    assert full.headline() == 1_000_000
+
+
+@pytest.mark.parametrize(
+    ("kind", "field"),
+    [("wallet", "profit"), ("savings", "profit_12m")],
+)
+def test_each_yielding_kind_takes_only_its_own_gain(kind, field):
+    """A wallet reports a 12-month gain, a pot an accumulated one; never swapped."""
+    with pytest.raises(ValidationError):
+        METRICS_ADAPTER.validate_python({"kind": kind, "balance": 1_000_000, field: 999_999})
+
+
+@pytest.mark.parametrize(
+    ("kind", "field", "denomination"),
+    [
+        ("wallet", "annual_rate_pct", "percent"),
+        ("wallet", "profit_12m", "currency"),
+        ("savings", "annual_rate_pct", "percent"),
+        ("savings", "profit", "currency"),
+    ],
+)
+def test_yield_fields_carry_their_denomination(kind, field, denomination):
+    """The rate is a percent number and a gain an amount in the product currency."""
+    properties = REGISTRY[kind].metrics_cls.model_json_schema()["properties"]
+
+    assert properties[field]["denomination"] == denomination
+
+
+@pytest.mark.parametrize("kind", ["checking", "vista"])
+def test_other_bank_accounts_do_not_take_yield_fields(kind):
+    """The yield fields are scoped to wallets and savings, not every account."""
+    with pytest.raises(ValidationError):
+        METRICS_ADAPTER.validate_python(
+            {"kind": kind, "balance": 1_000_000, "annual_rate_pct": 4.5}
+        )
+
+
 def test_stock_metrics_carry_a_position():
     """The per-unit fields ride along with nav; the quote time round-trips."""
     metrics = StockMetrics(
@@ -209,7 +258,7 @@ def test_stock_metrics_carry_a_position():
         unrealized_profit_pct=-3.85,
         realized_profit=10.0,
         dividends=1.5,
-        unit_price_as_of=datetime(2026, 1, 2, 15, 4, 5, tzinfo=timezone.utc),
+        unit_price_as_of=datetime(2026, 1, 2, 15, 4, 5, tzinfo=UTC),
     )
 
     dumped = metrics.model_dump(mode="json", exclude_none=True)
@@ -522,9 +571,7 @@ class TestTransactionLocation:
             {"name": "  Tienda Ficticia ", "city": " CIUDAD FICTICIA", "country": "   "}
         ).location
 
-        assert location == TransactionLocation(
-            name="Tienda Ficticia", city="CIUDAD FICTICIA"
-        )
+        assert location == TransactionLocation(name="Tienda Ficticia", city="CIUDAD FICTICIA")
         assert location.country is None
 
     def test_text_is_not_recased(self):
@@ -679,9 +726,9 @@ class TestTransactionBillingStatus:
     def test_the_json_schema_describes_both_fields(self):
         props = ScrapedTransaction.model_json_schema()["properties"]
 
-        assert {"enum": ["unbilled", "billed"], "type": "string"} in props[
-            "billing_status"
-        ]["anyOf"]
+        assert {"enum": ["unbilled", "billed"], "type": "string"} in props["billing_status"][
+            "anyOf"
+        ]
         assert {"format": "date", "type": "string"} in props["statement_date"]["anyOf"]
         assert props["billing_status"]["default"] is None
 
@@ -709,9 +756,7 @@ class TestScrapedExchangeRate:
         assert rate.quote_currency == "CLP"
         assert rate.rate == Decimal("950.00")
         assert rate.reported_as_of == date(2026, 1, 1)
-        assert rate.product == ProductRef(
-            kind="credit_card", currency="USD", external_ref=None
-        )
+        assert rate.product == ProductRef(kind="credit_card", currency="USD", external_ref=None)
 
     def test_an_institution_wide_rate_has_no_product(self):
         rate = _usd_rate(product=None, reported_as_of=None)
@@ -727,8 +772,16 @@ class TestScrapedExchangeRate:
         "raw",
         [0, -1, "0", "1.123456789", 10**12, "NaN", float("inf"), "1,5", "1E+3", True],
         ids=[
-            "zero", "negative", "zero-string", "nine-decimals", "too-large",
-            "nan", "inf", "comma", "exponent", "bool",
+            "zero",
+            "negative",
+            "zero-string",
+            "nine-decimals",
+            "too-large",
+            "nan",
+            "inf",
+            "comma",
+            "exponent",
+            "bool",
         ],
     )
     def test_rates_the_column_cannot_hold_are_rejected(self, raw):
@@ -803,8 +856,18 @@ class TestScrapedPriceHistory:
         "raw",
         [0, -1, "0", -0.5, "1.123456789", 10**12, "NaN", float("inf"), "1,5", "1E+3", " 1", True],
         ids=[
-            "zero", "negative", "zero-string", "negative-fraction", "nine-decimals",
-            "too-large", "nan", "inf", "comma", "exponent", "padded", "bool",
+            "zero",
+            "negative",
+            "zero-string",
+            "negative-fraction",
+            "nine-decimals",
+            "too-large",
+            "nan",
+            "inf",
+            "comma",
+            "exponent",
+            "padded",
+            "bool",
         ],
     )
     def test_prices_the_column_cannot_hold_are_rejected(self, raw):
@@ -812,9 +875,7 @@ class TestScrapedPriceHistory:
             DailyPrice(date="2026-01-02", price=raw)
 
     def test_eight_decimals_fit(self):
-        assert DailyPrice(date="2026-01-02", price="0.12345678").price == Decimal(
-            "0.12345678"
-        )
+        assert DailyPrice(date="2026-01-02", price="0.12345678").price == Decimal("0.12345678")
 
     def test_a_day_appears_at_most_once(self):
         with pytest.raises(ValidationError, match="repeat the day"):
@@ -831,9 +892,7 @@ class TestScrapedPriceHistory:
 
     def test_a_history_is_bounded(self):
         start = date(2000, 1, 1).toordinal()
-        points = [
-            {"date": date.fromordinal(start + n), "price": 100.0} for n in range(4001)
-        ]
+        points = [{"date": date.fromordinal(start + n), "price": 100.0} for n in range(4001)]
 
         with pytest.raises(ValidationError):
             _price_history(points=points)
@@ -844,9 +903,7 @@ class TestScrapedPriceHistory:
         with pytest.raises(ValidationError):
             _price_history(points=[{"date": "2026-01-02", "price": 100.0, "volume": 1}])
         with pytest.raises(ValidationError):
-            _price_history(
-                product={"kind": "stock", "currency": "USD", "id": "0001"}
-            )
+            _price_history(product={"kind": "stock", "currency": "USD", "id": "0001"})
 
     def test_a_point_is_immutable(self):
         point = DailyPrice(date="2026-01-02", price=100.0)
@@ -856,9 +913,7 @@ class TestScrapedPriceHistory:
 
     def test_the_generated_json_schema_exports_it(self):
         schema_path = (
-            Path(__file__).resolve().parent.parent
-            / "generated"
-            / "product-model.schema.json"
+            Path(__file__).resolve().parent.parent / "generated" / "product-model.schema.json"
         )
         defs = json.loads(schema_path.read_text(encoding="utf-8"))["$defs"]
 

@@ -6,8 +6,6 @@ CLP/USD amounts); no real portal capture appears here.
 
 import asyncio
 import os
-import signal
-import subprocess
 from datetime import date
 
 import pytest
@@ -168,9 +166,7 @@ class TestSaldosParsing:
 
     def test_clp_not_read_as_usd(self):
         """A bare '$' row must not be picked up by the USD (US$) pattern."""
-        saldos = web.card_saldos_from_text(
-            "Nacional $2.500.000 $1.000.000 $1.500.000"
-        )
+        saldos = web.card_saldos_from_text("Nacional $2.500.000 $1.000.000 $1.500.000")
         assert "CLP" in saldos and "USD" not in saldos
 
 
@@ -302,7 +298,12 @@ class TestMovementConversion:
         self.scraper = BciLiderScraper()
 
     def _mov(self, description="SYNTHETIC STORE", amount=-35000, day=15):
-        return {"date": date(2026, 7, day), "description": description, "cuotas": None, "amount": amount}
+        return {
+            "date": date(2026, 7, day),
+            "description": description,
+            "cuotas": None,
+            "amount": amount,
+        }
 
     def test_basic_conversion(self):
         txn = self.scraper._movement_to_transaction(self._mov())
@@ -325,9 +326,7 @@ class TestMovementConversion:
     def test_id_survives_a_description_rewrite(self):
         """Billing rewrites the store name, so the id must not depend on it."""
         por_facturar = self.scraper._movement_to_transaction(self._mov(description="STORE A"))
-        facturado = self.scraper._movement_to_transaction(
-            self._mov(description="STORE A,SANTIAGO")
-        )
+        facturado = self.scraper._movement_to_transaction(self._mov(description="STORE A,SANTIAGO"))
 
         assert por_facturar.external_id == facturado.external_id
 
@@ -369,7 +368,9 @@ class TestOneLoginCaching:
     def test_transactions_then_products_logs_in_once(self, monkeypatch):
         result = BciLiderCardResult(
             products=self.products,
-            movements=[{"date": date(2026, 7, 15), "description": "S", "cuotas": None, "amount": -1000}],
+            movements=[
+                {"date": date(2026, 7, 15), "description": "S", "cuotas": None, "amount": -1000}
+            ],
         )
         calls = self._install(monkeypatch, result=result)
 
@@ -403,8 +404,13 @@ class TestOneLoginCaching:
     @pytest.mark.parametrize("billed_first", [True, False], ids=["billed-first", "unbilled-first"])
     def test_a_charge_in_both_views_is_written_once_billed(self, monkeypatch, billed_first):
         """Its rewritten description kept both copies in the backend; one key wins."""
-        unbilled = {"date": date(2026, 7, 15), "description": "STORE A", "cuotas": None,
-                    "amount": -35000, "billed": False}
+        unbilled = {
+            "date": date(2026, 7, 15),
+            "description": "STORE A",
+            "cuotas": None,
+            "amount": -35000,
+            "billed": False,
+        }
         billed = dict(unbilled, description="STORE A,SANTIAGO", billed=True)
         other = dict(unbilled, date=date(2026, 7, 14), billed=False)
         movements = [billed, unbilled, other] if billed_first else [unbilled, billed, other]
@@ -443,9 +449,7 @@ class TestStatements:
 
     # Synthetic: an installment charge on both statements, a newer charge and
     # a payment on the newer one only.
-    OLDER = _lider_statement(
-        date(2026, 2, 11), date(2026, 2, 10), [(date(2026, 2, 3), -999999)]
-    )
+    OLDER = _lider_statement(date(2026, 2, 11), date(2026, 2, 10), [(date(2026, 2, 3), -999999)])
     NEWER = _lider_statement(
         date(2026, 3, 11),
         date(2026, 3, 10),
@@ -466,18 +470,31 @@ class TestStatements:
         """Even one read in "Por facturar"; an unlisted one keeps its view."""
         # Arrange
         movements = [
-            {"date": date(2026, 2, 3), "description": "CUOTAS", "cuotas": "02/03",
-             "amount": -999999, "billed": False},
-            {"date": date(2026, 3, 1), "description": "STORE", "cuotas": None,
-             "amount": -35000, "billed": None},
-            {"date": date(2026, 3, 12), "description": "NEW", "cuotas": None,
-             "amount": -35000, "billed": False},
+            {
+                "date": date(2026, 2, 3),
+                "description": "CUOTAS",
+                "cuotas": "02/03",
+                "amount": -999999,
+                "billed": False,
+            },
+            {
+                "date": date(2026, 3, 1),
+                "description": "STORE",
+                "cuotas": None,
+                "amount": -35000,
+                "billed": None,
+            },
+            {
+                "date": date(2026, 3, 12),
+                "description": "NEW",
+                "cuotas": None,
+                "amount": -35000,
+                "billed": False,
+            },
         ]
 
         # Act
-        installment, charge, new = self._scrape(
-            monkeypatch, movements, [self.NEWER, self.OLDER]
-        )
+        installment, charge, new = self._scrape(monkeypatch, movements, [self.NEWER, self.OLDER])
 
         # Assert
         assert (installment.billing_status, installment.statement_date) == (
@@ -505,8 +522,7 @@ class TestStatements:
             "CLP",
         )
         assert newer.external_ids == {
-            bci_lider_mod.movement_external_id(day, amount)
-            for day, amount in self.NEWER.movements
+            bci_lider_mod.movement_external_id(day, amount) for day, amount in self.NEWER.movements
         }
 
     def test_the_key_matches_the_movement_key(self):
@@ -558,172 +574,153 @@ class TestStatements:
         assert prods.exchange_rates == [rate]
 
 
-class _FakeChrome:
-    """A launched Chrome stand-in: records waits, exits when told to."""
+class TestRealChromeWiring:
+    """Lider's thin layer over `real_chrome` (whose own behaviour has its own tests)."""
 
-    pid = 4242
-
-    def __init__(self, exits_after: int = 1):
-        self.waits = 0
-        self.exits_after = exits_after
-        self.signals = []
-
-    def wait(self, timeout=None):
-        self.waits += 1
-        if self.waits < self.exits_after:
-            raise subprocess.TimeoutExpired("chrome", timeout)
-        return 0
-
-    def send_signal(self, sig):
-        self.signals.append(sig)
-
-
-class TestChromeDiscovery:
-    def _isolate(self, monkeypatch, platform, windows=False, on_path=(), exists=()):
-        monkeypatch.delenv("LIDER_BCI_CHROME_PATH", raising=False)
-        monkeypatch.setattr(web.sys, "platform", platform)
-        monkeypatch.setattr(web, "_is_windows", lambda: windows)
+    @pytest.mark.parametrize("offscreen", [True, False])
+    def test_launch_passes_lider_settings_to_the_shared_helpers(self, monkeypatch, offscreen):
+        """The override env, the dedicated profile, the port, the URL and offscreen go through."""
+        found, launched = [], []
         monkeypatch.setattr(
-            web.shutil, "which", lambda name: f"/usr/bin/{name}" if name in on_path else None
+            web.real_chrome, "find_chrome", lambda env: found.append(env) or "/synthetic/chrome"
         )
-        monkeypatch.setattr(web.os.path, "exists", lambda path: path in exists)
+        monkeypatch.setattr(
+            web.real_chrome,
+            "launch_chrome",
+            lambda exe, **kwargs: launched.append((exe, kwargs)) or "proc",
+        )
 
-    def test_override_wins(self, monkeypatch):
-        monkeypatch.setenv("LIDER_BCI_CHROME_PATH", "/opt/synthetic/chrome")
+        proc = web._launch_real_chrome(9222, "https://example.invalid/", offscreen=offscreen)
 
-        assert web._chrome_executable() == "/opt/synthetic/chrome"
+        assert proc == "proc"
+        assert found == ["LIDER_BCI_CHROME_PATH"]
+        assert launched == [
+            (
+                "/synthetic/chrome",
+                {
+                    "port": 9222,
+                    "profile_dir": web._CHROME_PROFILE,
+                    "url": "https://example.invalid/",
+                    "offscreen": offscreen,
+                },
+            )
+        ]
 
-    @pytest.mark.parametrize(
-        "name", ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome"]
-    )
-    def test_linux_names_on_path(self, monkeypatch, name):
-        self._isolate(monkeypatch, "linux", on_path={name}, exists={f"/usr/bin/{name}"})
-
-        assert web._chrome_executable() == f"/usr/bin/{name}"
-
-    def test_macos_applications(self, monkeypatch):
-        app = os.path.join("/Applications", "Google Chrome.app/Contents/MacOS/Google Chrome")
-        self._isolate(monkeypatch, "darwin", exists={app})
-
-        assert web._chrome_executable() == app
-
-    @pytest.mark.parametrize(
-        ("env_var", "suffix"),
-        [
-            ("PROGRAMFILES", ("Google", "Chrome", "Application", "chrome.exe")),
-            ("PROGRAMFILES(X86)", ("Google", "Chrome", "Application", "chrome.exe")),
-            ("LOCALAPPDATA", ("Google", "Chrome", "Application", "chrome.exe")),
-            ("LOCALAPPDATA", ("Chromium", "Application", "chrome.exe")),
-        ],
-    )
-    def test_windows_install_dirs(self, monkeypatch, env_var, suffix):
-        for var in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
-            monkeypatch.setenv(var, f"/synthetic/{var}")
-        expected = os.path.join(f"/synthetic/{env_var}", *suffix)
-        self._isolate(monkeypatch, "win32", windows=True, exists={expected})
-
-        assert web._chrome_executable() == expected
-
-    @pytest.mark.parametrize(
-        ("platform", "windows", "hint"),
-        [
-            ("darwin", False, "/Applications"),
-            ("win32", True, "%LocalAppData%"),
-            ("linux", False, "apt install chromium"),
-        ],
-    )
-    def test_not_found_names_the_override_and_an_os_hint(self, monkeypatch, platform, windows, hint):
-        self._isolate(monkeypatch, platform, windows=windows)
+    def test_missing_chrome_is_a_lider_error_naming_the_override(self, monkeypatch):
+        """No Chrome anywhere surfaces as BciLiderWebError pointing at LIDER_BCI_CHROME_PATH."""
+        monkeypatch.delenv("LIDER_BCI_CHROME_PATH", raising=False)
+        monkeypatch.setattr(web.real_chrome, "chrome_candidates", list)
 
         with pytest.raises(web.BciLiderWebError) as info:
-            web._chrome_executable()
+            web._launch_real_chrome(9222, "https://example.invalid/")
 
         assert "LIDER_BCI_CHROME_PATH" in str(info.value)
-        assert hint in str(info.value)
 
+    def test_unstartable_chrome_is_a_lider_error_without_the_path(self, monkeypatch):
+        """A bad override names the setting, never the path it holds."""
+        path = "/synthetic/missing/chrome"
+        monkeypatch.setenv("LIDER_BCI_CHROME_PATH", path)
 
-class TestChromeLifecycle:
-    def _capture_popen(self, monkeypatch):
-        calls = []
-        monkeypatch.setattr(web, "_chrome_executable", lambda: "/synthetic/chrome")
+        def no_binary(args, **kwargs):
+            raise FileNotFoundError(2, "No such file or directory", path)
+
+        monkeypatch.setattr(web.real_chrome.subprocess, "Popen", no_binary)
+
+        with pytest.raises(web.BciLiderWebError) as info:
+            web._launch_real_chrome(9222, "https://example.invalid/")
+
+        assert "LIDER_BCI_CHROME_PATH" in str(info.value)
+        assert path not in str(info.value)
+        assert info.value.__cause__ is None
+
+    def test_unreachable_debug_port_is_a_lider_session_error(self, monkeypatch):
+        """A connect that never succeeds keeps Lider's error type, URL and hint."""
+        deadlines = []
+
+        def unreachable(playwright, cdp_url, *, deadline, process=None):
+            deadlines.append(deadline)
+            raise web.real_chrome.ChromeUnreachableError("synthetic")
+
+        monkeypatch.setattr(web.real_chrome, "connect_over_cdp", unreachable)
+
+        with pytest.raises(web.BciLiderSessionError) as info:
+            web._connect_cdp(object(), "http://localhost:9222", deadline=123.0)
+
+        assert deadlines == [123.0]
+        assert "http://localhost:9222" in str(info.value)
+        assert "make bci-lider-login" in str(info.value)
+
+    def test_exited_chrome_is_a_lider_session_error_with_the_profile_hint(self, monkeypatch):
+        """A launched Chrome that exits surfaces at once with the profile hint."""
+        passed = []
+
+        def exited(playwright, cdp_url, *, deadline, process=None):
+            passed.append(process)
+            raise web.real_chrome.ChromeExitedError("synthetic exit.")
+
+        monkeypatch.setattr(web.real_chrome, "connect_over_cdp", exited)
+
+        with pytest.raises(web.BciLiderSessionError) as info:
+            web._connect_cdp(object(), "http://localhost:9222", deadline=123.0, process="proc")
+
+        assert passed == ["proc"]
+        assert "Lider profile" in str(info.value)
+
+    def test_sign_in_chrome_that_exits_is_a_lider_web_error_with_the_profile_hint(
+        self,
+        monkeypatch,
+    ):
+        """The interactive sign-in watches the Chrome it launched and names the profile."""
+        import contextlib
+
+        import playwright.sync_api
+
+        passed = []
+
+        def exited(playwright, cdp_url, *, deadline, process=None):
+            passed.append(process)
+            raise web.real_chrome.ChromeExitedError("synthetic exit.")
+
+        monkeypatch.setattr(web, "_launch_real_chrome", lambda port, url: "proc")
+        monkeypatch.setattr(web.real_chrome, "connect_over_cdp", exited)
         monkeypatch.setattr(
-            web.subprocess, "Popen", lambda args, **kwargs: calls.append((args, kwargs)) or "proc"
+            playwright.sync_api, "sync_playwright", lambda: contextlib.nullcontext(object())
         )
-        return calls
 
-    def test_posix_launch_starts_a_new_session(self, monkeypatch):
-        monkeypatch.setattr(web, "_is_windows", lambda: False)
-        calls = self._capture_popen(monkeypatch)
+        with pytest.raises(web.BciLiderWebError) as info:
+            web.save_login_session(timeout_s=60)
 
-        assert web._launch_real_chrome(9222, "https://example.invalid/") == "proc"
+        assert passed == ["proc"]
+        assert "Lider profile" in str(info.value)
 
-        (args, kwargs), = calls
-        assert args[0] == "/synthetic/chrome"
-        assert kwargs["start_new_session"] is True
-        assert "creationflags" not in kwargs
+    def test_managed_attempt_passes_its_chrome_to_the_scrape(self, monkeypatch):
+        """The managed run hands the Chrome it launched to the CDP attach."""
+        seen = []
+        monkeypatch.setattr(web, "_launch_real_chrome", lambda port, url, offscreen: "proc")
+        monkeypatch.setattr(web.real_chrome, "terminate_chrome", lambda proc: None)
+        monkeypatch.setattr(
+            web,
+            "_scrape_over_cdp",
+            lambda cdp_url, rut, password, process=None: seen.append(process) or "result",
+        )
 
-    def test_windows_launch_uses_a_new_process_group(self, monkeypatch):
-        monkeypatch.setattr(web, "_is_windows", lambda: True)
-        calls = self._capture_popen(monkeypatch)
+        result = web._scrape_managed_once(9222, "http://localhost:9222", None, None, offscreen=True)
 
-        web._launch_real_chrome(9222, "https://example.invalid/", offscreen=True)
+        assert result == "result"
+        assert seen == ["proc"]
 
-        (args, kwargs), = calls
-        assert kwargs["creationflags"] == getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200)
-        assert "start_new_session" not in kwargs
-        assert "--window-position=-32000,-32000" in args
+    def test_managed_attempt_terminates_its_chrome_even_on_failure(self, monkeypatch):
+        """The Chrome a managed run launched is torn down by the shared helper."""
+        terminated = []
+        monkeypatch.setattr(web, "_launch_real_chrome", lambda port, url, offscreen: "proc")
+        monkeypatch.setattr(web.real_chrome, "terminate_chrome", terminated.append)
 
-    @pytest.mark.skipif(os.name == "nt", reason="SIGKILL does not exist on Windows")
-    def test_posix_teardown_signals_the_process_group(self, monkeypatch):
-        monkeypatch.setattr(web, "_is_windows", lambda: False)
-        sent = []
-        monkeypatch.setattr(web.os, "getpgid", lambda pid: 777, raising=False)
-        monkeypatch.setattr(web.os, "killpg", lambda pgid, sig: sent.append((pgid, sig)), raising=False)
-        proc = _FakeChrome(exits_after=2)
+        def broken_scrape(cdp_url, rut, password, process=None):
+            raise web.BciLiderSessionError("synthetic")
 
-        web._terminate_chrome(proc)
+        monkeypatch.setattr(web, "_scrape_over_cdp", broken_scrape)
 
-        assert sent == [(777, signal.SIGTERM), (777, web.signal.SIGKILL)]
-        assert proc.waits == 2
+        with pytest.raises(web.BciLiderSessionError):
+            web._scrape_managed_once(9222, "http://localhost:9222", None, None, offscreen=True)
 
-    def test_windows_teardown_never_touches_posix_only_calls(self, monkeypatch):
-        """Simulates Windows: no killpg/getpgid/SIGKILL, so any use would raise."""
-        monkeypatch.setattr(web, "_is_windows", lambda: True)
-        monkeypatch.delattr(web.os, "killpg", raising=False)
-        monkeypatch.delattr(web.os, "getpgid", raising=False)
-        monkeypatch.delattr(web.signal, "SIGKILL", raising=False)
-        runs = []
-        monkeypatch.setattr(web.subprocess, "run", lambda args, **kwargs: runs.append(args))
-        proc = _FakeChrome(exits_after=1)
-
-        web._terminate_chrome(proc)
-
-        assert runs == [["taskkill", "/PID", "4242", "/T"]]
-        assert proc.waits == 1
-
-    def test_windows_teardown_forces_the_tree_when_chrome_lingers(self, monkeypatch):
-        monkeypatch.setattr(web, "_is_windows", lambda: True)
-        runs = []
-        monkeypatch.setattr(web.subprocess, "run", lambda args, **kwargs: runs.append(args))
-        proc = _FakeChrome(exits_after=2)
-
-        web._terminate_chrome(proc)
-
-        assert runs == [
-            ["taskkill", "/PID", "4242", "/T"],
-            ["taskkill", "/PID", "4242", "/T", "/F"],
-        ]
-        assert proc.waits == 2
-
-    def test_windows_teardown_survives_a_taskkill_error(self, monkeypatch):
-        monkeypatch.setattr(web, "_is_windows", lambda: True)
-
-        def boom(args, **kwargs):
-            raise FileNotFoundError("taskkill")
-
-        monkeypatch.setattr(web.subprocess, "run", boom)
-        proc = _FakeChrome(exits_after=3)
-
-        web._terminate_chrome(proc)  # logs, never raises
-
-        assert proc.waits == 2
+        assert terminated == ["proc"]

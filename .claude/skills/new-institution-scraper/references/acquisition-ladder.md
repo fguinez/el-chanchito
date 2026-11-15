@@ -349,6 +349,14 @@ a tab, terminate) is `backends/real_chrome.py`: start from it.
 - Tear the browser down by asking the browser process alone first
   (`real_chrome.terminate_chrome`): a signal to the whole process group ends
   the child that owns the cookie store before it has written it.
+- A killed scraper service never runs its `finally`, and the orphaned Chrome
+  then holds the debug port and the profile lock for every later run. Record
+  each managed launch (`real_chrome.record_managed_launch` after the launch,
+  `forget_managed_launch` after `terminate_chrome`) and call
+  `real_chrome.reclaim_orphaned_chrome` before the busy-port check; it only
+  kills a pid whose command line and process group prove it is that Chrome
+  and whose launching process is gone or is no longer its parent (a live
+  sign-in window is not an orphan). Forget the record only once `terminate_chrome` really stopped it.
 - Sessions expire on their own. Raise a clear "re-run `make <slug>-login`"
   error instead of retrying into a lockout.
 - Drive the browser once per cycle: the transactions leg caches its result

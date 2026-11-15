@@ -141,12 +141,16 @@ def _checks(
         identities = Counter((p.kind, p.currency, p.external_ref) for p in products)
         dupes = sum(n - 1 for n in identities.values() if n > 1)
         if dupes:
-            failures.append(f"{dupes} duplicate product identity(ies) (kind, currency, external_ref)")
+            failures.append(
+                f"{dupes} duplicate product identity(ies) (kind, currency, external_ref)"
+            )
         singletons = {(p.kind, p.currency) for p in products if p.external_ref is None}
         multi = {(p.kind, p.currency) for p in products if p.external_ref is not None}
         mixed = singletons & multi
         if mixed:
-            failures.append(f"singleton and per-ref products share (kind, currency): {sorted(mixed)}")
+            failures.append(
+                f"singleton and per-ref products share (kind, currency): {sorted(mixed)}"
+            )
         if txns:
             targets = {(t.product_kind, t.currency) for t in txns if t.product_external_ref is None}
             orphan = targets - singletons
@@ -190,6 +194,7 @@ def _compare(path: Path, txns: list | None, products: list | None) -> None:
             f"only before {len(before - now)}"
         )
     if products is not None:
+
         def ident(kind: str, currency: str, ref: str | None) -> tuple:
             return (kind, currency, ref)
 
@@ -222,14 +227,14 @@ async def _run(scraper: BaseScraper, legs: set[str]) -> tuple[Any, Any, list[str
     if "transactions" in legs:
         try:
             txns = await scraper.scrape_transactions()
-        except Exception as e:  # noqa: BLE001 - report and keep going, like run_scraper
+        except Exception as e:  # report and keep going, like run_scraper
             ok = False
             print(f"transactions leg FAILED: {type(e).__name__}: {e}")
     if "products" in legs:
         try:
             result = await scraper.scrape_products()
             products, warnings = result.products, result.warnings
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             ok = False
             print(f"products leg FAILED: {type(e).__name__}: {e}")
     return txns, products, warnings, ok
@@ -240,7 +245,7 @@ def _close_email_session() -> None:
         from scrapers.backends.email import get_session
 
         get_session().close()
-    except Exception:  # noqa: BLE001 - never initialised, or already closed
+    except Exception:  # never initialised, or already closed
         pass
 
 
@@ -266,8 +271,12 @@ def main() -> int:
     try:
         scraper = cls()
     except KeyError as e:
-        raise SystemExit(f"{cls.__name__} needs env var {e}; load .env and the stored secrets")
-    print(f"dry run: {scraper.name} (legs: {', '.join(sorted(legs))}); nothing is written to the DB")
+        raise SystemExit(
+            f"{cls.__name__} needs env var {e}; load .env and the stored secrets"
+        ) from None
+    print(
+        f"dry run: {scraper.name} (legs: {', '.join(sorted(legs))}); nothing is written to the DB"
+    )
 
     try:
         txns, products, warnings, ok = asyncio.run(_run(scraper, legs))

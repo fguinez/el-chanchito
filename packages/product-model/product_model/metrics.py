@@ -28,6 +28,33 @@ class BaseMetrics(BaseModel):
         raise NotImplementedError
 
 
+def _annual_rate_pct_field():
+    """`annual_rate_pct`: the yield rate an institution quotes for a balance."""
+    return Field(
+        None,
+        description=("Annual yield rate as a percent number, as reported by the institution."),
+        json_schema_extra={"denomination": "percent"},
+    )
+
+
+def _yield_profit_field():
+    """`profit`: the gain an institution reports a yielding balance has earned."""
+    return Field(
+        None,
+        description="Accumulated gain as reported by the institution.",
+        json_schema_extra={"denomination": "currency"},
+    )
+
+
+def _yield_profit_12m_field():
+    """`profit_12m`: the gain a yielding balance earned over the last 12 months."""
+    return Field(
+        None,
+        description=("Gain over the last 12 months, as reported by the institution."),
+        json_schema_extra={"denomination": "currency"},
+    )
+
+
 class BankAccountMetrics(BaseMetrics):
     """Shared observation fields for bank accounts (checking/savings/vista)."""
 
@@ -109,26 +136,26 @@ class SavingsMetrics(BankAccountMetrics):
     kind: Literal["savings"] = Field(
         "savings", description='Payload discriminator; always "savings".'
     )
+    annual_rate_pct: float | None = _annual_rate_pct_field()
+    profit: float | None = _yield_profit_field()
 
 
 class VistaMetrics(BankAccountMetrics):
     """Observation for a vista account; headline is `balance`."""
 
-    kind: Literal["vista"] = Field(
-        "vista", description='Payload discriminator; always "vista".'
-    )
+    kind: Literal["vista"] = Field("vista", description='Payload discriminator; always "vista".')
 
 
 class WalletMetrics(BaseMetrics):
     """Observation for an app wallet; headline is `balance`."""
 
-    kind: Literal["wallet"] = Field(
-        "wallet", description='Payload discriminator; always "wallet".'
-    )
+    kind: Literal["wallet"] = Field("wallet", description='Payload discriminator; always "wallet".')
     balance: float = Field(
         description="Wallet balance in the wallet currency (whole pesos for CLP).",
         json_schema_extra={"denomination": "currency"},
     )
+    annual_rate_pct: float | None = _annual_rate_pct_field()
+    profit_12m: float | None = _yield_profit_12m_field()
 
     def headline(self) -> float | None:
         return self.balance
@@ -166,30 +193,22 @@ class CreditCardMetrics(RevolvingCreditMetrics):
     )
     next_statement_date: datetime.date | None = Field(
         None,
-        description=(
-            "Next closing date, as the institution prints it (Próxima facturación)."
-        ),
+        description=("Next closing date, as the institution prints it (Próxima facturación)."),
     )
     payment_due_date: datetime.date | None = Field(
         None,
-        description=(
-            "Payment due date of the latest statement (Pagar hasta / Vencimiento)."
-        ),
+        description=("Payment due date of the latest statement (Pagar hasta / Vencimiento)."),
     )
     billed_amount: float | None = Field(
         None,
         description=(
-            "Amount billed on the latest statement, in product currency "
-            "(Monto facturado)."
+            "Amount billed on the latest statement, in product currency (Monto facturado)."
         ),
         json_schema_extra={"denomination": "currency"},
     )
     minimum_payment: float | None = Field(
         None,
-        description=(
-            "Minimum payment of the latest statement, in product currency "
-            "(Pago mínimo)."
-        ),
+        description=("Minimum payment of the latest statement, in product currency (Pago mínimo)."),
         json_schema_extra={"denomination": "currency"},
     )
 
@@ -231,9 +250,7 @@ class LineOfCreditMetrics(RevolvingCreditMetrics):
 class LoanMetrics(InstallmentLoanMetrics):
     """Observation for a consumer loan; headline is `owed`."""
 
-    kind: Literal["loan"] = Field(
-        "loan", description='Payload discriminator; always "loan".'
-    )
+    kind: Literal["loan"] = Field("loan", description='Payload discriminator; always "loan".')
 
 
 class MortgageMetrics(InstallmentLoanMetrics):
@@ -287,9 +304,7 @@ class InvestmentMetrics(BaseMetrics):
 class StockMetrics(BaseMetrics):
     """Observation for a stock position; headline is `nav`."""
 
-    kind: Literal["stock"] = Field(
-        "stock", description='Payload discriminator; always "stock".'
-    )
+    kind: Literal["stock"] = Field("stock", description='Payload discriminator; always "stock".')
     nav: float = Field(
         description="Current market value of the position (net asset value).",
         json_schema_extra={"denomination": "currency"},
@@ -353,9 +368,7 @@ class StockMetrics(BaseMetrics):
 class CryptoMetrics(BaseMetrics):
     """Observation for a crypto holding; headline is `units`."""
 
-    kind: Literal["crypto"] = Field(
-        "crypto", description='Payload discriminator; always "crypto".'
-    )
+    kind: Literal["crypto"] = Field("crypto", description='Payload discriminator; always "crypto".')
     units: float = Field(
         description="Coin units held (fractional).",
         json_schema_extra={"denomination": "currency"},
@@ -378,9 +391,7 @@ class CryptoMetrics(BaseMetrics):
 class OtherMetrics(BaseMetrics):
     """Observation for an uncategorized product; headline is `balance` if known."""
 
-    kind: Literal["other"] = Field(
-        "other", description='Payload discriminator; always "other".'
-    )
+    kind: Literal["other"] = Field("other", description='Payload discriminator; always "other".')
     balance: int | None = Field(
         None,
         description="Balance in CLP when known.",

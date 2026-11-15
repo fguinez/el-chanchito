@@ -42,9 +42,7 @@ def _spec(*columns: ColumnSpec, family: str = "cash") -> FamilySpec:
 # so a spec routed into the wrong branch cannot pass on another branch's error.
 INVALID_SPECS: dict[str, tuple[FamilySpec, str]] = {
     "unknown metric field": (
-        _spec(
-            ColumnSpec(key="x", label_es="X", source=ColumnSource.METRIC, field="nope")
-        ),
+        _spec(ColumnSpec(key="x", label_es="X", source=ColumnSource.METRIC, field="nope")),
         "no kind of the family has a metrics.nope field",
     ),
     "metric field without denomination": (
@@ -99,11 +97,7 @@ INVALID_SPECS: dict[str, tuple[FamilySpec, str]] = {
         "has both metrics.installments_paid",
     ),
     "reserved key": (
-        _spec(
-            ColumnSpec(
-                key="producto", label_es="Producto", source=ColumnSource.HEADLINE
-            )
-        ),
+        _spec(ColumnSpec(key="producto", label_es="Producto", source=ColumnSource.HEADLINE)),
         "reserved for a universal column",
     ),
     "duplicate key": (
@@ -175,6 +169,26 @@ def test_kind_belongs_to_exactly_one_family(kind):
 def test_family_kinds_match_the_design(family):
     """family_kinds partitions PRODUCT_KINDS as the design table says."""
     assert family_kinds(family) == EXPECTED_KINDS[family]
+
+
+def test_cash_columns_add_an_optional_rate_and_two_signed_gains():
+    """Tasa anual is a percent; Ganancia and Ganancia 12 meses signed amounts; all hidden when empty."""
+    columns = {column.key: column for column in resolve_columns("cash")}
+
+    assert tuple(columns) == ("saldo", "saldo_contable", "tasa", "ganancia", "ganancia_12m")
+    assert (columns["tasa"].field, columns["tasa"].format) == (
+        "annual_rate_pct",
+        ColumnFormat.PERCENT,
+    )
+    assert columns["tasa"].signed is False
+    for key, field, label in (
+        ("ganancia", "profit", "Ganancia"),
+        ("ganancia_12m", "profit_12m", "Ganancia 12 meses"),
+    ):
+        assert (columns[key].field, columns[key].label_es) == (field, label)
+        assert columns[key].format is ColumnFormat.CURRENCY
+        assert columns[key].signed is True
+    assert all(columns[key].optional for key in ("tasa", "ganancia", "ganancia_12m"))
 
 
 def test_revolving_credit_columns_are_right_aligned_currency():
@@ -269,9 +283,7 @@ def test_resolve_columns_rejects_unknown_family():
         resolve_columns("bonds")
 
 
-@pytest.mark.parametrize(
-    ("spec", "message"), INVALID_SPECS.values(), ids=INVALID_SPECS.keys()
-)
+@pytest.mark.parametrize(("spec", "message"), INVALID_SPECS.values(), ids=INVALID_SPECS.keys())
 def test_resolver_rejects_inconsistent_spec(spec, message):
     """Inconsistent specs raise DisplaySpecError naming the actual problem."""
     with pytest.raises(DisplaySpecError, match=message):

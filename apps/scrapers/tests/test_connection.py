@@ -113,9 +113,7 @@ class TestGetPool:
 
         assert pool_cls.call_args.args == ("postgres://u:p@db.example:6543/x",)
 
-    def test_connections_are_checked_before_being_handed_out(
-        self, monkeypatch, pool_cls
-    ):
+    def test_connections_are_checked_before_being_handed_out(self, monkeypatch, pool_cls):
         """A connection a Postgres restart killed is replaced, not used."""
         monkeypatch.setenv("DATABASE_URL", "postgres://u:p@db.example:6543/x")
 

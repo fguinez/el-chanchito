@@ -215,6 +215,7 @@ See `testing.md` for the content. Files:
 
 ## 10. Final gates
 
+- [ ] `make lint-py` passes (CI runs the same Ruff checks).
 - [ ] `make test-py` passes. Run `make test-db` too if you touched the writer
       or a migration. CI runs both suites against a real Postgres.
 - [ ] If you touched the web (the logo included) or the product model's TS

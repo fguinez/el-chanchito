@@ -1,7 +1,7 @@
 """Kind registry: one spec per product kind, plus the discriminated unions."""
 
 from dataclasses import dataclass
-from typing import Annotated, Union
+from typing import Annotated
 
 from pydantic import Field
 
@@ -198,43 +198,39 @@ _SPECS: tuple[KindSpec, ...] = (
 REGISTRY: dict[str, KindSpec] = {spec.kind: spec for spec in _SPECS}
 
 ProductAttributes = Annotated[
-    Union[
-        CheckingAttributes,
-        SavingsAttributes,
-        VistaAttributes,
-        WalletAttributes,
-        TermDepositAttributes,
-        CreditCardAttributes,
-        DebitCardAttributes,
-        PrepaidCardAttributes,
-        LineOfCreditAttributes,
-        LoanAttributes,
-        MortgageAttributes,
-        InvestmentAttributes,
-        StockAttributes,
-        CryptoAttributes,
-        OtherAttributes,
-    ],
+    CheckingAttributes
+    | SavingsAttributes
+    | VistaAttributes
+    | WalletAttributes
+    | TermDepositAttributes
+    | CreditCardAttributes
+    | DebitCardAttributes
+    | PrepaidCardAttributes
+    | LineOfCreditAttributes
+    | LoanAttributes
+    | MortgageAttributes
+    | InvestmentAttributes
+    | StockAttributes
+    | CryptoAttributes
+    | OtherAttributes,
     Field(discriminator="kind"),
 ]
 
 ProductMetrics = Annotated[
-    Union[
-        CheckingMetrics,
-        SavingsMetrics,
-        VistaMetrics,
-        WalletMetrics,
-        TermDepositMetrics,
-        CreditCardMetrics,
-        DebitCardMetrics,
-        PrepaidCardMetrics,
-        LineOfCreditMetrics,
-        LoanMetrics,
-        MortgageMetrics,
-        InvestmentMetrics,
-        StockMetrics,
-        CryptoMetrics,
-        OtherMetrics,
-    ],
+    CheckingMetrics
+    | SavingsMetrics
+    | VistaMetrics
+    | WalletMetrics
+    | TermDepositMetrics
+    | CreditCardMetrics
+    | DebitCardMetrics
+    | PrepaidCardMetrics
+    | LineOfCreditMetrics
+    | LoanMetrics
+    | MortgageMetrics
+    | InvestmentMetrics
+    | StockMetrics
+    | CryptoMetrics
+    | OtherMetrics,
     Field(discriminator="kind"),
 ]

@@ -38,16 +38,6 @@ class FakeScheduler:
         return self.jobs.get(job_id)
 
 
-class FakeClock:
-    """A monotonic clock the test moves by hand."""
-
-    def __init__(self):
-        self.now = 1000.0
-
-    def __call__(self):
-        return self.now
-
-
 def _serve(scheduler, scraper_keys, heartbeat):
     handler = _make_control_handler(scheduler, scraper_keys, heartbeat)
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
@@ -133,9 +123,7 @@ class TestControlServer:
         assert status == 200
         assert body == {"scrapers": ["buda", "fintual", "tenpo"]}
 
-    def test_scrapers_excludes_keys_without_a_scheduler_job(
-        self, server_with_jobless_key
-    ):
+    def test_scrapers_excludes_keys_without_a_scheduler_job(self, server_with_jobless_key):
         # /scrapers must never advertise a slug POST /refresh/{slug} would
         # 404 on, so a key without a scheduler job stays out of the list.
         _, base = server_with_jobless_key
@@ -313,7 +301,7 @@ class TestRefreshCooldown:
 
 
 def test_banchile_is_gated_by_the_backend():
-    assert _REFRESH_COOLDOWNS == {"banchile": banchile_web.login_cooldown_retry_after}
+    assert {"banchile": banchile_web.login_cooldown_retry_after} == _REFRESH_COOLDOWNS
 
 
 @pytest.fixture

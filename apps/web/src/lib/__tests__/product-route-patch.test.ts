@@ -202,3 +202,49 @@ describe("PATCH /api/institutions/[slug]/products/[product] billing days", () =>
     expect(updateSet()).not.toHaveProperty("attributes");
   });
 });
+
+describe("PATCH /api/institutions/[slug]/products/[product] isActive", () => {
+  // A pot the scraper retired: its source no longer lists it (synthetic stamps).
+  const retiredPot = () =>
+    productRow({
+      kind: "savings",
+      isActive: false,
+      currentBalance: "0",
+      attributes: {
+        retired_by_scraper: true,
+        retired_by_scraper_at: "2026-01-01T00:00:00+00:00",
+        vanished_pending_since: "2026-01-01T00:00:00+00:00",
+      },
+    });
+
+  it("clears the scraper's markers in the same update when reactivating", async () => {
+    row = retiredPot();
+
+    const res = await patch({ isActive: true });
+
+    expect(res.status).toBe(200);
+    const { updatedAt, ...set } = updateSet()!;
+    expect(updatedAt).toBeInstanceOf(Date);
+    expect(set).toEqual({ isActive: true, attributes: {} });
+  });
+
+  it("clears a pending marker when deactivating, so a scrape never undoes it", async () => {
+    row = productRow({
+      kind: "savings",
+      attributes: { vanished_pending_since: "2026-01-01T00:00:00+00:00" },
+    });
+
+    const res = await patch({ isActive: false });
+
+    expect(res.status).toBe(200);
+    expect(updateSet()).toMatchObject({ isActive: false, attributes: {} });
+  });
+
+  it("writes no attributes when the product carries no markers", async () => {
+    const res = await patch({ isActive: false });
+
+    expect(res.status).toBe(200);
+    expect(updateSet()).toMatchObject({ isActive: false });
+    expect(updateSet()).not.toHaveProperty("attributes");
+  });
+});

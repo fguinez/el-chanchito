@@ -10,9 +10,9 @@ point.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Optional
 
 from product_model import (
+    BaseMetrics,
     DailyPrice,
     ProductRef,
     ScrapedExchangeRate,
@@ -35,6 +35,7 @@ __all__ = [
     "ScrapedTransaction",
     "SupersededTransaction",
     "TransactionLocation",
+    "VanishedProductScope",
     "one_per_key_billed_first",
 ]
 
@@ -65,6 +66,34 @@ def one_per_key_billed_first(
     return kept
 
 
+@dataclass(frozen=True)
+class VanishedProductScope:
+    """A set of per-holding products a products leg listed in full.
+
+    Every product of the institution's (kind, currency) whose `external_ref`
+    starts with `external_ref_prefix` that still exists at the source is in
+    `present_refs`, so a stored active one missing from it was closed there
+    (a savings pot the user emptied and closed, say).
+    `db.writer.retire_vanished_products` flags those on their first miss and
+    retires them on the second complete listing in a row that lacks them:
+    inactive, with a `closed_metrics` snapshot (a zero balance) so its
+    history stays and net worth stops counting it. A scraper emits a scope only from a read it
+    knows is complete. Never part of the ingest contract.
+    """
+
+    institution: str
+    product_kind: str
+    currency: str
+    external_ref_prefix: str
+    present_refs: frozenset[str]
+    closed_metrics: BaseMetrics
+
+    def __post_init__(self) -> None:
+        # A retired product with no balance would vanish from the web, history included.
+        if self.closed_metrics.headline() is None:
+            raise ValueError("closed_metrics must have a headline value")
+
+
 @dataclass
 class ProductScrapeResult:
     """Outcome of a products leg: the scraped products plus non-fatal warnings.
@@ -80,12 +109,18 @@ class ProductScrapeResult:
     `price_histories` are the daily closing prices the leg read for some of
     its products (e.g. Fintual's stock positions); `run_scraper` writes them
     after the products too, for the same reason.
+
+    `vanished_product_scopes` name the product sets the leg listed in full
+    (see `VanishedProductScope`); `run_scraper` flags, then retires, the
+    stored products they no longer list, only once every product of the leg
+    was written.
     """
 
     products: list[ScrapedProduct]
     warnings: list[str] = field(default_factory=list)
     exchange_rates: list[ScrapedExchangeRate] = field(default_factory=list)
     price_histories: list[ScrapedPriceHistory] = field(default_factory=list)
+    vanished_product_scopes: list[VanishedProductScope] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -110,7 +145,7 @@ class SupersededTransaction:
     replacement_external_id: str
     created_before_migration: str
     external_id_prefix: str
-    external_id: Optional[str] = None
+    external_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -157,13 +192,11 @@ class BaseScraper(ABC):
 
     @property
     @abstractmethod
-    def method(self) -> str:
-        ...
+    def method(self) -> str: ...
 
     @property
     @abstractmethod
-    def institution(self) -> str:
-        ...
+    def institution(self) -> str: ...
 
     @property
     def name(self) -> str:

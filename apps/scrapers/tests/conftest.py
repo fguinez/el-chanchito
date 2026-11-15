@@ -7,23 +7,41 @@ applies them, and each test gets a fresh clone of it that is dropped at
 teardown. Only `chanchito_test_*` databases this module created are ever
 dropped. Without `TEST_DATABASE_URL` the DB tests are skipped; with it set but
 the server unreachable they fail.
+
+The suite must never load the developer's real `DATABASE_URL`: `main` calls
+`load_dotenv()` at import time, which walks up to the checkout's `.env` and its
+`DATABASE_URL`. So before any test module imports `main` (or a login CLI
+imports dotenv), `load_dotenv` becomes a no-op and `DATABASE_URL` is dropped
+from the environment; only `db_conn` / `unmigrated_db` set it, to a disposable
+`chanchito_test_*` database.
 """
 
 import os
 from pathlib import Path
 from uuid import uuid4
 
-import psycopg
-import pytest
-from psycopg import sql
-from psycopg.conninfo import make_conninfo
-from psycopg.rows import dict_row
+import dotenv
+import dotenv.main
 
-from db import connection
 
-MIGRATIONS_DIR = (
-    Path(__file__).resolve().parents[3] / "packages" / "db-schema" / "migrations"
-)
+def _no_load_dotenv(*args, **kwargs) -> bool:
+    """Stand-in for `dotenv.load_dotenv`: loads nothing, like an absent .env."""
+    return False
+
+
+dotenv.load_dotenv = _no_load_dotenv
+dotenv.main.load_dotenv = _no_load_dotenv
+os.environ.pop("DATABASE_URL", None)
+
+import psycopg  # noqa: E402
+import pytest  # noqa: E402
+from psycopg import sql  # noqa: E402
+from psycopg.conninfo import make_conninfo  # noqa: E402
+from psycopg.rows import dict_row  # noqa: E402
+
+from db import connection  # noqa: E402
+
+MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "packages" / "db-schema" / "migrations"
 
 # Same DDL as packages/db-schema/migrate.mjs.
 _MIGRATIONS_TABLE = """
@@ -61,9 +79,7 @@ def _create_database(dsn: str, name: str, template: str | None = None) -> None:
 def _drop_database(dsn: str, name: str) -> None:
     with _admin(dsn) as conn:
         conn.execute(
-            sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
-                sql.Identifier(name)
-            )
+            sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name))
         )
 
 
@@ -79,18 +95,14 @@ def apply_migrations(dsn: str, before: str | None = None) -> None:
     with psycopg.connect(dsn) as conn:
         conn.execute(_MIGRATIONS_TABLE)
         conn.commit()
-        applied = {
-            row[0] for row in conn.execute("SELECT name FROM _migrations")
-        }
+        applied = {row[0] for row in conn.execute("SELECT name FROM _migrations")}
         conn.commit()
         for path in paths:
             if path.name in applied:
                 continue
             with conn.transaction():
                 conn.execute(path.read_text(encoding="utf-8"))
-                conn.execute(
-                    "INSERT INTO _migrations (name) VALUES (%s)", (path.name,)
-                )
+                conn.execute("INSERT INTO _migrations (name) VALUES (%s)", (path.name,))
 
 
 @pytest.fixture(scope="session")
@@ -140,9 +152,7 @@ def db_conn(_template_db, monkeypatch):
     try:
         connection.close_pool()
         monkeypatch.setenv("DATABASE_URL", test_dsn)
-        with psycopg.connect(
-            test_dsn, autocommit=True, row_factory=dict_row
-        ) as conn:
+        with psycopg.connect(test_dsn, autocommit=True, row_factory=dict_row) as conn:
             yield conn
     finally:
         connection.close_pool()

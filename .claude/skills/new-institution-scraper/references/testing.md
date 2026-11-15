@@ -117,15 +117,15 @@ gitignored `local/` directory.
 ## Running
 
 ```bash
-make install-py     # once: .venv + requirements-dev.txt (pytest)
+make install-py     # once: .venv + requirements-dev.txt (pytest, ruff)
 make test-py        # scrapers + product-model suites; DB tests skip locally
 make test-db        # same, against a throwaway tmpfs Postgres (port 5436)
 cd apps/scrapers && ../../.venv/bin/python -m pytest tests/test_<slug>.py -v
 ```
 
-There is no ruff or mypy configuration in this repo, and CI runs only
-pytest for Python. Still write type hints in the style of the existing
-modules.
+CI also runs Ruff (`ruff.toml` at the repo root): run `make lint-py`
+before pushing, or `make format-py` to apply its fixes. There is no mypy
+configuration; still write type hints in the style of the existing modules.
 
 ## Live verification (outside the test suite)
 
