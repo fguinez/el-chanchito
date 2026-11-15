@@ -44,18 +44,36 @@ def marker_path(session: Path) -> Path:
 _RUT_RE = re.compile(r"^[\d.\s]+-?\s*[\dkK]$")
 
 
+def rut_check_digit(body: str) -> str:
+    """The mod-11 check digit of a RUT's digits ("0"-"9" or "K")."""
+    total, factor = 0, 2
+    for digit in reversed(body):
+        total += int(digit) * factor
+        factor = 2 if factor == 7 else factor + 1
+    rest = 11 - total % 11
+    return {11: "0", 10: "K"}.get(rest, str(rest))
+
+
 def normalize(identifier: str) -> str:
     """The canonical form of an account identifier: an e-mail stripped and
     lowercased, a RUT as `<digits>-<check digit>` with an uppercase K (no dots
-    or spaces, leading zeros dropped), anything else stripped."""
+    or spaces, leading zeros dropped), anything else stripped.
+
+    A RUT typed with its hyphen keeps the check digit it was given. Without
+    one, the last character is taken as the check digit only when it is the
+    valid mod-11 digit of the rest; otherwise the value may be a RUT without
+    its check digit, so it stays its bare digits and matches only itself."""
     value = identifier.strip()
     if "@" in value:
         return value.lower()
     if _RUT_RE.match(value):
         compact = re.sub(r"[.\s-]", "", value).upper()
         body, check = compact[:-1].lstrip("0"), compact[-1]
-        if body:
+        if not body:
+            return value
+        if "-" in value or (body.isdigit() and rut_check_digit(body) == check):
             return f"{body}-{check}"
+        return compact.lstrip("0")
     return value
 
 

@@ -486,23 +486,44 @@ def _find_authenticated_page(browser, deadline: float):
 
 # Whether the portal's signed-in customer (`user` in the tab's sessionStorage,
 # the id its API takes as `rut`) is the expected RUT, compared inside the page
-# so the id never reaches Python: "match", "mismatch", or "unknown" when the
-# tab holds no id. Separators and leading zeros are ignored, and an id without
-# its check digit matches too.
+# so the id never reaches Python: "match", "mismatch", or "unknown". Separators
+# and leading zeros are ignored. The id matches as the full RUT (`full`, check
+# digit included) or as its bare digits (`body`); an id equal to `body` whose
+# last digit is itself a valid mod-11 check digit of the rest could also be
+# another account's full RUT, so it is "unknown", never a match. A tab with no
+# id is "unknown" too.
 _ACCOUNT_CHECK_JS = """
 ({full, body}) => {
   let user = null;
   try { user = sessionStorage.getItem('user'); } catch (e) { return 'unknown'; }
   const id = String(user || '').replace(/[^0-9kK]/g, '').toUpperCase().replace(/^0+/, '');
   if (!id) return 'unknown';
-  return id === full || id === body ? 'match' : 'mismatch';
+  if (id === full) return 'match';
+  if (id !== body) return 'mismatch';
+  const checkDigit = (digits) => {
+    let total = 0;
+    let factor = 2;
+    for (let i = digits.length - 1; i >= 0; i--) {
+      total += Number(digits[i]) * factor;
+      factor = factor === 7 ? 2 : factor + 1;
+    }
+    const rest = 11 - (total % 11);
+    return rest === 11 ? '0' : rest === 10 ? 'K' : String(rest);
+  };
+  const head = id.slice(0, -1);
+  const carriesCheckDigit = /^[0-9]+$/.test(head) && checkDigit(head) === id.slice(-1);
+  return carriesCheckDigit ? 'unknown' : 'match';
 }
 """
 
 
 def _account_check(page, rut: str) -> str:
-    """`_ACCOUNT_CHECK_JS`'s verdict for `rut` on `page`; "unknown" on failure."""
-    full = session_account.normalize(rut).replace("-", "")
+    """`_ACCOUNT_CHECK_JS`'s verdict for `rut` on `page`; "unknown" on failure
+    or when `rut` has no check digit to compare a full id with."""
+    canonical = session_account.normalize(rut)
+    if "-" not in canonical:
+        return "unknown"
+    full = canonical.replace("-", "")
     try:
         verdict = page.evaluate(_ACCOUNT_CHECK_JS, {"full": full, "body": full[:-1]})
     except Exception:

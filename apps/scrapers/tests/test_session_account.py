@@ -63,6 +63,9 @@ def test_a_saved_session_then_belongs_to_its_account(tmp_path):
         ("11111111-1", "11111111-1"),
         (" 11 111 111 - 1 ", "11111111-1"),
         ("111111111", "11111111-1"),
+        ("22222222 2", "22222222-2"),
+        ("111111112", "111111112"),
+        ("0111111112", "111111112"),
         ("11.111.111-k", "11111111-K"),
         ("011.111.111-1", "11111111-1"),
         (" User@Example.COM ", "user@example.com"),
@@ -73,11 +76,21 @@ def test_normalize(raw, canonical):
     assert session_account.normalize(raw) == canonical
 
 
+@pytest.mark.parametrize(
+    ("body", "check"),
+    [("11111111", "1"), ("22222222", "2"), ("1111111", "4"), ("12345678", "5"), ("0", "0")],
+)
+def test_rut_check_digit(body, check):
+    assert session_account.rut_check_digit(body) == check
+
+
 def test_a_rut_with_or_without_dots_is_one_account(tmp_path):
     path = _session(tmp_path)
     session_account.write_account(path, "11.111.111-k")
     assert session_account.belongs_to(path, "11111111-K")
-    assert session_account.belongs_to(path, "11111111k")
+    assert session_account.belongs_to(path, " 11 111 111 - K ")
+    # Without a hyphen, a K that is not the valid check digit is not read as one.
+    assert not session_account.belongs_to(path, "11111111k")
     assert not session_account.belongs_to(path, "22.222.222-2")
 
 

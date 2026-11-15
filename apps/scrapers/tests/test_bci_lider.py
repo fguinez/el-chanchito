@@ -974,6 +974,13 @@ class TestAccountBinding:
         assert web._account_check(Page(), "11.111.111-k") == "match"
         assert seen == [{"full": "11111111K", "body": "11111111"}]
 
+    def test_a_rut_without_a_check_digit_cannot_be_compared(self):
+        class Page:
+            def evaluate(self, js, arg):
+                raise AssertionError("compared without a check digit")
+
+        assert web._account_check(Page(), "111111112") == "unknown"
+
     @pytest.mark.parametrize("answer", [None, "yes", RuntimeError("closed")])
     def test_an_unreadable_verdict_is_unknown(self, answer):
         class Page:
@@ -1143,3 +1150,59 @@ class TestAccountBinding:
                 profile=profile if managed else None,
             )
         assert not web.session_account.marker_path(profile).exists()
+
+
+def _run_account_js(user, rut):
+    """Run `_ACCOUNT_CHECK_JS` under node with `user` in sessionStorage."""
+    import json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    canonical = web.session_account.normalize(rut).replace("-", "")
+    script = (
+        f"globalThis.sessionStorage = {{getItem: () => {json.dumps(user)}}};\n"
+        f"const check = {web._ACCOUNT_CHECK_JS.strip()};\n"
+        f"process.stdout.write(check({json.dumps({'full': canonical, 'body': canonical[:-1]})}));"
+    )
+    return subprocess.run(
+        [node, "-e", script], capture_output=True, text=True, check=True, timeout=30
+    ).stdout
+
+
+@pytest.mark.skipif(__import__("shutil").which("node") is None, reason="node is not on PATH")
+class TestAccountCheckScript:
+    """The in-page comparison itself, under node. Every RUT is synthetic."""
+
+    @pytest.mark.parametrize(
+        ("user", "rut", "verdict"),
+        [
+            ("11.111.111-1", "11111111-1", "match"),
+            ("11111111-1", "11.111.111-1", "match"),
+            ("111111111", "11.111.111-1", "match"),
+            ("0011111111", "11.111.111-1", "match"),
+            ("011.111.111-1", "11.111.111-1", "match"),
+            ("11111111", "11.111.111-1", "match"),  # bare digits, no check digit
+            ("12.345.678-5", "12345678-5", "match"),
+            ("12345678", "12.345.678-5", "match"),
+            ("12.345.678-k", "12.345.678-K", "match"),
+            ("12345678K", "12.345.678-k", "match"),
+            ("22.222.222-2", "11.111.111-1", "mismatch"),
+            ("2222222", "11.111.111-1", "mismatch"),
+            ("11111112", "11.111.111-1", "mismatch"),
+            (None, "11.111.111-1", "unknown"),
+            ("", "11.111.111-1", "unknown"),
+            ("abc", "11.111.111-1", "unknown"),
+        ],
+    )
+    def test_verdicts(self, user, rut, verdict):
+        assert _run_account_js(user, rut) == verdict
+
+    def test_another_accounts_full_rut_equal_to_our_digits_is_not_a_match(self):
+        """1.111.111-4 is a valid RUT whose compact form "11111114" is also the
+        bare digits of 11.111.114-X: that id must never pass as ours."""
+        assert web.session_account.rut_check_digit("1111111") == "4"
+        ours = f"11.111.114-{web.session_account.rut_check_digit('11111114')}"
+        assert _run_account_js("1.111.111-4", ours) == "unknown"
+        assert _run_account_js("11111114", ours) == "unknown"
+        assert _run_account_js("1.111.111-4", "1.111.111-4") == "match"

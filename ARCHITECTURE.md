@@ -762,7 +762,9 @@ managed profile carries a `session_account` marker and is deleted before
 launch when it is not this RUT's (a changed RUT, or a profile from before
 markers), and a tab the run did not sign in itself must show this RUT as the
 portal's sessionStorage `user` (compared inside the page, the id never reaches
-Python). A mismatch in managed mode (`BciLiderAccountMismatch`) resets the
+Python; an id equal to the RUT's bare digits counts only when its own last
+digit is not a valid mod-11 check digit, since it could otherwise be another
+account's full RUT). A mismatch in managed mode (`BciLiderAccountMismatch`) resets the
 profile once Chrome exits and the visible retry signs in on a fresh one; in
 reuse mode, whose Chrome is the user's and never wiped, it raises
 `BciLiderSignInRequired` asking for a sign-out and `make bci-lider-login`. A
@@ -1710,7 +1712,8 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
   fingerprint. Cached sessions (Fintual cookies, BanChile storage state) carry
   a `<session>.account` marker (0600, a salted SHA-256 of the RUT or e-mail,
   never the identifier; normalized first, so `11.111.111-1` and `11111111-1`
-  are one account, and a marker from before normalization still matches and
+  are one account (without a hyphen the last digit is the check digit only
+  when mod-11 validates it), and a marker from before normalization still matches and
   is rewritten), written on every save and checked on every load: a
   session of another account is discarded, whether the change came from the
   dashboard or the env, and even when a run on the old credentials writes its
