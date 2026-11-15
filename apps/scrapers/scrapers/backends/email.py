@@ -537,7 +537,8 @@ class ImapSession:
         except ssl.SSLCertVerificationError as exc:
             raise ConnectionError(
                 f"IMAP server {self._host} failed TLS certificate verification "
-                f"({exc}); refusing to send the password"
+                f"({exc}); refusing to send the password. For a server with a "
+                "private CA, point SSL_CERT_FILE at a bundle that includes it"
             ) from exc
         mail.login(self._user, self._password)
         self._mail = mail
