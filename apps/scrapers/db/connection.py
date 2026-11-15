@@ -3,15 +3,11 @@
 import functools
 import os
 from collections.abc import Callable
-from typing import ParamSpec, TypeVar
 
 import psycopg
 from psycopg_pool import ConnectionPool
 
 from scrapers.retry import retry_sync
-
-P = ParamSpec("P")
-T = TypeVar("T")
 
 # Recycle connections well before anything between us and Postgres drops them.
 _MAX_LIFETIME_SECONDS = 30 * 60
@@ -66,7 +62,7 @@ def is_transient_db_error(exc: BaseException) -> bool:
     return isinstance(exc, psycopg.OperationalError)
 
 
-def with_db_retry(fn: Callable[P, T]) -> Callable[P, T]:
+def with_db_retry[**P, T](fn: Callable[P, T]) -> Callable[P, T]:
     """Retry `fn` on transient DB errors, at most DB_ATTEMPTS times.
 
     Only for functions that are safe to repeat, and that roll a failed attempt

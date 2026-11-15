@@ -129,7 +129,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
@@ -138,7 +138,6 @@ from scrapers.backends.percent import parse_percent
 
 logger = logging.getLogger(__name__)
 
-T = TypeVar("T")
 
 LOCAL_TZ = ZoneInfo("America/Santiago")
 
@@ -1140,7 +1139,7 @@ def _targets_text(summary: real_chrome.TargetSummary) -> str:
     return f"Chrome targets: {listed or 'none'}"
 
 
-def _with_portal_tab(
+def _with_portal_tab[T](
     cdp_url: str,
     action: Callable[[Any], T],
     *,

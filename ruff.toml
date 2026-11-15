@@ -28,7 +28,6 @@ ignore = [
     "RUF003",
     "SIM105", # try/except/pass reads fine; contextlib.suppress is not required
     "UP031",  # %-formatting keeps JS snippets readable (no doubled braces)
-    "UP047",  # TypeVar generics stay until a dedicated PEP 695 pass
     "RUF012", # class-level fakes in tests mutate shared defaults on purpose
 ]
 
