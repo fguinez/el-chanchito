@@ -74,7 +74,7 @@ async function readBoundedJson(
   try {
     return { ok: true, body: JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) };
   } catch {
-    return { ok: false, status: 400, error: "Invalid JSON body" };
+    return { ok: false, status: 400, error: "El cuerpo no es JSON válido." };
   }
 }
 

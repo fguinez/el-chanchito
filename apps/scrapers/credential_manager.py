@@ -59,6 +59,10 @@ class CredentialManager:
         self._published_key_id = published_key_id
         self._published = False
         self._loaded = False
+        # `_io_lock` serializes the database work (which may sit through
+        # retries for ~30 s); `_lock` guards the state and is only ever held
+        # briefly, so status() never waits on the database.
+        self._io_lock = threading.Lock()
         self._lock = threading.Lock()
         self._retry_thread: threading.Thread | None = None
 
@@ -121,7 +125,8 @@ class CredentialManager:
         except Exception as exc:
             logger.warning("Could not publish the credentials key yet: %s", type(exc).__name__)
             return
-        self._published = True
+        with self._lock:
+            self._published = True
         if replaced:
             logger.warning(
                 "The credentials key in the database was %s; now %s (%s). If another "
@@ -152,12 +157,14 @@ class CredentialManager:
                     "Another process published key %s over ours; publishing ours again",
                     published[:12],
                 )
-            self._published = False
+            with self._lock:
+                self._published = False
             self._publish_key()
 
     # -- rows ----------------------------------------------------------------------
 
     def _reload_locked(self) -> bool:
+        """Called with `_io_lock` held; takes `_lock` only to apply."""
         if self.key is None:
             return False
         if not self._published:
@@ -172,8 +179,9 @@ class CredentialManager:
             logger.warning("Could not read stored credentials: %s", type(exc).__name__)
             return False
         opened = open_rows(self.key, rows, self.overlay.baseline)
-        self.overlay.apply(opened)
-        self._loaded = True
+        with self._lock:
+            self.overlay.apply(opened)
+            self._loaded = True
         if opened.values:
             logger.info("Applied %d stored credential field(s)", len(opened.values))
         return True
@@ -181,14 +189,14 @@ class CredentialManager:
     def reload(self) -> bool:
         """Read the rows again and re-apply the overlay; False when the rows
         could not be read (the previous overlay stays)."""
-        with self._lock:
+        with self._io_lock:
             return self._reload_locked()
 
     def tick(self) -> bool:
         """The periodic job: publish the key until it sticks, put it back if
         replaced, and read the rows until they load. True when the rows were
         loaded just now (the caller then rebuilds its scrapers)."""
-        with self._lock:
+        with self._io_lock:
             if self.key is None:
                 return False
             if self._published:
@@ -212,7 +220,8 @@ class CredentialManager:
         self._retry_thread.start()
 
     def status(self) -> dict:
-        """Booleans and the public key id only; never a value."""
+        """Booleans and the public key id only; never a value. Never waits on
+        the database."""
         with self._lock:
             return {
                 "key_available": self.key is not None,

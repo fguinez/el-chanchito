@@ -367,7 +367,11 @@ def open_rows(
                     values[field.env_var] = value
                     opened = True
                 except CredentialOpenError:
-                    flag(row, field.env_var, "was not sealed to the stored destination")
+                    flag(
+                        row,
+                        field.env_var,
+                        f"was not sealed to the {'/'.join(field.binds)} it would be used with",
+                    )
             if not opened and destination_stored:
                 # Never send another secret to a destination the store chose.
                 logger.warning(
