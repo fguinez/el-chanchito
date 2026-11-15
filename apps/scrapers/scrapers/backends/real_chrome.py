@@ -341,6 +341,19 @@ class DriverKillSwitch:
                 logger.warning("Could not kill the Playwright driver", exc_info=True)
 
 
+def connection_lost(exc: Exception) -> bool:
+    """Whether a failed Playwright call means the tab or its connection is gone.
+
+    A dead driver raises a bare `Exception` (1.64) or `TargetClosedError`
+    (1.65, also for a closed tab or Chrome); `TargetClosedError` is not public,
+    so it is matched by name. Any other Playwright `Error` (a timeout, a
+    navigation that destroyed the script's context) leaves the tab usable.
+    """
+    from playwright.sync_api import Error as PlaywrightError  # lazy: keeps tests browser-free
+
+    return not isinstance(exc, PlaywrightError) or type(exc).__name__ == "TargetClosedError"
+
+
 def _driver_process(manager):
     """The driver subprocess behind a started `sync_playwright()` manager, or None.
 
