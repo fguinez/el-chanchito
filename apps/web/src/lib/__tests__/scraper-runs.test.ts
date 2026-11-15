@@ -14,6 +14,15 @@ describe("runStatusStyle", () => {
     expect(partial.badgeClass).not.toBe(runStatusStyle("error").badgeClass);
   });
 
+  it("gives runs that need a sign-in their own label and color", () => {
+    const needsSignIn = runStatusStyle("needs_sign_in");
+
+    expect(needsSignIn.label).toBe("inicia sesión");
+    for (const other of ["success", "partial", "error", "running"]) {
+      expect(needsSignIn.badgeClass).not.toBe(runStatusStyle(other).badgeClass);
+    }
+  });
+
   it("shows an unknown status as-is, unstyled", () => {
     expect(runStatusStyle("constructor")).toEqual({
       label: "constructor",
@@ -25,6 +34,7 @@ describe("runStatusStyle", () => {
 describe("hasRunDetails", () => {
   it.each([
     ["error", "products: login failed", true],
+    ["needs_sign_in", "Stub needs sign-in: run `make stub-login`.", true],
     ["partial", "transactions: 1 of 2 not written", true],
     ["partial", null, false],
     ["success", null, false],

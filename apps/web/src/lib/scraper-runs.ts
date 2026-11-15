@@ -1,9 +1,16 @@
 // How the dashboard presents a scraper run. The statuses are the ones
 // `run_scraper` writes to scraper_runs (apps/scrapers/main.py): `partial`
 // means part of the run's data landed and part failed, or the scraper warned
-// about incomplete coverage; its error_message says which.
+// about incomplete coverage; its error_message says which. `needs_sign_in`
+// means the scraper's session is gone and nothing else failed: a human must
+// sign in, and the message names the command.
 
-export type ScraperRunStatus = "running" | "success" | "partial" | "error";
+export type ScraperRunStatus =
+  | "running"
+  | "success"
+  | "partial"
+  | "error"
+  | "needs_sign_in";
 
 export interface RunStatusStyle {
   /** Badge text, in Spanish like the rest of the dashboard. */
@@ -16,6 +23,10 @@ const STATUS_STYLES: Record<ScraperRunStatus, RunStatusStyle> = {
   success: { label: "ok", badgeClass: "text-green-600 border-green-200" },
   partial: { label: "parcial", badgeClass: "text-amber-600 border-amber-200" },
   error: { label: "error", badgeClass: "text-red-600 border-red-200" },
+  needs_sign_in: {
+    label: "inicia sesión",
+    badgeClass: "text-violet-600 border-violet-200",
+  },
   running: { label: "en curso", badgeClass: "text-blue-600 border-blue-200" },
 };
 
