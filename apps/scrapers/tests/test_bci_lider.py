@@ -697,7 +697,7 @@ class TestRealChromeWiring:
         """The managed run hands the Chrome it launched to the CDP attach."""
         seen = []
         monkeypatch.setattr(web, "_launch_real_chrome", lambda port, url, offscreen: "proc")
-        monkeypatch.setattr(web.real_chrome, "terminate_chrome", lambda proc: None)
+        monkeypatch.setattr(web.real_chrome, "terminate_chrome", lambda proc, cdp_url=None: None)
         monkeypatch.setattr(
             web,
             "_scrape_over_cdp",
@@ -710,10 +710,14 @@ class TestRealChromeWiring:
         assert seen == ["proc"]
 
     def test_managed_attempt_terminates_its_chrome_even_on_failure(self, monkeypatch):
-        """The Chrome a managed run launched is torn down by the shared helper."""
+        """The Chrome a managed run launched is torn down by the shared helper, via CDP first."""
         terminated = []
         monkeypatch.setattr(web, "_launch_real_chrome", lambda port, url, offscreen: "proc")
-        monkeypatch.setattr(web.real_chrome, "terminate_chrome", terminated.append)
+        monkeypatch.setattr(
+            web.real_chrome,
+            "terminate_chrome",
+            lambda proc, cdp_url=None: terminated.append((proc, cdp_url)),
+        )
 
         def broken_scrape(cdp_url, rut, password, process=None):
             raise web.BciLiderSessionError("synthetic")
@@ -723,4 +727,4 @@ class TestRealChromeWiring:
         with pytest.raises(web.BciLiderSessionError):
             web._scrape_managed_once(9222, "http://localhost:9222", None, None, offscreen=True)
 
-        assert terminated == ["proc"]
+        assert terminated == [("proc", "http://localhost:9222")]
