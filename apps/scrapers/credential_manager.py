@@ -149,7 +149,10 @@ def rotate_key_file(
             raise RotationPending(
                 f"could not check an interrupted rotation ({type(exc).__name__})"
             ) from None
-        old = key_file.load()
+        try:
+            old = key_file.load()
+        except FileNotFoundError:
+            raise RotationError(f"there is no key file at {key_file.path}") from None
         try:
             active = ring.active_key()
         except Exception as exc:

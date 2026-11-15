@@ -132,7 +132,7 @@ def _reset(key_file: KeyFile, ring: DatabaseKeyRing, assume_yes: bool) -> int:
             f"{orphaned} stored credential(s) must be entered again in Credenciales."
         )
     else:
-        print(f"Key {key.key_id[:12]} already was the active key; nothing to reset.")
+        print(f"Key {key.key_id[:12]} is the active key; no other key was retired.")
     _poke_service()
     return 0
 
