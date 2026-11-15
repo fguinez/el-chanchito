@@ -71,18 +71,35 @@ def key_id_for(public_raw: bytes) -> str:
     return hashlib.sha256(public_raw).hexdigest()
 
 
-def sealing_info(slug: str, field_key: str, key_id: str) -> bytes:
+def binding_digest(values: Iterable[str]) -> str:
+    """Hex SHA-256 of the values a secret is sealed to (e.g. IMAP host and
+    user), length-prefixed so no two lists collide."""
+    digest = hashlib.sha256()
+    for value in values:
+        encoded = value.encode("utf-8")
+        digest.update(len(encoded).to_bytes(4, "big") + encoded)
+    return digest.hexdigest()
+
+
+def sealing_info(slug: str, field_key: str, key_id: str, binding: str | None = None) -> bytes:
     """The HPKE `info` that binds a ciphertext to where it belongs.
 
     The dashboard builds the same bytes (apps/web/src/lib/credentials/seal.ts).
     The parts are NUL-separated; slugs and keys are `[a-z][a-z0-9_]*` and the
-    key id is hex, so the layout is unambiguous.
+    key id and binding are hex, so the layout is unambiguous. A secret that
+    binds other fields (registry `binds`) adds `binding_digest` of their
+    values, so it only opens next to the destination it was saved with.
     """
     if not _NAME_RE.match(slug) or not _NAME_RE.match(field_key):
         raise CredentialOpenError("malformed credential slug or field key")
     if not _KEY_ID_RE.match(key_id):
         raise CredentialOpenError("malformed credential key id")
-    return "\x00".join((_INFO_LABEL, SCHEME, slug, field_key, key_id)).encode("ascii")
+    parts = [_INFO_LABEL, SCHEME, slug, field_key, key_id]
+    if binding is not None:
+        if not _KEY_ID_RE.match(binding):
+            raise CredentialOpenError("malformed credential binding")
+        parts.append(f"bind:{binding}")
+    return "\x00".join(parts).encode("ascii")
 
 
 @dataclass(frozen=True)
@@ -103,16 +120,18 @@ class CredentialKey:
         )
         return cls(private_key, public_raw, key_id_for(public_raw))
 
-    def seal(self, slug: str, field_key: str, value: str) -> bytes:
+    def seal(self, slug: str, field_key: str, value: str, binding: str | None = None) -> bytes:
         """Seal like the dashboard does (tests and tooling only)."""
-        info = sealing_info(slug, field_key, self.key_id)
+        info = sealing_info(slug, field_key, self.key_id, binding)
         return _SUITE.encrypt(value.encode("utf-8"), self.private_key.public_key(), info=info)
 
-    def open(self, slug: str, field_key: str, key_id: str, sealed: bytes) -> str:
+    def open(
+        self, slug: str, field_key: str, key_id: str, sealed: bytes, binding: str | None = None
+    ) -> str:
         """The plaintext of one stored field; CredentialOpenError on any failure."""
         if key_id != self.key_id:
             raise CredentialOpenError("sealed to another key")
-        info = sealing_info(slug, field_key, key_id)
+        info = sealing_info(slug, field_key, key_id, binding)
         try:
             plaintext = _SUITE.decrypt(bytes(sealed), self.private_key, info=info)
             return plaintext.decode("utf-8")
@@ -230,27 +249,68 @@ class SealedCredential:
 
 @dataclass(frozen=True)
 class OpenedCredentials:
-    """What a set of rows yields: values by env var, and the env vars whose
-    row exists but cannot be opened (to be entered again)."""
+    """What a set of rows yields: values by env var, the env vars whose row
+    exists but cannot be used (to be entered again), and the env vars that
+    must be unset even though the environment has a value: a binding secret
+    whose destination came from the store but which was not sealed to it."""
 
     values: dict[str, str]
     needs_reentry: frozenset[str]
+    suppressed: frozenset[str] = frozenset()
 
     def __repr__(self) -> str:
         return (
             f"OpenedCredentials(stored={sorted(self.values)}, "
-            f"needs_reentry={sorted(self.needs_reentry)})"
+            f"needs_reentry={sorted(self.needs_reentry)}, suppressed={sorted(self.suppressed)})"
         )
 
 
-def open_rows(key: CredentialKey | None, rows: Iterable[SealedCredential]) -> OpenedCredentials:
-    """Open every row the registry knows. Without a usable key nothing is
-    opened, and nothing is flagged either: the rows may be fine once the key
-    file is fixed."""
-    values: dict[str, str] = {}
-    reentry: set[str] = set()
+# C0, DEL and C1 controls never belong in a login (the dashboard refuses them).
+_CONTROL_RE = re.compile("[\x00-\x1f\x7f-\x9f]")
+
+
+def _truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() not in ("", "0", "false", "no", "off")
+
+
+def _value_problem(field, value: str, fallback: Mapping[str, str | None]) -> str | None:
+    if _CONTROL_RE.search(value):
+        return "has control characters"
+    if (
+        field.allowed_values
+        and value.lower() not in {v.lower() for v in field.allowed_values}
+        and not _truthy(fallback.get(field.allow_custom_env))
+    ):
+        return f"is not a known value (set {field.allow_custom_env}=1 to allow it)"
+    return None
+
+
+def open_rows(
+    key: CredentialKey | None,
+    rows: Iterable[SealedCredential],
+    fallback: Mapping[str, str | None] | None = None,
+) -> OpenedCredentials:
+    """Open every row the registry knows.
+
+    `fallback` is the environment the stored values are laid over: it decides
+    the custom-value opt-outs and stands in for bound fields with no row.
+    Without a usable key nothing is opened and nothing is flagged: the rows
+    may be fine once the key file is fixed.
+    """
+    fallback = fallback or {}
     if key is None:
         return OpenedCredentials({}, frozenset())
+    values: dict[str, str] = {}
+    reentry: set[str] = set()
+    suppressed: set[str] = set()
+    by_field: dict[tuple[str, str], SealedCredential] = {}
+
+    def flag(row: SealedCredential, env: str, why: str) -> None:
+        logger.warning(
+            "Stored credential %s.%s %s; enter it again", row.institution_slug, row.field_key, why
+        )
+        reentry.add(env)
+
     for row in rows:
         spec = CREDENTIALS_BY_SLUG.get(row.institution_slug)
         field = next((f for f in spec.fields if f.key == row.field_key), None) if spec else None
@@ -262,25 +322,64 @@ def open_rows(key: CredentialKey | None, rows: Iterable[SealedCredential]) -> Op
             )
             continue
         if row.scheme != SCHEME or row.key_id != key.key_id:
-            logger.warning(
-                "Stored credential %s.%s was sealed to another key; enter it again",
-                row.institution_slug,
-                row.field_key,
-            )
-            reentry.add(field.env_var)
+            flag(row, field.env_var, "was sealed to another key")
             continue
-        try:
-            values[field.env_var] = key.open(
-                row.institution_slug, row.field_key, row.key_id, row.sealed
-            )
-        except CredentialOpenError:
-            logger.warning(
-                "Stored credential %s.%s could not be opened; enter it again",
-                row.institution_slug,
-                row.field_key,
-            )
-            reentry.add(field.env_var)
-    return OpenedCredentials(values, frozenset(reentry))
+        by_field[(row.institution_slug, row.field_key)] = row
+
+    # Plain fields first: binding secrets are opened against their values.
+    for spec in CREDENTIAL_SPECS:
+        for field in spec.fields:
+            row = by_field.get((spec.slug, field.key))
+            if row is None or field.binds:
+                continue
+            try:
+                value = key.open(row.institution_slug, row.field_key, row.key_id, row.sealed)
+            except CredentialOpenError:
+                flag(row, field.env_var, "could not be opened")
+                continue
+            problem = _value_problem(field, value, fallback)
+            if problem:
+                flag(row, field.env_var, problem)
+                continue
+            values[field.env_var] = value
+
+    for spec in CREDENTIAL_SPECS:
+        fields = {f.key: f for f in spec.fields}
+        for field in spec.fields:
+            if not field.binds:
+                continue
+            bound = [fields[k] for k in field.binds]
+            destination_stored = any(b.env_var in values for b in bound)
+            effective = [values.get(b.env_var, fallback.get(b.env_var) or "") for b in bound]
+            row = by_field.get((spec.slug, field.key))
+            opened = False
+            if row is not None:
+                try:
+                    value = key.open(
+                        row.institution_slug,
+                        row.field_key,
+                        row.key_id,
+                        row.sealed,
+                        binding_digest(effective),
+                    )
+                    if _CONTROL_RE.search(value):
+                        raise CredentialOpenError("control characters")
+                    values[field.env_var] = value
+                    opened = True
+                except CredentialOpenError:
+                    flag(row, field.env_var, "was not sealed to the stored destination")
+            if not opened and destination_stored:
+                # Never send another secret to a destination the store chose.
+                logger.warning(
+                    "%s.%s is stored without a matching %s; %s stays unset",
+                    spec.slug,
+                    "/".join(field.binds),
+                    field.key,
+                    field.env_var,
+                )
+                suppressed.add(field.env_var)
+                reentry.add(field.env_var)
+    return OpenedCredentials(values, frozenset(reentry), frozenset(suppressed))
 
 
 # --- Environment overlay --------------------------------------------------------
@@ -307,17 +406,30 @@ class CredentialOverlay:
         self._environ = os.environ if environ is None else environ
         self._fields = _registry_env() if fields is None else fields
         names = {name for env, legacy in self._fields for name in (env, *legacy)}
+        names |= {
+            f.allow_custom_env
+            for spec in CREDENTIAL_SPECS
+            for f in spec.fields
+            if f.allow_custom_env
+        }
         self._baseline = {name: self._environ.get(name) for name in names}
         self._opened = OpenedCredentials({}, frozenset())
 
     def apply(self, opened: OpenedCredentials) -> None:
         self._opened = opened
         for env, _legacy in self._fields:
-            value = opened.values.get(env, self._baseline[env])
+            value = (
+                None if env in opened.suppressed else opened.values.get(env, self._baseline[env])
+            )
             if value is None:
                 self._environ.pop(env, None)
             else:
                 self._environ[env] = value
+
+    @property
+    def baseline(self) -> dict[str, str | None]:
+        """The environment as it was before any stored value (a copy)."""
+        return dict(self._baseline)
 
     def status(self) -> dict[str, dict[str, bool]]:
         """Per env var, booleans only: a fallback value exists, a stored one

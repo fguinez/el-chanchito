@@ -41,6 +41,14 @@ def publish_public_key(key: CredentialKey) -> tuple[str | None, int]:
 
 
 @with_db_retry
+def fetch_published_key_id() -> str | None:
+    """The key id the dashboard currently seals to, if any."""
+    with get_pool().connection() as conn:
+        row = conn.execute("SELECT key_id FROM credential_keys WHERE id = 1").fetchone()
+    return row[0] if row else None
+
+
+@with_db_retry
 def fetch_sealed_credentials() -> list[SealedCredential]:
     with get_pool().connection() as conn:
         rows = conn.execute(

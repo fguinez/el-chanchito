@@ -32,6 +32,7 @@ from scrapers.credentials import (
     CredentialOverlay,
     OpenedCredentials,
     SealedCredential,
+    binding_digest,
     env_fingerprint,
     load_key,
     load_or_create_key,
@@ -121,9 +122,15 @@ def test_dashboard_fixture_opens():
     assert fixture["scheme"] == SCHEME
     for entry in fixture["entries"]:
         sealed = base64.b64decode(entry["sealed"])
-        assert key.open(entry["slug"], entry["field"], key.key_id, sealed) == entry["value"]
+        binding = binding_digest(entry["binding_values"]) if "binding_values" in entry else None
+        assert (
+            key.open(entry["slug"], entry["field"], key.key_id, sealed, binding) == entry["value"]
+        )
         with pytest.raises(CredentialOpenError):
-            key.open(entry["slug"], "other_field", key.key_id, sealed)
+            key.open(entry["slug"], "other_field", key.key_id, sealed, binding)
+        if binding is not None:
+            with pytest.raises(CredentialOpenError):
+                key.open(entry["slug"], entry["field"], key.key_id, sealed)
 
 
 # --- Key file -------------------------------------------------------------------
@@ -251,6 +258,7 @@ class FakeStore:
         self.rows: list[SealedCredential] = []
         self.published: list[str] = []
         self.fail_fetch = False
+        self.fail_publish = False
 
     def fetch(self):
         if self.fail_fetch:
@@ -258,8 +266,13 @@ class FakeStore:
         return list(self.rows)
 
     def publish(self, key):
+        if self.fail_publish:
+            raise ConnectionError("db down")
         self.published.append(key.key_id)
         return None, 0
+
+    def published_key_id(self):
+        return self.published[-1] if self.published else None
 
 
 @pytest.fixture
@@ -273,6 +286,7 @@ def _manager(tmp_path, store, environ):
         environ=environ,
         fetch=store.fetch,
         publish=store.publish,
+        published_key_id=store.published_key_id,
     )
     manager.start()
     return manager
@@ -394,7 +408,7 @@ def control(tmp_path, store, monkeypatch):
 
     scrapers = ScraperSet(scheduler, build(), build=build)
     handler = _make_control_handler(
-        scheduler, scrapers.keys, Heartbeat(), credentials=CredentialControl(manager, scrapers)
+        scheduler, scrapers.snapshot, Heartbeat(), credentials=CredentialControl(manager, scrapers)
     )
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     Thread(target=httpd.serve_forever, daemon=True).start()
@@ -488,3 +502,186 @@ def test_manager_skips_the_rows_while_the_key_cannot_be_published(tmp_path, stor
     assert manager.key is not None
     assert manager.reload() is False
     assert fetched == []
+
+
+# --- Bound secrets (IMAP password -> host + user) -------------------------------
+
+HOST, USER, IMAP_PASSWORD = "imap.gmail.com", "user@example.com", "synthetic-app-password"
+
+
+def _email_rows(key, host=HOST, user=USER, sealed_to=(HOST, USER)):
+    return [
+        _row(key, "email", "imap_host", host),
+        _row(key, "email", "imap_user", user),
+        SealedCredential(
+            "email",
+            "imap_password",
+            SCHEME,
+            key.key_id,
+            key.seal("email", "imap_password", IMAP_PASSWORD, binding_digest(sealed_to)),
+        ),
+    ]
+
+
+def test_bound_secret_opens_with_its_destination(key):
+    opened = open_rows(key, _email_rows(key))
+    assert opened.values == {
+        "EMAIL_IMAP_HOST": HOST,
+        "EMAIL_IMAP_USER": USER,
+        "EMAIL_IMAP_PASSWORD": IMAP_PASSWORD,
+    }
+    assert not opened.suppressed
+
+
+def test_a_replaced_host_never_gets_the_password(key):
+    """Someone with DB write access re-seals the host to their own server and
+    keeps the stored password row: the password must not follow, and the
+    secret store's password must not either."""
+    rows = _email_rows(key, host="imap.mail.me.com")  # allowed host, not the sealed one
+    fallback = {"EMAIL_IMAP_PASSWORD": "synthetic-keychain-password"}
+    opened = open_rows(key, rows, fallback)
+    assert "EMAIL_IMAP_PASSWORD" not in opened.values
+    assert "EMAIL_IMAP_PASSWORD" in opened.suppressed
+    environ = dict(fallback)
+    overlay = CredentialOverlay(environ)
+    overlay.apply(opened)
+    assert "EMAIL_IMAP_PASSWORD" not in environ
+    assert overlay.status()["EMAIL_IMAP_PASSWORD"]["needs_reentry"] is True
+
+
+def test_a_stored_host_without_a_password_suppresses_the_fallback(key):
+    opened = open_rows(
+        key,
+        [_row(key, "email", "imap_host", HOST)],
+        {"EMAIL_IMAP_PASSWORD": "synthetic-keychain-password", "EMAIL_IMAP_USER": USER},
+    )
+    assert opened.suppressed == {"EMAIL_IMAP_PASSWORD"}
+
+
+def test_fallback_destination_keeps_the_fallback_password(key):
+    opened = open_rows(key, [], {"EMAIL_IMAP_HOST": HOST, "EMAIL_IMAP_PASSWORD": "synthetic-x"})
+    assert not opened.suppressed
+
+
+def test_unknown_imap_host_is_refused_unless_allowed(key):
+    rows = _email_rows(key, host="imap.example.com", sealed_to=("imap.example.com", USER))
+    refused = open_rows(key, rows, {"EMAIL_IMAP_HOST": HOST})
+    assert "EMAIL_IMAP_HOST" in refused.needs_reentry
+    assert "EMAIL_IMAP_HOST" not in refused.values
+    # The host fell back, so the password (sealed to the refused host) is not used.
+    assert "EMAIL_IMAP_PASSWORD" not in refused.values
+
+    allowed = open_rows(key, rows, {"EMAIL_IMAP_ALLOW_CUSTOM_HOST": "1"})
+    assert allowed.values["EMAIL_IMAP_HOST"] == "imap.example.com"
+    assert allowed.values["EMAIL_IMAP_PASSWORD"] == IMAP_PASSWORD
+
+
+@pytest.mark.parametrize("bad", ["synthetic\x85value", "synthetic\x1bvalue"])
+def test_control_characters_are_refused(key, bad):
+    opened = open_rows(key, [_row(key, "skipo", "api_key", bad)])
+    assert opened.values == {}
+    assert opened.needs_reentry == {"SKIPO_API_KEY"}
+
+
+# --- Retries, republishing and read-only runs -------------------------------------
+
+
+def test_tick_retries_until_published_and_loaded(tmp_path, store):
+    store.fail_publish = True
+    manager = _manager(tmp_path, store, {})
+    assert manager.status()["published"] is False
+    store.rows = [_row(manager.key, "skipo", "api_key", SECRET)]
+    assert manager.tick() is False  # still down
+    store.fail_publish = False
+    assert manager.tick() is True
+    assert manager.overlay.status()["SKIPO_API_KEY"]["stored"] is True
+    assert manager.tick() is False  # nothing left to do
+
+
+def test_tick_republishes_a_replaced_key(tmp_path, store):
+    manager = _manager(tmp_path, store, {})
+    store.published.append("0" * 64)  # another process took over
+    manager.tick()
+    assert store.published[-1] == manager.key.key_id
+
+
+def test_readonly_never_creates_a_key(tmp_path, store):
+    manager = CredentialManager(
+        key_path=tmp_path / "credentials_key",
+        environ={},
+        fetch=store.fetch,
+        publish=store.publish,
+        published_key_id=store.published_key_id,
+    )
+    manager.start_readonly()
+    assert manager.key is None
+    assert not (tmp_path / "credentials_key").exists()
+    assert store.published == []
+
+
+def test_readonly_skips_rows_when_another_key_is_published(tmp_path, store):
+    path = tmp_path / "credentials_key"
+    key = load_or_create_key(path)
+    store.rows = [_row(key, "skipo", "api_key", SECRET)]
+    store.published.append("0" * 64)
+    environ: dict[str, str] = {}
+    manager = CredentialManager(
+        key_path=path,
+        environ=environ,
+        fetch=store.fetch,
+        publish=store.publish,
+        published_key_id=store.published_key_id,
+    )
+    manager.start_readonly()
+    assert environ == {}
+    assert store.published == ["0" * 64]
+
+    store.published.append(key.key_id)
+    manager.start_readonly()
+    assert environ == {"SKIPO_API_KEY": SECRET}
+
+
+# --- Scraper state across credential changes -----------------------------------------
+
+
+class FakeFintual:
+    def __init__(self, folder):
+        self.session_file = folder / ".fintual_session.json"
+        self._login_failed_file = folder / ".fintual_session.json.login-failed"
+
+
+def test_fintual_change_clears_the_marker_and_an_old_accounts_session(tmp_path, monkeypatch):
+    for name in main._credential_env_vars("fintual"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("FINTUAL_EMAIL", "user@example.com")
+    monkeypatch.setenv("FINTUAL_PASSWORD", "synthetic-old")
+    scrapers = ScraperSet(
+        FakeScheduler(),
+        {"fintual": FakeFintual(tmp_path)},
+        build=lambda: {"fintual": FakeFintual(tmp_path)},
+    )
+    fake = FakeFintual(tmp_path)
+
+    fake.session_file.write_text("{}")
+    fake._login_failed_file.write_text("x")
+    monkeypatch.setenv("FINTUAL_PASSWORD", "synthetic-new")
+    assert scrapers.rebuild()["updated"] == ["fintual"]
+    assert not fake._login_failed_file.exists()
+    assert fake.session_file.exists()  # same account: keep the session
+
+    fake._login_failed_file.write_text("x")
+    monkeypatch.setenv("FINTUAL_EMAIL", "other@example.com")
+    scrapers.rebuild()
+    assert not fake._login_failed_file.exists()
+    assert not fake.session_file.exists()
+
+
+def test_snapshot_is_immutable_and_swapped(monkeypatch):
+    monkeypatch.setenv("SKIPO_API_KEY", "synthetic-key")
+    present = {"skipo": object()}
+    scrapers = ScraperSet(FakeScheduler(), dict(present), build=lambda: dict(present))
+    before = scrapers.snapshot()
+    assert isinstance(before, frozenset)
+    present.clear()
+    scrapers.rebuild()
+    assert before == {"skipo"} and scrapers.snapshot() == frozenset()
