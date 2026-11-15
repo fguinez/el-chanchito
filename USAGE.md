@@ -22,7 +22,7 @@ the BanChile scraper needs (in Docker this happens in the scrapers image).
 | Windows | Through **WSL2**, which is a Linux host for everything in this table: `make`, `scripts/*.sh` and the secret store (the Linux keyring or the file) run there. The Python scraper code itself has no POSIX-only calls and CI runs its tests natively on Windows, but native Windows is not a documented way to run the stack |
 | Raspberry Pi 4/5 | The whole stack through Docker Compose on 64-bit Raspberry Pi OS (Debian, `aarch64`); see [Raspberry Pi](#raspberry-pi) below. CI builds both images on `linux/arm64` |
 
-The Docker images (`postgres:16-alpine`, `python:3.12-slim`, `node:20-alpine`) are
+The Docker images (`postgres:16-alpine`, `python:3.12-slim`, `node:24-alpine`) are
 multi-arch, and Playwright ships its Chromium for Linux ARM64, so the headless
 scrapers (Banco de Chile, Santander, Banco Falabella) run in the container on any
 of these hosts.
