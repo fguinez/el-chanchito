@@ -255,7 +255,9 @@ Three levels:
    `make <slug>-login`"). When only a human sign-in fixes it, subclass
    `SignInRequired` from `scrapers/base.py`
    (`<Institution>SessionError(SignInRequired)`): `run_scraper` then records
-   the run as `needs_sign_in`, not `error`. Other leg-fatal failures subclass
+   the run as `needs_sign_in`, not `error`. When the scraper deliberately
+   declines to read (a login cooldown, a rate gate), subclass `RunSkipped`
+   instead: the run is `skipped`. Other leg-fatal failures subclass
    `RuntimeError` and are recorded as errors.
 2. **Partial coverage: warn.** One surface failed after its retries, a page
    cap was hit, entries without ids were skipped. Add a short string to
@@ -311,8 +313,9 @@ module.
   modules use `loop.run_in_executor`), IMAP through the existing backend
   (which already uses a lock and `to_thread`).
 - APScheduler runs each institution with `max_instances=1` and
-  `coalesce=True`, and manual refreshes reuse those guards, so a scraper never
-  overlaps itself. It may overlap other scrapers, so share no mutable
+  `coalesce=True`, and manual refreshes reuse those guards; `run_scraper` also
+  skips a call while the same scraper's run is in flight (the startup run is
+  no job), so a scraper never overlaps itself. It may overlap other scrapers, so share no mutable
   module-level state except deliberate singletons (the IMAP session).
 - Set explicit timeouts on every network call (httpx `timeout=30.0` is the
   local norm) and bound every loop (`MAX_PAGES`, retry counts).

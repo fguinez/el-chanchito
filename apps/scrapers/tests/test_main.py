@@ -1,5 +1,5 @@
 """Tests for run_scraper's final status decision (success / partial / error /
-needs_sign_in).
+needs_sign_in / skipped).
 
 The DB writer functions are patched out (no database): what's asserted is the
 status + error_message handed to `finish_scraper_run` for each combination of
@@ -28,13 +28,14 @@ from product_model import (
     DebitCardMetrics,
     SavingsMetrics,
 )
-from scrapers.backends import mercadopago_web
+from scrapers.backends import banchile_web, mercadopago_web
 from scrapers.base import (
     BaseScraper,
     BilledStatement,
     DailyPrice,
     ProductRef,
     ProductScrapeResult,
+    RunSkipped,
     ScrapedExchangeRate,
     ScrapedPriceHistory,
     ScrapedProduct,
@@ -374,6 +375,93 @@ class TestRunOutcome:
     def test_sign_in(self, sign_in, errors, landed, expected):
         """Only a run stopped by nothing but a sign-in needs one; the message is kept once."""
         assert run_outcome(errors, [], landed, None, sign_in) == expected
+
+    @pytest.mark.parametrize(
+        ("skipped", "sign_in", "errors", "landed", "expected"),
+        [
+            (["k"], [], [], 0, ("skipped", "k")),
+            (["k", "k"], [], [], 0, ("skipped", "k")),
+            (["k"], ["s"], [], 0, ("needs_sign_in", "s; k")),
+            (["k"], [], ["e"], 0, ("error", "k; e")),
+            (["k"], [], [], 1, ("partial", "k")),
+        ],
+    )
+    def test_skipped(self, skipped, sign_in, errors, landed, expected):
+        """Only a run stopped by nothing but a skip is `skipped`; the message is kept once."""
+        assert run_outcome(errors, [], landed, None, sign_in, skipped) == expected
+
+    def test_skipped_keeps_warnings_in_the_message(self):
+        """Warnings from a run that landed nothing join a `skipped` run's message."""
+        assert run_outcome([], ["w"], 0, None, [], ["k"]) == ("skipped", "k; w")
+
+
+class TestRunSkipped:
+    """A leg the scraper chose to skip finishes the run as `skipped`, not `error`."""
+
+    def test_both_legs_record_one_message(self, finish, caplog):
+        """The same refusal on both legs is one message and no traceback."""
+        exc = RunSkipped("Stub skipped: retry later.")
+        scraper = _StubScraper(tx_exc=exc, prod_exc=exc)
+
+        asyncio.run(run_scraper(scraper))
+
+        finish.assert_called_once_with(
+            "run-1",
+            "skipped",
+            transactions_imported=0,
+            error_message="Stub skipped: retry later.",
+        )
+        assert not any(r.exc_info for r in caplog.records)
+
+    def test_the_banchile_login_cooldown_is_a_skip(self):
+        """A full login the cooldown refused is the cooldown working, not a bug."""
+        assert issubclass(banchile_web.LoginCooldownError, RunSkipped)
+
+
+class _GatedScraper(_StubScraper):
+    """A stub whose transactions leg waits for `release` and counts its calls."""
+
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+        self.release = asyncio.Event()
+
+    async def scrape_transactions(self):
+        self.calls += 1
+        await self.release.wait()
+        return []
+
+
+class TestInFlightGuard:
+    """A second run of a scraper whose run is still in flight records nothing."""
+
+    def test_an_overlapping_trigger_joins_the_run_in_flight(self, finish):
+        """The startup run and a manual trigger of one scraper never overlap."""
+        scraper = _GatedScraper()
+
+        async def overlap():
+            first = asyncio.create_task(run_scraper(scraper))
+            await asyncio.sleep(0)
+            await run_scraper(scraper)
+            scraper.release.set()
+            await first
+
+        asyncio.run(overlap())
+
+        assert scraper.calls == 1
+        finish.assert_called_once()
+
+    def test_the_next_run_goes_through_once_it_finished(self, finish):
+        """The guard is released even when the run crashed."""
+        scraper = _StubScraper(tx_exc=RuntimeError("boom"), prod_exc=RuntimeError("boom"))
+        main_mod.start_scraper_run.side_effect = ["run-1", RuntimeError("db down"), "run-3"]
+
+        asyncio.run(run_scraper(scraper))
+        with pytest.raises(RuntimeError, match="db down"):
+            asyncio.run(run_scraper(scraper))
+        asyncio.run(run_scraper(scraper))
+
+        assert finish.call_count == 2
 
 
 class TestSignInRequired:

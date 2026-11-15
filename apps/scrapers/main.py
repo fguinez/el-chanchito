@@ -40,6 +40,7 @@ from scrapers.backends import banchile_web
 from scrapers.backends.email import get_session as get_email_session
 from scrapers.base import (
     BaseScraper,
+    RunSkipped,
     ScrapedExchangeRate,
     ScrapedPriceHistory,
     SignInRequired,
@@ -76,6 +77,7 @@ def run_outcome(
     landed: int,
     notes: list[str] | None = None,
     sign_in: list[str] | None = None,
+    skipped: list[str] | None = None,
 ) -> tuple[str, str | None]:
     """The final (status, error_message) of a run.
 
@@ -91,20 +93,41 @@ def run_outcome(
     human must act, and nothing is broken. Otherwise they count as errors.
     Both legs usually raise the same one, so each message is kept once, and
     first: the dashboard shows only a message's first 120 characters.
+
+    `skipped` holds the messages of legs that raised `RunSkipped` (the scraper
+    chose not to read, e.g. BanChile's login cooldown). When nothing landed
+    and nothing else failed or needs a sign-in, the run is `skipped`: nothing
+    is broken and the last run's data stands. Otherwise they count as errors.
+    They are deduplicated like `sign_in`, and follow it.
     """
     sign_in = list(dict.fromkeys(sign_in or []))
-    message = "; ".join(sign_in + errors + warnings + (notes or [])) or None
-    if sign_in and not errors and not landed:
-        return "needs_sign_in", message
-    if (errors or sign_in) and not landed:
+    skipped = list(dict.fromkeys(skipped or []))
+    message = "; ".join(sign_in + skipped + errors + warnings + (notes or [])) or None
+    if not errors and not landed:
+        if sign_in:
+            return "needs_sign_in", message
+        if skipped:
+            return "skipped", message
+    if (errors or sign_in or skipped) and not landed:
         return "error", message
-    if errors or sign_in or warnings:
+    if errors or sign_in or skipped or warnings:
         return "partial", message
     return "success", message
 
 
+# Names of the scrapers with a run in flight. The startup run is no scheduler
+# job, so `max_instances=1` can't stop a manual trigger from overlapping it;
+# this does, for every caller of `run_scraper`. Only touched on the event loop.
+_in_flight: set[str] = set()
+
+
 async def run_scraper(scraper: BaseScraper) -> None:
     """Run a single scraper with logging and DB tracking.
+
+    A call while the same scraper's run is still in flight records nothing and
+    returns: that run is already fetching what the call asked for, and two
+    sessions at once would fight over one login (BanChile's second run would
+    lose its restored session and hit the login cooldown).
 
     Transactions and products are scraped as independent legs: a failure in one
     must not stop the other. BanChile in particular reads both from one browser
@@ -117,8 +140,8 @@ async def run_scraper(scraper: BaseScraper) -> None:
     Writes are isolated per row too: a product or transaction that fails to
     write is logged and counted, and the rest are still written. Transactions
     that name a product not stored yet are a warning and land on a later run.
-    A leg that raises `SignInRequired` logs one line, no traceback: it is
-    expected on every run until someone signs in.
+    A leg that raises `SignInRequired` or `RunSkipped` logs one line, no
+    traceback: neither is a bug.
     The final status comes from `run_outcome`, and the products leg's
     non-fatal warnings (e.g. a BanChile surface that failed all its retries)
     join the message.
@@ -131,6 +154,18 @@ async def run_scraper(scraper: BaseScraper) -> None:
     products, each on its own: one that names an unknown product, or fails to
     write, is a warning. Neither counts as landed.
     """
+    if scraper.name in _in_flight:
+        logger.info("Scraper %s already running; this trigger joins that run", scraper.name)
+        return
+    _in_flight.add(scraper.name)
+    try:
+        await _run_scraper(scraper)
+    finally:
+        _in_flight.discard(scraper.name)
+
+
+async def _run_scraper(scraper: BaseScraper) -> None:
+    """`run_scraper`'s body, once no other run of `scraper` is in flight."""
     run_id = start_scraper_run(scraper.method, scraper.institution)
     logger.info("Starting scraper: %s (run=%s)", scraper.name, run_id)
 
@@ -138,6 +173,7 @@ async def run_scraper(scraper: BaseScraper) -> None:
     warnings: list[str] = []
     notes: list[str] = []
     sign_in: list[str] = []
+    skipped: list[str] = []
     n_tx = 0
     inserted = 0
     n_prod = 0
@@ -161,6 +197,9 @@ async def run_scraper(scraper: BaseScraper) -> None:
     except SignInRequired as e:
         logger.warning("Scraper %s: transactions need sign-in: %s", scraper.name, e)
         sign_in.append(str(e))
+    except RunSkipped as e:
+        logger.info("Scraper %s: transactions skipped: %s", scraper.name, e)
+        skipped.append(str(e))
     except Exception as e:
         logger.exception("Scraper %s: transactions failed", scraper.name)
         errors.append(f"transactions: {e}")
@@ -205,6 +244,9 @@ async def run_scraper(scraper: BaseScraper) -> None:
     except SignInRequired as e:
         logger.warning("Scraper %s: products need sign-in: %s", scraper.name, e)
         sign_in.append(str(e))
+    except RunSkipped as e:
+        logger.info("Scraper %s: products skipped: %s", scraper.name, e)
+        skipped.append(str(e))
     except Exception as e:
         logger.exception("Scraper %s: products failed", scraper.name)
         errors.append(f"products: {e}")
@@ -272,7 +314,7 @@ async def run_scraper(scraper: BaseScraper) -> None:
         n_prod,
         sum(len(h.points) for h in histories),
     )
-    status, message = run_outcome(errors, warnings, landed, notes, sign_in)
+    status, message = run_outcome(errors, warnings, landed, notes, sign_in, skipped)
     finish_scraper_run(run_id, status, transactions_imported=inserted, error_message=message)
 
 
@@ -471,8 +513,8 @@ def _make_control_handler(
     the seconds until it may be triggered again (None: now). Until then
     `POST /refresh/{slug}` answers 429 with `Retry-After`, and `POST /refresh`
     triggers the rest and lists it under `skipped`. The startup run isn't a
-    job, so a trigger during it isn't absorbed (BanChile's login gate still
-    stops a second login).
+    job, so a trigger during it isn't absorbed by `max_instances`;
+    `run_scraper`'s in-flight guard absorbs it instead.
 
     GET /health reports the scheduler, not just this thread: it answers 503
     when `heartbeat` has gone stale, which is what the compose healthcheck

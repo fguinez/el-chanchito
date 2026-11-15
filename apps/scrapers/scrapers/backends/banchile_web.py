@@ -51,7 +51,7 @@ from product_model import (
     TermDepositAttributes,
     TermDepositMetrics,
 )
-from scrapers.base import ScrapedProduct
+from scrapers.base import RunSkipped, ScrapedProduct
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +151,7 @@ class BanChileWebError(RuntimeError):
     """Raised when the BdC web session can't log in or reach the balance."""
 
 
-class LoginCooldownError(BanChileWebError):
+class LoginCooldownError(BanChileWebError, RunSkipped):
     """A full login was skipped: the last attempt is still inside the cooldown."""
 
 

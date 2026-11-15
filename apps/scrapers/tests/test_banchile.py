@@ -12,6 +12,7 @@ import os
 from dataclasses import replace
 from datetime import date
 from decimal import Decimal
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -703,7 +704,10 @@ class TestStatementsReachTheCards:
 
 
 class TestLoginCooldownSkip:
-    """A login the cooldown refused is a quiet skip: one warning, no traceback."""
+    """A login the cooldown refused is a quiet skip: one warning, no traceback.
+
+    Both legs raise it (a `RunSkipped`), so a run it stopped is `skipped`.
+    """
 
     SKIP = "full login skipped to avoid the bank's login throttling (allowed again in 540s)"
 
@@ -718,26 +722,60 @@ class TestLoginCooldownSkip:
         assert all(r.exc_info is None for r in records)
         return [r.levelname for r in records]
 
-    def test_transactions_leg_still_fails_the_run(self, monkeypatch, caplog):
+    def test_transactions_leg_raises_it(self, monkeypatch, caplog):
+        """The refusal reaches `run_scraper`, with one warning logged."""
         monkeypatch.setattr(banchile_mod, "fetch_session", self._refused)
 
-        try:
+        with pytest.raises(banchile_mod.LoginCooldownError, match="login throttling"):
             asyncio.run(self.scraper.scrape_transactions())
-        except banchile_mod.LoginCooldownError as exc:
-            assert str(exc) == self.SKIP
-        else:
-            raise AssertionError("a refused login must still fail the run")
 
         assert self._warnings_logged(caplog) == ["WARNING"]
 
-    def test_products_leg_turns_it_into_a_warning(self, monkeypatch, caplog):
+    def test_products_fallback_raises_it(self, monkeypatch, caplog):
+        """A balance-only fallback the cooldown refused is a skip, not a warning."""
         monkeypatch.setattr(banchile_mod, "fetch_balances", self._refused)
+
+        with pytest.raises(banchile_mod.LoginCooldownError):
+            asyncio.run(self.scraper.scrape_products())
+
+        assert self._warnings_logged(caplog) == ["WARNING"]
+
+    def test_products_leg_reuses_the_transactions_refusal(self, monkeypatch):
+        """No second login attempt: the products leg raises the same refusal."""
+        monkeypatch.setattr(banchile_mod, "fetch_session", self._refused)
+        fallback = MagicMock()
+        monkeypatch.setattr(banchile_mod, "fetch_balances", fallback)
+        with pytest.raises(banchile_mod.LoginCooldownError) as first:
+            asyncio.run(self.scraper.scrape_transactions())
+
+        with pytest.raises(banchile_mod.LoginCooldownError) as second:
+            asyncio.run(self.scraper.scrape_products())
+
+        assert second.value is first.value
+        fallback.assert_not_called()
+
+    def test_a_refusal_does_not_leak_into_the_next_run(self, monkeypatch):
+        """The next run's products leg serves its own session, not the old refusal."""
+        products = [
+            ScrapedProduct(
+                institution="banchile",
+                kind="checking",
+                metrics=CheckingMetrics(balance=2500000),
+            )
+        ]
+
+        async def opened(rut, password):
+            return BanChileSessionResult(products=products)
+
+        monkeypatch.setattr(banchile_mod, "fetch_session", self._refused)
+        with pytest.raises(banchile_mod.LoginCooldownError):
+            asyncio.run(self.scraper.scrape_transactions())
+        monkeypatch.setattr(banchile_mod, "fetch_session", opened)
+        asyncio.run(self.scraper.scrape_transactions())
 
         result = asyncio.run(self.scraper.scrape_products())
 
-        assert result.products == []
-        assert result.warnings == [f"BanChile: {self.SKIP}"]
-        assert self._warnings_logged(caplog) == ["WARNING"]
+        assert result.products == products
 
 
 # --- Issue #79: currency routing, identity and the misrouted rows -------------
