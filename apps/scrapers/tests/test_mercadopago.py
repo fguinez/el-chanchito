@@ -3175,15 +3175,16 @@ class TestRunStatus:
             "run-1", "partial", transactions_imported=0, error_message=message
         )
 
-    def test_a_lost_session_ends_the_run_in_error_naming_the_login(self, monkeypatch, no_sleep):
-        """Both legs report the one failure; Chrome was driven once."""
+    def test_a_lost_session_ends_the_run_needing_sign_in(self, monkeypatch, no_sleep):
+        """Both legs report the one failure, named once; Chrome was driven once."""
         tab = _tab(balance={"status": "redirect"})
 
         finish = self._run(monkeypatch, tab)
 
         (_, status), kwargs = finish.call_args
-        assert status == "error"
-        assert kwargs["error_message"].count("make mercadopago-login") == 2
+        assert status == "needs_sign_in"
+        assert kwargs["error_message"].startswith("Mercado Pago session lost")
+        assert kwargs["error_message"].count("make mercadopago-login") == 1
         assert tab.calls == ["balance"]
 
 
@@ -3743,8 +3744,23 @@ class TestSignInMarker:
         assert record.exc_info is None
         assert "needs sign-in" in record.getMessage()
 
-    def test_a_skipped_run_still_finishes_its_run_row_in_error(self, monkeypatch, tmp_path):
-        """The web poller waits for a finished row: it gets one, with the hint."""
+    def test_a_lost_session_logs_a_warning_without_a_traceback(self, monkeypatch, caplog):
+        """A redirect or 401 mid-run needs a sign-in too: one warning, no traceback."""
+        _install(monkeypatch, exc=MercadoPagoSessionError("Session lost (synthetic)."))
+
+        with (
+            caplog.at_level(logging.WARNING, logger=mp_mod.__name__),
+            pytest.raises(MercadoPagoSessionError),
+        ):
+            asyncio.run(MercadoPagoScraper().scrape_transactions())
+
+        (record,) = [r for r in caplog.records if r.name == mp_mod.__name__]
+        assert record.levelno == logging.WARNING
+        assert record.exc_info is None
+
+    def test_a_skipped_run_still_finishes_its_run_row(self, monkeypatch, tmp_path):
+        """The web poller waits for a finished row: it gets one, needing sign-in,
+        whose dashboard summary keeps both the hint and the time."""
         chrome = _Chrome(monkeypatch, tmp_path)
         self._marker(tmp_path).write_text(SYNTHETIC_SINCE)
         finish = _patched_writer(monkeypatch)
@@ -3752,8 +3768,10 @@ class TestSignInMarker:
         asyncio.run(main_mod.run_scraper(MercadoPagoScraper()))
 
         (run_id, status), kwargs = finish.call_args
-        assert (run_id, status) == ("run-1", "error")
-        assert "make mercadopago-login" in kwargs["error_message"][:120]
+        assert (run_id, status) == ("run-1", "needs_sign_in")
+        summary = kwargs["error_message"][:120]
+        assert "make mercadopago-login" in summary
+        assert "lost since" in summary
         assert chrome.launches == []
 
 

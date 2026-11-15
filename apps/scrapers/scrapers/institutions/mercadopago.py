@@ -115,7 +115,6 @@ from scrapers.backends.mercadopago_web import (
     DEFAULT_MOVEMENT_PAGES,
     MercadoPagoAccount,
     MercadoPagoSessionError,
-    MercadoPagoSignInPending,
     MercadoPagoWebError,
     Movement,
     save_login_session,
@@ -220,15 +219,15 @@ class MercadoPagoScraper(BaseScraper):
             logger.exception("Playwright not installed. Run: pip install -r requirements.txt")
             self._error = exc
             raise
-        except MercadoPagoSignInPending as exc:
-            # Expected on every run until someone signs in: no traceback.
+        except MercadoPagoSessionError as exc:
+            # A human must sign in again (the skip included): no traceback.
+            # Cached so the products leg neither drives again nor retries a
+            # lost session.
             logger.warning("%s", exc)
             self._error = exc
             raise
         except Exception as exc:
-            # MercadoPagoSessionError (a human must sign in again) and any
-            # other failure land here; cached so the products leg neither
-            # drives again nor retries a lost session.
+            # Cached so the products leg does not drive again.
             logger.exception("MercadoPago read failed")
             self._error = exc
             raise

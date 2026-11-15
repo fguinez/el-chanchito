@@ -182,6 +182,15 @@ class BilledStatement:
     external_ids: frozenset[str]
 
 
+class SignInRequired(RuntimeError):
+    """A human must sign in again before this scraper can read anything.
+
+    A leg that raises it finishes the run as `needs_sign_in` instead of
+    `error` when nothing else failed (see `main.run_outcome`). Its message is
+    shown on the dashboard as is, so it must name the command that signs in.
+    """
+
+
 class BaseScraper(ABC):
     """Interface that all scrapers must implement.
 

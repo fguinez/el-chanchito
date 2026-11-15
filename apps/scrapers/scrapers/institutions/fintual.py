@@ -111,6 +111,7 @@ from scrapers.base import (
     ScrapedPriceHistory,
     ScrapedProduct,
     ScrapedTransaction,
+    SignInRequired,
 )
 from scrapers.retry import TRANSIENT_HTTP_STATUSES, send_with_retry
 
@@ -184,7 +185,7 @@ _APP_DIR = Path(__file__).resolve().parents[2]
 _DEFAULT_SESSION_FILE = _APP_DIR / ".fintual_session.json"
 
 
-class FintualSessionError(RuntimeError):
+class FintualSessionError(SignInRequired):
     """Raised when there is no usable cached session and 2FA login is required."""
 
 

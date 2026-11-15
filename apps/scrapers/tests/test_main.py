@@ -1,4 +1,5 @@
-"""Tests for run_scraper's final status decision (success / partial / error).
+"""Tests for run_scraper's final status decision (success / partial / error /
+needs_sign_in).
 
 The DB writer functions are patched out (no database): what's asserted is the
 status + error_message handed to `finish_scraper_run` for each combination of
@@ -27,6 +28,7 @@ from product_model import (
     DebitCardMetrics,
     SavingsMetrics,
 )
+from scrapers.backends import mercadopago_web
 from scrapers.base import (
     BaseScraper,
     BilledStatement,
@@ -37,10 +39,12 @@ from scrapers.base import (
     ScrapedPriceHistory,
     ScrapedProduct,
     ScrapedTransaction,
+    SignInRequired,
     SupersededTransaction,
     VanishedProductScope,
     VanishedWindow,
 )
+from scrapers.institutions import fintual
 
 
 class _StubScraper(BaseScraper):
@@ -357,6 +361,60 @@ class TestRunOutcome:
     ):
         """A note is information, not a problem: the status is the same as without it."""
         assert run_outcome(errors, warnings, landed, ["n"]) == expected
+
+    @pytest.mark.parametrize(
+        ("sign_in", "errors", "landed", "expected"),
+        [
+            (["s"], [], 0, ("needs_sign_in", "s")),
+            (["s", "s"], [], 0, ("needs_sign_in", "s")),
+            (["s"], ["e"], 0, ("error", "s; e")),
+            (["s"], [], 1, ("partial", "s")),
+        ],
+    )
+    def test_sign_in(self, sign_in, errors, landed, expected):
+        """Only a run stopped by nothing but a sign-in needs one; the message is kept once."""
+        assert run_outcome(errors, [], landed, None, sign_in) == expected
+
+
+class TestSignInRequired:
+    """A leg that needs a human sign-in finishes the run as `needs_sign_in`."""
+
+    def test_both_legs_record_one_unprefixed_message(self, writer, finish, caplog):
+        exc = SignInRequired("Stub needs sign-in: run `make stub-login`.")
+        scraper = _StubScraper(tx_exc=exc, prod_exc=exc)
+
+        asyncio.run(run_scraper(scraper))
+
+        finish.assert_called_once_with(
+            "run-1",
+            "needs_sign_in",
+            transactions_imported=0,
+            error_message="Stub needs sign-in: run `make stub-login`.",
+        )
+        assert not any(r.exc_info for r in caplog.records)
+
+    @pytest.mark.parametrize(
+        "exc_type",
+        [mercadopago_web.MercadoPagoSessionError, fintual.FintualSessionError],
+    )
+    def test_session_errors_are_sign_in_required(self, exc_type):
+        """The scrapers whose lost session needs a human raise the shared type."""
+        assert issubclass(exc_type, SignInRequired)
+
+    def test_another_failure_makes_it_an_error(self, writer, finish):
+        scraper = _StubScraper(
+            tx_exc=SignInRequired("Stub needs sign-in."),
+            prod_exc=RuntimeError("boom"),
+        )
+
+        asyncio.run(run_scraper(scraper))
+
+        finish.assert_called_once_with(
+            "run-1",
+            "error",
+            transactions_imported=0,
+            error_message="Stub needs sign-in.; products: boom",
+        )
 
 
 _TWIN = SupersededTransaction(

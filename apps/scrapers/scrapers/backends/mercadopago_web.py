@@ -140,6 +140,7 @@ from zoneinfo import ZoneInfo
 from scrapers import sign_in_marker
 from scrapers.backends import real_chrome
 from scrapers.backends.percent import parse_percent
+from scrapers.base import SignInRequired
 
 logger = logging.getLogger(__name__)
 
@@ -338,7 +339,7 @@ class MercadoPagoConnectionLostError(MercadoPagoWebError):
     """The connection to the tab ended mid-read; nothing more can be fetched."""
 
 
-class MercadoPagoSessionError(RuntimeError):
+class MercadoPagoSessionError(SignInRequired):
     """The signed-in browser session is missing or gone; a human must sign in.
 
     Never retried: a second attempt against a lost session is what gets an
