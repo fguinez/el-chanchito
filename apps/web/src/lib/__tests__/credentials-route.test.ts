@@ -16,7 +16,7 @@ import {
   sealingInfo,
   type SealingKey,
 } from "@/lib/credentials/seal";
-import type { CredentialMeta, SealedField } from "@/lib/credentials/db";
+import type { CredentialMeta, SealedField, StoredKeyInfo } from "@/lib/credentials/db";
 import type { ControlCredentialStatus } from "@/lib/credentials/control";
 
 // The credential routes run against in-memory doubles of the DB layer and of
@@ -41,6 +41,8 @@ const state = {
   key: KEY as SealingKey | null,
   meta: [] as CredentialMeta[],
   upserts: [] as { slug: string; scheme: string; keyId: string; fields: SealedField[] }[],
+  rotateBeforeStore: [] as (() => void)[],
+  keyInfo: null as StoredKeyInfo | null,
   deletes: [] as { slug: string; field?: string }[],
   control: null as ControlCredentialStatus | null,
   enabled: null as string[] | null,
@@ -52,8 +54,16 @@ const state = {
 vi.mock("@/lib/credentials/db", () => ({
   readSealingKey: async () => state.key,
   listCredentialMeta: async () => state.meta,
+  readKeyInfo: async () => state.keyInfo,
   upsertSealedFields: async (slug: string, scheme: string, keyId: string, fields: SealedField[]) => {
     state.upserts.push({ slug, scheme, keyId, fields });
+    // A rotation that lands between sealing and storing: the key is retired.
+    const rotate = state.rotateBeforeStore.shift();
+    if (rotate) {
+      rotate();
+      return false;
+    }
+    return true;
   },
   deleteSealedFields: async (slug: string, fields?: readonly string[]) => {
     state.deletes.push({ slug, field: fields?.join(",") });
@@ -107,6 +117,8 @@ beforeEach(() => {
   state.key = KEY;
   state.meta = [];
   state.upserts = [];
+  state.rotateBeforeStore = [];
+  state.keyInfo = null;
   state.deletes = [];
   state.control = { key_available: true, key_id: KEY.keyId, fields: {} };
   state.enabled = null;
@@ -197,7 +209,9 @@ describe("PUT /api/credentials/[slug]", () => {
     state.key = null;
     const response = await put("banchile", { fields: { password: PASSWORD } });
     expect(response.status).toBe(503);
-    expect((await response.json()).error).toContain("make dev");
+    const body = await response.json();
+    expect(body.reason).toBe("no_key");
+    expect(body.error).toContain("clave de cifrado");
     expect(state.upserts).toHaveLength(0);
   });
 
@@ -205,8 +219,55 @@ describe("PUT /api/credentials/[slug]", () => {
     state.control = null;
     const response = await put("banchile", { fields: { password: PASSWORD } });
     expect(response.status).toBe(503);
-    expect((await response.json()).error).toContain("no responde");
+    const body = await response.json();
+    expect(body.reason).toBe("service_unreachable");
+    expect(body.error).toContain("no responde");
     expect(state.upserts).toHaveLength(0);
+  });
+
+  it("refuses to save while the database seals to another service's key", async () => {
+    state.control = { key_available: true, key_id: "0".repeat(64), key_mismatch: true, fields: {} };
+    const response = await put("banchile", { fields: { password: PASSWORD } });
+    expect(response.status).toBe(503);
+    const body = await response.json();
+    expect(body.reason).toBe("key_mismatch");
+    expect(body.error).toContain("make credentials-reset-key");
+    expect(state.upserts).toHaveLength(0);
+  });
+
+  it("seals again to the new key when a rotation lands mid-save", async () => {
+    const next = await suite.kem.generateKeyPair();
+    const nextPublic = new Uint8Array(await suite.kem.serializePublicKey(next.publicKey));
+    const NEXT: SealingKey = { ...KEY, keyId: await keyIdFor(nextPublic), publicKey: nextPublic };
+    state.rotateBeforeStore = [
+      () => {
+        state.key = NEXT;
+        state.control = { key_available: true, key_id: NEXT.keyId, fields: {} };
+      },
+    ];
+    const response = await put("skipo", { fields: { api_key: PASSWORD } });
+    expect(response.status).toBe(200);
+    expect(state.upserts.map((u) => u.keyId)).toEqual([KEY.keyId, NEXT.keyId]);
+    const sealed = state.upserts[1].fields[0].sealed;
+    const opened = await suite.open(
+      {
+        recipientKey: next.privateKey,
+        enc: sealed.slice(0, 32),
+        info: sealingInfo("skipo", "api_key", NEXT.keyId),
+      },
+      sealed.slice(32)
+    );
+    expect(new TextDecoder().decode(opened)).toBe(PASSWORD);
+  });
+
+  it("answers a retryable 409 when the key changes twice under a save", async () => {
+    state.rotateBeforeStore = [() => {}, () => {}];
+    const response = await put("skipo", { fields: { api_key: PASSWORD } });
+    expect(response.status).toBe(409);
+    const body = await text(response);
+    expect(body).not.toContain(PASSWORD);
+    expect(JSON.parse(body).reason).toBe("key_changed");
+    expect(state.upserts).toHaveLength(2);
   });
 
   it("runs a scraper the save just enabled", async () => {
@@ -382,13 +443,52 @@ describe("GET /api/credentials", () => {
     expect(mercadopago.fields).toEqual([]);
   });
 
-  it("still answers with the service down, fallback unknown", async () => {
+  it("still answers with the service down, fallback unknown, saving off", async () => {
     state.control = null;
     const body = await (await GET()).json();
     expect(body.serviceReachable).toBe(false);
     expect(body.keyAvailable).toBeNull();
+    expect(body.keyMismatch).toBeNull();
+    expect(body.canSave).toBe(false);
+    expect(body.saveBlocked).toBe("service_unreachable");
     expect(body.institutions[0].enabled).toBeNull();
     expect(body.institutions[0].fields[0].fallback).toBeNull();
+  });
+
+  it("says saving works when the service holds the active key", async () => {
+    const body = await (await GET()).json();
+    expect(body.canSave).toBe(true);
+    expect(body.saveBlocked).toBeNull();
+    expect(body.keyMismatch).toBe(false);
+  });
+
+  it("reports a key mismatch and why saving is off", async () => {
+    state.control = { key_available: true, key_id: "0".repeat(64), key_mismatch: true, fields: {} };
+    const body = await (await GET()).json();
+    expect(body.keyMismatch).toBe(true);
+    expect(body.canSave).toBe(false);
+    expect(body.saveBlocked).toBe("key_mismatch");
+  });
+
+  it("shows the active key's dates and the last rotation failure, never key material", async () => {
+    state.keyInfo = {
+      createdAt: new Date("2026-01-01T12:00:00Z"),
+      lastRotatedAt: new Date("2026-01-01T12:00:00Z"),
+      rotationFailedAt: new Date("2026-04-02T12:00:00Z"),
+      rotationError: "OperationalError",
+    };
+    state.control = { key_available: true, key_id: KEY.keyId, max_age_days: 90, fields: {} };
+    const response = await GET();
+    const raw = await text(response);
+    const body = JSON.parse(raw);
+    expect(body.key).toEqual({
+      createdAt: "2026-01-01T12:00:00.000Z",
+      lastRotatedAt: "2026-01-01T12:00:00.000Z",
+      rotationFailedAt: "2026-04-02T12:00:00.000Z",
+      rotationError: "OperationalError",
+      maxAgeDays: 90,
+    });
+    expect(raw).not.toContain(KEY.keyId);
   });
 });
 

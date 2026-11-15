@@ -302,6 +302,11 @@ export function CredentialCard({
                 Borrar todo
               </Button>
             )}
+            {!canSave && !message && (
+              <p className="text-xs text-muted-foreground">
+                Guardar no está disponible por ahora; el aviso de arriba explica por qué.
+              </p>
+            )}
             {message && (
               <p
                 role={message.kind === "error" ? "alert" : "status"}

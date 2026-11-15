@@ -2,6 +2,11 @@ import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { failureBody, requireJsonContentType } from "@/lib/api/validation";
 import {
+  KEY_CHANGED_MESSAGE,
+  SAVE_BLOCKED_MESSAGES,
+  saveBlocker,
+} from "@/lib/credentials/availability";
+import {
   fetchControlCredentialStatus,
   reloadControlCredentials,
   triggerControlRefresh,
@@ -30,10 +35,6 @@ type Context = { params: Promise<{ slug: string }> };
 
 // Nothing in this file logs a request body, a value or a sealed blob, and no
 // response or error message repeats one.
-
-const NO_KEY_MESSAGE =
-  "El servicio de scrapers aún no ha publicado su clave de cifrado. " +
-  "Inicia el stack completo con `make dev` y vuelve a intentarlo.";
 
 const bodySchema = z.object({ fields: z.record(z.string(), z.string()) }).strict();
 
@@ -104,7 +105,9 @@ async function applyToService(): Promise<{ applied: boolean | null; triggered: s
  * re-enter only the password. Unknown fields are refused. Answers which
  * field keys were saved and whether the scraper service applied them
  * (`applied`: null when it could not be reached; it picks them up on its
- * next start).
+ * next start). Saving needs the running service to hold the active key:
+ * otherwise 503 with `reason` (see lib/credentials/availability), and 409
+ * `key_changed` if the key rotated twice under the request.
  */
 export async function PUT(request: NextRequest, { params }: Context) {
   const { slug } = await params;
@@ -158,56 +161,44 @@ export async function PUT(request: NextRequest, { params }: Context) {
   );
   if (grouping) return noStoreJson(failureBody({ error: grouping, field: "fields" }), 400);
 
-  const key = await readSealingKey();
-  if (!key) return noStoreJson({ error: NO_KEY_MESSAGE }, 503);
-  // Seal only to a key the running service confirms it holds: the published
-  // row alone could be stale or planted.
-  const control = await fetchControlCredentialStatus();
-  if (!control) {
-    return noStoreJson(
-      {
-        error:
-          "El servicio de scrapers no responde, así que no se puede confirmar su clave. " +
-          "Inicia el stack completo con `make dev` y vuelve a intentarlo.",
-      },
-      503
-    );
-  }
-  if (!control.key_available || control.key_id !== key.keyId) {
-    return noStoreJson(
-      {
-        error:
-          "El servicio de scrapers no puede usar la clave publicada. " +
-          "Revisa su log (local/scrapers-dev.log) y reinícialo con `make dev`.",
-      },
-      503
-    );
-  }
-
   const byKey = new Map(values.map((v) => [v.fieldKey, v.value]));
-  let sealed: SealedField[];
-  try {
-    sealed = await Promise.all(
-      values.map(async ({ fieldKey, value }) => {
-        const binds = credentialField(spec, fieldKey)?.binds ?? [];
-        // bindingProblem guaranteed every bound value is in this request.
-        const binding =
-          binds.length > 0 ? await bindingDigest(binds.map((k) => byKey.get(k) ?? "")) : undefined;
-        return { fieldKey, sealed: await sealCredential(key, slug, fieldKey, value, binding) };
-      })
-    );
-  } catch {
-    return noStoreJson(
-      { error: "No se pudo cifrar con la clave publicada. Reinicia el stack con `make dev`." },
-      503
-    );
+  // A rotation between reading the key and storing makes the store refuse
+  // (the key is retired); read the new key and seal once more.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const key = await readSealingKey();
+    // Seal only to a key the running service confirms it holds: the active
+    // row alone could be stale, another service's or planted.
+    const blocked = saveBlocker(key, await fetchControlCredentialStatus());
+    if (blocked || !key) {
+      return noStoreJson({ error: SAVE_BLOCKED_MESSAGES[blocked ?? "no_key"], reason: blocked }, 503);
+    }
+    let sealed: SealedField[];
+    try {
+      sealed = await Promise.all(
+        values.map(async ({ fieldKey, value }) => {
+          const binds = credentialField(spec, fieldKey)?.binds ?? [];
+          // bindingProblem guaranteed every bound value is in this request.
+          const binding =
+            binds.length > 0
+              ? await bindingDigest(binds.map((k) => byKey.get(k) ?? ""))
+              : undefined;
+          return { fieldKey, sealed: await sealCredential(key, slug, fieldKey, value, binding) };
+        })
+      );
+    } catch {
+      return noStoreJson(
+        { error: "No se pudo cifrar con la clave publicada. Reinicia el servicio de scrapers." },
+        503
+      );
+    }
+    if (await upsertSealedFields(slug, CREDENTIAL_SCHEME, key.keyId, sealed)) {
+      return noStoreJson({
+        saved: sealed.map((field) => field.fieldKey),
+        ...(await applyToService()),
+      });
+    }
   }
-  await upsertSealedFields(slug, CREDENTIAL_SCHEME, key.keyId, sealed);
-
-  return noStoreJson({
-    saved: sealed.map((field) => field.fieldKey),
-    ...(await applyToService()),
-  });
+  return noStoreJson({ error: KEY_CHANGED_MESSAGE, reason: "key_changed" }, 409);
 }
 
 /**

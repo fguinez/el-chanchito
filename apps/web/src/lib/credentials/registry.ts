@@ -8,6 +8,8 @@ import {
   type CredentialFieldSpec,
   type InstitutionCredentialSpec,
 } from "@chanchito/product-model";
+import type { SaveBlocker } from "./availability";
+import type { CredentialKeyInfo } from "./key-info";
 
 export { CREDENTIAL_SPECS };
 export type { CredentialFieldSpec, InstitutionCredentialSpec };
@@ -120,8 +122,17 @@ export interface CredentialsOverview {
   serviceReachable: boolean;
   /** The service has a usable key; null when it could not be asked. */
   keyAvailable: boolean | null;
-  /** A public key is published, so saving is possible. */
+  /** The database has an active key. */
   keyPublished: boolean;
+  /** The database seals to another service's key; null when the service
+   *  could not be asked. */
+  keyMismatch: boolean | null;
+  /** Saving works now: the running service holds the active key. */
+  canSave: boolean;
+  /** Why saving is unavailable (see lib/credentials/availability). */
+  saveBlocked: SaveBlocker | null;
+  /** Read-only dates about the active key; null when there is none. */
+  key: CredentialKeyInfo | null;
   institutions: InstitutionCredentialStatus[];
 }
 

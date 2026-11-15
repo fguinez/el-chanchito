@@ -16,6 +16,11 @@ const fieldStatus = z.object({
 const statusSchema = z.object({
   key_available: z.boolean(),
   key_id: z.string().nullable(),
+  // The database seals to another service's key that owns stored rows.
+  key_mismatch: z.boolean().optional(),
+  max_age_days: z.number().int().nonnegative().optional(),
+  rotation_failed_at: z.string().nullable().optional(),
+  rotation_error: z.string().nullable().optional(),
   fields: z.record(z.string(), fieldStatus),
 });
 

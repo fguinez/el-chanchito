@@ -2,10 +2,19 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { CredentialCard } from "@/components/credentials/credential-card";
+import { SAVE_BLOCKED_MESSAGES } from "@/lib/credentials/availability";
+import { describeKeyInfo } from "@/lib/credentials/key-info";
 import {
   CREDENTIAL_SPECS,
   type CredentialsOverview,
 } from "@/lib/credentials/registry";
+
+/** Messages mark commands with backticks; render them as code. */
+function withCode(text: string) {
+  return text
+    .split("`")
+    .map((part, i) => (i % 2 === 1 ? <code key={i}>{part}</code> : part));
+}
 
 export default function CredentialsPage() {
   const [overview, setOverview] = useState<CredentialsOverview | null>(null);
@@ -26,7 +35,8 @@ export default function CredentialsPage() {
     void load();
   }, [load]);
 
-  const canSave = Boolean(overview?.keyPublished) && overview?.keyAvailable !== false;
+  const blocked = overview?.saveBlocked ?? null;
+  const keyLines = overview?.key ? describeKeyInfo(overview.key) : null;
 
   return (
     <div className="space-y-6">
@@ -45,23 +55,37 @@ export default function CredentialsPage() {
           No se pudo cargar el estado de las credenciales.
         </p>
       )}
-      {overview && !overview.keyPublished && (
-        <p role="alert" className="rounded-md border p-3 text-sm">
-          El servicio de scrapers aún no ha publicado su clave de cifrado, así que no se puede
-          guardar nada todavía. Inicia el stack completo con <code>make dev</code>.
+      {blocked && (
+        <p
+          role="alert"
+          className={
+            blocked === "key_mismatch" || blocked === "key_unavailable"
+              ? "rounded-md border border-destructive/40 p-3 text-sm text-destructive"
+              : "rounded-md border p-3 text-sm"
+          }
+        >
+          <span className="font-medium">No se puede guardar por ahora. </span>
+          {withCode(SAVE_BLOCKED_MESSAGES[blocked])}
         </p>
       )}
-      {overview?.keyAvailable === false && (
-        <p role="alert" className="rounded-md border border-destructive/40 p-3 text-sm text-destructive">
-          El servicio de scrapers no puede usar su archivo de clave (permisos o formato). Revisa{" "}
-          <code>local/scrapers-dev.log</code>.
-        </p>
-      )}
-      {overview && overview.keyPublished && !overview.serviceReachable && (
-        <p className="rounded-md border p-3 text-sm text-muted-foreground">
-          El servicio de scrapers no responde: no se sabe qué hay en su almacén local, y los
-          cambios se aplicarán cuando arranque.
-        </p>
+
+      {keyLines && (
+        <section
+          aria-labelledby="credentials-key-heading"
+          className="max-w-3xl space-y-1 rounded-md border p-3 text-sm"
+        >
+          <h3 id="credentials-key-heading" className="font-medium">
+            Clave de cifrado
+          </h3>
+          <p className="text-muted-foreground">{keyLines.age}</p>
+          {keyLines.schedule && <p className="text-muted-foreground">{keyLines.schedule}</p>}
+          {keyLines.failure && <p className="text-destructive">{keyLines.failure}</p>}
+          <p className="text-xs text-muted-foreground">
+            Rotar la clave vuelve a cifrar todo con una nueva y borra la anterior, así que los
+            respaldos antiguos de la base de datos ya no se pueden leer. También puedes rotarla a
+            mano con <code>make credentials-rotate</code>.
+          </p>
+        </section>
       )}
 
       {overview === null && !loadError ? (
@@ -73,7 +97,7 @@ export default function CredentialsPage() {
               key={spec.slug}
               spec={spec}
               status={overview?.institutions.find((i) => i.slug === spec.slug)}
-              canSave={canSave}
+              canSave={Boolean(overview?.canSave)}
               onChanged={load}
             />
           ))}
