@@ -37,7 +37,9 @@
 --    database where that key is not already the active row (a recreated
 --    database, or `make credentials-reset-key` with a v1 key file). No row
 --    of that database is sealed to such a key, so nothing is lost: delete
---    the v1 key file and the service makes a v2 one.
+--    the v1 key file and restart the service, which makes a v2 one. The
+--    service (db/credentials.py) refuses such a key itself first, with that
+--    advice, so the trigger is the backstop for any other writer.
 --
 -- Idempotent.
 

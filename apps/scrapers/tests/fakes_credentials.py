@@ -9,7 +9,7 @@ import psycopg
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from db.credentials import ActiveKey, KeyRingConflict, KeySync
-from scrapers.credentials import CredentialKey
+from scrapers.credentials import V2, CredentialKey, CredentialKeyError
 
 
 def make_v1_key() -> CredentialKey:
@@ -41,6 +41,11 @@ class FakeRing:
         self.activated.append(key.key_id)
         return self.active
 
+    def _refuse_unless_v2(self, key) -> None:
+        """Like db.credentials: since V051 only a v2 key can become active."""
+        if key.kind is not V2:
+            raise CredentialKeyError("only v2 (X-Wing) keys can become active")
+
     def _orphaned(self, key_id: str) -> int:
         return sum(1 for r in self.rows if r.key_id != key_id)
 
@@ -49,8 +54,10 @@ class FakeRing:
         if self.active is not None and self.active.key_id == key.key_id:
             return KeySync("current", self.active, self._orphaned(key.key_id))
         if self.active is None:
+            self._refuse_unless_v2(key)
             outcome = "published"
         elif allow_takeover and not any(r.key_id == self.active.key_id for r in self.rows):
+            self._refuse_unless_v2(key)
             outcome = "took_over"
         else:
             return KeySync("mismatch", self.active)
@@ -99,6 +106,7 @@ class FakeRing:
         self._check()
         if self.active is not None and self.active.key_id == key.key_id:
             return None, self._orphaned(key.key_id)
+        self._refuse_unless_v2(key)
         retired = self.active.key_id if self.active else None
         self.activate(key)
         return retired, self._orphaned(key.key_id)

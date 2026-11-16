@@ -19,7 +19,9 @@ from datetime import datetime
 
 from db.connection import get_pool, with_db_retry
 from scrapers.credentials import (
+    V2,
     CredentialKey,
+    CredentialKeyError,
     ResealedCredential,
     SealedCredential,
 )
@@ -56,6 +58,26 @@ def _active(conn, lock: bool = False) -> ActiveKey | None:
         + (" FOR UPDATE" if lock else "")
     ).fetchone()
     return ActiveKey(row[0], row[1], row[2]) if row else None
+
+
+def _refuse_unless_v2(conn, key: CredentialKey) -> None:
+    """V051 lets only v2 keys become active. Say so, and what to do, before
+    the trigger turns it into a bare check violation: a v1 key file that is
+    not already this database's active key can never be published here."""
+    if key.kind is V2:
+        return
+    sealed = _count_sealed_to(conn, key.key_id)
+    lost = (
+        "no stored credential in this database is sealed to it, so nothing is lost"
+        if sealed == 0
+        else f"the {sealed} stored credential(s) sealed to it must be entered again"
+    )
+    raise CredentialKeyError(
+        f"the credentials key file holds an older v1 (X25519) key ({key.key_id[:12]}) that "
+        "is not this database's active key, and only v2 (X-Wing) keys can become active. "
+        "Delete the key file and restart the scraper service, which then creates a v2 key; "
+        f"{lost}. Do not delete it if another database still uses it as its active key"
+    )
 
 
 def _activate(conn, key: CredentialKey) -> ActiveKey:
@@ -106,8 +128,10 @@ def sync_key(key: CredentialKey, allow_takeover: bool) -> KeySync:
         if active is not None and active.key_id == key.key_id:
             return KeySync("current", active, _count_orphaned(conn, key.key_id))
         if active is None:
+            _refuse_unless_v2(conn, key)
             outcome = "published"
         elif allow_takeover and _count_sealed_to(conn, active.key_id) == 0:
+            _refuse_unless_v2(conn, key)
             _retire(conn, active.key_id)
             outcome = "took_over"
         else:
@@ -221,6 +245,7 @@ def reset_active_key(key: CredentialKey) -> tuple[str | None, int]:
         active = _active(conn, lock=True)
         retired = None
         if active is None or active.key_id != key.key_id:
+            _refuse_unless_v2(conn, key)
             if active is not None:
                 _retire(conn, active.key_id)
                 retired = active.key_id

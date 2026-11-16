@@ -39,8 +39,9 @@ export const SAVE_BLOCKED_MESSAGES: Record<SaveBlocker, string> = {
     "El servicio de scrapers no responde, así que no se puede confirmar su clave de cifrado. " +
     "Inicia el stack completo con `make dev` (o `make up`) y vuelve a intentarlo.",
   key_unavailable:
-    "El servicio de scrapers no puede usar su archivo de clave (permisos o formato). Revisa su " +
-    "log (`local/scrapers-dev.log` o `make logs-scrapers`).",
+    "El servicio de scrapers no puede usar su archivo de clave (permisos, formato, o una clave " +
+    "v1 antigua que esta base de datos ya no acepta como activa). Su log dice qué hacer " +
+    "(`local/scrapers-dev.log` o `make logs-scrapers`).",
   key_mismatch:
     "La base de datos cifra las credenciales con la clave de otro servicio de scrapers (por " +
     "ejemplo, `make dev` y `make up` sobre la misma base), así que este no puede abrirlas ni " +

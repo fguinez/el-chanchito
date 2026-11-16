@@ -26,6 +26,7 @@ from db import credentials as db_credentials
 from db.credentials import KeyRingConflict, fetch_sealed_credentials, sync_key
 from scrapers.credentials import (
     CredentialKey,
+    CredentialKeyError,
     KeyFile,
     binding_digest,
     generate_key,
@@ -161,13 +162,22 @@ def test_v050_ties_the_public_key_length_to_the_algorithm(unmigrated_db):
         assert n == 2
 
 
+def _publish_as_before_v2_only(conn, key: CredentialKey) -> None:
+    """What sync_key did with a v1 key before V051 (it now refuses one)."""
+    conn.execute(
+        "INSERT INTO credential_keys (key_id, algorithm, public_key, status)"
+        " VALUES (%s, %s, %s, 'active')",
+        (key.key_id, key.algorithm, key.public_raw),
+    )
+
+
 def _publish_v1_before_v051(dsn: str):
     """An install from before V051: its v1 key is the active row and owns a
     row. Returns the key; DATABASE_URL already points at `dsn`."""
     apply_migrations(dsn, before="V051")
     v1 = make_v1_key()
-    assert sync_key(v1, allow_takeover=False).outcome == "published"
     with psycopg.connect(dsn, autocommit=True) as conn:
+        _publish_as_before_v2_only(conn, v1)
         _insert(conn, v1, "banchile", "password", "synthetic-password")
     apply_migrations(dsn)
     return v1
@@ -196,33 +206,32 @@ def test_v051_keeps_an_active_v1_key_and_its_rows(unmigrated_db):
 
 
 def test_v051_lets_only_v2_keys_become_active(unmigrated_db):
-    """A key that is not v2 cannot be published, taken over with or
-    re-activated; it can still be kept as retired."""
+    """The trigger itself: a key that is not v2 cannot be inserted active or
+    re-activated, whoever writes; it can still be kept as retired."""
     v1 = _publish_v1_before_v051(unmigrated_db)
     other_v1 = make_v1_key()
+    insert = (
+        "INSERT INTO credential_keys (key_id, algorithm, public_key, status, retired_at)"
+        " VALUES (%s, %s, %s, %s, %s)"
+    )
     with psycopg.connect(unmigrated_db, autocommit=True) as conn:
-        # A v1 key that is not the active row cannot become it.
+        conn.execute("UPDATE credential_keys SET status = 'retired', retired_at = now()")
         with pytest.raises(psycopg.errors.CheckViolation):
-            db_credentials.reset_active_key(other_v1)
+            conn.execute(
+                insert, (other_v1.key_id, other_v1.algorithm, other_v1.public_raw, "active", None)
+            )
         conn.execute(
-            "INSERT INTO credential_keys (key_id, algorithm, public_key, status, retired_at)"
-            " VALUES (%s, %s, %s, 'retired', now())",
-            (other_v1.key_id, other_v1.algorithm, other_v1.public_raw),
+            insert, (other_v1.key_id, other_v1.algorithm, other_v1.public_raw, "retired", "now()")
         )
-        v2 = generate_key()
-        assert db_credentials.reset_active_key(v2)[0] == v1.key_id
-        # Re-activating the retired v1 key (what `_activate` does on conflict).
         with pytest.raises(psycopg.errors.CheckViolation):
-            db_credentials.reset_active_key(v1)
-        with pytest.raises(psycopg.errors.CheckViolation):
-            sync_key(other_v1, allow_takeover=True)
-        rows = conn.execute(
-            "SELECT key_id, status FROM credential_keys ORDER BY status, key_id"
-        ).fetchall()
-        assert rows == [
-            (v2.key_id, "active"),
-            *sorted([(v1.key_id, "retired"), (other_v1.key_id, "retired")]),
-        ]
+            conn.execute(
+                "UPDATE credential_keys SET status = 'active', retired_at = NULL WHERE key_id = %s",
+                (v1.key_id,),
+            )
+        (n,) = conn.execute(
+            "SELECT count(*) FROM credential_keys WHERE status = 'active'"
+        ).fetchone()
+        assert n == 0
 
 
 @pytest.mark.parametrize("swap", ["key_id", "public_key", "both"])
@@ -264,9 +273,60 @@ def test_v051_keeps_the_active_v1_row_the_same_key(unmigrated_db, swap):
         assert _active(conn) is None
 
 
+def test_a_v1_key_is_refused_with_what_to_do_before_the_trigger(unmigrated_db):
+    """sync_key and reset_active_key refuse a v1 key that is not already the
+    active row with a CredentialKeyError naming the fix, and change nothing."""
+    v1 = _publish_v1_before_v051(unmigrated_db)
+    other_v1 = make_v1_key()
+    with psycopg.connect(unmigrated_db, autocommit=True, row_factory=dict_row) as conn:
+        with pytest.raises(CredentialKeyError, match="nothing is lost") as refused:
+            db_credentials.reset_active_key(other_v1)
+        assert "Delete the key file and restart the scraper service" in str(refused.value)
+        assert _active(conn) == v1.key_id
+        v2 = generate_key()
+        assert db_credentials.reset_active_key(v2)[0] == v1.key_id
+        # v1 still owns its row: going back to it would need re-entry.
+        with pytest.raises(CredentialKeyError, match=r"the 1 stored credential\(s\) sealed"):
+            db_credentials.reset_active_key(v1)
+        with pytest.raises(CredentialKeyError, match="nothing is lost"):
+            sync_key(other_v1, allow_takeover=True)  # v2 owns no row: a takeover
+        assert _active(conn) == v2.key_id
+        rows = conn.execute("SELECT key_id FROM credential_keys ORDER BY key_id").fetchall()
+        assert {r["key_id"] for r in rows} == {v1.key_id, v2.key_id}
+
+
+def test_a_v1_key_file_on_a_fresh_database_stops_at_key_unavailable(db_conn, tmp_path, caplog):
+    """The service logs the fix once and reports key_unavailable instead of
+    a check violation on every sync."""
+    KeyFile(tmp_path / "credentials_key").replace(make_v1_key())
+    manager = _manager(tmp_path)
+    with caplog.at_level("ERROR", logger="scraper-service.credentials"):
+        manager.reload()
+        manager.tick()
+    status = manager.status()
+    assert (status["state"], status["key_available"]) == ("key_unavailable", False)
+    refusals = [r for r in caplog.records if "older v1 (X25519) key" in r.getMessage()]
+    assert len(refusals) == 1
+    assert "Delete the key file and restart" in refusals[0].getMessage()
+    assert _active(db_conn) is None
+
+
 def test_v051_publishes_a_v1_key_on_a_fresh_database_no_more(db_conn):
-    with pytest.raises(psycopg.errors.CheckViolation):
+    with pytest.raises(CredentialKeyError, match="nothing is lost"):
         sync_key(make_v1_key(), allow_takeover=False)
+    assert _active(db_conn) is None
+
+
+def test_reset_key_with_a_v1_key_file_says_what_to_do(db_conn, tmp_path, monkeypatch, capsys):
+    import credentials_admin
+
+    key_path = tmp_path / "credentials_key"
+    KeyFile(key_path).replace(make_v1_key())
+    monkeypatch.setenv("CREDENTIALS_KEY_FILE", str(key_path))
+    assert credentials_admin.main(["reset-key", "--yes"]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("Failed: the credentials key file holds an older v1 (X25519) key")
+    assert "nothing is lost" in err and "Error" not in err
     assert _active(db_conn) is None
 
 
@@ -466,8 +526,8 @@ def test_rotating_a_v1_key_moves_the_ring_and_rows_to_v2(unmigrated_db, tmp_path
     old = make_v1_key()
     key_file.replace(old)
     apply_migrations(unmigrated_db, before="V051")
-    assert sync_key(old, allow_takeover=False).outcome == "published"
     with psycopg.connect(unmigrated_db, autocommit=True, row_factory=dict_row) as db_conn:
+        _publish_as_before_v2_only(db_conn, old)
         _insert(db_conn, old, "banchile", "password", "synthetic-password")
         _insert(db_conn, old, "email", "imap_host", HOST)
         _insert(db_conn, old, "email", "imap_user", USER)
