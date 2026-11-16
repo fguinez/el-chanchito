@@ -1689,12 +1689,13 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
   SHAKE256(seed, 96) gives the ML-KEM-768 seed (64 bytes) and the X25519 key
   (32), and the shared secret is SHA3-256(ss_ML-KEM, ss_X25519, ct_X25519,
   pk_X25519, label). `generate_key` makes v2 keys, so new installs start on
-  v2; a v1 key keeps sealing and opening v1 rows until it is rotated, and
-  rotation re-seals every row to the new v2 key with the v2 scheme. The web
-  picks the suite from the active key's published algorithm (`seal.ts`, which
-  rejects a public key of the wrong length) and the route stores that
-  scheme; the scraper opens only rows whose scheme matches the key's, and
-  the Credenciales page asks to re-enter any other.
+  v2. The web seals only v2: `seal.ts` refuses a key published under any
+  other algorithm (or a public key of the wrong length), so an older
+  install's v1 key cannot take new saves; the scraper still loads a v1 key
+  file and opens its v1 rows, and rotation re-seals every row to the new v2
+  key with the v2 scheme. The route stores the scheme `seal.ts` returns; the
+  scraper opens only rows whose scheme matches the key's, and the
+  Credenciales page asks to re-enter any other.
   `@hpke/core` runs the HPKE layers on the web, with X-Wing as a
   `KemInterface` over `node:crypto` (`xwing.ts`: native ML-KEM-768 through
   `crypto.encapsulate`/`decapsulate`, X25519 through `diffieHellman`), which
@@ -1711,9 +1712,9 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
   KEM `0x647a` vectors of draft-ietf-hpke-pq (public key from the seed, then
   decap on the web and a full HPKE open in Python) and the three X-Wing
   vectors (public key from the seed; the web also decaps). Two checked-in fixtures sealed by the TypeScript code with
-  throwaway keys, `ts_sealed.json` (v1) and `ts_sealed_v2.json` (v2, a
-  binding entry with non-ASCII values included), are opened by the Python
-  tests to keep both sides in step.
+  throwaway keys, `ts_sealed.json` (v1, frozen since the web stopped sealing
+  v1) and `ts_sealed_v2.json` (v2, a binding entry with non-ASCII values
+  included), are opened by the Python tests to keep both sides in step.
 - **Registry.** `packages/product-model/product_model/credentials.py` lists
   each institution's fields (label, env var, identifier or secret, input
   hints, pattern) and is generated into the TS index, so the form, the API

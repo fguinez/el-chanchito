@@ -1,30 +1,24 @@
 // Seals a scraper credential to the scraper service's public key, server
 // side only (route handlers; never imported by a client component).
 //
-// HPKE (RFC 9180) base mode with HKDF-SHA256 and AES-256-GCM through
-// @hpke/core. The KEM follows the published key's algorithm: X-Wing
-// (ML-KEM-768 + X25519, ./xwing) for v2 keys, DHKEM(X25519) for v1 keys still
-// active before their rotation. The `info` string binds each ciphertext to
-// its scheme, institution, field and key, so a row moved to another field,
-// institution or key fails to open. The scraper service opens it
-// (apps/scrapers/scrapers/credentials.py); this side holds no private key and
+// HPKE (RFC 9180) base mode with the X-Wing KEM (ML-KEM-768 + X25519,
+// ./xwing), HKDF-SHA256 and AES-256-GCM through @hpke/core: scheme v2. This
+// side seals only to v2 keys; a key published under any other algorithm
+// (an older install's v1 X25519 key, before its rotation) is refused, and
+// saving fails until the scraper service rotates it to v2. The `info` string
+// binds each ciphertext to its scheme, institution, field and key, so a row
+// moved to another field, institution or key fails to open. The scraper
+// service opens it (apps/scrapers/scrapers/credentials.py, which still opens
+// v1 rows so rotation can re-seal them); this side holds no private key and
 // can never read a stored value back.
 
 import "server-only";
-import {
-  Aes256Gcm,
-  CipherSuite,
-  DhkemX25519HkdfSha256,
-  HkdfSha256,
-} from "@hpke/core";
+import { Aes256Gcm, CipherSuite, HkdfSha256 } from "@hpke/core";
 import { XWING_PUBLIC_KEY_BYTES, XWingKem } from "./xwing";
 
 // Must match apps/scrapers/scrapers/credentials.py. The algorithm is what
 // the scraper service publishes next to its key; the scheme, stored on every
 // row, names the whole construction sealed to that key.
-export const CREDENTIAL_SCHEME_V1 = "hpke-x25519-sha256-aes256gcm-v1";
-export const CREDENTIAL_ALGORITHM_V1 =
-  "HPKE-Base(DHKEM-X25519-HKDF-SHA256, HKDF-SHA256, AES-256-GCM)";
 export const CREDENTIAL_SCHEME_V2 = "hpke-mlkem768x25519-sha256-aes256gcm-v2";
 export const CREDENTIAL_ALGORITHM_V2 = "HPKE-Base(MLKEM768-X25519, HKDF-SHA256, AES-256-GCM)";
 
@@ -39,18 +33,6 @@ interface Scheme {
 }
 
 const SCHEMES = new Map<string, Scheme>([
-  [
-    CREDENTIAL_ALGORITHM_V1,
-    {
-      scheme: CREDENTIAL_SCHEME_V1,
-      publicKeyBytes: 32,
-      suite: new CipherSuite({
-        kem: new DhkemX25519HkdfSha256(),
-        kdf: new HkdfSha256(),
-        aead: new Aes256Gcm(),
-      }),
-    },
-  ],
   [
     CREDENTIAL_ALGORITHM_V2,
     {

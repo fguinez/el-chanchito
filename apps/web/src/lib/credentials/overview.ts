@@ -38,10 +38,14 @@ export function buildCredentialsOverview({
       const reported = control?.fields[field.envVar];
       // A row sealed to a key other than the published one (or with another
       // scheme than that key's), or one the service reports it could not
-      // open, has to be typed again.
+      // open, has to be typed again. An older install's v1 key, which this
+      // side no longer seals to (activeScheme null), only ever has v1 rows;
+      // they still open until the rotation re-seals them, so only the key id
+      // counts for it.
       const needsReentry = Boolean(
         row &&
-          ((key !== null && (row.keyId !== key.keyId || row.scheme !== activeScheme)) ||
+          ((key !== null &&
+            (row.keyId !== key.keyId || (activeScheme !== null && row.scheme !== activeScheme))) ||
             reported?.needs_reentry)
       );
       return {

@@ -256,10 +256,11 @@ How it is protected:
   `hpke-mlkem768x25519-sha256-aes256gcm-v2`), a hybrid post-quantum KEM: a
   database copy that leaks without the key file stays closed even to a
   future quantum computer ("harvest now, decrypt later"). Keys created before
-  it (X25519 only, `hpke-x25519-sha256-aes256gcm-v1`) keep working; the next
-  rotation (automatic, or `make credentials-rotate`) replaces such a key with
-  an X-Wing one and re-seals every stored credential to it, with nothing to
-  type again. Each ciphertext is bound to its institution, field and
+  it (X25519 only, `hpke-x25519-sha256-aes256gcm-v1`) still open the
+  credentials stored under them, but the dashboard no longer seals to them,
+  so saving fails until the key is rotated; the next rotation (automatic, or
+  `make credentials-rotate`) replaces such a key with an X-Wing one and
+  re-seals every stored credential to it, with nothing to type again. Each ciphertext is bound to its institution, field and
   key, so it cannot be moved to another field. The dashboard can write a
   credential but never read one back.
 - **Threat model.** The database alone (a dump, a backup, a leaked

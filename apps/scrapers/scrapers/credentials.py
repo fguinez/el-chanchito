@@ -10,12 +10,13 @@ alone opens nothing.
 The key decides the suite, and the suite's scheme is stored on every row:
 
 - v1, `hpke-x25519-sha256-aes256gcm-v1`: DHKEM(X25519, HKDF-SHA256),
-  HKDF-SHA256, AES-256-GCM. Keys made before v2 keep working until they are
-  rotated.
+  HKDF-SHA256, AES-256-GCM. The dashboard no longer seals to it, but a key
+  file made before v2 still loads and opens its v1 rows, so that rotating it
+  can re-seal them.
 - v2, `hpke-mlkem768x25519-sha256-aes256gcm-v2`: the hybrid post-quantum KEM
   ML-KEM-768 + X25519 (X-Wing, HPKE KEM 0x647a), HKDF-SHA256, AES-256-GCM.
   The private key is a 32-byte X-Wing seed. New keys are v2, so rotating a
-  v1 key re-seals every row to v2.
+  v1 key re-seals every row to v2. It is the only scheme the dashboard seals.
 
 Each ciphertext is bound to its context through the HPKE `info` string
 (scheme, institution slug, field key, key id), so a row copied onto another
@@ -60,7 +61,8 @@ logger = logging.getLogger(__name__)
 class KeyKind:
     """One version of the whole construction (suite, info layout, plaintext
     encoding). `scheme` is stored on every row and `algorithm` is published
-    next to the public key; the dashboard has the same pairs."""
+    next to the public key; the dashboard has the same v2 pair (it no
+    longer seals v1)."""
 
     scheme: str
     algorithm: str
@@ -222,7 +224,8 @@ class CredentialKey:
         )
 
     def seal(self, slug: str, field_key: str, value: str, binding: str | None = None) -> bytes:
-        """Seal like the dashboard does (tests and tooling only)."""
+        """Seal like the dashboard does: rotation re-seals rows with it, and
+        tests seal with it (the dashboard itself seals only v2)."""
         info = sealing_info(slug, field_key, self.key_id, binding, scheme=self.scheme)
         return self.kind.suite.encrypt(
             value.encode("utf-8"),
