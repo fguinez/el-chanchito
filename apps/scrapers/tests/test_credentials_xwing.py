@@ -56,6 +56,28 @@ def _write_owner_only(path: Path, data: bytes) -> None:
     os.close(fd)
 
 
+def _tlv(tag: int, contents: bytes) -> bytes:
+    """One DER element (short or one/two-byte long length)."""
+    n = len(contents)
+    if n < 0x80:
+        return bytes([tag, n]) + contents
+    size = n.to_bytes((n.bit_length() + 7) // 8, "big")
+    return bytes([tag, 0x80 | len(size)]) + size + contents
+
+
+XWING_OID = bytes.fromhex("2b0601040183e62d81c87a")  # 1.3.6.1.4.1.62253.25722
+SEED = b"\x01" * 32  # synthetic
+
+
+def _xwing_pkcs8(
+    version: bytes = _tlv(0x02, b"\x00"),
+    algorithm: bytes = _tlv(0x30, _tlv(0x06, XWING_OID)),
+    private_key: bytes = _tlv(0x04, SEED),
+    extra: bytes = b"",
+) -> bytes:
+    return _tlv(0x30, version + algorithm + private_key + extra)
+
+
 def _pem(der: bytes) -> bytes:
     body = base64.b64encode(der)
     lines = b"\n".join(body[i : i + 64] for i in range(0, len(body), 64))
@@ -140,21 +162,82 @@ def test_a_v1_key_file_still_loads_and_opens_its_rows(tmp_path):
     assert opened.needs_reentry == frozenset()
 
 
+def test_the_hand_built_x_wing_pkcs8_is_what_the_key_file_holds(tmp_path):
+    assert _xwing_pkcs8() == XWING_PKCS8_PREFIX + SEED
+    path = tmp_path / "credentials_key"
+    _write_owner_only(path, _pem(_xwing_pkcs8()))
+    assert load_key(path).key_id == CredentialKey.from_seed(SEED).key_id
+
+
 @pytest.mark.parametrize(
     "der",
     [
-        XWING_PKCS8_PREFIX + b"\x01" * 31,
-        XWING_PKCS8_PREFIX + b"\x01" * 33,
-        XWING_PKCS8_PREFIX.replace(b"\x02\x01\x00", b"\x02\x01\x01") + b"\x01" * 32,
-        XWING_PKCS8_PREFIX[:-2] + b"\x04\x22\x04\x20" + b"\x01" * 32,
+        _xwing_pkcs8(private_key=_tlv(0x04, SEED[:31])),
+        _xwing_pkcs8(private_key=_tlv(0x04, SEED + b"\x01")),
+        _xwing_pkcs8(private_key=_tlv(0x04, _tlv(0x04, SEED))),
+        _xwing_pkcs8(private_key=_tlv(0x03, b"\x00" + SEED)),
+        _xwing_pkcs8(private_key=b""),
+        _xwing_pkcs8(version=_tlv(0x02, b"\x01")),
+        _xwing_pkcs8(version=_tlv(0x02, b"\x00\x00")),
+        _xwing_pkcs8(algorithm=_tlv(0x30, _tlv(0x06, XWING_OID) + _tlv(0x05, b""))),
+        _xwing_pkcs8(extra=_tlv(0xA0, b"")),
+        _xwing_pkcs8(extra=_tlv(0x81, b"\x00" + b"\x02" * 1216)),
+        _xwing_pkcs8() + b"\x00",
+        _xwing_pkcs8(private_key=bytes([0x04, 0x81, 0x20]) + SEED),
     ],
-    ids=["short-seed", "long-seed", "version-1", "nested-octet-string"],
+    ids=[
+        "short-seed",
+        "long-seed",
+        "nested-octet-string",
+        "seed-as-bit-string",
+        "no-private-key",
+        "version-1",
+        "non-minimal-version",
+        "null-parameters",
+        "attributes",
+        "public-key",
+        "trailing-byte",
+        "non-minimal-seed-length",
+    ],
 )
 def test_a_malformed_x_wing_key_file_is_refused(tmp_path, der):
+    """A key that names X-Wing but is not exactly its PKCS#8 is refused as
+    such, never handed to another parser."""
     path = tmp_path / "credentials_key"
     _write_owner_only(path, _pem(der))
+    with pytest.raises(CredentialKeyError, match="malformed X-Wing key"):
+        load_key(path)
+
+
+@pytest.mark.parametrize(
+    "der",
+    [
+        XWING_PKCS8_PREFIX + SEED[:31],  # outer length past the end
+        bytes([0x30, 0x81, 0x34]) + (XWING_PKCS8_PREFIX + SEED)[2:],  # non-minimal
+        bytes([0x30, 0x80]) + (XWING_PKCS8_PREFIX + SEED)[2:] + b"\x00\x00",  # BER
+        b"\x00" * 54,
+        b"",
+    ],
+    ids=["truncated", "non-minimal-outer-length", "indefinite-length", "zeros", "empty"],
+)
+def test_a_key_file_that_is_not_der_pkcs8_is_refused(tmp_path, der):
+    path = tmp_path / "credentials_key"
+    _write_owner_only(path, _pem(der) if der else b"")
     with pytest.raises(CredentialKeyError):
         load_key(path)
+
+
+def test_the_x_wing_oid_bytes_elsewhere_do_not_make_a_key_x_wing(tmp_path):
+    """Only the AlgorithmIdentifier decides: an X25519 key whose 32 private
+    bytes happen to start with the X-Wing OID's encoding is an X25519 key."""
+    scalar = (bytes([0x06, len(XWING_OID)]) + XWING_OID).ljust(32, b"\x07")
+    der = _xwing_pkcs8(
+        algorithm=_tlv(0x30, _tlv(0x06, bytes.fromhex("2b656e"))),  # 1.3.101.110, X25519
+        private_key=_tlv(0x04, _tlv(0x04, scalar)),
+    )
+    path = tmp_path / "credentials_key"
+    _write_owner_only(path, _pem(der))
+    assert load_key(path).kind is V1
 
 
 def test_trailing_data_after_the_pem_is_refused(tmp_path):

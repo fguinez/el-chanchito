@@ -91,8 +91,9 @@ _INFO_LABEL = "el-chanchito/credential"
 XWING_SEED_BYTES = 32
 # PKCS#8 OneAsymmetricKey { version 0, id-XWing (1.3.6.1.4.1.62253.25722, no
 # parameters), privateKey OCTET STRING (the 32-byte seed) }, as DER.
-_XWING_OID_DER = bytes.fromhex("060b2b0601040183e62d81c87a")
-_XWING_PKCS8_PREFIX = bytes.fromhex("3034020100300d") + _XWING_OID_DER + bytes.fromhex("0420")
+_XWING_OID = bytes.fromhex("2b0601040183e62d81c87a")
+_XWING_PKCS8_PREFIX = bytes.fromhex("3034020100300d060b") + _XWING_OID + bytes.fromhex("0420")
+_DER_SEQUENCE, _DER_INTEGER, _DER_OCTET_STRING, _DER_OID = 0x30, 0x02, 0x04, 0x06
 _PEM_PRIVATE_KEY_RE = re.compile(
     rb"\A-----BEGIN PRIVATE KEY-----\r?\n"
     rb"([A-Za-z0-9+/=\r\n]+?)\r?\n"
@@ -298,10 +299,64 @@ def load_key(path: Path) -> CredentialKey:
     return CredentialKey.from_private(private_key)
 
 
+def _der_element(data: bytes, pos: int) -> tuple[int, bytes, int]:
+    """The DER element at `pos`: (tag, contents, end). Only what PKCS#8 needs
+    here: single-byte tags and definite, minimally encoded lengths that fit
+    in `data`; anything else raises ValueError."""
+    if pos + 2 > len(data) or data[pos] & 0x1F == 0x1F:
+        raise ValueError("truncated element or multi-byte tag")
+    tag, first = data[pos], data[pos + 1]
+    pos += 2
+    if first < 0x80:
+        length = first
+    else:
+        n = first & 0x7F
+        if not 1 <= n <= 2 or pos + n > len(data) or data[pos] == 0:
+            raise ValueError("indefinite, oversized or non-minimal length")
+        length = int.from_bytes(data[pos : pos + n], "big")
+        pos += n
+        if length < 0x80:
+            raise ValueError("non-minimal length")
+    if pos + length > len(data):
+        raise ValueError("length past the end")
+    return tag, data[pos : pos + length], pos + length
+
+
+def _xwing_seed_from_der(der: bytes, path: Path) -> bytes | None:
+    """The seed of an X-Wing PKCS#8, parsed strictly: SEQUENCE { INTEGER 0,
+    SEQUENCE { OID id-XWing } (no parameters), OCTET STRING of the 32-byte
+    seed }, with exact lengths and nothing after any part. None when the
+    structure does not name X-Wing (another key type, or not PKCS#8 at all),
+    which is left to `cryptography`; CredentialKeyError when it names X-Wing
+    but is not exactly that encoding."""
+    try:
+        tag, key_info, end = _der_element(der, 0)
+        if tag != _DER_SEQUENCE:
+            return None
+        version_tag, version, pos = _der_element(key_info, 0)
+        algorithm_tag, algorithm, pos = _der_element(key_info, pos)
+        if version_tag != _DER_INTEGER or algorithm_tag != _DER_SEQUENCE:
+            return None
+        oid_tag, oid, algorithm_end = _der_element(algorithm, 0)
+    except ValueError:
+        return None
+    if oid_tag != _DER_OID or oid != _XWING_OID:
+        return None
+    malformed = CredentialKeyError(f"{path} is a malformed X-Wing key")
+    if end != len(der) or version != b"\x00" or algorithm_end != len(algorithm):
+        raise malformed
+    try:
+        seed_tag, seed, pos = _der_element(key_info, pos)
+    except ValueError:
+        raise malformed from None
+    if seed_tag != _DER_OCTET_STRING or len(seed) != XWING_SEED_BYTES or pos != len(key_info):
+        raise malformed
+    return seed
+
+
 def _xwing_seed_from_pem(data: bytes, path: Path) -> bytes | None:
     """The seed of an X-Wing PKCS#8 PEM; None when the file is some other
-    PKCS#8 key (left to `cryptography`). A file that names X-Wing but is not
-    exactly the expected encoding raises CredentialKeyError."""
+    key (left to `cryptography`). See `_xwing_seed_from_der`."""
     match = _PEM_PRIVATE_KEY_RE.match(data)
     if match is None:
         return None
@@ -309,13 +364,7 @@ def _xwing_seed_from_pem(data: bytes, path: Path) -> bytes | None:
         der = base64.b64decode(re.sub(rb"\r?\n", b"", match.group(1)), validate=True)
     except (binascii.Error, ValueError):
         return None
-    if _XWING_OID_DER not in der:
-        return None
-    if len(der) != len(_XWING_PKCS8_PREFIX) + XWING_SEED_BYTES or not der.startswith(
-        _XWING_PKCS8_PREFIX
-    ):
-        raise CredentialKeyError(f"{path} is a malformed X-Wing key")
-    return der[len(_XWING_PKCS8_PREFIX) :]
+    return _xwing_seed_from_der(der, path)
 
 
 def generate_key() -> CredentialKey:

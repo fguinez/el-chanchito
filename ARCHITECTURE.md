@@ -1672,8 +1672,10 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
   (V049), where at most one key is `active`. A v2 key file is a PKCS#8
   `PRIVATE KEY` with the X-Wing OID (`1.3.6.1.4.1.62253.25722`, no
   parameters) holding the 32-byte X-Wing seed, encoded and parsed strictly
-  by hand; `load_key` also accepts a v1 X25519 PKCS#8 and refuses anything
-  else. Every read or write of the private key goes through
+  by hand (a minimal DER reader: the AlgorithmIdentifier's OID decides
+  whether a file is X-Wing, and an X-Wing file must be exactly that
+  structure, with minimal lengths and nothing left over); `load_key` also
+  accepts a v1 X25519 PKCS#8 and refuses anything else. Every read or write of the private key goes through
   `KeyFile` (scrapers/credentials.py), the seam a secret manager can replace.
 - **Schemes.** HPKE (RFC 9180) base mode with HKDF-SHA256 and AES-256-GCM;
   the KEM follows the key, and every row stores the scheme it was sealed
