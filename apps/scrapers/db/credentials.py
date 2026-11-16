@@ -1,4 +1,4 @@
-"""Sealed scraper credentials (V048-V050): the key ring and the rows.
+"""Sealed scraper credentials (V048-V051): the key ring and the rows.
 
 The rows hold only HPKE ciphertext (see scrapers/credentials.py); nothing
 here sees a plaintext value, except `rotate_key`, which hands the rows to a

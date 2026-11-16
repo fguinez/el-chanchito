@@ -1,5 +1,5 @@
-"""The sealed-credentials SQL (V048-V050) against a real PostgreSQL: the key
-ring migration, one key per database, rotation (crash recovery and concurrent
+"""The sealed-credentials SQL (V048-V051) against a real PostgreSQL: the key
+ring migrations, one key per database, rotation (crash recovery and concurrent
 dashboard saves included) and the reset command.
 
 Skipped unless TEST_DATABASE_URL is set (see conftest.py). Values and keys
@@ -20,6 +20,7 @@ from credential_manager import (
     reset_key_file,
     rotate_key_file,
 )
+from psycopg.rows import dict_row
 
 from db import credentials as db_credentials
 from db.credentials import KeyRingConflict, fetch_sealed_credentials, sync_key
@@ -35,6 +36,8 @@ from tests.conftest import MIGRATIONS_DIR, apply_migrations
 from tests.fakes_credentials import make_v1_key
 
 HOST, USER = "imap.gmail.com", "user@example.com"
+V1_SCHEME = "hpke-x25519-sha256-aes256gcm-v1"
+V2_SCHEME = "hpke-mlkem768x25519-sha256-aes256gcm-v2"
 
 
 def _insert(conn, key: CredentialKey, slug: str, field: str, value: str, binding=None) -> None:
@@ -158,6 +161,139 @@ def test_v050_ties_the_public_key_length_to_the_algorithm(unmigrated_db):
         assert n == 2
 
 
+def _publish_v1_before_v051(dsn: str):
+    """An install from before V051: its v1 key is the active row and owns a
+    row. Returns the key; DATABASE_URL already points at `dsn`."""
+    apply_migrations(dsn, before="V051")
+    v1 = make_v1_key()
+    assert sync_key(v1, allow_takeover=False).outcome == "published"
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        _insert(conn, v1, "banchile", "password", "synthetic-password")
+    apply_migrations(dsn)
+    return v1
+
+
+def test_v051_keeps_an_active_v1_key_and_its_rows(unmigrated_db):
+    """The upgrade path: V051 applies over an active v1 key with v1 rows, the
+    key keeps working (a failed rotation is still recorded on it) and the
+    migration is idempotent."""
+    v1 = _publish_v1_before_v051(unmigrated_db)
+    migration = next(MIGRATIONS_DIR.glob("V051__*.sql"))
+    with psycopg.connect(unmigrated_db, autocommit=True) as conn:
+        conn.execute(migration.read_text(encoding="utf-8"))  # idempotent
+        # A v1 key that is already active stays active, and still takes rows.
+        assert sync_key(v1, allow_takeover=False).outcome == "current"
+        _insert(conn, v1, "skipo", "api_key", "synthetic-key")
+        db_credentials.record_rotation_failure(v1.key_id, "OperationalError")
+        row = conn.execute(
+            "SELECT status, rotation_error FROM credential_keys WHERE key_id = %s", (v1.key_id,)
+        ).fetchone()
+        assert row == ("active", "OperationalError")
+        assert open_rows(v1, fetch_sealed_credentials()).values == {
+            "BANCHILE_PASSWORD": "synthetic-password",
+            "SKIPO_API_KEY": "synthetic-key",
+        }
+
+
+def test_v051_lets_only_v2_keys_become_active(unmigrated_db):
+    """A key that is not v2 cannot be published, taken over with or
+    re-activated; it can still be kept as retired."""
+    v1 = _publish_v1_before_v051(unmigrated_db)
+    other_v1 = make_v1_key()
+    with psycopg.connect(unmigrated_db, autocommit=True) as conn:
+        # A v1 key that is not the active row cannot become it.
+        with pytest.raises(psycopg.errors.CheckViolation):
+            db_credentials.reset_active_key(other_v1)
+        conn.execute(
+            "INSERT INTO credential_keys (key_id, algorithm, public_key, status, retired_at)"
+            " VALUES (%s, %s, %s, 'retired', now())",
+            (other_v1.key_id, other_v1.algorithm, other_v1.public_raw),
+        )
+        v2 = generate_key()
+        assert db_credentials.reset_active_key(v2)[0] == v1.key_id
+        # Re-activating the retired v1 key (what `_activate` does on conflict).
+        with pytest.raises(psycopg.errors.CheckViolation):
+            db_credentials.reset_active_key(v1)
+        with pytest.raises(psycopg.errors.CheckViolation):
+            sync_key(other_v1, allow_takeover=True)
+        rows = conn.execute(
+            "SELECT key_id, status FROM credential_keys ORDER BY status, key_id"
+        ).fetchall()
+        assert rows == [
+            (v2.key_id, "active"),
+            *sorted([(v1.key_id, "retired"), (other_v1.key_id, "retired")]),
+        ]
+
+
+@pytest.mark.parametrize("swap", ["key_id", "public_key", "both"])
+def test_v051_keeps_the_active_v1_row_the_same_key(unmigrated_db, swap):
+    """The grandfathered v1 row stays active only as itself: rewriting its
+    key_id or public_key into another v1 key raises, while updates that keep
+    the key (a recorded rotation failure, retiring it) still work."""
+    v1 = _publish_v1_before_v051(unmigrated_db)
+    other = make_v1_key()
+    sets = {
+        "key_id": ("key_id = %s", (other.key_id,)),
+        "public_key": ("public_key = %s", (other.public_raw,)),
+        "both": ("key_id = %s, public_key = %s", (other.key_id, other.public_raw)),
+    }[swap]
+    with psycopg.connect(unmigrated_db, autocommit=True, row_factory=dict_row) as conn:
+        # The row's own key id moves with it, so drop the row sealed to it.
+        conn.execute("DELETE FROM institution_credentials")
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute(
+                f"UPDATE credential_keys SET {sets[0]} WHERE key_id = %s",
+                (*sets[1], v1.key_id),
+            )
+        # Same key, same values: not a different key.
+        conn.execute(
+            "UPDATE credential_keys SET key_id = key_id, public_key = public_key WHERE key_id = %s",
+            (v1.key_id,),
+        )
+        db_credentials.record_rotation_failure(v1.key_id, "OperationalError")
+        row = conn.execute(
+            "SELECT key_id, public_key, status, rotation_error FROM credential_keys"
+        ).fetchone()
+        assert (row["key_id"], bytes(row["public_key"]), row["status"]) == (
+            v1.key_id,
+            v1.public_raw,
+            "active",
+        )
+        assert row["rotation_error"] == "OperationalError"
+        conn.execute("UPDATE credential_keys SET status = 'retired', retired_at = now()")
+        assert _active(conn) is None
+
+
+def test_v051_publishes_a_v1_key_on_a_fresh_database_no_more(db_conn):
+    with pytest.raises(psycopg.errors.CheckViolation):
+        sync_key(make_v1_key(), allow_takeover=False)
+    assert _active(db_conn) is None
+
+
+def test_v051_ties_the_sealed_floor_to_the_scheme(db_conn):
+    key = generate_key()
+    sync_key(key, allow_takeover=False)
+    insert = (
+        "INSERT INTO institution_credentials"
+        " (institution_slug, field_key, scheme, key_id, sealed)"
+        " VALUES ('skipo', 'api_key', %s, %s, %s)"
+    )
+    for scheme, length in [
+        (V2_SCHEME, 1135),
+        (V2_SCHEME, 4097),
+        (V1_SCHEME, 47),
+        (V1_SCHEME, 4097),
+        ("hpke-something-else", 1136),
+    ]:
+        with pytest.raises(psycopg.errors.CheckViolation):
+            db_conn.execute(insert, (scheme, key.key_id, b"\x00" * length))
+    for scheme, length in [(V2_SCHEME, 1136), (V2_SCHEME, 4096), (V1_SCHEME, 48)]:
+        db_conn.execute(insert, (scheme, key.key_id, b"\x00" * length))
+        db_conn.execute("DELETE FROM institution_credentials")
+    # What a v2 key really seals is over the floor even for an empty value.
+    assert len(key.seal("skipo", "api_key", "")) == 1136
+
+
 def test_at_most_one_key_is_active(db_conn):
     first, second = generate_key(), generate_key()
     sync_key(first, allow_takeover=False)
@@ -184,8 +320,8 @@ def test_rows_are_written_only_under_the_active_key(db_conn):
 @pytest.mark.parametrize(
     ("slug", "key_id", "sealed"),
     [
-        ("Bad Slug", None, b"\x00" * 64),
-        ("banchile", "not-hex", b"\x00" * 64),
+        ("Bad Slug", None, b"\x00" * 1200),
+        ("banchile", "not-hex", b"\x00" * 1200),
         ("banchile", None, b"\x00" * 8),
     ],
 )
@@ -322,48 +458,51 @@ def test_rotation_reseals_every_row_and_shreds_the_old_key(db_conn, tmp_path):
     assert manager.status()["state"] == "ok"
 
 
-def test_rotating_a_v1_key_moves_the_ring_and_rows_to_v2(db_conn, tmp_path):
-    """An install from before v2: its v1 key is published and owns rows. The
-    rotation publishes a v2 key under the v2 algorithm and stores every row
-    under the v2 scheme."""
+def test_rotating_a_v1_key_moves_the_ring_and_rows_to_v2(unmigrated_db, tmp_path):
+    """An install from before v2: its v1 key was published (before V051) and
+    owns rows. With every migration applied, the rotation publishes a v2 key
+    under the v2 algorithm and stores every row under the v2 scheme."""
     key_file = KeyFile(tmp_path / "credentials_key")
     old = make_v1_key()
     key_file.replace(old)
+    apply_migrations(unmigrated_db, before="V051")
     assert sync_key(old, allow_takeover=False).outcome == "published"
-    _insert(db_conn, old, "banchile", "password", "synthetic-password")
-    _insert(db_conn, old, "email", "imap_host", HOST)
-    _insert(db_conn, old, "email", "imap_user", USER)
-    _insert(
-        db_conn,
-        old,
-        "email",
-        "imap_password",
-        "synthetic-app-password",
-        binding_digest([HOST, USER]),
-    )
+    with psycopg.connect(unmigrated_db, autocommit=True, row_factory=dict_row) as db_conn:
+        _insert(db_conn, old, "banchile", "password", "synthetic-password")
+        _insert(db_conn, old, "email", "imap_host", HOST)
+        _insert(db_conn, old, "email", "imap_user", USER)
+        _insert(
+            db_conn,
+            old,
+            "email",
+            "imap_password",
+            "synthetic-app-password",
+            binding_digest([HOST, USER]),
+        )
+        apply_migrations(unmigrated_db)
 
-    result = rotate_key_file(key_file, DatabaseKeyRing())
+        result = rotate_key_file(key_file, DatabaseKeyRing())
 
-    new = result.new_key
-    assert (result.resealed, result.skipped) == (4, 0)
-    assert new.scheme == "hpke-mlkem768x25519-sha256-aes256gcm-v2"
-    assert key_file.load().key_id == new.key_id
-    ring = db_conn.execute(
-        "SELECT key_id, status, algorithm, octet_length(public_key) AS n FROM credential_keys"
-        " ORDER BY status"
-    ).fetchall()
-    assert [(r["key_id"], r["status"], r["algorithm"], r["n"]) for r in ring] == [
-        (new.key_id, "active", new.algorithm, 1216),
-        (old.key_id, "retired", old.algorithm, 32),
-    ]
-    schemes = db_conn.execute("SELECT DISTINCT key_id, scheme FROM institution_credentials")
-    assert [(r["key_id"], r["scheme"]) for r in schemes] == [(new.key_id, new.scheme)]
-    assert open_rows(new, fetch_sealed_credentials()).values == {
-        "BANCHILE_PASSWORD": "synthetic-password",
-        "EMAIL_IMAP_HOST": HOST,
-        "EMAIL_IMAP_USER": USER,
-        "EMAIL_IMAP_PASSWORD": "synthetic-app-password",
-    }
+        new = result.new_key
+        assert (result.resealed, result.skipped) == (4, 0)
+        assert new.scheme == V2_SCHEME
+        assert key_file.load().key_id == new.key_id
+        ring = db_conn.execute(
+            "SELECT key_id, status, algorithm, octet_length(public_key) AS n FROM credential_keys"
+            " ORDER BY status"
+        ).fetchall()
+        assert [(r["key_id"], r["status"], r["algorithm"], r["n"]) for r in ring] == [
+            (new.key_id, "active", new.algorithm, 1216),
+            (old.key_id, "retired", old.algorithm, 32),
+        ]
+        schemes = db_conn.execute("SELECT DISTINCT key_id, scheme FROM institution_credentials")
+        assert [(r["key_id"], r["scheme"]) for r in schemes] == [(new.key_id, new.scheme)]
+        assert open_rows(new, fetch_sealed_credentials()).values == {
+            "BANCHILE_PASSWORD": "synthetic-password",
+            "EMAIL_IMAP_HOST": HOST,
+            "EMAIL_IMAP_USER": USER,
+            "EMAIL_IMAP_PASSWORD": "synthetic-app-password",
+        }
 
 
 def test_rotation_refuses_a_key_file_that_is_not_active(db_conn, tmp_path):

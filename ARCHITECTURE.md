@@ -511,6 +511,7 @@ suggested category, cascading with the category.
 | `V048__institution_credentials.sql` | `credential_keys` (the scraper service's single X25519 public key, `key_id` = hex SHA-256 of it) and `institution_credentials` (one HPKE-sealed field per `(institution_slug, field_key)`, with its `scheme` and `key_id`); see "Sealed credentials" |
 | `V049__credential_key_ring.sql` | `credential_keys` becomes a key ring: `key_id` primary key, `status` `active`/`retired` (at most one active, partial unique index `credential_keys_one_active`), `created_at`, `retired_at`, `rotation_failed_at`, `rotation_error`; the V048 singleton becomes the active key (`created_at` from its `updated_at`); a trigger lets `institution_credentials` be written only under the active key, locking it FOR SHARE; idempotent |
 | `V050__credential_keys_xwing.sql` | `credential_keys` may hold X-Wing keys: V048's `octet_length(public_key) = 32` CHECK becomes `credential_keys_algorithm_public_key_check`, which allows only the two published algorithms and ties each to its length (32 bytes for v1 X25519, 1216 for v2 X-Wing); `institution_credentials.sealed` keeps its 48 to 4096-byte CHECK; idempotent; see "Sealed credentials" |
+| `V051__credentials_v2_checks.sql` | `institution_credentials.scheme` takes only the v1 and v2 scheme strings (`institution_credentials_scheme_check`); V048's flat `sealed` CHECK becomes `institution_credentials_scheme_sealed_check`, at most 4096 bytes and at least the scheme's floor (48 for v1, 1136 for v2: the 1120-byte X-Wing enc plus the 16-byte tag); the `credential_keys_activate_only_v2` trigger refuses a key that is not v2 becoming active (insert, re-activation, or rewriting the active row's `key_id`, `public_key` or `algorithm`) but lets an already active v1 key stay active as the same key, record rotation failures and be retired, so an older install still rotates to v2 (a CHECK would fail on that row, and even NOT VALID would refuse its updates); idempotent; see "Sealed credentials" |
 
 ## Scraper Architecture
 
@@ -1646,7 +1647,7 @@ Browser → web POST /api/institutions/refresh {institution?}
 | `BANCHILE_LOGIN_COOLDOWN_MINUTES` | scrapers | Minimum minutes between full BanChile logins, which also gates manual refreshes (default `10`; `0` disables) |
 | `BANCHILE_BILLED_STATEMENTS` | scrapers | Card statements per currency each BanChile run reads, newest first (default `2`, at most `12`); raise it for a one-off backfill of older billed history |
 
-### Sealed credentials (V048 to V050)
+### Sealed credentials (V048 to V051)
 
 Scraper credentials can be entered in the dashboard (Credenciales) instead of
 the host secret store. The design goal is that the dashboard can **write** a
@@ -1724,7 +1725,7 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
   e-mail) are sealed too. `required` is exactly what `build_scrapers()` gates
   on (a test checks every spec). `max_length` is capped (`MAX_FIELD_LENGTH`, 740
   characters) so 4 bytes per character plus the largest scheme's overhead
-  (v2: 1120-byte `enc` and 16-byte tag) fit V048's 4096-byte CHECK, whichever
+  (v2: 1120-byte `enc` and 16-byte tag) fit V051's 4096-byte CHECK, whichever
   key seals the field.
 - **Bound secrets.** A secret with `binds` (the IMAP password binds the IMAP
   host and user) is always saved together with the fields it binds (the API
@@ -1801,7 +1802,9 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
   active key row FOR UPDATE, open every row sealed to it and seal it to the
   new key (the `info` binds the key id, so this is a full re-encrypt; binding
   secrets keep their binding), retire the old key and insert the new active
-  one (the new key is always v2, so a v1 key's rows move to the v2 scheme);
+  one (the new key is always v2, so a v1 key's rows move to the v2 scheme;
+  since V051 only a v2 key can become active, while a v1 key that already
+  was active stays so until this rotation retires it);
   then `rename(.next, key file)`, which unlinks the old private key, so
   older database backups open with nothing the app keeps (snapshots, volume
   backups or copies of the key file still hold it: the rename does not erase

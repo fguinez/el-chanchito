@@ -4,7 +4,10 @@ import path from "node:path";
 import postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-// The dashboard's writes to the sealed credentials (V048, V049) against a
+import { CREDENTIAL_ALGORITHM_V2, CREDENTIAL_SCHEME_V2 } from "@/lib/credentials/seal";
+import { XWING_ENC_BYTES, XWING_PUBLIC_KEY_BYTES } from "@/lib/credentials/xwing";
+
+// The dashboard's writes to the sealed credentials (V048-V051) against a
 // real PostgreSQL: a save lands only under the active key, and one that waits
 // on a rotation never lands under the key it retired. Runs only with
 // TEST_DATABASE_URL naming a disposable server (`make test-db-up` starts one);
@@ -16,12 +19,14 @@ const MIGRATE = path.resolve(__dirname, "../../../../../packages/db-schema/migra
 
 type Lib = typeof import("@/lib/credentials/db");
 
+// V050 ties the public key length to the algorithm, and V051 lets only v2
+// keys become active and sets v2's sealed floor (1120-byte enc + 16-byte tag).
 function fakeKey() {
-  const publicKey = randomBytes(32);
+  const publicKey = randomBytes(XWING_PUBLIC_KEY_BYTES);
   return { publicKey, keyId: createHash("sha256").update(publicKey).digest("hex") };
 }
 
-const SEALED = { fieldKey: "api_key", sealed: new Uint8Array(64).fill(7) };
+const SEALED = { fieldKey: "api_key", sealed: new Uint8Array(XWING_ENC_BYTES + 16).fill(7) };
 
 describe.skipIf(!ADMIN_URL)("sealed credential writes (real PostgreSQL)", () => {
   const dbName = `chanchito_test_${randomUUID().replace(/-/g, "")}`;
@@ -33,7 +38,7 @@ describe.skipIf(!ADMIN_URL)("sealed credential writes (real PostgreSQL)", () => 
     const key = fakeKey();
     await sql`
       INSERT INTO credential_keys (key_id, algorithm, public_key, status, retired_at)
-      VALUES (${key.keyId}, 'synthetic', ${key.publicKey}, ${status},
+      VALUES (${key.keyId}, ${CREDENTIAL_ALGORITHM_V2}, ${key.publicKey}, ${status},
         ${status === "retired" ? new Date() : null})`;
     return key;
   }
@@ -68,9 +73,9 @@ describe.skipIf(!ADMIN_URL)("sealed credential writes (real PostgreSQL)", () => 
   it("stores under the active key and refuses a retired one", async () => {
     const retired = await addKey("retired");
     const active = await addKey("active");
-    expect(await lib.upsertSealedFields("skipo", "v1", retired.keyId, [SEALED])).toBe(false);
+    expect(await lib.upsertSealedFields("skipo", CREDENTIAL_SCHEME_V2, retired.keyId, [SEALED])).toBe(false);
     expect(await sql`SELECT 1 FROM institution_credentials`).toHaveLength(0);
-    expect(await lib.upsertSealedFields("skipo", "v1", active.keyId, [SEALED])).toBe(true);
+    expect(await lib.upsertSealedFields("skipo", CREDENTIAL_SCHEME_V2, active.keyId, [SEALED])).toBe(true);
     const rows = await sql`SELECT key_id FROM institution_credentials`;
     expect(rows.map((r) => r.key_id)).toEqual([active.keyId]);
     expect((await lib.readSealingKey())?.keyId).toBe(active.keyId);
@@ -83,7 +88,7 @@ describe.skipIf(!ADMIN_URL)("sealed credential writes (real PostgreSQL)", () => 
       let saving: Promise<boolean> | null = null;
       await rotation.begin(async (tx) => {
         await tx`SELECT 1 FROM credential_keys WHERE key_id = ${old.keyId} FOR UPDATE`;
-        saving = lib.upsertSealedFields("skipo", "v1", old.keyId, [SEALED]);
+        saving = lib.upsertSealedFields("skipo", CREDENTIAL_SCHEME_V2, old.keyId, [SEALED]);
         // Let the save reach its FOR SHARE and wait there.
         for (let i = 0; i < 100; i++) {
           const [waiting] = await sql`
