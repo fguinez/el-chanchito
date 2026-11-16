@@ -258,9 +258,11 @@ How it is protected:
   future quantum computer ("harvest now, decrypt later"). Keys created before
   it (X25519 only, `hpke-x25519-sha256-aes256gcm-v1`) still open the
   credentials stored under them, but the dashboard no longer seals to them,
-  so saving fails until the key is rotated; the next rotation (automatic, or
-  `make credentials-rotate`) replaces such a key with an X-Wing one and
-  re-seals every stored credential to it, with nothing to type again. Each ciphertext is bound to its institution, field and
+  so Guardar stays disabled until the key is rotated. The scraper service
+  rotates such a key on its first check (within a minute of starting,
+  whatever its age, even with `CREDENTIALS_KEY_MAX_AGE_DAYS=0`), or run
+  `make credentials-rotate`: the new X-Wing key re-seals every stored
+  credential, with nothing to type again. Each ciphertext is bound to its institution, field and
   key, so it cannot be moved to another field. The dashboard can write a
   credential but never read one back.
 - **Threat model.** The database alone (a dump, a backup, a leaked
@@ -299,7 +301,7 @@ the dashboard seals to that key only once the running service confirms it
 holds it (the database row alone could be stale, another service's, or
 planted). Otherwise the page says why (service unreachable, key file
 unusable, key mismatch, no key published yet, key not confirmed yet right
-after a rotation) and disables Guardar, and the API answers `503` with the
+after a rotation, an older v1 key waiting for its rotation) and disables Guardar, and the API answers `503` with the
 same `reason`. Deleting works without the service. The service comes up
 without waiting for the database; until it can reach it (or the V048/V049
 tables), it retries every minute and whenever the page asks, and its first
@@ -325,7 +327,7 @@ being as sensitive as the credentials.
 
 - **Automatic.** The scraper service rotates the key once it is older than
   `CREDENTIALS_KEY_MAX_AGE_DAYS` (default 90; `0` turns it off), checked every
-  minute. A failed attempt is logged, shown on the Credenciales page, and
+  minute, and an older X25519 (v1) key at once, even with `0`. A failed attempt is logged, shown on the Credenciales page, and
   retried an hour later; the current key keeps working meanwhile.
 - **By hand.** `make credentials-rotate` rotates `make dev`'s key file now;
   `make credentials-rotate STACK=up` does it inside the running `scrapers`

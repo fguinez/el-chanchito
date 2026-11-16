@@ -1798,7 +1798,9 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
 - **Rotation.** `rotate_key_file` (credential_manager.py), used by the
   service when the active key is older than `CREDENTIALS_KEY_MAX_AGE_DAYS`
   (default 90, 0 off; checked on the `credentials` job, retried an hour after
-  a failure, which is recorded on the key row) and by `make
+  a failure, which is recorded on the key row) or is not v2 (an older
+  install's v1 key, rotated on the first check whatever its age or the
+  setting, since the web refuses to seal to it: `key_needs_rotation`) and by `make
   credentials-rotate`: under the key file's `flock`, write the new key to
   `<key file>.next` (O_EXCL, 0600, fsync), then in one transaction lock the
   active key row FOR UPDATE, open every row sealed to it and seal it to the
@@ -1856,7 +1858,7 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
 | Var | Service | Meaning |
 |---|---|---|
 | `CREDENTIALS_KEY_FILE` | scrapers | Private key file for the sealed credentials on host runs (default `apps/scrapers/.credentials_key`); Compose hardcodes `/data/credentials_key` |
-| `CREDENTIALS_KEY_MAX_AGE_DAYS` | scrapers | Rotate the credentials key once it is this many days old (default 90; `0` never) |
+| `CREDENTIALS_KEY_MAX_AGE_DAYS` | scrapers | Rotate the credentials key once it is this many days old (default 90; `0` never, except that a v1 key is always rotated to v2) |
 | `EMAIL_IMAP_ALLOW_CUSTOM_HOST` | web, scrapers | `1` allows a stored IMAP host outside the known-provider list |
 
 ## Dashboard authentication
