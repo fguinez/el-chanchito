@@ -14,13 +14,10 @@
 
 import "server-only";
 import { Aes256Gcm, CipherSuite, HkdfSha256 } from "@hpke/core";
+import { CREDENTIAL_ALGORITHM_V2, CREDENTIAL_SCHEME_V2 } from "./schemes";
 import { XWING_PUBLIC_KEY_BYTES, XWingKem } from "./xwing";
 
-// Must match apps/scrapers/scrapers/credentials.py. The algorithm is what
-// the scraper service publishes next to its key; the scheme, stored on every
-// row, names the whole construction sealed to that key.
-export const CREDENTIAL_SCHEME_V2 = "hpke-mlkem768x25519-sha256-aes256gcm-v2";
-export const CREDENTIAL_ALGORITHM_V2 = "HPKE-Base(MLKEM768-X25519, HKDF-SHA256, AES-256-GCM)";
+export { CREDENTIAL_ALGORITHM_V2, CREDENTIAL_SCHEME_V2, schemeForAlgorithm } from "./schemes";
 
 const INFO_LABEL = "el-chanchito/credential";
 const NAME_RE = /^[a-z][a-z0-9_]*$/;
@@ -42,12 +39,6 @@ const SCHEMES = new Map<string, Scheme>([
     },
   ],
 ]);
-
-/** The scheme rows sealed to a key with this published algorithm carry, or
- *  null for an algorithm this side cannot seal to. */
-export function schemeForAlgorithm(algorithm: string): string | null {
-  return SCHEMES.get(algorithm)?.scheme ?? null;
-}
 
 export class CredentialSealError extends Error {}
 

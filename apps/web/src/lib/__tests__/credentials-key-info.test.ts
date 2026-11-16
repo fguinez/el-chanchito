@@ -3,12 +3,13 @@ import { describe, expect, it } from "vitest";
 import { SAVE_BLOCKED_MESSAGES, saveBlocker } from "@/lib/credentials/availability";
 import type { ControlCredentialStatus } from "@/lib/credentials/control";
 import { describeKeyInfo, type CredentialKeyInfo } from "@/lib/credentials/key-info";
+import { CREDENTIAL_ALGORITHM_V2 } from "@/lib/credentials/schemes";
 import type { SealingKey } from "@/lib/credentials/seal";
 
 // Synthetic key ids and dates only.
 const KEY: SealingKey = {
   keyId: "a".repeat(64),
-  algorithm: "x",
+  algorithm: CREDENTIAL_ALGORITHM_V2,
   publicKey: new Uint8Array(32),
 };
 
@@ -24,6 +25,11 @@ describe("saveBlocker", () => {
     ["no_key", null, control()],
     ["key_pending", KEY, control({ key_id: "b".repeat(64) })],
     ["pending_unresolved", KEY, control({ state: "pending_unresolved" })],
+    [
+      "key_needs_rotation",
+      { ...KEY, algorithm: "HPKE-Base(DHKEM-X25519-HKDF-SHA256, HKDF-SHA256, AES-256-GCM)" },
+      control(),
+    ],
   ] as const)("is %s", (reason, key, status) => {
     expect(saveBlocker(key, status)).toBe(reason);
     expect(SAVE_BLOCKED_MESSAGES[reason]).toBeTruthy();

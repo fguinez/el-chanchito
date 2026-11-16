@@ -10,7 +10,8 @@ import {
   type CredentialsOverview,
   type InstitutionCredentialStatus,
 } from "./registry";
-import { schemeForAlgorithm, type SealingKey } from "./seal";
+import { rowSchemeForAlgorithm } from "./schemes";
+import type { SealingKey } from "./seal";
 
 export function buildCredentialsOverview({
   key,
@@ -25,7 +26,7 @@ export function buildCredentialsOverview({
   enabledScrapers: string[] | null;
   keyInfo?: StoredKeyInfo | null;
 }): CredentialsOverview {
-  const activeScheme = key ? schemeForAlgorithm(key.algorithm) : null;
+  const rowScheme = key ? rowSchemeForAlgorithm(key.algorithm) : null;
   const institutions: InstitutionCredentialStatus[] = CREDENTIAL_SPECS.map((spec) => ({
     slug: spec.slug,
     enabled: enabledScrapers
@@ -38,14 +39,11 @@ export function buildCredentialsOverview({
       const reported = control?.fields[field.envVar];
       // A row sealed to a key other than the published one (or with another
       // scheme than that key's), or one the service reports it could not
-      // open, has to be typed again. An older install's v1 key, which this
-      // side no longer seals to (activeScheme null), only ever has v1 rows;
-      // they still open until the rotation re-seals them, so only the key id
-      // counts for it.
+      // open, has to be typed again. An older install's v1 key's v1 rows
+      // still open until the rotation re-seals them.
       const needsReentry = Boolean(
         row &&
-          ((key !== null &&
-            (row.keyId !== key.keyId || (activeScheme !== null && row.scheme !== activeScheme))) ||
+          ((key !== null && (row.keyId !== key.keyId || row.scheme !== rowScheme)) ||
             reported?.needs_reentry)
       );
       return {

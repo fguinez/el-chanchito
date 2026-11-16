@@ -185,6 +185,9 @@ describe("PUT /api/credentials/[slug]", () => {
 
     expect(response.status).toBe(503);
     expect(await text(response)).not.toContain(PASSWORD);
+    const body = await response.json();
+    expect(body.reason).toBe("key_needs_rotation");
+    expect(body.error).toContain("make credentials-rotate");
     expect(state.upserts).toHaveLength(0);
     expect(state.reloads).toBe(0);
   });
@@ -471,21 +474,28 @@ describe("GET /api/credentials", () => {
     expect(mercadopago.fields).toEqual([]);
   });
 
-  it("keeps a v1 key's v1 rows as stored until the rotation re-seals them", async () => {
+  it("keeps a v1 key's v1 rows as stored and saving off until the rotation", async () => {
     const v1 = await sealingKey(ALGORITHM_V1, suiteV1);
     state.key = v1.key;
     state.control = { key_available: true, key_id: v1.key.keyId, fields: {} };
     state.meta = [
       { institutionSlug: "skipo", fieldKey: "api_key", keyId: v1.key.keyId, scheme: SCHEME_V1, updatedAt },
       { institutionSlug: "buda", fieldKey: "api_key", keyId: KEY.keyId, scheme: CREDENTIAL_SCHEME_V2, updatedAt },
+      // The v1 key's id with the v2 scheme: the service cannot open it.
+      { institutionSlug: "banchile", fieldKey: "password", keyId: v1.key.keyId, scheme: CREDENTIAL_SCHEME_V2, updatedAt },
     ];
 
     const body = await (await GET()).json();
 
+    expect(body.canSave).toBe(false);
+    expect(body.saveBlocked).toBe("key_needs_rotation");
     const skipo = body.institutions.find((i: { slug: string }) => i.slug === "skipo");
     expect(skipo.fields[0]).toMatchObject({ stored: true, needsReentry: false });
     const buda = body.institutions.find((i: { slug: string }) => i.slug === "buda");
     expect(buda.fields[0]).toMatchObject({ stored: false, needsReentry: true });
+    const banchile = body.institutions.find((i: { slug: string }) => i.slug === "banchile");
+    const password = banchile.fields.find((f: { key: string }) => f.key === "password");
+    expect(password).toMatchObject({ stored: false, needsReentry: true });
   });
 
   it("still answers with the service down, fallback unknown, saving off", async () => {
