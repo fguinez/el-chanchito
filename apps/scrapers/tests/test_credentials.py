@@ -25,7 +25,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 import main
 from main import CredentialControl, Heartbeat, ScraperSet, _make_control_handler
 from scrapers.credentials import (
-    SCHEME,
+    V1,
     CredentialKey,
     CredentialKeyError,
     CredentialOpenError,
@@ -34,6 +34,7 @@ from scrapers.credentials import (
     SealedCredential,
     binding_digest,
     env_fingerprint,
+    generate_key,
     load_key,
     load_or_create_key,
     open_rows,
@@ -45,13 +46,16 @@ FIXTURE = Path(__file__).parent / "fixtures" / "credentials" / "ts_sealed.json"
 SECRET = "synthetic-password-1234"
 
 
-@pytest.fixture
-def key() -> CredentialKey:
-    return CredentialKey.from_private(X25519PrivateKey.generate())
+@pytest.fixture(params=["v1", "v2"])
+def key(request) -> CredentialKey:
+    """Every scheme test runs with a v1 (X25519) key and a v2 (X-Wing) one."""
+    if request.param == "v1":
+        return CredentialKey.from_private(X25519PrivateKey.generate())
+    return generate_key()
 
 
 def _row(key: CredentialKey, slug: str, field: str, value: str) -> SealedCredential:
-    return SealedCredential(slug, field, SCHEME, key.key_id, key.seal(slug, field, value))
+    return SealedCredential(slug, field, key.scheme, key.key_id, key.seal(slug, field, value))
 
 
 # --- Scheme ---------------------------------------------------------------------
@@ -108,7 +112,7 @@ def test_errors_never_carry_the_value(key):
 )
 def test_info_rejects_malformed_parts(slug, field, key_id):
     with pytest.raises(CredentialOpenError):
-        sealing_info(slug, field, key_id)
+        sealing_info(slug, field, key_id, scheme=V1.scheme)
 
 
 def test_dashboard_fixture_opens():
@@ -120,7 +124,7 @@ def test_dashboard_fixture_opens():
     scalar = bytes.fromhex(fixture["recipient_scalar_hex"])
     key = CredentialKey.from_private(X25519PrivateKey.from_private_bytes(scalar))
     assert key.key_id == fixture["recipient_fingerprint"]
-    assert fixture["scheme"] == SCHEME
+    assert fixture["scheme"] == V1.scheme == key.scheme
     for entry in fixture["entries"]:
         sealed = base64.b64decode(entry["sealed"])
         binding = binding_digest(entry["binding_values"]) if "binding_values" in entry else None
@@ -165,7 +169,7 @@ def test_refuses_a_symlinked_key(tmp_path):
         load_key(link)
 
 
-def test_refuses_a_non_x25519_key(tmp_path):
+def test_refuses_a_key_of_another_type(tmp_path):
     path = tmp_path / "credentials_key"
     pem = Ed25519PrivateKey.generate().private_bytes(
         serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
@@ -204,7 +208,7 @@ def test_open_rows_flags_rows_it_cannot_open(key):
         _row(key, "banchile", "password", SECRET),
         _row(key, "banchile", "rut", "11.111.111-1"),
         _row(other, "buda", "api_key", "synthetic-key"),
-        SealedCredential("santander", "rut", SCHEME, key.key_id, swapped),
+        SealedCredential("santander", "rut", key.scheme, key.key_id, swapped),
         _row(key, "unknown_bank", "password", "synthetic-x"),
     ]
     opened = open_rows(key, rows)
@@ -531,7 +535,7 @@ def _email_rows(key, host=HOST, user=USER, sealed_to=(HOST, USER)):
         SealedCredential(
             "email",
             "imap_password",
-            SCHEME,
+            key.scheme,
             key.key_id,
             key.seal("email", "imap_password", IMAP_PASSWORD, binding_digest(sealed_to)),
         ),

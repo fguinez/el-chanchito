@@ -9,8 +9,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { proxy } from "@/proxy";
 import {
-  CREDENTIAL_ALGORITHM,
-  CREDENTIAL_SCHEME,
+  CREDENTIAL_ALGORITHM_V1,
+  CREDENTIAL_ALGORITHM_V2,
+  CREDENTIAL_SCHEME_V1,
+  CREDENTIAL_SCHEME_V2,
   bindingDigest,
   keyIdFor,
   sealingInfo,
@@ -18,24 +20,34 @@ import {
 } from "@/lib/credentials/seal";
 import type { CredentialMeta, SealedField, StoredKeyInfo } from "@/lib/credentials/db";
 import type { ControlCredentialStatus } from "@/lib/credentials/control";
+import { XWingKem } from "@/lib/credentials/xwing";
 
 // The credential routes run against in-memory doubles of the DB layer and of
 // the scraper service's control endpoints. The point of most cases: no
 // response, in any branch, ever carries a submitted value. Every value is
 // synthetic and every key is generated per run.
 
-const suite = new CipherSuite({
+const suite = new CipherSuite({ kem: new XWingKem(), kdf: new HkdfSha256(), aead: new Aes256Gcm() });
+const suiteV1 = new CipherSuite({
   kem: new DhkemX25519HkdfSha256(),
   kdf: new HkdfSha256(),
   aead: new Aes256Gcm(),
 });
-const pair = await suite.kem.generateKeyPair();
-const publicKey = new Uint8Array(await suite.kem.serializePublicKey(pair.publicKey));
-const KEY: SealingKey = {
-  keyId: await keyIdFor(publicKey),
-  algorithm: CREDENTIAL_ALGORITHM,
-  publicKey,
-};
+
+async function sealingKey(algorithm: string, kemSuite: CipherSuite) {
+  const pair = await kemSuite.kem.generateKeyPair();
+  const publicKey = new Uint8Array(await kemSuite.kem.serializePublicKey(pair.publicKey));
+  const key: SealingKey = { keyId: await keyIdFor(publicKey), algorithm, publicKey };
+  return { pair, key };
+}
+
+/** Opens `enc || ciphertext`, split at the suite's own enc size. */
+function openSealed(kemSuite: CipherSuite, recipientKey: CryptoKey, sealed: Uint8Array, info: Uint8Array) {
+  const n = kemSuite.kem.encSize;
+  return kemSuite.open({ recipientKey, enc: sealed.slice(0, n), info }, sealed.slice(n));
+}
+
+const { pair, key: KEY } = await sealingKey(CREDENTIAL_ALGORITHM_V2, suite);
 
 const state = {
   key: KEY as SealingKey | null,
@@ -142,23 +154,40 @@ describe("PUT /api/credentials/[slug]", () => {
 
     const [upsert] = state.upserts;
     expect(upsert.slug).toBe("banchile");
-    expect(upsert.scheme).toBe(CREDENTIAL_SCHEME);
+    expect(upsert.scheme).toBe(CREDENTIAL_SCHEME_V2);
     expect(upsert.keyId).toBe(KEY.keyId);
     for (const field of upsert.fields) {
       expect(Buffer.from(field.sealed).includes(Buffer.from(PASSWORD))).toBe(false);
     }
     // The identifier is trimmed; the stored ciphertext opens to it.
     const rut = upsert.fields.find((f) => f.fieldKey === "rut")!;
-    const opened = await suite.open(
-      {
-        recipientKey: pair.privateKey,
-        enc: rut.sealed.slice(0, 32),
-        info: sealingInfo("banchile", "rut", KEY.keyId),
-      },
-      rut.sealed.slice(32)
+    const opened = await openSealed(
+      suite,
+      pair.privateKey,
+      rut.sealed,
+      sealingInfo(CREDENTIAL_SCHEME_V2, "banchile", "rut", KEY.keyId)
     );
     expect(new TextDecoder().decode(opened)).toBe(RUT);
     expect(state.reloads).toBe(1);
+  });
+
+  it("seals to a v1 key with the v1 scheme until it is rotated", async () => {
+    const v1 = await sealingKey(CREDENTIAL_ALGORITHM_V1, suiteV1);
+    state.key = v1.key;
+    state.control = { key_available: true, key_id: v1.key.keyId, fields: {} };
+
+    const response = await put("skipo", { fields: { api_key: PASSWORD } });
+
+    expect(response.status).toBe(200);
+    const [upsert] = state.upserts;
+    expect(upsert.scheme).toBe(CREDENTIAL_SCHEME_V1);
+    const opened = await openSealed(
+      suiteV1,
+      v1.pair.privateKey,
+      upsert.fields[0].sealed,
+      sealingInfo(CREDENTIAL_SCHEME_V1, "skipo", "api_key", v1.key.keyId)
+    );
+    expect(new TextDecoder().decode(opened)).toBe(PASSWORD);
   });
 
   it("accepts a partial update and reports an unreachable service as null", async () => {
@@ -249,13 +278,11 @@ describe("PUT /api/credentials/[slug]", () => {
     expect(response.status).toBe(200);
     expect(state.upserts.map((u) => u.keyId)).toEqual([KEY.keyId, NEXT.keyId]);
     const sealed = state.upserts[1].fields[0].sealed;
-    const opened = await suite.open(
-      {
-        recipientKey: next.privateKey,
-        enc: sealed.slice(0, 32),
-        info: sealingInfo("skipo", "api_key", NEXT.keyId),
-      },
-      sealed.slice(32)
+    const opened = await openSealed(
+      suite,
+      next.privateKey,
+      sealed,
+      sealingInfo(CREDENTIAL_SCHEME_V2, "skipo", "api_key", NEXT.keyId)
     );
     expect(new TextDecoder().decode(opened)).toBe(PASSWORD);
   });
@@ -352,13 +379,11 @@ describe("PUT /api/credentials/email (bound IMAP password)", () => {
     expect(response.status).toBe(200);
     const sealed = state.upserts[0].fields.find((f) => f.fieldKey === "imap_password")!.sealed;
     const open = (binding?: string) =>
-      suite.open(
-        {
-          recipientKey: pair.privateKey,
-          enc: sealed.slice(0, 32),
-          info: sealingInfo("email", "imap_password", KEY.keyId, binding),
-        },
-        sealed.slice(32)
+      openSealed(
+        suite,
+        pair.privateKey,
+        sealed,
+        sealingInfo(CREDENTIAL_SCHEME_V2, "email", "imap_password", KEY.keyId, binding)
       );
     expect(new TextDecoder().decode(await open(await bindingDigest([HOST, USER])))).toBe(PASSWORD);
     await expect(open(await bindingDigest(["imap.example.com", USER]))).rejects.toThrow();
@@ -406,8 +431,10 @@ describe("GET /api/credentials", () => {
 
   it("merges stored rows with the service's fallback booleans", async () => {
     state.meta = [
-      { institutionSlug: "banchile", fieldKey: "password", keyId: KEY.keyId, scheme: CREDENTIAL_SCHEME, updatedAt },
-      { institutionSlug: "buda", fieldKey: "api_key", keyId: "0".repeat(64), scheme: CREDENTIAL_SCHEME, updatedAt },
+      { institutionSlug: "banchile", fieldKey: "password", keyId: KEY.keyId, scheme: CREDENTIAL_SCHEME_V2, updatedAt },
+      { institutionSlug: "buda", fieldKey: "api_key", keyId: "0".repeat(64), scheme: CREDENTIAL_SCHEME_V2, updatedAt },
+      // The active key's id with another scheme than that key's.
+      { institutionSlug: "skipo", fieldKey: "api_key", keyId: KEY.keyId, scheme: CREDENTIAL_SCHEME_V1, updatedAt },
     ];
     state.control = {
       key_available: true,
@@ -439,6 +466,8 @@ describe("GET /api/credentials", () => {
     ]);
     const buda = body.institutions.find((i: { slug: string }) => i.slug === "buda");
     expect(buda.fields[0]).toMatchObject({ stored: false, needsReentry: true });
+    const skipo = body.institutions.find((i: { slug: string }) => i.slug === "skipo");
+    expect(skipo.fields[0]).toMatchObject({ stored: false, needsReentry: true });
     const mercadopago = body.institutions.find((i: { slug: string }) => i.slug === "mercadopago");
     expect(mercadopago.fields).toEqual([]);
   });

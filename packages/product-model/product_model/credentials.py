@@ -38,10 +38,13 @@ _ENV_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 # Generous for any password or API secret, small enough to bound a request.
 DEFAULT_MAX_LENGTH = 256
 # Every stored ciphertext must fit V048's CHECK (octet_length(sealed) <= 4096):
-# 4 UTF-8 bytes per character at most, plus the 32-byte HPKE encapsulated key
-# and the 16-byte AES-GCM tag.
+# 4 UTF-8 bytes per character at most, plus the HPKE encapsulated key and the
+# 16-byte AES-GCM tag. The encapsulated key is that of the largest scheme in
+# use: 1120 bytes for v2 (X-Wing: ML-KEM-768 ciphertext 1088 + X25519 32), not
+# v1's 32, so a field fits whichever key seals it.
 MAX_SEALED_BYTES = 4096
-HPKE_OVERHEAD_BYTES = 32 + 16
+HPKE_ENCAPSULATED_KEY_BYTES = 1120
+HPKE_OVERHEAD_BYTES = HPKE_ENCAPSULATED_KEY_BYTES + 16
 MAX_FIELD_LENGTH = (MAX_SEALED_BYTES - HPKE_OVERHEAD_BYTES) // 4
 
 # IMAP servers a stored host may name without EMAIL_IMAP_ALLOW_CUSTOM_HOST=1:

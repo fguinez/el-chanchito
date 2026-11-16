@@ -2,7 +2,8 @@
 
 ## Prerequisites
 
-- **Node.js** >= 20 + **pnpm** 9 (`corepack enable` provides the version pinned
+- **Node.js** >= 24.7 (the credentials page seals with Node's native
+  ML-KEM, `crypto.encapsulate`, which 24.7 added) + **pnpm** 9 (`corepack enable` provides the version pinned
   in `package.json`)
 - **Python** >= 3.12 as `python3` (the shared `packages/product-model` requires
   it; `make install` builds `.venv` from whatever `python3` is on your PATH)
@@ -22,7 +23,7 @@ the BanChile scraper needs (in Docker this happens in the scrapers image).
 | Windows | Through **WSL2**, which is a Linux host for everything in this table: `make`, `scripts/*.sh` and the secret store (the Linux keyring or the file) run there. The Python scraper code itself has no POSIX-only calls and CI runs its tests natively on Windows, but native Windows is not a documented way to run the stack |
 | Raspberry Pi 4/5 | The whole stack through Docker Compose on 64-bit Raspberry Pi OS (Debian, `aarch64`); see [Raspberry Pi](#raspberry-pi) below. CI builds both images on `linux/arm64` |
 
-The Docker images (`postgres:16-alpine`, `python:3.12-slim`, `node:20-alpine`) are
+The Docker images (`postgres:16-alpine`, `python:3.12-slim`, `node:24-alpine`) are
 multi-arch, and Playwright ships its Chromium for Linux ARM64, so the headless
 scrapers (Banco de Chile, Santander, Banco Falabella) run in the container on any
 of these hosts.
@@ -243,15 +244,22 @@ scraper service). Deleting any of the three deletes all three.
 
 How it is protected:
 
-- The scraper service owns an X25519 key pair. The private key lives in an
+- The scraper service owns a key pair. The private key lives in an
   owner-only (`0600`) file, `apps/scrapers/.credentials_key` (gitignored; in
   Compose `/data/credentials_key` on the `scraper_state` volume; move it with
   `CREDENTIALS_KEY_FILE`). It is created on first start, and the service
   refuses a key file that other users can read. Only the public key goes to
   the database.
 - The dashboard's server seals each field to that public key with HPKE
-  (RFC 9180: DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, AES-256-GCM) and stores
-  only the ciphertext. Each ciphertext is bound to its institution, field and
+  (RFC 9180 base mode, HKDF-SHA256, AES-256-GCM) and stores only the
+  ciphertext. New keys use X-Wing (ML-KEM-768 + X25519, scheme
+  `hpke-mlkem768x25519-sha256-aes256gcm-v2`), a hybrid post-quantum KEM: a
+  database copy that leaks without the key file stays closed even to a
+  future quantum computer ("harvest now, decrypt later"). Keys created before
+  it (X25519 only, `hpke-x25519-sha256-aes256gcm-v1`) keep working; the next
+  rotation (automatic, or `make credentials-rotate`) replaces such a key with
+  an X-Wing one and re-seals every stored credential to it, with nothing to
+  type again. Each ciphertext is bound to its institution, field and
   key, so it cannot be moved to another field. The dashboard can write a
   credential but never read one back.
 - **Threat model.** The database alone (a dump, a backup, a leaked
@@ -301,7 +309,8 @@ the database currently seals to; they never create, publish or rotate a key.
 
 ### Rotating the credentials key
 
-Rotating makes a new key pair, re-seals every stored credential to it in one
+Rotating makes a new key pair (always X-Wing, so it also upgrades an older
+X25519 key), re-seals every stored credential to it in one
 database transaction, and then deletes the old private key file. Old
 database backups (which hold the old ciphertext) then no longer open with
 anything the app keeps: that is the point. Nothing has to be typed again.
@@ -320,7 +329,8 @@ being as sensitive as the credentials.
 - **By hand.** `make credentials-rotate` rotates `make dev`'s key file now;
   `make credentials-rotate STACK=up` does it inside the running `scrapers`
   container for `make up`. `make credentials-status` (same `STACK`) compares
-  the key file with the database's active key. The command takes the key
+  the key file with the database's active key and names each one's scheme
+  (v1 X25519 or v2 X-Wing). The command takes the key
   file's lock, so it never races the service's own rotation, and asks the
   running service to load the new key at once (it would within a minute
   anyway). The dashboard has no rotate button on purpose.

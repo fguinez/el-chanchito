@@ -10,7 +10,7 @@ import {
   type CredentialsOverview,
   type InstitutionCredentialStatus,
 } from "./registry";
-import { CREDENTIAL_SCHEME, type SealingKey } from "./seal";
+import { schemeForAlgorithm, type SealingKey } from "./seal";
 
 export function buildCredentialsOverview({
   key,
@@ -25,6 +25,7 @@ export function buildCredentialsOverview({
   enabledScrapers: string[] | null;
   keyInfo?: StoredKeyInfo | null;
 }): CredentialsOverview {
+  const activeScheme = key ? schemeForAlgorithm(key.algorithm) : null;
   const institutions: InstitutionCredentialStatus[] = CREDENTIAL_SPECS.map((spec) => ({
     slug: spec.slug,
     enabled: enabledScrapers
@@ -35,11 +36,12 @@ export function buildCredentialsOverview({
         (m) => m.institutionSlug === spec.slug && m.fieldKey === field.key
       );
       const reported = control?.fields[field.envVar];
-      // A row sealed to a key other than the published one, or one the
-      // service reports it could not open, has to be typed again.
+      // A row sealed to a key other than the published one (or with another
+      // scheme than that key's), or one the service reports it could not
+      // open, has to be typed again.
       const needsReentry = Boolean(
         row &&
-          ((key !== null && (row.keyId !== key.keyId || row.scheme !== CREDENTIAL_SCHEME)) ||
+          ((key !== null && (row.keyId !== key.keyId || row.scheme !== activeScheme)) ||
             reported?.needs_reentry)
       );
       return {

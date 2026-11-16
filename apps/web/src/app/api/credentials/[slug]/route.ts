@@ -26,7 +26,7 @@ import {
   credentialField,
   credentialSpec,
 } from "@/lib/credentials/registry";
-import { CREDENTIAL_SCHEME, bindingDigest, sealCredential } from "@/lib/credentials/seal";
+import { bindingDigest, sealCredential } from "@/lib/credentials/seal";
 
 export const dynamic = "force-dynamic";
 
@@ -172,9 +172,10 @@ export async function PUT(request: NextRequest, { params }: Context) {
     if (blocked || !key) {
       return noStoreJson({ error: SAVE_BLOCKED_MESSAGES[blocked ?? "no_key"], reason: blocked }, 503);
     }
+    let scheme: string;
     let sealed: SealedField[];
     try {
-      sealed = await Promise.all(
+      const results = await Promise.all(
         values.map(async ({ fieldKey, value }) => {
           const binds = credentialField(spec, fieldKey)?.binds ?? [];
           // bindingProblem guaranteed every bound value is in this request.
@@ -182,16 +183,19 @@ export async function PUT(request: NextRequest, { params }: Context) {
             binds.length > 0
               ? await bindingDigest(binds.map((k) => byKey.get(k) ?? ""))
               : undefined;
-          return { fieldKey, sealed: await sealCredential(key, slug, fieldKey, value, binding) };
+          return { fieldKey, ...(await sealCredential(key, slug, fieldKey, value, binding)) };
         })
       );
+      // Every field went to the same key, so they share one scheme (values is non-empty).
+      scheme = results[0].scheme;
+      sealed = results.map(({ fieldKey, sealed: bytes }) => ({ fieldKey, sealed: bytes }));
     } catch {
       return noStoreJson(
         { error: "No se pudo cifrar con la clave publicada. Reinicia el servicio de scrapers." },
         503
       );
     }
-    if (await upsertSealedFields(slug, CREDENTIAL_SCHEME, key.keyId, sealed)) {
+    if (await upsertSealedFields(slug, scheme, key.keyId, sealed)) {
       return noStoreJson({
         saved: sealed.map((field) => field.fieldKey),
         ...(await applyToService()),

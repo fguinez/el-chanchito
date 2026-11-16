@@ -26,7 +26,7 @@ from credential_manager import (
 
 from db.credentials import KeyRingConflict, sync_key
 from main import CredentialControl, ScraperSet
-from scrapers.credentials import ALGORITHM, KeyFile, OpenedCredentials, generate_key, load_key
+from scrapers.credentials import KeyFile, OpenedCredentials, generate_key, load_key
 from tests.fakes_credentials import FakeRing
 from tests.test_credentials import SECRET, FakeScheduler, _row
 
@@ -315,7 +315,7 @@ def test_recovery_waits_for_a_rotation_commit_in_flight(db_conn, tmp_path):
         rotation.execute(
             "INSERT INTO credential_keys (key_id, algorithm, public_key, status)"
             " VALUES (%s, %s, %s, 'active')",
-            (new.key_id, ALGORITHM, new.public_raw),
+            (new.key_id, new.algorithm, new.public_raw),
         )
         outcome = []
         recovery = threading.Thread(

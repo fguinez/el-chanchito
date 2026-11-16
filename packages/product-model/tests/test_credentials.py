@@ -82,6 +82,9 @@ def test_slug_charset_is_enforced(monkeypatch):
 def test_max_length_fits_the_sealed_column(monkeypatch):
     from product_model.credentials import HPKE_OVERHEAD_BYTES, MAX_FIELD_LENGTH, MAX_SEALED_BYTES
 
+    # v2 (X-Wing): 1120-byte encapsulated key + 16-byte tag.
+    assert HPKE_OVERHEAD_BYTES == 1136
+    assert MAX_FIELD_LENGTH == 740
     assert MAX_FIELD_LENGTH * 4 + HPKE_OVERHEAD_BYTES <= MAX_SEALED_BYTES
     for spec in CREDENTIAL_SPECS:
         for f in spec.fields:

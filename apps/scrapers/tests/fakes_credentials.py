@@ -6,8 +6,15 @@ from dataclasses import replace
 from datetime import UTC, datetime
 
 import psycopg
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from db.credentials import ActiveKey, KeyRingConflict, KeySync
+from scrapers.credentials import CredentialKey
+
+
+def make_v1_key() -> CredentialKey:
+    """A v1 (X25519) key, as installs made before v2 still hold."""
+    return CredentialKey.from_private(X25519PrivateKey.generate())
 
 
 class FakeRing:
@@ -30,7 +37,7 @@ class FakeRing:
         if self.active is not None:
             self.statuses[self.active.key_id] = "retired"
         self.statuses[key.key_id] = "active"
-        self.active = ActiveKey(key.key_id, self.now)
+        self.active = ActiveKey(key.key_id, self.now, key.algorithm)
         self.activated.append(key.key_id)
         return self.active
 
@@ -76,7 +83,12 @@ class FakeRing:
         self.activate(new)
         by_field = {(r.institution_slug, r.field_key): r for r in resealed}
         self.rows = [
-            replace(r, key_id=new.key_id, sealed=by_field[(r.institution_slug, r.field_key)].sealed)
+            replace(
+                r,
+                key_id=new.key_id,
+                scheme=by_field[(r.institution_slug, r.field_key)].scheme,
+                sealed=by_field[(r.institution_slug, r.field_key)].sealed,
+            )
             if r.key_id == old.key_id and (r.institution_slug, r.field_key) in by_field
             else r
             for r in self.rows
