@@ -2,10 +2,13 @@
 // seals to the database's active key, but only once the running scraper
 // service confirms it holds that key: the row alone could be stale (mid
 // rotation), another service's (key mismatch) or planted. So saving needs
-// the service up. Pure: shared by GET /api/credentials (to disable Guardar)
-// and PUT (to refuse with the same reason).
+// the service up, and a key the dashboard can seal to (v2: an older
+// install's v1 key waits for its rotation). Pure: shared by GET
+// /api/credentials (to disable Guardar) and PUT (to refuse with the same
+// reason).
 
 import type { ControlCredentialStatus } from "./control";
+import { schemeForAlgorithm } from "./schemes";
 import type { SealingKey } from "./seal";
 
 export type SaveBlocker =
@@ -14,7 +17,8 @@ export type SaveBlocker =
   | "key_mismatch"
   | "pending_unresolved"
   | "no_key"
-  | "key_pending";
+  | "key_pending"
+  | "key_needs_rotation";
 
 export function saveBlocker(
   key: SealingKey | null,
@@ -26,6 +30,7 @@ export function saveBlocker(
   if (control.key_mismatch) return "key_mismatch";
   if (!key) return "no_key";
   if (control.key_id !== key.keyId) return "key_pending";
+  if (schemeForAlgorithm(key.algorithm) === null) return "key_needs_rotation";
   return null;
 }
 
@@ -34,8 +39,9 @@ export const SAVE_BLOCKED_MESSAGES: Record<SaveBlocker, string> = {
     "El servicio de scrapers no responde, así que no se puede confirmar su clave de cifrado. " +
     "Inicia el stack completo con `make dev` (o `make up`) y vuelve a intentarlo.",
   key_unavailable:
-    "El servicio de scrapers no puede usar su archivo de clave (permisos o formato). Revisa su " +
-    "log (`local/scrapers-dev.log` o `make logs-scrapers`).",
+    "El servicio de scrapers no puede usar su archivo de clave (permisos, formato, o una clave " +
+    "v1 antigua que esta base de datos ya no acepta como activa). Su log dice qué hacer " +
+    "(`local/scrapers-dev.log` o `make logs-scrapers`).",
   key_mismatch:
     "La base de datos cifra las credenciales con la clave de otro servicio de scrapers (por " +
     "ejemplo, `make dev` y `make up` sobre la misma base), así que este no puede abrirlas ni " +
@@ -56,6 +62,14 @@ export const SAVE_BLOCKED_MESSAGES: Record<SaveBlocker, string> = {
   key_pending:
     "El servicio de scrapers todavía no confirma la clave de cifrado vigente (por ejemplo, " +
     "justo después de rotarla). Vuelve a intentarlo en un minuto.",
+  key_needs_rotation:
+    "La clave de cifrado del servicio de scrapers usa un esquema anterior (v1), al que ya no " +
+    "se guardan credenciales. El servicio la rota sola a una clave X-Wing (v2) en su próxima " +
+    "revisión (suele ser en cerca de un minuto; si falla, reintenta cada hora y su log dice " +
+    "por qué), sin que haya que volver a ingresar nada; para hacerlo ahora, ejecuta " +
+    "`make credentials-rotate` (o `make credentials-rotate STACK=up`). Rotar necesita " +
+    "bloquear el archivo de clave, así que en Windows nativo no ocurre: corre el servicio en " +
+    "macOS, Linux o WSL2.",
 };
 
 /** What PUT answers when the key changed between sealing and storing, twice. */

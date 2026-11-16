@@ -116,10 +116,10 @@ def test_info_rejects_malformed_parts(slug, field, key_id):
 
 
 def test_dashboard_fixture_opens():
-    """A ciphertext sealed by the dashboard's TypeScript code (with a
-    throwaway key) opens here, and only in its own context. Regenerate with
-    `WRITE_CREDENTIALS_FIXTURE=1 corepack pnpm --filter @chanchito/web test
-    credentials-seal`."""
+    """A ciphertext the dashboard's TypeScript code sealed to a throwaway v1
+    key opens here, and only in its own context. The fixture is frozen: the
+    dashboard no longer seals v1, but v1 rows still have to open until a
+    rotation re-seals them."""
     fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
     scalar = bytes.fromhex(fixture["recipient_scalar_hex"])
     key = CredentialKey.from_private(X25519PrivateKey.from_private_bytes(scalar))

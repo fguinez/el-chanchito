@@ -511,6 +511,7 @@ suggested category, cascading with the category.
 | `V048__institution_credentials.sql` | `credential_keys` (the scraper service's single X25519 public key, `key_id` = hex SHA-256 of it) and `institution_credentials` (one HPKE-sealed field per `(institution_slug, field_key)`, with its `scheme` and `key_id`); see "Sealed credentials" |
 | `V049__credential_key_ring.sql` | `credential_keys` becomes a key ring: `key_id` primary key, `status` `active`/`retired` (at most one active, partial unique index `credential_keys_one_active`), `created_at`, `retired_at`, `rotation_failed_at`, `rotation_error`; the V048 singleton becomes the active key (`created_at` from its `updated_at`); a trigger lets `institution_credentials` be written only under the active key, locking it FOR SHARE; idempotent |
 | `V050__credential_keys_xwing.sql` | `credential_keys` may hold X-Wing keys: V048's `octet_length(public_key) = 32` CHECK becomes `credential_keys_algorithm_public_key_check`, which allows only the two published algorithms and ties each to its length (32 bytes for v1 X25519, 1216 for v2 X-Wing); `institution_credentials.sealed` keeps its 48 to 4096-byte CHECK; idempotent; see "Sealed credentials" |
+| `V051__credentials_v2_checks.sql` | `institution_credentials.scheme` takes only the v1 and v2 scheme strings (`institution_credentials_scheme_check`); V048's flat `sealed` CHECK becomes `institution_credentials_scheme_sealed_check`, at most 4096 bytes and at least the scheme's floor (48 for v1, 1136 for v2: the 1120-byte X-Wing enc plus the 16-byte tag); the `credential_keys_activate_only_v2` trigger refuses a key that is not v2 becoming active (insert, re-activation, or rewriting the active row's `key_id`, `public_key` or `algorithm`) but lets an already active v1 key stay active as the same key, record rotation failures and be retired, so an older install still rotates to v2 (a CHECK would fail on that row, and even NOT VALID would refuse its updates); `sync_key` and `reset_active_key` refuse such a key first with a `CredentialKeyError` that says to delete the v1 key file and restart (the service reports `key_unavailable`); idempotent; see "Sealed credentials" |
 
 ## Scraper Architecture
 
@@ -1646,7 +1647,7 @@ Browser → web POST /api/institutions/refresh {institution?}
 | `BANCHILE_LOGIN_COOLDOWN_MINUTES` | scrapers | Minimum minutes between full BanChile logins, which also gates manual refreshes (default `10`; `0` disables) |
 | `BANCHILE_BILLED_STATEMENTS` | scrapers | Card statements per currency each BanChile run reads, newest first (default `2`, at most `12`); raise it for a one-off backfill of older billed history |
 
-### Sealed credentials (V048 to V050)
+### Sealed credentials (V048 to V051)
 
 Scraper credentials can be entered in the dashboard (Credenciales) instead of
 the host secret store. The design goal is that the dashboard can **write** a
@@ -1671,8 +1672,10 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
   (V049), where at most one key is `active`. A v2 key file is a PKCS#8
   `PRIVATE KEY` with the X-Wing OID (`1.3.6.1.4.1.62253.25722`, no
   parameters) holding the 32-byte X-Wing seed, encoded and parsed strictly
-  by hand; `load_key` also accepts a v1 X25519 PKCS#8 and refuses anything
-  else. Every read or write of the private key goes through
+  by hand (a minimal DER reader: the AlgorithmIdentifier's OID decides
+  whether a file is X-Wing, and an X-Wing file must be exactly that
+  structure, with minimal lengths and nothing left over); `load_key` also
+  accepts a v1 X25519 PKCS#8 and refuses anything else. Every read or write of the private key goes through
   `KeyFile` (scrapers/credentials.py), the seam a secret manager can replace.
 - **Schemes.** HPKE (RFC 9180) base mode with HKDF-SHA256 and AES-256-GCM;
   the KEM follows the key, and every row stores the scheme it was sealed
@@ -1689,16 +1692,19 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
   SHAKE256(seed, 96) gives the ML-KEM-768 seed (64 bytes) and the X25519 key
   (32), and the shared secret is SHA3-256(ss_ML-KEM, ss_X25519, ct_X25519,
   pk_X25519, label). `generate_key` makes v2 keys, so new installs start on
-  v2; a v1 key keeps sealing and opening v1 rows until it is rotated, and
-  rotation re-seals every row to the new v2 key with the v2 scheme. The web
-  picks the suite from the active key's published algorithm (`seal.ts`, which
-  rejects a public key of the wrong length) and the route stores that
-  scheme; the scraper opens only rows whose scheme matches the key's, and
-  the Credenciales page asks to re-enter any other.
+  v2. The web seals only v2: `seal.ts` refuses a key published under any
+  other algorithm (or a public key of the wrong length), so an older
+  install's v1 key cannot take new saves; the scraper still loads a v1 key
+  file and opens its v1 rows, and rotation re-seals every row to the new v2
+  key with the v2 scheme. The route stores the scheme `seal.ts` returns; the
+  scraper opens only rows whose scheme matches the key's, and the
+  Credenciales page asks to re-enter any other.
   `@hpke/core` runs the HPKE layers on the web, with X-Wing as a
   `KemInterface` over `node:crypto` (`xwing.ts`: native ML-KEM-768 through
-  `crypto.encapsulate`/`decapsulate`, X25519 through `diffieHellman`), which
-  is why the web needs Node 24.7 or later; the scraper uses `cryptography`'s
+  `crypto.encapsulate`, X25519 through `diffieHellman`), which is why the web
+  needs Node 24.7 or later. It only seals: private keys and decap throw
+  `NotSupportedError`, and the tests open with the recipient side in
+  `apps/web/src/lib/__tests__/xwing-recipient.ts`; the scraper uses `cryptography`'s
   `hazmat.primitives.hpke` (`MLKEM768X25519PrivateKey` for v2). The HPKE
   `info` is `el-chanchito/credential \0
   scheme \0 slug \0 field \0 key_id` (the scheme of the key sealed to), so
@@ -1709,11 +1715,11 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
   (`apps/web/src/lib/__tests__/fixtures/xwing-vectors.json`,
   `apps/scrapers/tests/fixtures/credentials/xwing_vectors.json`): the two
   KEM `0x647a` vectors of draft-ietf-hpke-pq (public key from the seed, then
-  decap on the web and a full HPKE open in Python) and the three X-Wing
-  vectors (public key from the seed; the web also decaps). Two checked-in fixtures sealed by the TypeScript code with
-  throwaway keys, `ts_sealed.json` (v1) and `ts_sealed_v2.json` (v2, a
-  binding entry with non-ASCII values included), are opened by the Python
-  tests to keep both sides in step.
+  decap in the web tests and a full HPKE open in Python) and the three X-Wing
+  vectors (public key from the seed; the web tests also decap). Two checked-in fixtures sealed by the TypeScript code with
+  throwaway keys, `ts_sealed.json` (v1, frozen since the web stopped sealing
+  v1) and `ts_sealed_v2.json` (v2, a binding entry with non-ASCII values
+  included), are opened by the Python tests to keep both sides in step.
 - **Registry.** `packages/product-model/product_model/credentials.py` lists
   each institution's fields (label, env var, identifier or secret, input
   hints, pattern) and is generated into the TS index, so the form, the API
@@ -1721,7 +1727,7 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
   e-mail) are sealed too. `required` is exactly what `build_scrapers()` gates
   on (a test checks every spec). `max_length` is capped (`MAX_FIELD_LENGTH`, 740
   characters) so 4 bytes per character plus the largest scheme's overhead
-  (v2: 1120-byte `enc` and 16-byte tag) fit V048's 4096-byte CHECK, whichever
+  (v2: 1120-byte `enc` and 16-byte tag) fit V051's 4096-byte CHECK, whichever
   key seals the field.
 - **Bound secrets.** A secret with `binds` (the IMAP password binds the IMAP
   host and user) is always saved together with the fields it binds (the API
@@ -1792,13 +1798,17 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
 - **Rotation.** `rotate_key_file` (credential_manager.py), used by the
   service when the active key is older than `CREDENTIALS_KEY_MAX_AGE_DAYS`
   (default 90, 0 off; checked on the `credentials` job, retried an hour after
-  a failure, which is recorded on the key row) and by `make
+  a failure, which is recorded on the key row) or is not v2 (an older
+  install's v1 key, rotated on the first check whatever its age or the
+  setting, since the web refuses to seal to it: `key_needs_rotation`) and by `make
   credentials-rotate`: under the key file's `flock`, write the new key to
   `<key file>.next` (O_EXCL, 0600, fsync), then in one transaction lock the
   active key row FOR UPDATE, open every row sealed to it and seal it to the
   new key (the `info` binds the key id, so this is a full re-encrypt; binding
   secrets keep their binding), retire the old key and insert the new active
-  one (the new key is always v2, so a v1 key's rows move to the v2 scheme);
+  one (the new key is always v2, so a v1 key's rows move to the v2 scheme;
+  since V051 only a v2 key can become active, while a v1 key that already
+  was active stays so until this rotation retires it);
   then `rename(.next, key file)`, which unlinks the old private key, so
   older database backups open with nothing the app keeps (snapshots, volume
   backups or copies of the key file still hold it: the rename does not erase
@@ -1848,7 +1858,7 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
 | Var | Service | Meaning |
 |---|---|---|
 | `CREDENTIALS_KEY_FILE` | scrapers | Private key file for the sealed credentials on host runs (default `apps/scrapers/.credentials_key`); Compose hardcodes `/data/credentials_key` |
-| `CREDENTIALS_KEY_MAX_AGE_DAYS` | scrapers | Rotate the credentials key once it is this many days old (default 90; `0` never) |
+| `CREDENTIALS_KEY_MAX_AGE_DAYS` | scrapers | Rotate the credentials key once it is this many days old (default 90; `0` never, except that a v1 key is always rotated to v2) |
 | `EMAIL_IMAP_ALLOW_CUSTOM_HOST` | web, scrapers | `1` allows a stored IMAP host outside the known-provider list |
 
 ## Dashboard authentication

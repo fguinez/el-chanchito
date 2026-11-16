@@ -39,6 +39,7 @@ from db import credentials as db_credentials
 from db.connection import close_pool, is_transient_db_error
 from db.credentials import ActiveKey, KeyRingConflict, KeySync
 from scrapers.credentials import (
+    V2,
     CredentialKey,
     CredentialKeyError,
     CredentialOverlay,
@@ -545,8 +546,15 @@ class CredentialManager:
 
     # -- rotation ----------------------------------------------------------------------
 
+    def _needs_upgrade(self) -> bool:
+        """The active key is not v2 (an older install's v1 key): the dashboard
+        no longer seals to it, so it is rotated at once, whatever the age."""
+        return self._active is not None and self._active.algorithm != V2.algorithm
+
     def _rotation_due(self) -> bool:
-        if self.max_age_days <= 0 or not (self._published and self._loaded):
+        if not (self._published and self._loaded):
+            return False
+        if self.max_age_days <= 0 and not self._needs_upgrade():
             return False
         if not self.key_file.locking_available:
             if not self._warned_no_lock:
@@ -555,15 +563,23 @@ class CredentialManager:
             return False
         if self._active is None or time.monotonic() < self._next_rotation_attempt:
             return False
+        if self._needs_upgrade():
+            return True
         return self._now() - self._active.created_at >= timedelta(days=self.max_age_days)
 
     def _rotate_locked(self) -> bool:
         assert self.key is not None
-        logger.info(
-            "The credentials key is older than %d days (%s); rotating it",
-            self.max_age_days,
-            MAX_AGE_ENV,
-        )
+        if self._needs_upgrade():
+            logger.info(
+                "The credentials key uses the older v1 scheme, which the dashboard no longer "
+                "seals to; rotating it to a v2 (X-Wing) key"
+            )
+        else:
+            logger.info(
+                "The credentials key is older than %d days (%s); rotating it",
+                self.max_age_days,
+                MAX_AGE_ENV,
+            )
         try:
             result = rotate_key_file(self.key_file, self.ring, self.overlay.baseline)
         except Exception as exc:

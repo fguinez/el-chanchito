@@ -27,6 +27,7 @@ from scrapers.credentials import (
     V2,
     CredentialKey,
     KeyFile,
+    generate_key,
     load_key,
     load_or_create_key,
     open_rows,
@@ -87,7 +88,7 @@ def test_a_displaced_service_drops_the_values_it_opened(tmp_path, store):
     store.rows = [_row(manager.key, "skipo", "api_key", SECRET)]
     manager.reload()
     assert environ["SKIPO_API_KEY"] == SECRET
-    store.reset(_other_key())
+    store.reset(generate_key())
     assert manager.tick() is True
     assert "SKIPO_API_KEY" not in environ
 
@@ -183,6 +184,38 @@ def test_zero_max_age_never_rotates(tmp_path, store):
     old_id = manager.key.key_id
     manager.tick()
     assert manager.key.key_id == old_id
+
+
+@pytest.mark.skipif(os.name == "nt", reason="key rotation needs flock; native Windows refuses it")
+@pytest.mark.parametrize("max_age_days", [90, 0])
+def test_an_active_v1_key_is_rotated_to_v2_on_the_first_tick(tmp_path, store, max_age_days):
+    """An older install: its v1 key is active and owns rows. The dashboard
+    no longer seals to it, so the first tick rotates it however young it is,
+    even with age-based rotation off, and a failure waits like any other."""
+    old = _other_key()  # v1
+    KeyFile(tmp_path / "credentials_key").replace(old)
+    store.activate(old)
+    store.rows = [_row(old, "skipo", "api_key", SECRET)]
+    manager = _manager(tmp_path, store, {}, max_age_days=max_age_days)
+    assert (manager.key.key_id, manager.status()["state"]) == (old.key_id, "ok")
+
+    def db_down(*args):
+        raise psycopg.OperationalError("db down")
+
+    store.rotate = db_down
+    manager.tick()
+    assert manager.key.key_id == old.key_id
+    del store.rotate
+    manager.tick()
+    assert manager.key.key_id == old.key_id  # waits before retrying
+    manager._next_rotation_attempt = 0.0
+    manager.tick()
+    assert manager.key.kind is V2
+    assert store.active.algorithm == V2.algorithm
+    assert {(r.key_id, r.scheme) for r in store.rows} == {(manager.key.key_id, V2.scheme)}
+    assert manager.overlay.status()["SKIPO_API_KEY"]["stored"] is True
+    manager.tick()  # a v2 key is not rotated again
+    assert store.active.key_id == manager.key.key_id
 
 
 @pytest.mark.parametrize(

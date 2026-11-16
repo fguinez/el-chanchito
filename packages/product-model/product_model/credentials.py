@@ -37,7 +37,7 @@ _ENV_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 # Generous for any password or API secret, small enough to bound a request.
 DEFAULT_MAX_LENGTH = 256
-# Every stored ciphertext must fit V048's CHECK (octet_length(sealed) <= 4096):
+# Every stored ciphertext must fit V051's CHECK (octet_length(sealed) <= 4096):
 # 4 UTF-8 bytes per character at most, plus the HPKE encapsulated key and the
 # 16-byte AES-GCM tag. The encapsulated key is that of the largest scheme in
 # use: 1120 bytes for v2 (X-Wing: ML-KEM-768 ciphertext 1088 + X25519 32), not
@@ -347,7 +347,7 @@ def validate_credential_specs() -> None:
                 seen_envs.add(env)
             if not 1 <= f.max_length <= MAX_FIELD_LENGTH:
                 raise CredentialSpecError(
-                    f"{where}: max_length must be 1..{MAX_FIELD_LENGTH} to fit V048"
+                    f"{where}: max_length must be 1..{MAX_FIELD_LENGTH} to fit V051"
                 )
             if f.binds:
                 if f.kind is not CredentialFieldKind.SECRET:

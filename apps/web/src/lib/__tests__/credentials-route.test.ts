@@ -9,9 +9,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { proxy } from "@/proxy";
 import {
-  CREDENTIAL_ALGORITHM_V1,
   CREDENTIAL_ALGORITHM_V2,
-  CREDENTIAL_SCHEME_V1,
   CREDENTIAL_SCHEME_V2,
   bindingDigest,
   keyIdFor,
@@ -20,14 +18,21 @@ import {
 } from "@/lib/credentials/seal";
 import type { CredentialMeta, SealedField, StoredKeyInfo } from "@/lib/credentials/db";
 import type { ControlCredentialStatus } from "@/lib/credentials/control";
-import { XWingKem } from "@/lib/credentials/xwing";
+import { XWingRecipientKem } from "./xwing-recipient";
 
 // The credential routes run against in-memory doubles of the DB layer and of
 // the scraper service's control endpoints. The point of most cases: no
 // response, in any branch, ever carries a submitted value. Every value is
 // synthetic and every key is generated per run.
 
-const suite = new CipherSuite({ kem: new XWingKem(), kdf: new HkdfSha256(), aead: new Aes256Gcm() });
+const suite = new CipherSuite({
+  kem: new XWingRecipientKem(),
+  kdf: new HkdfSha256(),
+  aead: new Aes256Gcm(),
+});
+// An older install's v1 key (X25519), which the dashboard no longer seals to.
+const ALGORITHM_V1 = "HPKE-Base(DHKEM-X25519-HKDF-SHA256, HKDF-SHA256, AES-256-GCM)";
+const SCHEME_V1 = "hpke-x25519-sha256-aes256gcm-v1";
 const suiteV1 = new CipherSuite({
   kem: new DhkemX25519HkdfSha256(),
   kdf: new HkdfSha256(),
@@ -171,23 +176,20 @@ describe("PUT /api/credentials/[slug]", () => {
     expect(state.reloads).toBe(1);
   });
 
-  it("seals to a v1 key with the v1 scheme until it is rotated", async () => {
-    const v1 = await sealingKey(CREDENTIAL_ALGORITHM_V1, suiteV1);
+  it("refuses to seal to a v1 key until it is rotated to v2", async () => {
+    const v1 = await sealingKey(ALGORITHM_V1, suiteV1);
     state.key = v1.key;
     state.control = { key_available: true, key_id: v1.key.keyId, fields: {} };
 
     const response = await put("skipo", { fields: { api_key: PASSWORD } });
 
-    expect(response.status).toBe(200);
-    const [upsert] = state.upserts;
-    expect(upsert.scheme).toBe(CREDENTIAL_SCHEME_V1);
-    const opened = await openSealed(
-      suiteV1,
-      v1.pair.privateKey,
-      upsert.fields[0].sealed,
-      sealingInfo(CREDENTIAL_SCHEME_V1, "skipo", "api_key", v1.key.keyId)
-    );
-    expect(new TextDecoder().decode(opened)).toBe(PASSWORD);
+    expect(response.status).toBe(503);
+    expect(await text(response)).not.toContain(PASSWORD);
+    const body = await response.json();
+    expect(body.reason).toBe("key_needs_rotation");
+    expect(body.error).toContain("make credentials-rotate");
+    expect(state.upserts).toHaveLength(0);
+    expect(state.reloads).toBe(0);
   });
 
   it("accepts a partial update and reports an unreachable service as null", async () => {
@@ -434,7 +436,7 @@ describe("GET /api/credentials", () => {
       { institutionSlug: "banchile", fieldKey: "password", keyId: KEY.keyId, scheme: CREDENTIAL_SCHEME_V2, updatedAt },
       { institutionSlug: "buda", fieldKey: "api_key", keyId: "0".repeat(64), scheme: CREDENTIAL_SCHEME_V2, updatedAt },
       // The active key's id with another scheme than that key's.
-      { institutionSlug: "skipo", fieldKey: "api_key", keyId: KEY.keyId, scheme: CREDENTIAL_SCHEME_V1, updatedAt },
+      { institutionSlug: "skipo", fieldKey: "api_key", keyId: KEY.keyId, scheme: SCHEME_V1, updatedAt },
     ];
     state.control = {
       key_available: true,
@@ -470,6 +472,30 @@ describe("GET /api/credentials", () => {
     expect(skipo.fields[0]).toMatchObject({ stored: false, needsReentry: true });
     const mercadopago = body.institutions.find((i: { slug: string }) => i.slug === "mercadopago");
     expect(mercadopago.fields).toEqual([]);
+  });
+
+  it("keeps a v1 key's v1 rows as stored and saving off until the rotation", async () => {
+    const v1 = await sealingKey(ALGORITHM_V1, suiteV1);
+    state.key = v1.key;
+    state.control = { key_available: true, key_id: v1.key.keyId, fields: {} };
+    state.meta = [
+      { institutionSlug: "skipo", fieldKey: "api_key", keyId: v1.key.keyId, scheme: SCHEME_V1, updatedAt },
+      { institutionSlug: "buda", fieldKey: "api_key", keyId: KEY.keyId, scheme: CREDENTIAL_SCHEME_V2, updatedAt },
+      // The v1 key's id with the v2 scheme: the service cannot open it.
+      { institutionSlug: "banchile", fieldKey: "password", keyId: v1.key.keyId, scheme: CREDENTIAL_SCHEME_V2, updatedAt },
+    ];
+
+    const body = await (await GET()).json();
+
+    expect(body.canSave).toBe(false);
+    expect(body.saveBlocked).toBe("key_needs_rotation");
+    const skipo = body.institutions.find((i: { slug: string }) => i.slug === "skipo");
+    expect(skipo.fields[0]).toMatchObject({ stored: true, needsReentry: false });
+    const buda = body.institutions.find((i: { slug: string }) => i.slug === "buda");
+    expect(buda.fields[0]).toMatchObject({ stored: false, needsReentry: true });
+    const banchile = body.institutions.find((i: { slug: string }) => i.slug === "banchile");
+    const password = banchile.fields.find((f: { key: string }) => f.key === "password");
+    expect(password).toMatchObject({ stored: false, needsReentry: true });
   });
 
   it("still answers with the service down, fallback unknown, saving off", async () => {
