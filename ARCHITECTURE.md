@@ -1698,8 +1698,10 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
   Credenciales page asks to re-enter any other.
   `@hpke/core` runs the HPKE layers on the web, with X-Wing as a
   `KemInterface` over `node:crypto` (`xwing.ts`: native ML-KEM-768 through
-  `crypto.encapsulate`/`decapsulate`, X25519 through `diffieHellman`), which
-  is why the web needs Node 24.7 or later; the scraper uses `cryptography`'s
+  `crypto.encapsulate`, X25519 through `diffieHellman`), which is why the web
+  needs Node 24.7 or later. It only seals: private keys and decap throw
+  `NotSupportedError`, and the tests open with the recipient side in
+  `apps/web/src/lib/__tests__/xwing-recipient.ts`; the scraper uses `cryptography`'s
   `hazmat.primitives.hpke` (`MLKEM768X25519PrivateKey` for v2). The HPKE
   `info` is `el-chanchito/credential \0
   scheme \0 slug \0 field \0 key_id` (the scheme of the key sealed to), so
@@ -1710,8 +1712,8 @@ Browser → web PUT /api/credentials/{slug} { fields }        (validated vs regi
   (`apps/web/src/lib/__tests__/fixtures/xwing-vectors.json`,
   `apps/scrapers/tests/fixtures/credentials/xwing_vectors.json`): the two
   KEM `0x647a` vectors of draft-ietf-hpke-pq (public key from the seed, then
-  decap on the web and a full HPKE open in Python) and the three X-Wing
-  vectors (public key from the seed; the web also decaps). Two checked-in fixtures sealed by the TypeScript code with
+  decap in the web tests and a full HPKE open in Python) and the three X-Wing
+  vectors (public key from the seed; the web tests also decap). Two checked-in fixtures sealed by the TypeScript code with
   throwaway keys, `ts_sealed.json` (v1, frozen since the web stopped sealing
   v1) and `ts_sealed_v2.json` (v2, a binding entry with non-ASCII values
   included), are opened by the Python tests to keep both sides in step.

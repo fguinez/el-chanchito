@@ -18,14 +18,18 @@ import {
 } from "@/lib/credentials/seal";
 import type { CredentialMeta, SealedField, StoredKeyInfo } from "@/lib/credentials/db";
 import type { ControlCredentialStatus } from "@/lib/credentials/control";
-import { XWingKem } from "@/lib/credentials/xwing";
+import { XWingRecipientKem } from "./xwing-recipient";
 
 // The credential routes run against in-memory doubles of the DB layer and of
 // the scraper service's control endpoints. The point of most cases: no
 // response, in any branch, ever carries a submitted value. Every value is
 // synthetic and every key is generated per run.
 
-const suite = new CipherSuite({ kem: new XWingKem(), kdf: new HkdfSha256(), aead: new Aes256Gcm() });
+const suite = new CipherSuite({
+  kem: new XWingRecipientKem(),
+  kdf: new HkdfSha256(),
+  aead: new Aes256Gcm(),
+});
 // An older install's v1 key (X25519), which the dashboard no longer seals to.
 const ALGORITHM_V1 = "HPKE-Base(DHKEM-X25519-HKDF-SHA256, HKDF-SHA256, AES-256-GCM)";
 const SCHEME_V1 = "hpke-x25519-sha256-aes256gcm-v1";

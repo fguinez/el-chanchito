@@ -1,8 +1,10 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { NotSupportedError } from "@hpke/core";
 import { describe, expect, it } from "vitest";
 
-import { XWingKem, privateKeyFromSeed, xwingDecap } from "@/lib/credentials/xwing";
+import { XWingKem } from "@/lib/credentials/xwing";
+import { XWingRecipientKem, privateKeyFromSeed, xwingDecap } from "./xwing-recipient";
 
 interface Vectors {
   hpke_pq: { kem_id: number; skRm: string; pkRm: string; enc: string; shared_secret: string }[];
@@ -42,21 +44,38 @@ describe("X-Wing KEM against the published vectors", () => {
 describe("XWingKem", () => {
   it("encapsulates to a shared secret only the recipient recovers", async () => {
     const kem = new XWingKem();
-    const recipient = await kem.generateKeyPair();
-    const other = await kem.generateKeyPair();
+    const recipientKem = new XWingRecipientKem();
+    const recipient = await recipientKem.generateKeyPair();
+    const other = await recipientKem.generateKeyPair();
+    const publicKey = await kem.deserializePublicKey(
+      await recipientKem.serializePublicKey(recipient.publicKey)
+    );
 
-    const { sharedSecret, enc } = await kem.encap({ recipientPublicKey: recipient.publicKey });
+    const { sharedSecret, enc } = await kem.encap({ recipientPublicKey: publicKey });
 
     expect(enc.byteLength).toBe(kem.encSize);
     expect(sharedSecret.byteLength).toBe(kem.secretSize);
-    const mine = await kem.decap({ recipientKey: recipient, enc });
-    const theirs = await kem.decap({ recipientKey: other.privateKey, enc });
+    const mine = await recipientKem.decap({ recipientKey: recipient, enc });
+    const theirs = await recipientKem.decap({ recipientKey: other.privateKey, enc });
     expect(Buffer.from(mine).equals(Buffer.from(sharedSecret))).toBe(true);
     expect(Buffer.from(theirs).equals(Buffer.from(sharedSecret))).toBe(false);
   });
 
-  it("round-trips keys through their byte forms and rejects wrong sizes", async () => {
+  it("only seals: no private keys, no decapsulation", async () => {
     const kem = new XWingKem();
+    const pair = await new XWingRecipientKem().generateKeyPair();
+    const seed = new Uint8Array(32);
+    await expect(kem.generateKeyPair()).rejects.toBeInstanceOf(NotSupportedError);
+    await expect(kem.deserializePrivateKey(seed)).rejects.toBeInstanceOf(NotSupportedError);
+    await expect(kem.importKey("raw", seed.buffer, false)).rejects.toBeInstanceOf(NotSupportedError);
+    await expect(kem.serializePrivateKey(pair.privateKey)).rejects.toBeInstanceOf(NotSupportedError);
+    await expect(
+      kem.decap({ recipientKey: pair, enc: new Uint8Array(kem.encSize) })
+    ).rejects.toBeInstanceOf(NotSupportedError);
+  });
+
+  it("round-trips keys through their byte forms and rejects wrong sizes", async () => {
+    const kem = new XWingRecipientKem();
     const pair = await kem.generateKeyPair();
     const pk = await kem.serializePublicKey(pair.publicKey);
     const sk = await kem.serializePrivateKey(pair.privateKey);
