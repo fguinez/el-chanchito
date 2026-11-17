@@ -92,7 +92,9 @@ make dev
 # Credenciales (see "Configuration" below)
 ```
 
-`make dev` brings up PostgreSQL (Docker), runs migrations, starts the scraper
+`make dev` syncs Node dependencies with the lockfile (so a pulled dependency
+bump needs no `make install`; Python deps still do), brings up PostgreSQL
+(Docker), runs migrations, starts the scraper
 service on the host (control endpoint on `127.0.0.1:8080`, logs in
 `local/scrapers-dev.log`), and runs the Next.js dev server wired to it. Ctrl+C
 stops the dashboard and the scraper service together. To run only the web dev

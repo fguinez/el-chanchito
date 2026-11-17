@@ -34,6 +34,11 @@ ensure_node() {
 }
 ensure_node
 
+# Sync node_modules with the lockfile so a pulled dependency bump takes effect
+# without a manual `make install`. Frozen: never rewrites pnpm-lock.yaml.
+echo "==> Syncing Node dependencies"
+pnpm install --frozen-lockfile
+
 # Secrets come from the secret store (scripts/secret_store.py); identifiers
 # come from .env (the scraper service loads it via python-dotenv).
 . ./scripts/load-secrets.sh
