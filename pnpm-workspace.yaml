@@ -1,3 +1,12 @@
 packages:
   - "apps/*"
   - "packages/*"
+
+overrides:
+  "@hpke/common": "1.10.1"
+
+# pnpm 11 skips dependency install scripts unless listed here. Both only
+# verify or fetch the platform's native binary in postinstall.
+allowBuilds:
+  esbuild: true
+  unrs-resolver: true

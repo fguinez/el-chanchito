@@ -3,8 +3,11 @@
 ## Prerequisites
 
 - **Node.js** >= 24.7 (the credentials page seals with Node's native
-  ML-KEM, `crypto.encapsulate`, which 24.7 added) + **pnpm** 9 (`corepack enable` provides the version pinned
-  in `package.json`)
+  ML-KEM, `crypto.encapsulate`, which 24.7 added) + **pnpm** 11 (`corepack enable` provides the version pinned
+  in `package.json`). When adding a dependency: pnpm 11 skips its install
+  scripts unless the package is listed under `allowBuilds` in
+  `pnpm-workspace.yaml`, and refuses versions published less than a day ago
+  (`minimumReleaseAge`).
 - **Python** >= 3.12 as `python3` (the shared `packages/product-model` requires
   it; `make install` builds `.venv` from whatever `python3` is on your PATH)
 - **Docker** + **Docker Compose**
