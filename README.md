@@ -21,7 +21,7 @@ El Chanchito (“the piggy bank”) is a self-hosted personal finance tracker. P
 
 ## Quickstart
 
-Requires Node.js 24+ with pnpm 9 (`corepack enable`), Python 3.12+ and Docker; see [USAGE.md](USAGE.md#prerequisites).
+Requires Node.js 24+ with pnpm 11 (`corepack enable`), Python 3.12+ and Docker; see [USAGE.md](USAGE.md#prerequisites).
 
 ```bash
 git clone https://github.com/fguinez/el-chanchito.git

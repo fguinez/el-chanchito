@@ -9,12 +9,7 @@
   },
   "engines": {
     "node": ">=24.7",
-    "pnpm": ">=9"
+    "pnpm": ">=11"
   },
-  "packageManager": "pnpm@9.15.4+sha256.9bee59c7313a216722c079c1e22160dea7f88df4e0c3450b1d7b01b882336c6a",
-  "pnpm": {
-    "overrides": {
-      "@hpke/common": "1.10.1"
-    }
-  }
+  "packageManager": "pnpm@11.28.12+sha512.94833387e35d503e8ad1010417cdeb82c120e7e69bafdf0a9db0690515beae7159274571e692b96abc2a085d3566fec54381afd978f65f64a85362dfd7e108f7"
 }

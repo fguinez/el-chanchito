@@ -1,11 +1,19 @@
 FROM node:24-alpine AS base
-RUN corepack enable && corepack prepare pnpm@latest --activate
+# corepack runs the pnpm version pinned in the root package.json
+# `packageManager` (npm's `latest` tag now points at pnpm 12).
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+# The deps stage is the only install; `pnpm run` must not re-install.
+ENV pnpm_config_verify_deps_before_run=false
+WORKDIR /app
+COPY package.json ./
+RUN corepack enable && corepack install
 
 FROM base AS deps
 WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/web/package.json apps/web/
 COPY packages/db-schema/package.json packages/db-schema/
+COPY packages/product-model/package.json packages/product-model/
 RUN pnpm install --frozen-lockfile
 
 FROM base AS builder
