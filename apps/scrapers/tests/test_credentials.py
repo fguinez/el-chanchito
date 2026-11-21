@@ -706,6 +706,15 @@ class TestFintualKeepaliveJob:
         assert job.trigger.interval == timedelta(hours=hours)
         assert job.args == [scheduler]
 
+    @pytest.mark.parametrize("env", ["x", "inf", "nan"])
+    def test_a_non_number_warns_and_uses_the_default(self, monkeypatch, caplog, env):
+        monkeypatch.setenv("FINTUAL_KEEPALIVE_HOURS", env)
+
+        hours = main.fintual_keepalive_hours()
+
+        assert hours == 2
+        assert "FINTUAL_KEEPALIVE_HOURS is not a number; using 2.0" in caplog.text
+
     @pytest.mark.parametrize("env", ["0", "-1"])
     def test_zero_or_less_disables_it(self, monkeypatch, tmp_path, env):
         monkeypatch.setenv("FINTUAL_KEEPALIVE_HOURS", env)

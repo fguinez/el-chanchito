@@ -776,12 +776,12 @@ def fintual_keepalive_hours() -> float:
     try:
         hours = float(raw)
     except ValueError:
+        hours = math.nan
+    if not math.isfinite(hours):
         logger.warning(
             "FINTUAL_KEEPALIVE_HOURS is not a number; using %s",
             _FINTUAL_KEEPALIVE_DEFAULT_HOURS,
         )
-        return _FINTUAL_KEEPALIVE_DEFAULT_HOURS
-    if not math.isfinite(hours):
         return _FINTUAL_KEEPALIVE_DEFAULT_HOURS
     if 0 < hours < _FINTUAL_KEEPALIVE_MIN_HOURS:
         logger.warning(
