@@ -187,7 +187,11 @@ desktop User-Agent.
   interval can exceed that, keep the session alive with a cheap periodic
   refresh between runs (Fintual's `keepalive()` job), one that never falls
   back to a login. Save every cookie attribute (domain, path, expiry, flags),
-  not just name and value, so the cache restores what the server set.
+  not just name and value, so the cache restores what the server set. Treat
+  the keepalive as a mitigation: also record how a browser left signed in for
+  long actually renews its session (Fintual's never calls the refresh
+  endpoint; it renews through another call backed by an HttpOnly credential),
+  since reproducing that is the lasting fix.
 - **E-mailed 2FA codes.** When the code goes to the IMAP mailbox the service
   already reads, fetch it with `backends.email.fetch_latest_code` (Fintual
   does this when `FINTUAL_EMAIL == EMAIL_IMAP_USER`). Its subject filter

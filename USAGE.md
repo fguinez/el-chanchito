@@ -494,7 +494,7 @@ does the same without a terminal and asks for the code in the page (see
 Scheduled scrapes refresh the cached session the way the website does, with no
 2FA. Fintual drops an idle session after several hours, well before its cookie
 says it expires, so while the service runs it also refreshes the session every
-2 hours (`FINTUAL_KEEPALIVE_HOURS`; `0` turns it off). That keepalive never
+2 hours (`FINTUAL_KEEPALIVE_HOURS`, at least 0.25; `0` turns it off). That keepalive never
 signs in or e-mails a code. You only need `make fintual-login` again when:
 
 - the refresh token itself expires and `FINTUAL_EMAIL` is not the IMAP mailbox

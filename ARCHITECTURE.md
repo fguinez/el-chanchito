@@ -1132,16 +1132,29 @@ expiry, Secure, HttpOnly; a file from before that, a bare name -> value map,
 still loads onto `fintual.cl`). The server rejects an idle refresh token after
 several hours, well before the cookie's Max-Age, so the 6h runs alone would
 often find it dead and need a 2FA sign-in. A separate `fintual_keepalive`
-scheduler job (every `FINTUAL_KEEPALIVE_HOURS`, default 2, 0 disables it; only
-while Fintual is enabled) runs `FintualScraper.keepalive()`: the same
-`/app/goals` refresh, under the run's session lock, saving the rotated cookies.
-It records no scraper run and never signs in: with no session, a dead one or
-the `.login-failed` marker it only logs, leaving the next run to sign in, and a
-429/5xx or network error is logged and dropped. It skips while a run or a
-dashboard sign-in holds Fintual. A sign-in sends the cached cookies other than
-the session's own tokens, so a trusted-device cookie (if Fintual sets one)
-can spare the code. At DEBUG the scraper logs each cookie's name, domain and
-expiry (never its value) after a sign-in and after a refresh.
+scheduler job (every `FINTUAL_KEEPALIVE_HOURS`, default 2, never under 0.25,
+0 disables it; only while Fintual is enabled) runs
+`FintualScraper.keepalive()`: the same `/app/goals` refresh, under the run's
+session lock, saving the rotated cookies. It records no scraper run and never
+signs in: with no session, a dead one or the `.login-failed` marker it only
+logs, leaving the next run to sign in, and a 429/5xx or network error is
+logged and dropped. It skips while a run or a dashboard sign-in holds Fintual,
+and it does not claim Fintual itself (a manual refresh then would be dropped).
+A dashboard sign-in uses its own scraper instance, so the keepalive compares
+the cache file's mtime before saving: if a sign-in saved a session while the
+refresh was in flight, that session is kept and the refreshed cookies are
+dropped (logged by name). Every refresh logs at INFO whether
+`auth_refresh_token` actually rotated. A sign-in sends the cached cookies
+other than the session's own tokens, so a trusted-device cookie (if Fintual
+sets one) can spare the code; if `initiate_login` refuses them, it is retried
+once with an empty jar (a refusal mails no code), and only a failed clean
+retry counts as a failed sign-in. At DEBUG the scraper logs each cookie's
+name, domain and expiry (never its value) after a sign-in and after a refresh.
+
+The keepalive is a mitigation, not the root fix: live recon showed that a
+browser kept signed in for long never calls the refresh endpoint; it renews
+through `POST /auth/jwt`, backed by an HttpOnly credential the scraper does
+not capture. Reproducing that is the lasting fix.
 
 Fintual's transactions are the USD wallet's ledger, from one `WalletMovements`
 query on `POST /gql/` (`backends/fintual_stocks.py` holds the query text and
