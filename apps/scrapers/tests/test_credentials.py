@@ -693,7 +693,9 @@ class TestFintualKeepaliveJob:
         )
         return scheduler
 
-    @pytest.mark.parametrize(("env", "hours"), [(None, 2), ("3", 3), ("0.5", 0.5), ("x", 2)])
+    @pytest.mark.parametrize(
+        ("env", "hours"), [(None, 2), ("3", 3), ("0.5", 0.5), ("x", 2), ("0.1", 0.25)]
+    )
     def test_it_runs_at_the_env_interval(self, monkeypatch, tmp_path, env, hours):
         if env is not None:
             monkeypatch.setenv("FINTUAL_KEEPALIVE_HOURS", env)

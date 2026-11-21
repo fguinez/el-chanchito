@@ -765,6 +765,18 @@ class FintualScraper(BaseScraper):
             await asyncio.sleep(_CODE_POLL_INTERVAL_SECONDS)
         raise FintualSessionError("Fintual's 2FA code e-mail did not reach the IMAP inbox.")
 
+    async def _initiate_login(self, client: httpx.AsyncClient) -> httpx.Response:
+        """Open the sign-in page, then POST the credentials to initiate_login."""
+        await client.get(
+            SIGN_IN_URL,
+            headers={"Accept": "text/html,application/xhtml+xml,*/*;q=0.8"},
+        )
+        return await client.post(
+            INITIATE_LOGIN_URL,
+            headers={"Accept": "application/json", "Referer": SIGN_IN_URL},
+            json={"email": self.email, "password": self.password},
+        )
+
     async def login(self, code_provider: Callable[[], str | Awaitable[str]]) -> None:
         """Sign in and cache the session.
 
@@ -772,24 +784,27 @@ class FintualScraper(BaseScraper):
         6-digit code Fintual e-mails to the account address. It may be sync
         (interactive prompt) or async (reading the code from the IMAP inbox).
         The cached cookies other than the session's own tokens go along, so a
-        device Fintual already trusts may sign in without the code.
+        device Fintual already trusts may sign in without the code. If
+        initiate_login refuses them, it is tried once more with an empty jar
+        (a refusal mails no code, so the retry is safe).
         """
         async with httpx.AsyncClient(
             timeout=30.0, follow_redirects=True, headers=self._base_headers()
         ) as client:
+            restored = False
             for cookie in self._cached_cookies() or []:
                 if cookie.name not in _AUTH_COOKIES:
                     client.cookies.jar.set_cookie(cookie)
-            await client.get(
-                SIGN_IN_URL,
-                headers={"Accept": "text/html,application/xhtml+xml,*/*;q=0.8"},
-            )
-
-            resp = await client.post(
-                INITIATE_LOGIN_URL,
-                headers={"Accept": "application/json", "Referer": SIGN_IN_URL},
-                json={"email": self.email, "password": self.password},
-            )
+                    restored = True
+            resp = await self._initiate_login(client)
+            if resp.status_code not in (200, 201) and restored:
+                logger.info(
+                    "Fintual: sign-in refused (HTTP %d) with the cached cookies; "
+                    "retrying without them",
+                    resp.status_code,
+                )
+                client.cookies.clear()
+                resp = await self._initiate_login(client)
 
             if resp.status_code == 201:
                 logger.info("Fintual login initiated; e-mail 2FA required.")
@@ -931,12 +946,24 @@ class FintualScraper(BaseScraper):
             label="Fintual GET /api/goals",
         )
 
-    async def _refresh_session(self, client: httpx.AsyncClient) -> bool:
+    def _session_mtime(self) -> int | None:
+        try:
+            return self.session_file.stat().st_mtime_ns
+        except OSError:
+            return None
+
+    async def _refresh_session(
+        self, client: httpx.AsyncClient, loaded_mtime: int | None = None
+    ) -> bool:
         """Refresh an expired session the way the website does; True on success.
 
         The refresh token rotates on every use, so the jar is saved at once,
-        before anything else can fail and strand the spent one on disk.
+        before anything else can fail and strand the spent one on disk. With
+        `loaded_mtime` (the cache file's mtime when the session was loaded), a
+        file that changed meanwhile is not overwritten: a sign-in outside the
+        session lock (the dashboard's) saved a newer session there.
         """
+        before = {c.value for c in client.cookies.jar if c.name == _SESSION_COOKIE}
         resp = await send_with_retry(
             lambda: client.get(
                 APP_URL,
@@ -957,9 +984,18 @@ class FintualScraper(BaseScraper):
             )
             return False
         _log_cookie_inventory(client, "refresh")
-        self._save_session(client)
+        after = {c.value for c in client.cookies.jar if c.name == _SESSION_COOKIE}
+        rotated = bool(after) and after != before
+        if loaded_mtime is not None and self._session_mtime() != loaded_mtime:
+            logger.info(
+                "Fintual: the session file changed during the refresh; kept it, "
+                "not saving cookies %s",
+                sorted({c.name for c in client.cookies.jar}),
+            )
+        else:
+            self._save_session(client)
         self._refreshed_this_run = True
-        logger.info("Fintual: session refreshed.")
+        logger.info("Fintual: session refreshed (%s rotated: %s).", _SESSION_COOKIE, rotated)
         return True
 
     async def keepalive(self) -> bool:
@@ -988,8 +1024,11 @@ class FintualScraper(BaseScraper):
             if not self._load_session(client):
                 logger.info("Fintual keepalive: no cached session; the next run signs in")
                 return False
+            # A dashboard sign-in uses its own instance (and lock): never
+            # overwrite a session it saves while this refresh is in flight.
+            loaded_mtime = self._session_mtime()
             try:
-                refreshed = await self._refresh_session(client)
+                refreshed = await self._refresh_session(client, loaded_mtime=loaded_mtime)
             except (httpx.HTTPError, OSError) as exc:
                 logger.warning(
                     "Fintual keepalive failed (%s); the next run retries", type(exc).__name__

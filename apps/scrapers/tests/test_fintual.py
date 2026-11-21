@@ -1013,6 +1013,47 @@ class TestKeepalive:
         assert refreshed is False
         assert client.calls == []
 
+    def test_a_session_saved_during_the_refresh_is_not_overwritten(self, monkeypatch, session_file):
+        """A dashboard sign-in (its own instance and lock) that saves while
+        the keepalive's request is in flight keeps its session."""
+        _write_session(session_file, auth_refresh_token="synthetic-refresh-1")
+
+        def handler(request):
+            _write_session(session_file, auth_refresh_token="synthetic-signed-in")
+            os.utime(session_file, ns=(1, 1))
+            return httpx.Response(
+                200,
+                headers=[("set-cookie", "auth_refresh_token=synthetic-refresh-2; Path=/")],
+                text="<html></html>",
+            )
+
+        _mock_client(monkeypatch, handler)
+
+        refreshed = asyncio.run(FintualScraper().keepalive())
+
+        assert refreshed is True
+        assert json.loads(session_file.read_text()) == {"auth_refresh_token": "synthetic-signed-in"}
+
+    @pytest.mark.parametrize(
+        ("set_cookies", "rotated"),
+        [({"auth_refresh_token": "synthetic-refresh-2"}, True), ({}, False)],
+        ids=["rotated", "not rotated"],
+    )
+    def test_the_log_says_whether_the_refresh_token_rotated(
+        self, monkeypatch, session_file, caplog, set_cookies, rotated
+    ):
+        caplog.set_level("INFO", logger=fintual_mod.logger.name)
+        _write_session(session_file, auth_refresh_token="synthetic-refresh-1")
+        _install(
+            monkeypatch,
+            _RoutedClient({APP_URL: [(200, {})]}, set_cookies={APP_URL: set_cookies}),
+        )
+
+        asyncio.run(FintualScraper().keepalive())
+
+        assert f"auth_refresh_token rotated: {rotated}" in caplog.text
+        assert "synthetic-refresh" not in caplog.text
+
 
 class TestLoginSendsCachedCookies:
     def _sign_in(self, monkeypatch):
@@ -1054,6 +1095,58 @@ class TestLoginSendsCachedCookies:
         cookie = self._sign_in(monkeypatch)
 
         assert cookie is None
+
+
+def _initiate_server(monkeypatch, refuse):
+    """A server whose initiate_login answers 403 when `refuse(cookie header)`
+    and otherwise 200 (no 2FA); returns the Cookie headers it got."""
+    sent = []
+
+    def handler(request):
+        if request.url.path == "/auth/sessions/initiate_login":
+            cookie = request.headers.get("cookie")
+            sent.append(cookie)
+            if refuse(cookie):
+                return httpx.Response(403)
+            return httpx.Response(
+                200, headers=[("set-cookie", "auth_refresh_token=synthetic-refresh-2; Path=/")]
+            )
+        return httpx.Response(200, text="<html></html>")
+
+    _mock_client(monkeypatch, handler)
+    return sent
+
+
+class TestLoginRetriesWithoutCachedCookies:
+    def test_a_refusal_with_cached_cookies_is_retried_with_an_empty_jar(
+        self, monkeypatch, session_file
+    ):
+        _write_session(session_file, synthetic_device="synthetic-1")
+        sent = _initiate_server(monkeypatch, refuse=lambda cookie: cookie is not None)
+
+        asyncio.run(FintualScraper().login(MagicMock(return_value="000000")))
+
+        assert sent == ["synthetic_device=synthetic-1", None]
+        assert _saved_cookies(session_file) == {"auth_refresh_token": "synthetic-refresh-2"}
+
+    def test_a_refusal_without_cached_cookies_is_not_retried(self, monkeypatch):
+        sent = _initiate_server(monkeypatch, refuse=lambda cookie: True)
+
+        with pytest.raises(FintualSessionError, match="refused to start"):
+            asyncio.run(FintualScraper().login(MagicMock(return_value="000000")))
+
+        assert sent == [None]
+
+    def test_only_a_failed_clean_retry_writes_the_marker(self, monkeypatch, session_file):
+        _imap_is_the_fintual_account(monkeypatch)
+        _write_session(session_file, synthetic_device="synthetic-1")
+        sent = _initiate_server(monkeypatch, refuse=lambda cookie: True)
+
+        with pytest.raises(FintualSessionError, match="refused to start"):
+            asyncio.run(FintualScraper()._auto_login())
+
+        assert sent == ["synthetic_device=synthetic-1", None]
+        assert _marker(session_file).exists()
 
 
 # -- stocks -----------------------------------------------------------------

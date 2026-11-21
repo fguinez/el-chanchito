@@ -764,10 +764,12 @@ def _start_control_server(
 # cookie's Max-Age, so a job between the 6h runs keeps it alive (no sign-in).
 FINTUAL_KEEPALIVE_JOB = "fintual_keepalive"
 _FINTUAL_KEEPALIVE_DEFAULT_HOURS = 2.0
+# A shorter interval would only hammer Fintual; the refresh token outlives it.
+_FINTUAL_KEEPALIVE_MIN_HOURS = 0.25
 
 
 def fintual_keepalive_hours() -> float:
-    """FINTUAL_KEEPALIVE_HOURS (default 2); 0 or less disables the job."""
+    """FINTUAL_KEEPALIVE_HOURS (default 2, at least 0.25); 0 or less disables the job."""
     raw = os.environ.get("FINTUAL_KEEPALIVE_HOURS", "").strip()
     if not raw:
         return _FINTUAL_KEEPALIVE_DEFAULT_HOURS
@@ -779,7 +781,16 @@ def fintual_keepalive_hours() -> float:
             _FINTUAL_KEEPALIVE_DEFAULT_HOURS,
         )
         return _FINTUAL_KEEPALIVE_DEFAULT_HOURS
-    return hours if math.isfinite(hours) else _FINTUAL_KEEPALIVE_DEFAULT_HOURS
+    if not math.isfinite(hours):
+        return _FINTUAL_KEEPALIVE_DEFAULT_HOURS
+    if 0 < hours < _FINTUAL_KEEPALIVE_MIN_HOURS:
+        logger.warning(
+            "FINTUAL_KEEPALIVE_HOURS=%s is below the floor; using %s",
+            hours,
+            _FINTUAL_KEEPALIVE_MIN_HOURS,
+        )
+        return _FINTUAL_KEEPALIVE_MIN_HOURS
+    return hours
 
 
 async def _fintual_keepalive(scheduler: AsyncIOScheduler) -> None:
@@ -789,8 +800,9 @@ async def _fintual_keepalive(scheduler: AsyncIOScheduler) -> None:
     if job is None:
         return
     # A run or a dashboard sign-in in flight drives the session itself.
-    if _RUN_GUARD.holder("fintual") is not None:
-        logger.info("Fintual keepalive skipped: %s in progress", _RUN_GUARD.holder("fintual"))
+    holder = _RUN_GUARD.holder("fintual")
+    if holder is not None:
+        logger.info("Fintual keepalive skipped: %s in progress", holder)
         return
     await job.args[0].keepalive()
 
