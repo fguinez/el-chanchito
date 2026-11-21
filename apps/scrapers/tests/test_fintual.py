@@ -850,6 +850,24 @@ class TestRefreshEndpoint:
         assert _saved_cookies(session_file) == {"auth_refresh_token": "synthetic-refresh-2"}
         assert "via POST /abff/auth/refresh (auth_refresh_token rotated: True)" in caplog.text
 
+    @pytest.mark.parametrize("status", [503, 429])
+    def test_a_transient_answer_is_neither_retried_nor_followed(self, session_file, status):
+        """A retry could spend a rotated token twice: one POST, then raise,
+        with the cache left for the next attempt."""
+        _write_session_v2(session_file, auth_refresh_token="synthetic-refresh-1")
+        cached = session_file.read_text()
+        paths = []
+
+        def handler(request):
+            paths.append(request.url.path)
+            return httpx.Response(status)
+
+        with pytest.raises(httpx.HTTPStatusError):
+            self._refresh(handler)
+
+        assert paths == ["/abff/auth/refresh"]
+        assert session_file.read_text() == cached
+
     @pytest.mark.parametrize("code", ["no_session", "invalid_session"])
     def test_a_dead_session_answer_does_not_fall_back(self, session_file, code):
         """The token may have rotated: a second path could spend it again."""

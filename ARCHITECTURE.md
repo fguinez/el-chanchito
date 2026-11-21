@@ -1134,7 +1134,9 @@ refuses a POST without one), the app's Origin and Referer, and the cookies.
 A 2xx is a refresh; a 401 that names `no_session` or `invalid_session` is a
 dead session and ends there (a second path could spend a rotated token
 again); anything else falls back to the server-rendered `GET /app/goals`. A
-429/5xx that outlives the retries fails the run as before. Each refresh logs
+429/5xx or network error fails the run as transient: the POST is sent once,
+never retried (a retry could spend a rotated token twice), and the cache
+stays for the next keepalive or run. Each refresh logs
 which path refreshed. The path was chosen to match the web app; whether it
 changes how long the server honors the refresh token is still unverified
 live. Expired cookies are dropped from the jar before a refresh, so a token

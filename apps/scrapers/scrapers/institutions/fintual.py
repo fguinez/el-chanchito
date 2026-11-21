@@ -998,23 +998,23 @@ class FintualScraper(BaseScraper):
 
         It mimics the web app exactly: no body but an explicit
         `Content-Length: 0` (Cloudflare refuses a POST without one), and the
-        app's Origin and Referer.
+        app's Origin and Referer. Sent once, never retried: the token rotates,
+        so a retry after a failure the server may have acted on could spend
+        it twice. A 429/5xx or network error raises as transient, keeping the
+        cached cookies for the next keepalive or run.
         """
-        resp = await send_with_retry(
-            lambda: client.post(
-                REFRESH_URL,
-                headers={
-                    "Accept": "application/json",
-                    "Origin": FINTUAL_ORIGIN,
-                    "Referer": APP_URL,
-                    "Content-Length": "0",
-                },
-                content=b"",
-            ),
-            label=f"Fintual POST {_REFRESH_PATH}",
+        resp = await client.post(
+            REFRESH_URL,
+            headers={
+                "Accept": "application/json",
+                "Origin": FINTUAL_ORIGIN,
+                "Referer": APP_URL,
+                "Content-Length": "0",
+            },
+            content=b"",
         )
-        # An outage that outlived the retries says nothing about the refresh
-        # token: fail the run instead of signing in (and mailing a code).
+        # An outage says nothing about the refresh token: fail the run
+        # instead of signing in (and mailing a code).
         if resp.status_code in TRANSIENT_HTTP_STATUSES:
             resp.raise_for_status()
         if resp.is_success and resp.url.path == _REFRESH_PATH:
