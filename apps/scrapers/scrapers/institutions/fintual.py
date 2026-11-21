@@ -1164,7 +1164,14 @@ class FintualScraper(BaseScraper):
                 return False
             try:
                 refreshed = await self._refresh_session(client, loaded_mtime=loaded_mtime)
-            except (httpx.HTTPError, OSError) as exc:
+            except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+                # Only an outage is swallowed; anything else (a failed save
+                # after the token rotated, say) must reach the job's log.
+                if (
+                    isinstance(exc, httpx.HTTPStatusError)
+                    and exc.response.status_code not in TRANSIENT_HTTP_STATUSES
+                ):
+                    raise
                 logger.warning(
                     "Fintual keepalive failed (%s); the next run retries", type(exc).__name__
                 )

@@ -15,7 +15,7 @@ import stat
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import httpx
 import pytest
@@ -1230,6 +1230,21 @@ class TestKeepalive:
 
         assert refreshed is False
         assert session_file.read_text() == cached
+
+    def test_a_failed_save_after_a_rotation_propagates(self, monkeypatch, session_file):
+        """The old token is spent: a lost new one must fail loudly, not quietly."""
+        _write_session(session_file, auth_refresh_token="synthetic-refresh-1")
+        _install(
+            monkeypatch,
+            _RoutedClient(
+                {REFRESH_URL: [(200, {})]},
+                set_cookies={REFRESH_URL: {"auth_refresh_token": "synthetic-refresh-2"}},
+            ),
+        )
+        monkeypatch.setattr(FintualScraper, "_save_session", Mock(side_effect=OSError("synthetic")))
+
+        with pytest.raises(OSError, match="synthetic"):
+            asyncio.run(FintualScraper().keepalive())
 
     def test_it_skips_while_a_run_holds_the_session(self, monkeypatch, session_file):
         _write_session(session_file, auth_refresh_token="synthetic-refresh-1")
