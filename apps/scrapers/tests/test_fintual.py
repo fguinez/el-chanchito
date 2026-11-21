@@ -1341,6 +1341,33 @@ class TestLoginSendsCachedCookies:
             "auth_refresh_token": "synthetic-refresh-2",
         }
 
+    def test_a_legacy_copy_is_dropped_when_the_sign_in_sets_another_domain(
+        self, monkeypatch, session_file
+    ):
+        """A legacy cache put the cookie on fintual.cl; once the sign-in sets
+        it on .fintual.cl, only that one is saved."""
+        _write_session(session_file, synthetic_device="synthetic-1")
+
+        def handler(request):
+            return httpx.Response(
+                200,
+                headers=[
+                    ("set-cookie", "auth_refresh_token=synthetic-refresh-2; Path=/"),
+                    ("set-cookie", "synthetic_device=synthetic-2; Domain=.fintual.cl; Path=/"),
+                ],
+                text="<html></html>",
+            )
+
+        _mock_client(monkeypatch, handler)
+
+        asyncio.run(FintualScraper().login(Mock(return_value="000000")))
+
+        saved = json.loads(session_file.read_text())["cookies"]
+        assert sorted((c["name"], c["domain"], c["value"]) for c in saved) == [
+            ("auth_refresh_token", "fintual.cl", "synthetic-refresh-2"),
+            ("synthetic_device", ".fintual.cl", "synthetic-2"),
+        ]
+
     def test_without_a_cache_no_cookie_is_sent(self, monkeypatch):
         cookie = self._sign_in(monkeypatch)
 

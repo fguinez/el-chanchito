@@ -795,14 +795,10 @@ class FintualScraper(BaseScraper):
         session_account.write_account(self.session_file, self.email)
         logger.info("Saved Fintual session to %s", self.session_file)
 
-    def _cached_cookies(self) -> list[http.cookiejar.Cookie] | None:
-        """This account's cached cookies; None when there is no readable cache.
-        Another account's cache is discarded."""
-        cache = self._read_cache()
-        return cache[0] if cache is not None else None
-
     def _read_cache(self) -> tuple[list[http.cookiejar.Cookie], bool] | None:
-        """The cached cookies and whether the file is the legacy format."""
+        """This account's cached cookies and whether the file is the legacy
+        format; None when there is no readable cache. Another account's cache
+        is discarded."""
         if not self.session_file.exists():
             return None
         if not session_account.belongs_to(self.session_file, self.email):
@@ -871,11 +867,14 @@ class FintualScraper(BaseScraper):
         async with httpx.AsyncClient(
             timeout=30.0, follow_redirects=True, headers=self._base_headers()
         ) as client:
-            restored = False
-            for cookie in self._cached_cookies() or []:
-                if cookie.name not in _AUTH_COOKIES:
-                    client.cookies.jar.set_cookie(cookie)
-                    restored = True
+            cookies, legacy = self._read_cache() or ([], False)
+            kept = [c for c in cookies if c.name not in _AUTH_COOKIES]
+            for cookie in kept:
+                client.cookies.jar.set_cookie(cookie)
+            restored = bool(kept)
+            self._legacy_keys = (
+                frozenset((c.domain, c.path, c.name) for c in kept) if legacy else frozenset()
+            )
             resp = await self._initiate_login(client)
             if resp.status_code in _COOKIE_REFUSAL_STATUSES and restored:
                 logger.info(
@@ -909,6 +908,7 @@ class FintualScraper(BaseScraper):
                     f"Fintual refused to start the sign-in (HTTP {resp.status_code})."
                 )
 
+            self._drop_legacy_twins(client)
             _log_cookie_inventory(client, "sign-in")
             self._save_session(client)
             self._login_failed_file.unlink(missing_ok=True)
@@ -1124,7 +1124,7 @@ class FintualScraper(BaseScraper):
         return True
 
     def _drop_legacy_twins(self, client: httpx.AsyncClient) -> None:
-        """After a refresh, drop each cookie a legacy cache put on fintual.cl
+        """After a refresh or a sign-in, drop each cookie a legacy cache put on fintual.cl
         that the server now set on another domain, so no name is sent twice."""
         keys, self._legacy_keys = self._legacy_keys, frozenset()
         for domain, path, name in keys:
