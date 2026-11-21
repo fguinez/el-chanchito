@@ -1127,14 +1127,29 @@ resolves and GraphQL reports no error) gets no stock products, no movements
 and no warning; nothing resolving next to a GraphQL error fails the leg (the
 movements are still read).
 
+A refresh (on a 401, or from the keepalive below) first calls the endpoint the
+web app itself refreshes through after a 401, `POST /abff/auth/refresh`,
+mimicked exactly: no body but an explicit `Content-Length: 0` (Cloudflare
+refuses a POST without one), the app's Origin and Referer, and the cookies.
+A 2xx is a refresh; a 401 that names `no_session` or `invalid_session` is a
+dead session and ends there (a second path could spend a rotated token
+again); anything else falls back to the server-rendered `GET /app/goals`. A
+429/5xx that outlives the retries fails the run as before. Each refresh logs
+which path refreshed. The path was chosen to match the web app; whether it
+changes how long the server honors the refresh token is still unverified
+live. Expired cookies are dropped from the jar before a refresh, so a token
+past its expiry is never sent along.
+
 The session cache keeps every cookie with its attributes (domain, path,
-expiry, Secure, HttpOnly; a file from before that, a bare name -> value map,
-still loads onto `fintual.cl`). The server rejects an idle refresh token after
+expiry, Secure, HttpOnly). A file from before that, a bare name -> value map,
+still loads onto `fintual.cl`, minus `monolith_token` and the service JWTs
+(`stocks-pricing_service_jwt`, `intracom_service_jwt`): they live only
+minutes and that format kept no expiry for them. The server rejects an idle refresh token after
 several hours, well before the cookie's Max-Age, so the 6h runs alone would
 often find it dead and need a 2FA sign-in. A separate `fintual_keepalive`
 scheduler job (every `FINTUAL_KEEPALIVE_HOURS`, default 2, never under 0.25,
 0 disables it; only while Fintual is enabled) runs
-`FintualScraper.keepalive()`: the same `/app/goals` refresh, under the run's
+`FintualScraper.keepalive()`: the same refresh, under the run's
 session lock, saving the rotated cookies. It records no scraper run and never
 signs in: with no session, a dead one or the `.login-failed` marker it only
 logs, leaving the next run to sign in, and a 429/5xx or network error is
