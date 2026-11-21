@@ -258,6 +258,11 @@ def _write_session(path, **cookies):
     session_account.write_account(path, os.environ["FINTUAL_EMAIL"])
 
 
+def _saved_cookies(path):
+    """Name -> value of the cookies a save wrote."""
+    return {c["name"]: c["value"] for c in json.loads(path.read_text())["cookies"]}
+
+
 def _imap_is_the_fintual_account(monkeypatch):
     monkeypatch.setenv("FINTUAL_EMAIL", "test@example.com")
     monkeypatch.setenv("EMAIL_IMAP_USER", "test@example.com")
@@ -352,7 +357,7 @@ class TestSessionRefresh:
         login.assert_not_awaited()
         assert client.calls == [GOALS_URL, APP_URL, GOALS_URL, GRAPHQL_URL]
         assert [p.external_ref for p in result.products] == ["34567"]
-        assert json.loads(session_file.read_text()) == {
+        assert _saved_cookies(session_file) == {
             "monolith_token": "synthetic-fresh",
             "auth_refresh_token": "synthetic-refresh-2",
         }
@@ -408,7 +413,7 @@ class TestSessionRefresh:
         with pytest.raises(httpx.HTTPStatusError):
             asyncio.run(FintualScraper().scrape_products())
 
-        assert json.loads(session_file.read_text()) == {"auth_refresh_token": "synthetic-refresh-2"}
+        assert _saved_cookies(session_file) == {"auth_refresh_token": "synthetic-refresh-2"}
         _assert_owner_only(session_file)
 
     def test_concurrent_runs_spend_the_refresh_token_once(self, monkeypatch, session_file):
@@ -431,7 +436,7 @@ class TestSessionRefresh:
 
         assert server.refreshes == 1
         assert [len(r.products) for r in results] == [1, 1]
-        assert json.loads(session_file.read_text())["auth_refresh_token"] == ("synthetic-refresh-2")
+        assert _saved_cookies(session_file)["auth_refresh_token"] == ("synthetic-refresh-2")
 
     def test_a_run_never_signs_in_twice(self, monkeypatch):
         """If the session a run just signed in for is refused, the run fails
@@ -523,7 +528,7 @@ class TestAutoLogin:
         assert len(lookups) == 1
         assert before - skew <= lookups[0]["received_after"] <= initiated - skew
         assert [p.external_ref for p in result.products] == ["34567"]
-        assert json.loads(session_file.read_text()) == {"auth_refresh_token": "synthetic-refresh-1"}
+        assert _saved_cookies(session_file) == {"auth_refresh_token": "synthetic-refresh-1"}
 
 
 class TestLoginFailureGuard:
@@ -647,7 +652,7 @@ class TestLoginFailureGuard:
         asyncio.run(FintualScraper().login(lambda: "000000"))
 
         assert not marker.exists()
-        assert json.loads(session_file.read_text()) == {"auth_refresh_token": "synthetic-refresh-1"}
+        assert _saved_cookies(session_file) == {"auth_refresh_token": "synthetic-refresh-1"}
 
 
 class TestLoginFailureFingerprint:
@@ -768,7 +773,7 @@ class TestRealCookieJar:
 
         assert refreshed is True
         assert "auth_refresh_token=synthetic-refresh-1" in sent[0]
-        assert json.loads(session_file.read_text()) == {
+        assert _saved_cookies(session_file) == {
             "monolith_token": "synthetic-fresh",
             "auth_refresh_token": "synthetic-refresh-2",
         }
@@ -807,6 +812,248 @@ class TestLoadSession:
 
         assert loaded is hit
         assert dict(client.cookies) == cookies
+
+    def test_the_original_format_loads_onto_fintual_cl(self, session_file):
+        """A name -> value file from before attributes were kept still loads."""
+        _write_session(session_file, auth_refresh_token="synthetic-refresh-1")
+        client = SimpleNamespace(cookies=httpx.Cookies())
+
+        loaded = FintualScraper()._load_session(client)
+
+        (cookie,) = client.cookies.jar
+        assert loaded is True
+        assert (cookie.domain, cookie.path, cookie.expires) == ("fintual.cl", "/", None)
+
+
+# A fixed instant far before the synthetic cookies' expiry.
+_NOW = datetime(2026, 1, 2, tzinfo=UTC).timestamp()
+_FAR_EXPIRY = "Thu, 01 Jan 2099 00:00:00 GMT"
+
+
+def _mock_client(monkeypatch, handler):
+    """Swap the module's AsyncClient for a real one over `handler`."""
+    monkeypatch.setattr(
+        fintual_mod.httpx,
+        "AsyncClient",
+        lambda **kwargs: _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler), **kwargs),
+    )
+
+
+class TestSessionFile:
+    def test_cookie_attributes_survive_a_save_and_a_load(self, monkeypatch, session_file):
+        """Domain, path, expiry and flags from Set-Cookie are saved and come
+        back as they were, duplicate names on other domains included."""
+        _write_session(session_file, auth_refresh_token="synthetic-refresh-1")
+
+        def handler(request):
+            return httpx.Response(
+                200,
+                headers=[
+                    (
+                        "set-cookie",
+                        "auth_refresh_token=synthetic-refresh-2; Path=/; "
+                        f"Expires={_FAR_EXPIRY}; Secure; HttpOnly",
+                    ),
+                    ("set-cookie", "synthetic_device=synthetic-1; Domain=.fintual.cl; Path=/f"),
+                ],
+                text="<html></html>",
+            )
+
+        async def refresh_then_reload():
+            async with _REAL_ASYNC_CLIENT(
+                transport=httpx.MockTransport(handler), follow_redirects=True
+            ) as client:
+                scraper = FintualScraper()
+                scraper._load_session(client)
+                await scraper._refresh_session(client)
+            reloaded = SimpleNamespace(cookies=httpx.Cookies())
+            scraper._load_session(reloaded)
+            return reloaded
+
+        reloaded = asyncio.run(refresh_then_reload())
+
+        data = json.loads(session_file.read_text())
+        restored = {
+            c.name: (c.domain, c.path, c.expires, c.secure, fintual_mod._is_httponly(c))
+            for c in reloaded.cookies.jar
+        }
+        assert data["version"] == 2
+        assert restored == {
+            "auth_refresh_token": ("fintual.cl", "/", 4070908800, True, True),
+            "synthetic_device": (".fintual.cl", "/f", None, False, False),
+        }
+        assert _saved_cookies(session_file)["auth_refresh_token"] == "synthetic-refresh-2"
+        _assert_owner_only(session_file)
+        assert session_account.belongs_to(session_file, os.environ["FINTUAL_EMAIL"])
+
+    def test_expired_and_malformed_cookies_are_left_out(self):
+        data = {
+            "version": 2,
+            "cookies": [
+                {"name": "kept", "value": "synthetic", "domain": "fintual.cl", "path": "/"},
+                {
+                    "name": "expired",
+                    "value": "synthetic",
+                    "domain": "fintual.cl",
+                    "path": "/",
+                    "expires": int(_NOW) - 1,
+                },
+                {"name": "no_domain", "value": "synthetic", "path": "/"},
+                {
+                    "name": "bad_expiry",
+                    "value": "synthetic",
+                    "domain": "fintual.cl",
+                    "path": "/",
+                    "expires": "soon",
+                },
+                "not a cookie",
+            ],
+        }
+
+        cookies = fintual_mod.parse_session_cookies(data, _NOW)
+
+        assert [c.name for c in cookies] == ["kept"]
+
+    def test_names_domains_and_expiries_are_logged_never_values(self, session_file, caplog):
+        _write_session(session_file, auth_refresh_token="synthetic-refresh-1")
+        caplog.set_level("DEBUG", logger=fintual_mod.logger.name)
+
+        def handler(request):
+            return httpx.Response(
+                200,
+                headers=[
+                    (
+                        "set-cookie",
+                        f"auth_refresh_token=synthetic-refresh-2; Path=/; Expires={_FAR_EXPIRY}",
+                    )
+                ],
+                text="<html></html>",
+            )
+
+        async def refresh():
+            async with _REAL_ASYNC_CLIENT(
+                transport=httpx.MockTransport(handler), follow_redirects=True
+            ) as client:
+                scraper = FintualScraper()
+                scraper._load_session(client)
+                await scraper._refresh_session(client)
+
+        asyncio.run(refresh())
+
+        assert "auth_refresh_token domain=fintual.cl path=/ expires=2099-01-01" in caplog.text
+        assert "synthetic-refresh" not in caplog.text
+
+
+class TestKeepalive:
+    def test_it_refreshes_and_saves_the_rotated_token(self, monkeypatch, session_file):
+        _write_session(session_file, auth_refresh_token="synthetic-refresh-1")
+        login = AsyncMock()
+        monkeypatch.setattr(FintualScraper, "login", login)
+        client = _install(
+            monkeypatch,
+            _RoutedClient(
+                {APP_URL: [(200, {})]},
+                set_cookies={APP_URL: {"auth_refresh_token": "synthetic-refresh-2"}},
+            ),
+        )
+
+        refreshed = asyncio.run(FintualScraper().keepalive())
+
+        assert refreshed is True
+        assert client.calls == [APP_URL]
+        assert _saved_cookies(session_file) == {"auth_refresh_token": "synthetic-refresh-2"}
+        login.assert_not_awaited()
+
+    @pytest.mark.parametrize("state", ["no session", "dead session", "login-failed marker"])
+    def test_it_never_signs_in(self, monkeypatch, session_file, state):
+        """Even when an unattended sign-in is possible, the next run is the
+        one that signs in: no 2FA e-mail comes from a keepalive."""
+        _imap_is_the_fintual_account(monkeypatch)
+        if state != "no session":
+            _write_session(session_file, auth_refresh_token="synthetic-refresh-1")
+        if state == "login-failed marker":
+            _marker(session_file).write_text("synthetic-marker")
+        login = AsyncMock()
+        monkeypatch.setattr(FintualScraper, "login", login)
+        client = _install(monkeypatch, _RoutedClient({**_LOGIN_ROUTES, APP_URL: [(401, {})]}))
+
+        refreshed = asyncio.run(FintualScraper().keepalive())
+
+        assert refreshed is False
+        assert client.calls == ([APP_URL] if state == "dead session" else [])
+        login.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "answer",
+        [(503, {}), (429, {}), httpx.ConnectError("synthetic")],
+        ids=["5xx", "429", "transport"],
+    )
+    def test_a_transient_failure_is_swallowed(self, monkeypatch, session_file, answer):
+        monkeypatch.setattr("scrapers.retry.BASE_DELAY_SECONDS", 0.0)
+        _write_session(session_file, auth_refresh_token="synthetic-refresh-1")
+        cached = session_file.read_text()
+        _install(monkeypatch, _RoutedClient({APP_URL: [answer]}))
+
+        refreshed = asyncio.run(FintualScraper().keepalive())
+
+        assert refreshed is False
+        assert session_file.read_text() == cached
+
+    def test_it_skips_while_a_run_holds_the_session(self, monkeypatch, session_file):
+        _write_session(session_file, auth_refresh_token="synthetic-refresh-1")
+        client = _install(monkeypatch, _RoutedClient({APP_URL: [(200, {})]}))
+        scraper = FintualScraper()
+
+        async def keepalive_during_a_run():
+            async with scraper._session_lock:
+                return await scraper.keepalive()
+
+        refreshed = asyncio.run(keepalive_during_a_run())
+
+        assert refreshed is False
+        assert client.calls == []
+
+
+class TestLoginSendsCachedCookies:
+    def _sign_in(self, monkeypatch):
+        """Sign in against a server that skips the 2FA; return the Cookie
+        header initiate_login got."""
+        sent = {}
+
+        def handler(request):
+            if request.url.path == "/auth/sessions/initiate_login":
+                sent["cookie"] = request.headers.get("cookie")
+                return httpx.Response(
+                    200, headers=[("set-cookie", "auth_refresh_token=synthetic-refresh-2; Path=/")]
+                )
+            return httpx.Response(200, text="<html></html>")
+
+        _mock_client(monkeypatch, handler)
+        code_provider = MagicMock(return_value="000000")
+        asyncio.run(FintualScraper().login(code_provider))
+        code_provider.assert_not_called()
+        return sent["cookie"]
+
+    def test_the_cached_non_auth_cookies_go_along(self, monkeypatch, session_file):
+        _write_session(
+            session_file,
+            auth_refresh_token="synthetic-dead",
+            monolith_token="synthetic-dead",
+            synthetic_device="synthetic-1",
+        )
+
+        cookie = self._sign_in(monkeypatch)
+
+        assert cookie == "synthetic_device=synthetic-1"
+        assert _saved_cookies(session_file) == {
+            "synthetic_device": "synthetic-1",
+            "auth_refresh_token": "synthetic-refresh-2",
+        }
+
+    def test_without_a_cache_no_cookie_is_sent(self, monkeypatch):
+        cookie = self._sign_in(monkeypatch)
+
+        assert cookie is None
 
 
 # -- stocks -----------------------------------------------------------------
@@ -1314,7 +1561,7 @@ class TestStocksLeg:
             "WalletMovements",
         ]
         assert server.requests[5].url.params["symbols"] == "ACME,GLBX"
-        assert json.loads(session_file.read_text()) == {
+        assert _saved_cookies(session_file) == {
             "auth_refresh_token": "synthetic-refresh-1",
             _JWT_COOKIE: "synthetic-jwt",
         }
@@ -1602,7 +1849,7 @@ class TestStocksLeg:
         assert result.warnings == []
         assert server.paths().count("/app/goals") == 1
         assert ("stock", "USD", "stock:000101") in _by_ref(result.products)
-        assert json.loads(session_file.read_text())["auth_refresh_token"] == ("synthetic-refresh-2")
+        assert _saved_cookies(session_file)["auth_refresh_token"] == ("synthetic-refresh-2")
 
     def test_a_run_refreshes_the_session_at_most_once(self, monkeypatch, session_file):
         """Once the goals leg has refreshed, a /gql/ 401 doesn't spend the
@@ -1923,7 +2170,7 @@ class TestPriceHistoryLeg:
         }
         assert len(transactions) == 5
         assert server.paths()[-1] == "/stocks-pricing-cl/historical-prices"
-        assert json.loads(session_file.read_text())[_JWT_COOKIE] == "synthetic-jwt"
+        assert _saved_cookies(session_file)[_JWT_COOKIE] == "synthetic-jwt"
 
     def test_running_over_the_budget_keeps_the_series_already_read(self, monkeypatch, session_file):
         """The budget spans the requests: a stock that hangs costs its own
@@ -1964,7 +2211,7 @@ class TestPriceHistoryLeg:
             ("wallet", "USD", None),
         }
         assert len(transactions) == 5
-        assert json.loads(session_file.read_text())[_JWT_COOKIE] == "synthetic-jwt"
+        assert _saved_cookies(session_file)[_JWT_COOKIE] == "synthetic-jwt"
 
     @pytest.mark.parametrize(
         "portfolio",
