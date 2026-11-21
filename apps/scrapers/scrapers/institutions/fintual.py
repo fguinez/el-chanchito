@@ -864,16 +864,10 @@ class FintualScraper(BaseScraper):
         )
 
     async def login(self, code_provider: Callable[[], str | Awaitable[str]]) -> None:
-        """Sign in and cache the session.
-
-        `code_provider` is called (only when 2FA is required) to obtain the
-        6-digit code Fintual e-mails to the account address. It may be sync
-        (interactive prompt) or async (reading the code from the IMAP inbox).
-        The cached cookies other than the session's own tokens go along, so a
-        device Fintual already trusts may sign in without the code. If
-        initiate_login refuses them, it is tried once more with an empty jar
-        (a refusal mails no code, so the retry is safe).
-        """
+        """Sign in and cache the session; `code_provider` (sync or async) gives
+        the e-mailed 2FA code. Cached non-token cookies go along, so a trusted
+        device may skip the code; if initiate_login refuses them, one retry with
+        an empty jar is safe (a refusal mails no code)."""
         async with httpx.AsyncClient(
             timeout=30.0, follow_redirects=True, headers=self._base_headers()
         ) as client:
@@ -1039,17 +1033,10 @@ class FintualScraper(BaseScraper):
             return None
 
     async def _post_refresh(self, client: httpx.AsyncClient) -> bool | None:
-        """The web app's refresh: True on a 2xx that issued a monolith_token
-        or rotated the refresh token, False on a 401 that names a dead
-        session, None on anything else (the caller falls back).
-
-        It mimics the web app exactly: no body but an explicit
-        `Content-Length: 0` (Cloudflare refuses a POST without one), and the
-        app's Origin and Referer. Sent once, never retried: the token rotates,
-        so a retry after a failure the server may have acted on could spend
-        it twice. A 429/5xx or network error raises as transient, keeping the
-        cached cookies for the next keepalive or run.
-        """
+        """The web app's refresh: True if a 2xx issued new tokens, False on a
+        dead-session 401, None otherwise (the caller falls back). Sent once,
+        never retried: the token rotates, so a retry could spend it twice.
+        Cloudflare refuses the POST without an explicit `Content-Length: 0`."""
         tokens_before = _session_tokens(client)
         resp = await client.post(
             REFRESH_URL,
@@ -1105,17 +1092,10 @@ class FintualScraper(BaseScraper):
     async def _refresh_session(
         self, client: httpx.AsyncClient, loaded_mtime: int | None = None
     ) -> bool:
-        """Refresh an expired session the way the website does; True on success.
-
-        The web app's POST goes first; GET /app/goals only when it answers
-        something unexpected, never after a clear dead-session 401 (the
-        token may have rotated). Expired cookies are dropped before either.
-        The refresh token rotates on every use, so the jar is saved at once,
-        before anything else can fail and strand the spent one on disk. With
-        `loaded_mtime` (the cache file's mtime when the session was loaded), a
-        file that changed meanwhile is not overwritten: a sign-in outside the
-        session lock (the dashboard's) saved a newer session there.
-        """
+        """Refresh the session the way the website does; True on success. The
+        rotated token is saved at once, unless the file changed since
+        `loaded_mtime` (a dashboard sign-in, outside the lock, saved a newer
+        session). No GET fallback after a dead-session 401: it could respend."""
         client.cookies.jar.clear_expired_cookies()
         before = {c.value for c in client.cookies.jar if c.name == _SESSION_COOKIE}
         via = f"POST {_REFRESH_PATH}"
@@ -1155,16 +1135,10 @@ class FintualScraper(BaseScraper):
                     pass
 
     async def keepalive(self) -> bool:
-        """Refresh the cached session between scrapes; True when it did.
-
-        The server rejects an idle refresh token after several hours, well
-        before the cookie's Max-Age, so a cheap periodic refresh keeps it
-        alive. This never signs in (no 2FA e-mail): without a session, with a
-        dead one or after a failed automatic sign-in it only logs, and the
-        next run handles it. A transient failure (429/5xx after the retries,
-        the network) is logged and swallowed. It shares the run's session
-        lock and skips while a run holds it: that run refreshes anyway.
-        """
+        """Refresh the cached session between scrapes; True when it did. The
+        server drops an idle refresh token well before its Max-Age. Never
+        signs in (no 2FA e-mail): a missing or dead session is left to the
+        next run, and only an outage is swallowed."""
         if self._session_lock.locked():
             logger.info("Fintual keepalive: a run holds the session; skipped")
             return False
