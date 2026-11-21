@@ -1320,7 +1320,7 @@ class TestLoginSendsCachedCookies:
             return httpx.Response(200, text="<html></html>")
 
         _mock_client(monkeypatch, handler)
-        code_provider = MagicMock(return_value="000000")
+        code_provider = Mock(return_value="000000")
         asyncio.run(FintualScraper().login(code_provider))
         code_provider.assert_not_called()
         return sent["cookie"]
@@ -1377,7 +1377,7 @@ class TestLoginRetriesWithoutCachedCookies:
             monkeypatch, refuse=lambda cookie: cookie is not None, status=status
         )
 
-        asyncio.run(FintualScraper().login(MagicMock(return_value="000000")))
+        asyncio.run(FintualScraper().login(Mock(return_value="000000")))
 
         assert sent == ["synthetic_device=synthetic-1", None]
         assert _saved_cookies(session_file) == {"auth_refresh_token": "synthetic-refresh-2"}
@@ -1389,7 +1389,7 @@ class TestLoginRetriesWithoutCachedCookies:
         sent = _initiate_server(monkeypatch, refuse=lambda cookie: True, status=status)
 
         with pytest.raises(FintualSessionError, match="refused to start"):
-            asyncio.run(FintualScraper().login(MagicMock(return_value="000000")))
+            asyncio.run(FintualScraper().login(Mock(return_value="000000")))
 
         assert sent == ["synthetic_device=synthetic-1"]
 
@@ -1397,7 +1397,7 @@ class TestLoginRetriesWithoutCachedCookies:
         sent = _initiate_server(monkeypatch, refuse=lambda cookie: True)
 
         with pytest.raises(FintualSessionError, match="refused to start"):
-            asyncio.run(FintualScraper().login(MagicMock(return_value="000000")))
+            asyncio.run(FintualScraper().login(Mock(return_value="000000")))
 
         assert sent == [None]
 
