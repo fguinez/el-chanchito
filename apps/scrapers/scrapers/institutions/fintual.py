@@ -84,7 +84,7 @@ import secrets
 import tempfile
 from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
@@ -578,40 +578,61 @@ def _is_httponly(cookie: http.cookiejar.Cookie) -> bool:
     return any(cookie.has_nonstandard_attr(key) for key in ("HttpOnly", "httponly", "HTTPONLY"))
 
 
-def _cookie_record(cookie: http.cookiejar.Cookie) -> dict[str, Any]:
-    return {
-        "name": cookie.name,
-        "value": cookie.value,
-        "domain": cookie.domain,
-        "path": cookie.path,
-        "expires": cookie.expires,
-        "secure": cookie.secure,
-        "httponly": _is_httponly(cookie),
-    }
+@dataclass(frozen=True)
+class CookieRecord:
+    """One cookie as the session file stores it."""
 
+    name: str
+    value: str
+    domain: str
+    path: str
+    expires: int | None = None
+    secure: bool = False
+    httponly: bool = False
 
-def _cookie_from_record(record: Any) -> http.cookiejar.Cookie | None:
-    """A saved cookie; None when the record is malformed."""
-    if not isinstance(record, dict):
-        return None
-    name, value = record.get("name"), record.get("value")
-    domain, path = record.get("domain"), record.get("path")
-    expires = record.get("expires")
-    if not (isinstance(name, str) and isinstance(value, str) and value):
-        return None
-    if not (isinstance(domain, str) and domain and isinstance(path, str) and path):
-        return None
-    if expires is not None and (not isinstance(expires, int) or isinstance(expires, bool)):
-        return None
-    return _make_cookie(
-        name,
-        value,
-        domain=domain,
-        path=path,
-        expires=expires,
-        secure=record.get("secure") is True,
-        httponly=record.get("httponly") is True,
-    )
+    @classmethod
+    def from_cookie(cls, cookie: http.cookiejar.Cookie) -> "CookieRecord":
+        return cls(
+            name=cookie.name,
+            value=cookie.value or "",
+            domain=cookie.domain,
+            path=cookie.path,
+            expires=cookie.expires,
+            secure=cookie.secure,
+            httponly=_is_httponly(cookie),
+        )
+
+    @classmethod
+    def from_json(cls, raw: Any) -> "CookieRecord | None":
+        """A record read back from the file; None when it is malformed."""
+        if not isinstance(raw, dict):
+            return None
+        try:
+            record = cls(**{f.name: raw[f.name] for f in fields(cls) if f.name in raw})
+        except TypeError:  # a required field is missing
+            return None
+        return record if record.is_valid() else None
+
+    def is_valid(self) -> bool:
+        texts = (self.name, self.value, self.domain, self.path)
+        if not all(isinstance(text, str) and text for text in texts):
+            return False
+        if self.expires is not None and (
+            not isinstance(self.expires, int) or isinstance(self.expires, bool)
+        ):
+            return False
+        return isinstance(self.secure, bool) and isinstance(self.httponly, bool)
+
+    def to_cookie(self) -> http.cookiejar.Cookie:
+        return _make_cookie(
+            self.name,
+            self.value,
+            domain=self.domain,
+            path=self.path,
+            expires=self.expires,
+            secure=self.secure,
+            httponly=self.httponly,
+        )
 
 
 def parse_session_cookies(data: Any, now: float) -> list[http.cookiejar.Cookie]:
@@ -620,8 +641,8 @@ def parse_session_cookies(data: Any, now: float) -> list[http.cookiejar.Cookie]:
     without the short-lived tokens, whose expiry it never kept). Malformed
     entries and cookies expired at `now` are left out."""
     if isinstance(data, dict) and isinstance(data.get("cookies"), list):
-        parsed = [_cookie_from_record(record) for record in data["cookies"]]
-        cookies = [c for c in parsed if c is not None]
+        records = [CookieRecord.from_json(raw) for raw in data["cookies"]]
+        cookies = [r.to_cookie() for r in records if r is not None]
     elif isinstance(data, dict):
         cookies = [
             _make_cookie(name, value)
@@ -754,7 +775,7 @@ class FintualScraper(BaseScraper):
     def _save_session(self, client: httpx.AsyncClient) -> None:
         session = {
             "version": _SESSION_FORMAT_VERSION,
-            "cookies": [_cookie_record(c) for c in client.cookies.jar if c.value],
+            "cookies": [asdict(CookieRecord.from_cookie(c)) for c in client.cookies.jar if c.value],
         }
         # Session tokens are secrets: the temp file is created private (0600),
         # and swapping it in whole means a kill mid-write can't lose a rotated
