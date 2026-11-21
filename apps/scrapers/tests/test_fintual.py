@@ -624,7 +624,10 @@ class TestLoginFailureGuard:
         monkeypatch.setattr(FintualScraper, "login", login)
         _install(
             monkeypatch,
-            _RoutedClient({GOALS_URL: [(401, {}), (200, _ONE_GOAL)], REFRESH_URL: [(200, {})]}),
+            _RoutedClient(
+                {GOALS_URL: [(401, {}), (200, _ONE_GOAL)], REFRESH_URL: [(200, {})]},
+                set_cookies={REFRESH_URL: {"monolith_token": "synthetic-fresh"}},
+            ),
         )
 
         result = asyncio.run(FintualScraper().scrape_products())
@@ -919,12 +922,87 @@ class TestRefreshEndpoint:
 
         def handler(request):
             sent.append(request.headers.get("cookie"))
-            return httpx.Response(200, json={})
+            return httpx.Response(
+                200, headers=[("set-cookie", "monolith_token=synthetic-fresh; Path=/")], json={}
+            )
 
         self._refresh(handler, jar_extra=[expired])
 
         assert sent == ["auth_refresh_token=synthetic-refresh-1"]
-        assert _saved_cookies(session_file) == {"auth_refresh_token": "synthetic-refresh-1"}
+        assert _saved_cookies(session_file) == {
+            "auth_refresh_token": "synthetic-refresh-1",
+            "monolith_token": "synthetic-fresh",
+        }
+
+    def test_a_2xx_without_new_tokens_falls_back_to_app_goals(self, session_file):
+        _write_session_v2(session_file, auth_refresh_token="synthetic-refresh-1")
+        paths = []
+
+        def handler(request):
+            paths.append(request.url.path)
+            if request.url.path == "/abff/auth/refresh":
+                return httpx.Response(200, json={})
+            return httpx.Response(
+                200,
+                headers=[("set-cookie", "auth_refresh_token=synthetic-refresh-2; Path=/")],
+                text="<html></html>",
+            )
+
+        refreshed = self._refresh(handler)
+
+        assert refreshed is True
+        assert paths == ["/abff/auth/refresh", "/app/goals"]
+        assert _saved_cookies(session_file) == {"auth_refresh_token": "synthetic-refresh-2"}
+
+    def test_the_fallback_sends_a_token_rotated_by_a_refused_post(self, session_file):
+        """A 4xx that still rotated the token: the GET must send the new one."""
+        _write_session_v2(session_file, auth_refresh_token="synthetic-refresh-1")
+        sent = {}
+
+        def handler(request):
+            sent[request.url.path] = request.headers.get("cookie")
+            if request.url.path == "/abff/auth/refresh":
+                return httpx.Response(
+                    403,
+                    headers=[("set-cookie", "auth_refresh_token=synthetic-refresh-2; Path=/")],
+                    text="synthetic",
+                )
+            return httpx.Response(200, text="<html></html>")
+
+        refreshed = self._refresh(handler)
+
+        assert refreshed is True
+        assert sent == {
+            "/abff/auth/refresh": "auth_refresh_token=synthetic-refresh-1",
+            "/app/goals": "auth_refresh_token=synthetic-refresh-2",
+        }
+
+    def test_a_legacy_copy_is_dropped_when_the_server_sets_another_domain(self, session_file):
+        """A legacy cache put the token on fintual.cl; once the server sets it
+        on .fintual.cl, only that one is kept and sent."""
+        _write_session(session_file, auth_refresh_token="synthetic-refresh-1")
+        sent = []
+
+        def handler(request):
+            sent.append(request.headers.get("cookie"))
+            return httpx.Response(
+                200,
+                headers=[
+                    (
+                        "set-cookie",
+                        "auth_refresh_token=synthetic-refresh-2; Domain=.fintual.cl; Path=/",
+                    )
+                ],
+                json={},
+            )
+
+        refreshed = self._refresh(handler)
+
+        saved = json.loads(session_file.read_text())["cookies"]
+        assert refreshed is True
+        assert [(c["domain"], c["value"]) for c in saved] == [
+            (".fintual.cl", "synthetic-refresh-2")
+        ]
 
 
 class TestLoadSession:
@@ -1190,7 +1268,10 @@ class TestKeepalive:
 
     @pytest.mark.parametrize(
         ("set_cookies", "rotated"),
-        [({"auth_refresh_token": "synthetic-refresh-2"}, True), ({}, False)],
+        [
+            ({"auth_refresh_token": "synthetic-refresh-2"}, True),
+            ({"monolith_token": "synthetic-fresh"}, False),
+        ],
         ids=["rotated", "not rotated"],
     )
     def test_the_log_says_whether_the_refresh_token_rotated(

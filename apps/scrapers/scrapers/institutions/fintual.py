@@ -644,6 +644,15 @@ def _strings(value: Any) -> list[str]:
     return []
 
 
+def _session_tokens(client: httpx.AsyncClient) -> dict[str, set[str]]:
+    """The jar's monolith_token and auth_refresh_token values, by name."""
+    tokens: dict[str, set[str]] = {}
+    for cookie in client.cookies.jar:
+        if cookie.name in ("monolith_token", _SESSION_COOKIE) and cookie.value:
+            tokens.setdefault(cookie.name, set()).add(cookie.value)
+    return tokens
+
+
 def _is_dead_session_answer(resp: httpx.Response) -> bool:
     """Whether a 401 from the refresh endpoint names a missing or rejected
     refresh token (`no_session` / `invalid_session`)."""
@@ -725,6 +734,9 @@ class FintualScraper(BaseScraper):
         # 2FA code) twice.
         self._cached: _Cycle | None = None
         self._error: Exception | None = None
+        # (domain, path, name) of the cookies loaded from a legacy cache,
+        # which put every cookie on fintual.cl whatever the server set.
+        self._legacy_keys: frozenset[tuple[str, str, str]] = frozenset()
 
     # -- session persistence ------------------------------------------------
 
@@ -762,6 +774,11 @@ class FintualScraper(BaseScraper):
     def _cached_cookies(self) -> list[http.cookiejar.Cookie] | None:
         """This account's cached cookies; None when there is no readable cache.
         Another account's cache is discarded."""
+        cache = self._read_cache()
+        return cache[0] if cache is not None else None
+
+    def _read_cache(self) -> tuple[list[http.cookiejar.Cookie], bool] | None:
+        """The cached cookies and whether the file is the legacy format."""
         if not self.session_file.exists():
             return None
         if not session_account.belongs_to(self.session_file, self.email):
@@ -772,13 +789,18 @@ class FintualScraper(BaseScraper):
             data = json.loads(self.session_file.read_text())
         except (json.JSONDecodeError, OSError):
             return None
-        return parse_session_cookies(data, datetime.now(UTC).timestamp())
+        legacy = isinstance(data, dict) and not isinstance(data.get("cookies"), list)
+        return parse_session_cookies(data, datetime.now(UTC).timestamp()), legacy
 
     def _load_session(self, client: httpx.AsyncClient) -> bool:
         """Restore cached cookies onto `client`; return True if a session exists."""
-        cookies = self._cached_cookies()
-        if cookies is None:
+        cache = self._read_cache()
+        if cache is None:
             return False
+        cookies, legacy = cache
+        self._legacy_keys = (
+            frozenset((c.domain, c.path, c.name) for c in cookies) if legacy else frozenset()
+        )
         for cookie in cookies:
             client.cookies.jar.set_cookie(cookie)
         return any(c.name == _SESSION_COOKIE for c in cookies)
@@ -993,8 +1015,9 @@ class FintualScraper(BaseScraper):
             return None
 
     async def _post_refresh(self, client: httpx.AsyncClient) -> bool | None:
-        """The web app's refresh: True on a 2xx, False on a 401 that names a
-        dead session, None on anything else (the caller falls back).
+        """The web app's refresh: True on a 2xx that issued a monolith_token
+        or rotated the refresh token, False on a 401 that names a dead
+        session, None on anything else (the caller falls back).
 
         It mimics the web app exactly: no body but an explicit
         `Content-Length: 0` (Cloudflare refuses a POST without one), and the
@@ -1003,6 +1026,7 @@ class FintualScraper(BaseScraper):
         it twice. A 429/5xx or network error raises as transient, keeping the
         cached cookies for the next keepalive or run.
         """
+        tokens_before = _session_tokens(client)
         resp = await client.post(
             REFRESH_URL,
             headers={
@@ -1018,7 +1042,11 @@ class FintualScraper(BaseScraper):
         if resp.status_code in TRANSIENT_HTTP_STATUSES:
             resp.raise_for_status()
         if resp.is_success and resp.url.path == _REFRESH_PATH:
-            return True
+            issued = _session_tokens(client)
+            if any(values - tokens_before.get(name, set()) for name, values in issued.items()):
+                return True
+            logger.info("Fintual: the refresh endpoint answered 2xx without new tokens.")
+            return None
         if resp.status_code == 401 and _is_dead_session_answer(resp):
             logger.info("Fintual: the refresh endpoint reports a dead session.")
             return False
@@ -1073,6 +1101,7 @@ class FintualScraper(BaseScraper):
             refreshed = await self._get_app_refresh(client)
         if not refreshed:
             return False
+        self._drop_legacy_twins(client)
         _log_cookie_inventory(client, "refresh")
         after = {c.value for c in client.cookies.jar if c.name == _SESSION_COOKIE}
         rotated = bool(after) and after != before
@@ -1089,6 +1118,17 @@ class FintualScraper(BaseScraper):
             "Fintual: session refreshed via %s (%s rotated: %s).", via, _SESSION_COOKIE, rotated
         )
         return True
+
+    def _drop_legacy_twins(self, client: httpx.AsyncClient) -> None:
+        """After a refresh, drop each cookie a legacy cache put on fintual.cl
+        that the server now set on another domain, so no name is sent twice."""
+        keys, self._legacy_keys = self._legacy_keys, frozenset()
+        for domain, path, name in keys:
+            if any(c.name == name and c.domain != domain for c in client.cookies.jar):
+                try:
+                    client.cookies.jar.clear(domain, path, name)
+                except KeyError:
+                    pass
 
     async def keepalive(self) -> bool:
         """Refresh the cached session between scrapes; True when it did.
@@ -1113,12 +1153,12 @@ class FintualScraper(BaseScraper):
             if self._login_failed_file.exists():
                 logger.info("Fintual keepalive: an automatic sign-in failed earlier; skipped")
                 return False
-            if not self._load_session(client):
-                logger.info("Fintual keepalive: no cached session; the next run signs in")
-                return False
             # A dashboard sign-in uses its own instance (and lock): never
             # overwrite a session it saves while this refresh is in flight.
             loaded_mtime = self._session_mtime()
+            if not self._load_session(client):
+                logger.info("Fintual keepalive: no cached session; the next run signs in")
+                return False
             try:
                 refreshed = await self._refresh_session(client, loaded_mtime=loaded_mtime)
             except (httpx.HTTPError, OSError) as exc:
