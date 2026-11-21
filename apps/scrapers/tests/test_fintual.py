@@ -1332,9 +1332,9 @@ class TestLoginSendsCachedCookies:
         assert cookie is None
 
 
-def _initiate_server(monkeypatch, refuse):
-    """A server whose initiate_login answers 403 when `refuse(cookie header)`
-    and otherwise 200 (no 2FA); returns the Cookie headers it got."""
+def _initiate_server(monkeypatch, refuse, status=403):
+    """A server whose initiate_login answers `status` when `refuse(cookie
+    header)` and otherwise 200 (no 2FA); returns the Cookie headers it got."""
     sent = []
 
     def handler(request):
@@ -1342,7 +1342,7 @@ def _initiate_server(monkeypatch, refuse):
             cookie = request.headers.get("cookie")
             sent.append(cookie)
             if refuse(cookie):
-                return httpx.Response(403)
+                return httpx.Response(status)
             return httpx.Response(
                 200, headers=[("set-cookie", "auth_refresh_token=synthetic-refresh-2; Path=/")]
             )
@@ -1353,16 +1353,30 @@ def _initiate_server(monkeypatch, refuse):
 
 
 class TestLoginRetriesWithoutCachedCookies:
+    @pytest.mark.parametrize("status", [400, 403, 422])
     def test_a_refusal_with_cached_cookies_is_retried_with_an_empty_jar(
-        self, monkeypatch, session_file
+        self, monkeypatch, session_file, status
     ):
         _write_session(session_file, synthetic_device="synthetic-1")
-        sent = _initiate_server(monkeypatch, refuse=lambda cookie: cookie is not None)
+        sent = _initiate_server(
+            monkeypatch, refuse=lambda cookie: cookie is not None, status=status
+        )
 
         asyncio.run(FintualScraper().login(MagicMock(return_value="000000")))
 
         assert sent == ["synthetic_device=synthetic-1", None]
         assert _saved_cookies(session_file) == {"auth_refresh_token": "synthetic-refresh-2"}
+
+    @pytest.mark.parametrize("status", [401, 429, 500, 503])
+    def test_bad_credentials_or_an_outage_are_not_retried(self, monkeypatch, session_file, status):
+        """A 401 is the password, a 429/5xx the server: an empty jar changes neither."""
+        _write_session(session_file, synthetic_device="synthetic-1")
+        sent = _initiate_server(monkeypatch, refuse=lambda cookie: True, status=status)
+
+        with pytest.raises(FintualSessionError, match="refused to start"):
+            asyncio.run(FintualScraper().login(MagicMock(return_value="000000")))
+
+        assert sent == ["synthetic_device=synthetic-1"]
 
     def test_a_refusal_without_cached_cookies_is_not_retried(self, monkeypatch):
         sent = _initiate_server(monkeypatch, refuse=lambda cookie: True)

@@ -171,6 +171,9 @@ _AUTH_COOKIES = frozenset(
 # Tokens that live only minutes: a legacy cache file kept no expiry for them,
 # so they are dropped on load instead of being sent long dead.
 _SHORT_LIVED_COOKIES = _AUTH_COOKIES - {_SESSION_COOKIE}
+# initiate_login answers that may mean it refused the cached cookies, so a
+# retry with an empty jar is worth one more try; a 401 is bad credentials.
+_COOKIE_REFUSAL_STATUSES = frozenset({400, 403, 422})
 # The session file's format: cookies with their attributes. Version 1 (a flat
 # name -> value map, every cookie on fintual.cl) still loads.
 _SESSION_FORMAT_VERSION = 2
@@ -859,7 +862,7 @@ class FintualScraper(BaseScraper):
                     client.cookies.jar.set_cookie(cookie)
                     restored = True
             resp = await self._initiate_login(client)
-            if resp.status_code not in (200, 201) and restored:
+            if resp.status_code in _COOKIE_REFUSAL_STATUSES and restored:
                 logger.info(
                     "Fintual: sign-in refused (HTTP %d) with the cached cookies; "
                     "retrying without them",
