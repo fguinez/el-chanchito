@@ -178,9 +178,24 @@ desktop User-Agent.
   Docker can point it at the `scraper_state` volume. Reuse the cache; re-login
   only on 401.
 - **Refresh before re-login.** When the site keeps its own session alive with
-  a refresh-token cookie, take that path on a 401 instead of a new login (for
-  Fintual, loading `/app/goals` re-issues the short-lived token). Refresh
-  tokens often rotate on every use, so persist the new cookies immediately.
+  a refresh-token cookie, take that path on a 401 instead of a new login.
+  Prefer the exact call the web app makes (for Fintual, an empty-bodied
+  `POST /abff/auth/refresh` with `Content-Length: 0`, Origin and Referer; the
+  server-rendered `/app/goals` is only its fallback), and never send cookies
+  past their expiry. Refresh tokens often rotate on every use, so persist
+  the new cookies immediately, and don't try a second refresh path after a
+  clear dead-session answer.
+- **A refresh cookie's Max-Age is not its server-side lifetime.** The server
+  can reject an idle refresh token long before the cookie expires (Fintual's
+  dies after several idle hours against a Max-Age of days). If the scrape
+  interval can exceed that, keep the session alive with a cheap periodic
+  refresh between runs (Fintual's `keepalive()` job), one that never falls
+  back to a login. Save every cookie attribute (domain, path, expiry, flags),
+  not just name and value, so the cache restores what the server set. Treat
+  the keepalive as a mitigation: also record how a browser left signed in for
+  long actually renews its session (Fintual's never calls the refresh
+  endpoint; it renews through another call backed by an HttpOnly credential),
+  since reproducing that is the lasting fix.
 - **E-mailed 2FA codes.** When the code goes to the IMAP mailbox the service
   already reads, fetch it with `backends.email.fetch_latest_code` (Fintual
   does this when `FINTUAL_EMAIL == EMAIL_IMAP_USER`). Its subject filter

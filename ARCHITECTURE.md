@@ -1127,6 +1127,52 @@ resolves and GraphQL reports no error) gets no stock products, no movements
 and no warning; nothing resolving next to a GraphQL error fails the leg (the
 movements are still read).
 
+A refresh (on a 401, or from the keepalive below) first calls the endpoint the
+web app itself refreshes through after a 401, `POST /abff/auth/refresh`,
+mimicked exactly: no body but an explicit `Content-Length: 0` (Cloudflare
+refuses a POST without one), the app's Origin and Referer, and the cookies.
+A 2xx is a refresh; a 401 that names `no_session` or `invalid_session` is a
+dead session and ends there (a second path could spend a rotated token
+again); anything else falls back to the server-rendered `GET /app/goals`. A
+429/5xx or network error fails the run as transient: the POST is sent once,
+never retried (a retry could spend a rotated token twice), and the cache
+stays for the next keepalive or run. Each refresh logs
+which path refreshed. The path was chosen to match the web app; whether it
+changes how long the server honors the refresh token is still unverified
+live. Expired cookies are dropped from the jar before a refresh, so a token
+past its expiry is never sent along.
+
+The session cache keeps every cookie with its attributes (domain, path,
+expiry, Secure, HttpOnly). A file from before that, a bare name -> value map,
+still loads onto `fintual.cl`, minus `monolith_token` and the service JWTs
+(`stocks-pricing_service_jwt`, `intracom_service_jwt`): they live only
+minutes and that format kept no expiry for them. The server rejects an idle refresh token after
+several hours, well before the cookie's Max-Age, so the 6h runs alone would
+often find it dead and need a 2FA sign-in. A separate `fintual_keepalive`
+scheduler job (every `FINTUAL_KEEPALIVE_HOURS`, default 2, never under 0.25,
+0 disables it; only while Fintual is enabled) runs
+`FintualScraper.keepalive()`: the same refresh, under the run's
+session lock, saving the rotated cookies. It records no scraper run and never
+signs in: with no session, a dead one or the `.login-failed` marker it only
+logs, leaving the next run to sign in, and a 429/5xx or network error is
+logged and dropped. It skips while a run or a dashboard sign-in holds Fintual,
+and it does not claim Fintual itself (a manual refresh then would be dropped).
+A dashboard sign-in uses its own scraper instance, so the keepalive compares
+the cache file's mtime before saving: if a sign-in saved a session while the
+refresh was in flight, that session is kept and the refreshed cookies are
+dropped (logged by name). Every refresh logs at INFO whether
+`auth_refresh_token` actually rotated. A sign-in sends the cached cookies
+other than the session's own tokens, so a trusted-device cookie (if Fintual
+sets one) can spare the code; if `initiate_login` refuses them, it is retried
+once with an empty jar (a refusal mails no code), and only a failed clean
+retry counts as a failed sign-in. At DEBUG the scraper logs each cookie's
+name, domain and expiry (never its value) after a sign-in and after a refresh.
+
+The keepalive is a mitigation, not the root fix: live recon showed that a
+browser kept signed in for long never calls the refresh endpoint; it renews
+through `POST /auth/jwt`, backed by an HttpOnly credential the scraper does
+not capture. Reproducing that is the lasting fix.
+
 Fintual's transactions are the USD wallet's ledger, from one `WalletMovements`
 query on `POST /gql/` (`backends/fintual_stocks.py` holds the query text and
 the pure parsers), paged 50 at a time until a page where every list is empty
@@ -1324,7 +1370,7 @@ is the one place a scraped timestamp is not dated in Chile.
 
 | Institution | Method | Source | Auth | Schedule |
 |---|---|---|---|---|
-| `fintual` | `http_api` | REST API (`/api/goals`), GraphQL (`/gql/`) and the stocks pricing service | Web session + e-mail 2FA (cached; `make fintual-login`) | 6h |
+| `fintual` | `http_api` | REST API (`/api/goals`), GraphQL (`/gql/`) and the stocks pricing service | Web session + e-mail 2FA (cached; `make fintual-login`) | 6h (session keepalive every 2h) |
 | `buda` | `http_api` | REST API | HMAC-SHA384 signed requests | 1h |
 | `skipo` | `http_api` | REST API (`/v2`) | Read-only API key (bearer) | 1h |
 | `banchile` | `web` | Browser (Playwright: `banchile_web` + `banchile_movements`) | RUT + password | 24h |

@@ -760,6 +760,77 @@ def _start_control_server(
     return server
 
 
+# Fintual's refresh token dies after several idle hours, well before its
+# cookie's Max-Age, so a job between the 6h runs keeps it alive (no sign-in).
+FINTUAL_KEEPALIVE_JOB = "fintual_keepalive"
+_FINTUAL_KEEPALIVE_DEFAULT_HOURS = 2.0
+# A shorter interval would only hammer Fintual; the refresh token outlives it.
+_FINTUAL_KEEPALIVE_MIN_HOURS = 0.25
+
+
+def fintual_keepalive_hours() -> float:
+    """FINTUAL_KEEPALIVE_HOURS (default 2, at least 0.25); 0 or less disables the job."""
+    raw = os.environ.get("FINTUAL_KEEPALIVE_HOURS", "").strip()
+    if not raw:
+        return _FINTUAL_KEEPALIVE_DEFAULT_HOURS
+    try:
+        hours = float(raw)
+    except ValueError:
+        hours = math.nan
+    if not math.isfinite(hours):
+        logger.warning(
+            "FINTUAL_KEEPALIVE_HOURS is not a number; using %s",
+            _FINTUAL_KEEPALIVE_DEFAULT_HOURS,
+        )
+        return _FINTUAL_KEEPALIVE_DEFAULT_HOURS
+    if 0 < hours < _FINTUAL_KEEPALIVE_MIN_HOURS:
+        logger.warning(
+            "FINTUAL_KEEPALIVE_HOURS=%s is below the floor; using %s",
+            hours,
+            _FINTUAL_KEEPALIVE_MIN_HOURS,
+        )
+        return _FINTUAL_KEEPALIVE_MIN_HOURS
+    return hours
+
+
+async def _fintual_keepalive(scheduler: AsyncIOScheduler) -> None:
+    """Keep the scheduled Fintual instance's session alive. Records no run:
+    it reads nothing, so the dashboard has nothing to show for it."""
+    job = scheduler.get_job("fintual")
+    if job is None:
+        return
+    # A run or a dashboard sign-in in flight drives the session itself.
+    holder = _RUN_GUARD.holder("fintual")
+    if holder is not None:
+        logger.info("Fintual keepalive skipped: %s in progress", holder)
+        return
+    await job.args[0].keepalive()
+
+
+def _schedule_fintual_keepalive(scheduler: AsyncIOScheduler) -> bool:
+    """Add the Fintual keepalive job; False when FINTUAL_KEEPALIVE_HOURS disables it.
+
+    It resolves the scraper when it runs, so a rebuilt instance (new
+    credentials) is the one kept alive, under the same session lock as its runs.
+    """
+    hours = fintual_keepalive_hours()
+    if hours <= 0:
+        logger.info("Fintual keepalive disabled (FINTUAL_KEEPALIVE_HOURS=%s)", hours)
+        return False
+    scheduler.add_job(
+        _fintual_keepalive,
+        IntervalTrigger(hours=hours),
+        args=[scheduler],
+        id=FINTUAL_KEEPALIVE_JOB,
+        name=f"Fintual session keepalive (every {hours:g}h)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=None,
+    )
+    return True
+
+
 def _schedule_scraper(scheduler: AsyncIOScheduler, key: str, scraper: BaseScraper) -> bool:
     """Add `scraper`'s interval job; False when `key` has no schedule."""
     cfg = _SCHEDULES.get(key)
@@ -855,6 +926,8 @@ class ScraperSet:
     def _add(self, slug: str, scraper: BaseScraper, fingerprint: str | None = None) -> bool:
         if not _schedule_scraper(self.scheduler, slug, scraper):
             return False
+        if slug == "fintual":
+            _schedule_fintual_keepalive(self.scheduler)
         self._keys = self._keys | {slug}
         self._fingerprints[slug] = fingerprint or self._fingerprint(slug)
         return True
@@ -886,6 +959,8 @@ class ScraperSet:
             for slug in sorted(self._keys - wanted.keys()):
                 if self.scheduler.get_job(slug):
                     self.scheduler.remove_job(slug)
+                if slug == "fintual" and self.scheduler.get_job(FINTUAL_KEEPALIVE_JOB):
+                    self.scheduler.remove_job(FINTUAL_KEEPALIVE_JOB)
                 self._keys = self._keys - {slug}
                 self._fingerprints.pop(slug, None)
                 removed.append(slug)

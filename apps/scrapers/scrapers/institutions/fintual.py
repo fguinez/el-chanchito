@@ -8,9 +8,14 @@ alone gets a 401. The working flow mirrors a browser sign-in:
     POST /auth/sessions/initiate_login   -> {email, password}; 201 => e-mail 2FA
     POST /auth/sessions/finalize_login_web -> {email, password, code}; sets cookies
     GET  /api/goals                      -> old JSON:API shape, `nav` per goal
-    GET  /app/goals                      -> with auth_refresh_token, re-issues a
-                                            short-lived monolith_token and
-                                            rotates the refresh token
+    POST /abff/auth/refresh              -> with auth_refresh_token and an empty
+                                            body, re-issues a short-lived
+                                            monolith_token and rotates the
+                                            refresh token (the web app's own
+                                            refresh, after a 401)
+    GET  /app/goals                      -> the same through the server render;
+                                            the fallback when the POST answers
+                                            something unexpected
     POST /gql/                           -> the stock brokerage ("Acciones"):
                                             StocksPortfolio lists the USD wallet
                                             and the positions, StocksDetails
@@ -23,10 +28,15 @@ alone gets a 401. The working flow mirrors a browser sign-in:
     GET  /stocks-pricing-cl/historical-prices -> one symbol's daily closes,
                                             same cookie
 
-The session cookies are cached to disk. The monolith_token that /api/goals
-checks lives only a few minutes, so scheduled scrapes refresh the session the
-way the website does (no 2FA) and save the rotated refresh token right away. A
-full 2FA login is only needed once the refresh token itself has expired: when
+The session cookies are cached to disk with their attributes (domain, path,
+expiry, flags). The monolith_token that /api/goals checks lives only a few
+minutes, so scheduled scrapes refresh the session the way the website does (no
+2FA) and save the rotated refresh token right away. The server rejects an idle
+refresh token after several hours, well before the cookie's Max-Age, so the
+service also runs `keepalive()` between scrapes: the same refresh, never a
+sign-in. A sign-in sends the cached non-auth cookies along (a trusted-device
+cookie, if Fintual sets one, can spare the 2FA). A full 2FA login is only
+needed once the refresh token itself has expired: when
 FINTUAL_EMAIL equals EMAIL_IMAP_USER the scraper reads the e-mailed code from
 the mailbox and signs in by itself; otherwise run `make fintual-login` and type
 the code. An automatic login that fails once is not retried until
@@ -65,6 +75,7 @@ budget. The rest of the run never depends on it.
 import asyncio
 import hashlib
 import hmac
+import http.cookiejar
 import inspect
 import json
 import logging
@@ -73,7 +84,7 @@ import secrets
 import tempfile
 from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
@@ -128,6 +139,11 @@ FINALIZE_LOGIN_URL = f"{FINTUAL_ORIGIN}/auth/sessions/finalize_login_web"
 GOALS_URL = f"{FINTUAL_ORIGIN}/api/goals"
 # The web app page whose server render refreshes the session.
 APP_URL = f"{FINTUAL_ORIGIN}/app/goals"
+# The endpoint the web app itself refreshes through (after a 401).
+_REFRESH_PATH = "/abff/auth/refresh"
+REFRESH_URL = f"{FINTUAL_ORIGIN}{_REFRESH_PATH}"
+# What its 401 says about a missing or rejected refresh token.
+_DEAD_SESSION_CODES = frozenset({"no_session", "invalid_session"})
 GRAPHQL_URL = f"{FINTUAL_ORIGIN}/gql/"
 STOCK_PRICES_URL = f"{FINTUAL_ORIGIN}/stocks-pricing-cl/current-prices"
 HISTORICAL_PRICES_URL = f"{FINTUAL_ORIGIN}/stocks-pricing-cl/historical-prices"
@@ -147,6 +163,20 @@ BROWSER_USER_AGENT = (
 # Cookie that keeps the session alive (it re-issues the short-lived
 # monolith_token); its presence gates a cache hit.
 _SESSION_COOKIE = "auth_refresh_token"
+# The session's own tokens, never sent with a sign-in: a dead pair there
+# could only confuse it. Every other cached cookie rides along.
+_AUTH_COOKIES = frozenset(
+    {_SESSION_COOKIE, "monolith_token", _PRICING_JWT_COOKIE, "intracom_service_jwt"}
+)
+# Tokens that live only minutes: a legacy cache file kept no expiry for them,
+# so they are dropped on load instead of being sent long dead.
+_SHORT_LIVED_COOKIES = _AUTH_COOKIES - {_SESSION_COOKIE}
+# initiate_login answers that may mean it refused the cached cookies, so a
+# retry with an empty jar is worth one more try; a 401 is bad credentials.
+_COOKIE_REFUSAL_STATUSES = frozenset({400, 403, 422})
+# The session file's format: cookies with their attributes. Version 1 (a flat
+# name -> value map, every cookie on fintual.cl) still loads.
+_SESSION_FORMAT_VERSION = 2
 
 # A fresh 2FA e-mail can take tens of seconds to reach the inbox.
 _CODE_POLL_ATTEMPTS = 30
@@ -510,6 +540,174 @@ def _stocks_failure_reason(exc: Exception) -> str:
     return type(exc).__name__
 
 
+# -- session cookies -------------------------------------------------------
+
+
+def _make_cookie(
+    name: str,
+    value: str,
+    domain: str = "fintual.cl",
+    path: str = "/",
+    expires: int | None = None,
+    secure: bool = False,
+    httponly: bool = False,
+) -> http.cookiejar.Cookie:
+    """A jar cookie, built the way `httpx.Cookies.set` builds one."""
+    return http.cookiejar.Cookie(
+        version=0,
+        name=name,
+        value=value,
+        port=None,
+        port_specified=False,
+        domain=domain,
+        domain_specified=bool(domain),
+        domain_initial_dot=domain.startswith("."),
+        path=path,
+        path_specified=True,
+        secure=secure,
+        expires=expires,
+        discard=expires is None,
+        comment=None,
+        comment_url=None,
+        rest={"HttpOnly": ""} if httponly else {},
+    )
+
+
+def _is_httponly(cookie: http.cookiejar.Cookie) -> bool:
+    # The jar keeps the attribute in the case the server sent it.
+    return any(cookie.has_nonstandard_attr(key) for key in ("HttpOnly", "httponly", "HTTPONLY"))
+
+
+@dataclass(frozen=True)
+class CookieRecord:
+    """One cookie as the session file stores it."""
+
+    name: str
+    value: str
+    domain: str
+    path: str
+    expires: int | None = None
+    secure: bool = False
+    httponly: bool = False
+
+    @classmethod
+    def from_cookie(cls, cookie: http.cookiejar.Cookie) -> "CookieRecord":
+        return cls(
+            name=cookie.name,
+            value=cookie.value or "",
+            domain=cookie.domain,
+            path=cookie.path,
+            expires=cookie.expires,
+            secure=cookie.secure,
+            httponly=_is_httponly(cookie),
+        )
+
+    @classmethod
+    def from_json(cls, raw: Any) -> "CookieRecord | None":
+        """A record read back from the file; None when it is malformed."""
+        if not isinstance(raw, dict):
+            return None
+        try:
+            record = cls(**{f.name: raw[f.name] for f in fields(cls) if f.name in raw})
+        except TypeError:  # a required field is missing
+            return None
+        return record if record.is_valid() else None
+
+    def is_valid(self) -> bool:
+        texts = (self.name, self.value, self.domain, self.path)
+        if not all(isinstance(text, str) and text for text in texts):
+            return False
+        if self.expires is not None and (
+            not isinstance(self.expires, int) or isinstance(self.expires, bool)
+        ):
+            return False
+        return isinstance(self.secure, bool) and isinstance(self.httponly, bool)
+
+    def to_cookie(self) -> http.cookiejar.Cookie:
+        return _make_cookie(
+            self.name,
+            self.value,
+            domain=self.domain,
+            path=self.path,
+            expires=self.expires,
+            secure=self.secure,
+            httponly=self.httponly,
+        )
+
+
+def parse_session_cookies(data: Any, now: float) -> list[http.cookiejar.Cookie]:
+    """The cookies of a session file: the current format (every attribute
+    kept) or the original flat name -> value map (all on fintual.cl, path /,
+    without the short-lived tokens, whose expiry it never kept). Malformed
+    entries and cookies expired at `now` are left out."""
+    if isinstance(data, dict) and isinstance(data.get("cookies"), list):
+        records = [CookieRecord.from_json(raw) for raw in data["cookies"]]
+        cookies = [r.to_cookie() for r in records if r is not None]
+    elif isinstance(data, dict):
+        cookies = [
+            _make_cookie(name, value)
+            for name, value in data.items()
+            if isinstance(name, str)
+            and isinstance(value, str)
+            and value
+            and name not in _SHORT_LIVED_COOKIES
+        ]
+    else:
+        return []
+    return [c for c in cookies if not c.is_expired(int(now))]
+
+
+def _strings(value: Any) -> list[str]:
+    """Every string in a JSON value, at any depth."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for item in value.values() for s in _strings(item)]
+    if isinstance(value, list):
+        return [s for item in value for s in _strings(item)]
+    return []
+
+
+def _session_tokens(client: httpx.AsyncClient) -> dict[str, set[str]]:
+    """The jar's monolith_token and auth_refresh_token values, by name."""
+    tokens: dict[str, set[str]] = {}
+    for cookie in client.cookies.jar:
+        if cookie.name in ("monolith_token", _SESSION_COOKIE) and cookie.value:
+            tokens.setdefault(cookie.name, set()).add(cookie.value)
+    return tokens
+
+
+def _is_dead_session_answer(resp: httpx.Response) -> bool:
+    """Whether a 401 from the refresh endpoint names a missing or rejected
+    refresh token (`no_session` / `invalid_session`)."""
+    try:
+        body = resp.json()
+    except ValueError:
+        return False
+    return bool(_DEAD_SESSION_CODES & set(_strings(body)))
+
+
+def _log_cookie_inventory(client: httpx.AsyncClient, event: str) -> None:
+    """At DEBUG, which cookies the jar holds and until when: names, domains
+    and expiries only, never a value."""
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+    for cookie in client.cookies.jar:
+        expires = (
+            datetime.fromtimestamp(cookie.expires, UTC).isoformat()
+            if cookie.expires is not None
+            else "session"
+        )
+        logger.debug(
+            "Fintual cookie after %s: %s domain=%s path=%s expires=%s",
+            event,
+            cookie.name,
+            cookie.domain,
+            cookie.path,
+            expires,
+        )
+
+
 @dataclass(frozen=True)
 class _Cycle:
     """What one session drive read, for both legs of a run."""
@@ -560,6 +758,9 @@ class FintualScraper(BaseScraper):
         # 2FA code) twice.
         self._cached: _Cycle | None = None
         self._error: Exception | None = None
+        # (domain, path, name) of the cookies loaded from a legacy cache,
+        # which put every cookie on fintual.cl whatever the server set.
+        self._legacy_keys: frozenset[tuple[str, str, str]] = frozenset()
 
     # -- session persistence ------------------------------------------------
 
@@ -572,7 +773,10 @@ class FintualScraper(BaseScraper):
         return self.session_file.with_name(self.session_file.name + ".login-failed")
 
     def _save_session(self, client: httpx.AsyncClient) -> None:
-        cookies = {c.name: c.value for c in client.cookies.jar if c.value}
+        session = {
+            "version": _SESSION_FORMAT_VERSION,
+            "cookies": [asdict(CookieRecord.from_cookie(c)) for c in client.cookies.jar if c.value],
+        }
         # Session tokens are secrets: the temp file is created private (0600),
         # and swapping it in whole means a kill mid-write can't lose a rotated
         # refresh token.
@@ -581,7 +785,7 @@ class FintualScraper(BaseScraper):
         )
         try:
             with os.fdopen(fd, "w") as f:
-                json.dump(cookies, f)
+                json.dump(session, f)
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, self.session_file)
@@ -591,21 +795,35 @@ class FintualScraper(BaseScraper):
         session_account.write_account(self.session_file, self.email)
         logger.info("Saved Fintual session to %s", self.session_file)
 
-    def _load_session(self, client: httpx.AsyncClient) -> bool:
-        """Restore cached cookies onto `client`; return True if a session exists."""
+    def _read_cache(self) -> tuple[list[http.cookiejar.Cookie], bool] | None:
+        """This account's cached cookies and whether the file is the legacy
+        format; None when there is no readable cache. Another account's cache
+        is discarded."""
         if not self.session_file.exists():
-            return False
+            return None
         if not session_account.belongs_to(self.session_file, self.email):
             logger.info("Fintual: the cached session is not tied to this account; discarded")
             session_account.discard(self.session_file)
-            return False
+            return None
         try:
-            cookies = json.loads(self.session_file.read_text())
+            data = json.loads(self.session_file.read_text())
         except (json.JSONDecodeError, OSError):
+            return None
+        legacy = isinstance(data, dict) and not isinstance(data.get("cookies"), list)
+        return parse_session_cookies(data, datetime.now(UTC).timestamp()), legacy
+
+    def _load_session(self, client: httpx.AsyncClient) -> bool:
+        """Restore cached cookies onto `client`; return True if a session exists."""
+        cache = self._read_cache()
+        if cache is None:
             return False
-        for name, value in cookies.items():
-            client.cookies.set(name, value, domain="fintual.cl")
-        return _SESSION_COOKIE in cookies
+        cookies, legacy = cache
+        self._legacy_keys = (
+            frozenset((c.domain, c.path, c.name) for c in cookies) if legacy else frozenset()
+        )
+        for cookie in cookies:
+            client.cookies.jar.set_cookie(cookie)
+        return any(c.name == _SESSION_COOKIE for c in cookies)
 
     # -- login (auto via IMAP, or manual, interactive) ----------------------
 
@@ -629,26 +847,43 @@ class FintualScraper(BaseScraper):
             await asyncio.sleep(_CODE_POLL_INTERVAL_SECONDS)
         raise FintualSessionError("Fintual's 2FA code e-mail did not reach the IMAP inbox.")
 
-    async def login(self, code_provider: Callable[[], str | Awaitable[str]]) -> None:
-        """Sign in and cache the session.
+    async def _initiate_login(self, client: httpx.AsyncClient) -> httpx.Response:
+        """Open the sign-in page, then POST the credentials to initiate_login."""
+        await client.get(
+            SIGN_IN_URL,
+            headers={"Accept": "text/html,application/xhtml+xml,*/*;q=0.8"},
+        )
+        return await client.post(
+            INITIATE_LOGIN_URL,
+            headers={"Accept": "application/json", "Referer": SIGN_IN_URL},
+            json={"email": self.email, "password": self.password},
+        )
 
-        `code_provider` is called (only when 2FA is required) to obtain the
-        6-digit code Fintual e-mails to the account address. It may be sync
-        (interactive prompt) or async (reading the code from the IMAP inbox).
-        """
+    async def login(self, code_provider: Callable[[], str | Awaitable[str]]) -> None:
+        """Sign in and cache the session; `code_provider` (sync or async) gives
+        the e-mailed 2FA code. Cached non-token cookies go along, so a trusted
+        device may skip the code; if initiate_login refuses them, one retry with
+        an empty jar is safe (a refusal mails no code)."""
         async with httpx.AsyncClient(
             timeout=30.0, follow_redirects=True, headers=self._base_headers()
         ) as client:
-            await client.get(
-                SIGN_IN_URL,
-                headers={"Accept": "text/html,application/xhtml+xml,*/*;q=0.8"},
+            cookies, legacy = self._read_cache() or ([], False)
+            kept = [c for c in cookies if c.name not in _AUTH_COOKIES]
+            for cookie in kept:
+                client.cookies.jar.set_cookie(cookie)
+            restored = bool(kept)
+            self._legacy_keys = (
+                frozenset((c.domain, c.path, c.name) for c in kept) if legacy else frozenset()
             )
-
-            resp = await client.post(
-                INITIATE_LOGIN_URL,
-                headers={"Accept": "application/json", "Referer": SIGN_IN_URL},
-                json={"email": self.email, "password": self.password},
-            )
+            resp = await self._initiate_login(client)
+            if resp.status_code in _COOKIE_REFUSAL_STATUSES and restored:
+                logger.info(
+                    "Fintual: sign-in refused (HTTP %d) with the cached cookies; "
+                    "retrying without them",
+                    resp.status_code,
+                )
+                client.cookies.clear()
+                resp = await self._initiate_login(client)
 
             if resp.status_code == 201:
                 logger.info("Fintual login initiated; e-mail 2FA required.")
@@ -673,6 +908,8 @@ class FintualScraper(BaseScraper):
                     f"Fintual refused to start the sign-in (HTTP {resp.status_code})."
                 )
 
+            self._drop_legacy_twins(client)
+            _log_cookie_inventory(client, "sign-in")
             self._save_session(client)
             self._login_failed_file.unlink(missing_ok=True)
 
@@ -789,12 +1026,50 @@ class FintualScraper(BaseScraper):
             label="Fintual GET /api/goals",
         )
 
-    async def _refresh_session(self, client: httpx.AsyncClient) -> bool:
-        """Refresh an expired session the way the website does; True on success.
+    def _session_mtime(self) -> int | None:
+        try:
+            return self.session_file.stat().st_mtime_ns
+        except OSError:
+            return None
 
-        The refresh token rotates on every use, so the jar is saved at once,
-        before anything else can fail and strand the spent one on disk.
-        """
+    async def _post_refresh(self, client: httpx.AsyncClient) -> bool | None:
+        """The web app's refresh: True if a 2xx issued new tokens, False on a
+        dead-session 401, None otherwise (the caller falls back). Sent once,
+        never retried: the token rotates, so a retry could spend it twice.
+        Cloudflare refuses the POST without an explicit `Content-Length: 0`."""
+        tokens_before = _session_tokens(client)
+        resp = await client.post(
+            REFRESH_URL,
+            headers={
+                "Accept": "application/json",
+                "Origin": FINTUAL_ORIGIN,
+                "Referer": APP_URL,
+                "Content-Length": "0",
+            },
+            content=b"",
+        )
+        # An outage says nothing about the refresh token: fail the run
+        # instead of signing in (and mailing a code).
+        if resp.status_code in TRANSIENT_HTTP_STATUSES:
+            resp.raise_for_status()
+        if resp.is_success and resp.url.path == _REFRESH_PATH:
+            issued = _session_tokens(client)
+            if any(values - tokens_before.get(name, set()) for name, values in issued.items()):
+                return True
+            logger.info("Fintual: the refresh endpoint answered 2xx without new tokens.")
+            return None
+        if resp.status_code == 401 and _is_dead_session_answer(resp):
+            logger.info("Fintual: the refresh endpoint reports a dead session.")
+            return False
+        logger.info(
+            "Fintual: the refresh endpoint answered HTTP %d at %s; trying /app/goals.",
+            resp.status_code,
+            resp.url.path,
+        )
+        return None
+
+    async def _get_app_refresh(self, client: httpx.AsyncClient) -> bool:
+        """The server-rendered refresh (GET /app/goals); True on success."""
         resp = await send_with_retry(
             lambda: client.get(
                 APP_URL,
@@ -802,8 +1077,6 @@ class FintualScraper(BaseScraper):
             ),
             label="Fintual GET /app/goals",
         )
-        # An outage that outlived the retries says nothing about the refresh
-        # token: fail the run instead of signing in (and mailing a code).
         if resp.status_code in TRANSIENT_HTTP_STATUSES:
             resp.raise_for_status()
         # A redirect to the sign-in page also ends in a 200: not a refresh.
@@ -814,10 +1087,93 @@ class FintualScraper(BaseScraper):
                 resp.url.path,
             )
             return False
-        self._save_session(client)
-        self._refreshed_this_run = True
-        logger.info("Fintual: session refreshed.")
         return True
+
+    async def _refresh_session(
+        self, client: httpx.AsyncClient, loaded_mtime: int | None = None
+    ) -> bool:
+        """Refresh the session the way the website does; True on success. The
+        rotated token is saved at once, unless the file changed since
+        `loaded_mtime` (a dashboard sign-in, outside the lock, saved a newer
+        session). No GET fallback after a dead-session 401: it could respend."""
+        client.cookies.jar.clear_expired_cookies()
+        before = {c.value for c in client.cookies.jar if c.name == _SESSION_COOKIE}
+        via = f"POST {_REFRESH_PATH}"
+        refreshed = await self._post_refresh(client)
+        if refreshed is None:
+            via = "GET /app/goals"
+            refreshed = await self._get_app_refresh(client)
+        if not refreshed:
+            return False
+        self._drop_legacy_twins(client)
+        _log_cookie_inventory(client, "refresh")
+        after = {c.value for c in client.cookies.jar if c.name == _SESSION_COOKIE}
+        rotated = bool(after) and after != before
+        if loaded_mtime is not None and self._session_mtime() != loaded_mtime:
+            logger.info(
+                "Fintual: the session file changed during the refresh; kept it, "
+                "not saving cookies %s",
+                sorted({c.name for c in client.cookies.jar}),
+            )
+        else:
+            self._save_session(client)
+        self._refreshed_this_run = True
+        logger.info(
+            "Fintual: session refreshed via %s (%s rotated: %s).", via, _SESSION_COOKIE, rotated
+        )
+        return True
+
+    def _drop_legacy_twins(self, client: httpx.AsyncClient) -> None:
+        """After a refresh or a sign-in, drop each cookie a legacy cache put on fintual.cl
+        that the server now set on another domain, so no name is sent twice."""
+        keys, self._legacy_keys = self._legacy_keys, frozenset()
+        for domain, path, name in keys:
+            if any(c.name == name and c.domain != domain for c in client.cookies.jar):
+                try:
+                    client.cookies.jar.clear(domain, path, name)
+                except KeyError:
+                    pass
+
+    async def keepalive(self) -> bool:
+        """Refresh the cached session between scrapes; True when it did. The
+        server drops an idle refresh token well before its Max-Age. Never
+        signs in (no 2FA e-mail): a missing or dead session is left to the
+        next run, and only an outage is swallowed."""
+        if self._session_lock.locked():
+            logger.info("Fintual keepalive: a run holds the session; skipped")
+            return False
+        async with (
+            self._session_lock,
+            httpx.AsyncClient(
+                timeout=30.0, follow_redirects=True, headers=self._base_headers()
+            ) as client,
+        ):
+            if self._login_failed_file.exists():
+                logger.info("Fintual keepalive: an automatic sign-in failed earlier; skipped")
+                return False
+            # A dashboard sign-in uses its own instance (and lock): never
+            # overwrite a session it saves while this refresh is in flight.
+            loaded_mtime = self._session_mtime()
+            if not self._load_session(client):
+                logger.info("Fintual keepalive: no cached session; the next run signs in")
+                return False
+            try:
+                refreshed = await self._refresh_session(client, loaded_mtime=loaded_mtime)
+            except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+                # Only an outage is swallowed; anything else (a failed save
+                # after the token rotated, say) must reach the job's log.
+                if (
+                    isinstance(exc, httpx.HTTPStatusError)
+                    and exc.response.status_code not in TRANSIENT_HTTP_STATUSES
+                ):
+                    raise
+                logger.warning(
+                    "Fintual keepalive failed (%s); the next run retries", type(exc).__name__
+                )
+                return False
+            if not refreshed:
+                logger.info("Fintual keepalive: the session is dead; the next run signs in")
+            return refreshed
 
     # -- stocks -------------------------------------------------------------
 

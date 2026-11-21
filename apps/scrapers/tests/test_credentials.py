@@ -6,15 +6,19 @@ every key is generated per test or is the throwaway fixture key, which
 protects nothing.
 """
 
+import asyncio
 import base64
 import json
 import os
 import stat
 import urllib.error
 import urllib.request
+from datetime import timedelta
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from credential_manager import CredentialManager
@@ -316,8 +320,9 @@ def test_manager_with_a_loose_key_file_uses_env_only(tmp_path, store):
 
 
 class FakeJob:
-    def __init__(self, args):
+    def __init__(self, args, trigger=None):
         self.args = args
+        self.trigger = trigger
 
     def modify(self, **changes):
         self.args = changes.get("args", self.args)
@@ -328,7 +333,7 @@ class FakeScheduler:
         self.jobs: dict[str, FakeJob] = {}
 
     def add_job(self, func, trigger, args, id, **kwargs):
-        self.jobs[id] = FakeJob(args)
+        self.jobs[id] = FakeJob(args, trigger)
 
     def remove_job(self, job_id):
         del self.jobs[job_id]
@@ -668,6 +673,100 @@ def test_fintual_change_clears_the_login_failed_marker(tmp_path, monkeypatch):
     monkeypatch.setenv("FINTUAL_PASSWORD", "synthetic-new")
     assert scrapers.rebuild()["updated"] == ["fintual"]
     assert not fake._login_failed_file.exists()
+
+
+class TestFintualKeepaliveJob:
+    @pytest.fixture(autouse=True)
+    def _fintual_env(self, monkeypatch):
+        for name in main._credential_env_vars("fintual"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv("FINTUAL_KEEPALIVE_HOURS", raising=False)
+        monkeypatch.setenv("FINTUAL_EMAIL", "user@example.com")
+        monkeypatch.setenv("FINTUAL_PASSWORD", "synthetic-password")
+
+    def _scheduler(self, tmp_path):
+        scheduler = FakeScheduler()
+        ScraperSet(
+            scheduler,
+            {"fintual": FakeFintual(tmp_path)},
+            build=lambda: {"fintual": FakeFintual(tmp_path)},
+        )
+        return scheduler
+
+    @pytest.mark.parametrize(
+        ("env", "hours"), [(None, 2), ("3", 3), ("0.5", 0.5), ("x", 2), ("0.1", 0.25)]
+    )
+    def test_it_runs_at_the_env_interval(self, monkeypatch, tmp_path, env, hours):
+        if env is not None:
+            monkeypatch.setenv("FINTUAL_KEEPALIVE_HOURS", env)
+
+        scheduler = self._scheduler(tmp_path)
+
+        job = scheduler.jobs[main.FINTUAL_KEEPALIVE_JOB]
+        assert job.trigger.interval == timedelta(hours=hours)
+        assert job.args == [scheduler]
+
+    @pytest.mark.parametrize("env", ["x", "inf", "nan"])
+    def test_a_non_number_warns_and_uses_the_default(self, monkeypatch, caplog, env):
+        monkeypatch.setenv("FINTUAL_KEEPALIVE_HOURS", env)
+
+        hours = main.fintual_keepalive_hours()
+
+        assert hours == 2
+        assert "FINTUAL_KEEPALIVE_HOURS is not a number; using 2.0" in caplog.text
+
+    @pytest.mark.parametrize("env", ["0", "-1"])
+    def test_zero_or_less_disables_it(self, monkeypatch, tmp_path, env):
+        monkeypatch.setenv("FINTUAL_KEEPALIVE_HOURS", env)
+
+        scheduler = self._scheduler(tmp_path)
+
+        assert set(scheduler.jobs) == {"fintual"}
+
+    def test_it_is_not_scheduled_without_fintual(self):
+        scheduler = FakeScheduler()
+
+        ScraperSet(scheduler, {"skipo": object()}, build=lambda: {"skipo": object()})
+
+        assert main.FINTUAL_KEEPALIVE_JOB not in scheduler.jobs
+
+    def test_it_leaves_with_fintual(self, monkeypatch, tmp_path):
+        scheduler = FakeScheduler()
+        scrapers = ScraperSet(
+            scheduler,
+            {"fintual": FakeFintual(tmp_path)},
+            build=lambda: (
+                {"fintual": FakeFintual(tmp_path)} if os.environ.get("FINTUAL_EMAIL") else {}
+            ),
+        )
+        monkeypatch.delenv("FINTUAL_EMAIL")
+
+        scrapers.rebuild()
+
+        assert scheduler.jobs == {}
+
+    def test_the_job_keeps_the_scheduled_instance_alive(self):
+        scheduler = FakeScheduler()
+        scraper = SimpleNamespace(keepalive=AsyncMock())
+        scheduler.add_job(None, None, [scraper], "fintual")
+
+        asyncio.run(main._fintual_keepalive(scheduler))
+
+        scraper.keepalive.assert_awaited_once()
+
+    @pytest.mark.parametrize("holder", ["run", "login"])
+    def test_the_job_skips_while_fintual_is_busy(self, holder):
+        scheduler = FakeScheduler()
+        scraper = SimpleNamespace(keepalive=AsyncMock())
+        scheduler.add_job(None, None, [scraper], "fintual")
+        assert main._RUN_GUARD.claim("fintual", holder)
+
+        try:
+            asyncio.run(main._fintual_keepalive(scheduler))
+        finally:
+            main._RUN_GUARD.release("fintual")
+
+        scraper.keepalive.assert_not_awaited()
 
 
 def test_status_never_waits_on_the_database(tmp_path, store):
