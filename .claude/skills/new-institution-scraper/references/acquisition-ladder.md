@@ -181,6 +181,13 @@ desktop User-Agent.
   a refresh-token cookie, take that path on a 401 instead of a new login (for
   Fintual, loading `/app/goals` re-issues the short-lived token). Refresh
   tokens often rotate on every use, so persist the new cookies immediately.
+- **A refresh cookie's Max-Age is not its server-side lifetime.** The server
+  can reject an idle refresh token long before the cookie expires (Fintual's
+  dies after several idle hours against a Max-Age of days). If the scrape
+  interval can exceed that, keep the session alive with a cheap periodic
+  refresh between runs (Fintual's `keepalive()` job), one that never falls
+  back to a login. Save every cookie attribute (domain, path, expiry, flags),
+  not just name and value, so the cache restores what the server set.
 - **E-mailed 2FA codes.** When the code goes to the IMAP mailbox the service
   already reads, fetch it with `backends.email.fetch_latest_code` (Fintual
   does this when `FINTUAL_EMAIL == EMAIL_IMAP_USER`). Its subject filter

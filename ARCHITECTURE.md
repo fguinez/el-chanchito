@@ -1127,6 +1127,22 @@ resolves and GraphQL reports no error) gets no stock products, no movements
 and no warning; nothing resolving next to a GraphQL error fails the leg (the
 movements are still read).
 
+The session cache keeps every cookie with its attributes (domain, path,
+expiry, Secure, HttpOnly; a file from before that, a bare name -> value map,
+still loads onto `fintual.cl`). The server rejects an idle refresh token after
+several hours, well before the cookie's Max-Age, so the 6h runs alone would
+often find it dead and need a 2FA sign-in. A separate `fintual_keepalive`
+scheduler job (every `FINTUAL_KEEPALIVE_HOURS`, default 2, 0 disables it; only
+while Fintual is enabled) runs `FintualScraper.keepalive()`: the same
+`/app/goals` refresh, under the run's session lock, saving the rotated cookies.
+It records no scraper run and never signs in: with no session, a dead one or
+the `.login-failed` marker it only logs, leaving the next run to sign in, and a
+429/5xx or network error is logged and dropped. It skips while a run or a
+dashboard sign-in holds Fintual. A sign-in sends the cached cookies other than
+the session's own tokens, so a trusted-device cookie (if Fintual sets one)
+can spare the code. At DEBUG the scraper logs each cookie's name, domain and
+expiry (never its value) after a sign-in and after a refresh.
+
 Fintual's transactions are the USD wallet's ledger, from one `WalletMovements`
 query on `POST /gql/` (`backends/fintual_stocks.py` holds the query text and
 the pure parsers), paged 50 at a time until a page where every list is empty
@@ -1324,7 +1340,7 @@ is the one place a scraped timestamp is not dated in Chile.
 
 | Institution | Method | Source | Auth | Schedule |
 |---|---|---|---|---|
-| `fintual` | `http_api` | REST API (`/api/goals`), GraphQL (`/gql/`) and the stocks pricing service | Web session + e-mail 2FA (cached; `make fintual-login`) | 6h |
+| `fintual` | `http_api` | REST API (`/api/goals`), GraphQL (`/gql/`) and the stocks pricing service | Web session + e-mail 2FA (cached; `make fintual-login`) | 6h (session keepalive every 2h) |
 | `buda` | `http_api` | REST API | HMAC-SHA384 signed requests | 1h |
 | `skipo` | `http_api` | REST API (`/v2`) | Read-only API key (bearer) | 1h |
 | `banchile` | `web` | Browser (Playwright: `banchile_web` + `banchile_movements`) | RUT + password | 24h |

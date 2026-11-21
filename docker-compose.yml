@@ -102,6 +102,8 @@ services:
       # Cached Fintual web session (see `make fintual-login`); persisted in the
       # scraper_state volume so 2FA isn't re-triggered on every container start.
       FINTUAL_SESSION_FILE: ${FINTUAL_SESSION_FILE:-/data/fintual_session.json}
+      # Hours between Fintual session keepalives (default 2; 0 disables).
+      FINTUAL_KEEPALIVE_HOURS: ${FINTUAL_KEEPALIVE_HOURS:-}
       # Cached Banco de Chile web session, in the same volume so a restart
       # doesn't force a fresh login (the bank throttles bursts of them).
       BANCHILE_SESSION_FILE: ${BANCHILE_SESSION_FILE:-/data/banchile_session.json}

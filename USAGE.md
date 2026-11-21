@@ -492,7 +492,10 @@ does the same without a terminal and asks for the code in the page (see
 [Signing in from the dashboard](#signing-in-from-the-dashboard)).
 
 Scheduled scrapes refresh the cached session the way the website does, with no
-2FA, so you only need `make fintual-login` again when:
+2FA. Fintual drops an idle session after several hours, well before its cookie
+says it expires, so while the service runs it also refreshes the session every
+2 hours (`FINTUAL_KEEPALIVE_HOURS`; `0` turns it off). That keepalive never
+signs in or e-mails a code. You only need `make fintual-login` again when:
 
 - the refresh token itself expires and `FINTUAL_EMAIL` is not the IMAP mailbox
   (`EMAIL_IMAP_USER`); the scraper reports ``Fintual session expired. Run
